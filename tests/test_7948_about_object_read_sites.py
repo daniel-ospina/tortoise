@@ -249,7 +249,7 @@ WHAT THIS PINS
    accepted-pair constant, so a predicate that breaks the other way also reds.
    ⛔ The floor is the ACCEPTED-PAIR count and NOT §13's cell-occurrence figure:
    measured at this head the arm accepts 28 pairs over 19 x SIXTEEN distinct table
-   doors (304 pairs), while §13 states 22 cell OCCURRENCES. Collapsing those two into
+   doors (304 pairs), while §13 states 23 cell OCCURRENCES. Collapsing those two into
    one number is how this paragraph came to cite 63 pairs of 340 with a floor of 29
    after the table grew. The
    inputs are the TABLE's sixteen distinct doors, not the 99-tool registry, so adding a tool
@@ -3423,11 +3423,12 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
 #: Measured at this head: how many of the table's own `(row, door)` pairs the
 #: attribution predicate accepts — 28, out of 19 x SIXTEEN distinct table doors = 304
 #: pairs — summed over the nineteen customer-callable rows, plus the worst single row.
-#: ⛔ THE `22` IN §13 IS NOT THIS NUMBER AND MUST NOT BE USED AS A DENOMINATOR HERE.
-#: §13 states 22 CELL OCCURRENCES over those 16 doors — the doors each row's own reach
+#: ⛔ THE `23` IN §13 IS NOT THIS NUMBER AND MUST NOT BE USED AS A DENOMINATOR HERE.
+#: §13 states 23 CELL OCCURRENCES over those 16 doors — the doors each row's own reach
 #: cell NAMES — while these constants pin the ACCEPTED PAIRS, which is a different and
-#: larger quantity: four rows accept more doors than their own cell names, and one of
-#: those four (row 45) is a documented OVER-COUNT rather than a door the cell omits.
+#: larger quantity: THREE rows accept more doors than their own cell names (rows 1, 2
+#: and 17), and every other customer-callable row accepts exactly the doors its cell
+#: names — row 45 included, whose cell names BOTH of its doors and both attribute.
 #: Inputs are the TABLE (whose doors change only when the
 #: document does) rather than the 99-tool registry, so a new tool does not move
 #: these — which is what makes them pinnable.
@@ -3716,7 +3717,7 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # parser that produces `attributed`: a PARTIAL door-kind parse regression removes
     # entries from both sides, so the equality below cannot see it (the pre-#10226 arm
     # carried `>= 31` and this merge lost it). The numeral is HAND-COUNTED on purpose —
-    # a derived floor would inherit exactly the blindness it is here to catch. It IS 22
+    # a derived floor would inherit exactly the blindness it is here to catch. It IS 23
     # at this head, and the chain that produced it starts here: the table lost its SDK
     # traversal row when that method was retired
     # (31 -> 30), #11609 batch 1 archived `tortoise_backfill_v25`, taking row 32's
@@ -3740,7 +3741,9 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # inside the hop budget (`search_knowledge` was measured and does NOT), so their cell
     # carries no SDK door and the MCP tool is the same reader's door. Rows 37 and 45 KEEP
     # one, at its live spelling: `write_knowledge_batch` (measured to reach `_ingest`) and
-    # `search_knowledge` (measured to reach `ended.py::build_cypher` via `ended_scope`).
+    # `search_knowledge` (measured to reach `ended.py::build_cypher` through the
+    # state-question router — NOT through an `ended_scope` keyword, which no public door
+    # forwards: the flag is set inside `_tortoise_fts_query` from the QUESTION itself).
     # A table change moves this numeral with the table — 21 -> 22 where row 46
     # (`entity_reads.py::entity_relations`) arrived naming ONE door, the REST route
     # `GET /v1/entities/{entity_id}/relations` (`#14682`'s fix, landed on `main` in
