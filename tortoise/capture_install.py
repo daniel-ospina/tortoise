@@ -331,8 +331,14 @@ PI_VOLUNTEER_EXTENSION_NAME = (
 #: ``session_id``.
 LEGACY_PI_DIRNAME = "tortoise-capture"
 
-#: Where the legacy entry is moved when disabled — dot-prefixed, so Pi's
-#: loader skips it (``entry.name.startsWith(".")``) while its files live on.
+#: Where the legacy entry is moved when disabled.  ⛔ THE DOT PREFIX RETIRES
+#: NOTHING: Pi's ``discoverExtensionsInDir`` applies NO dot-prefix filter (the
+#: loader contains no ``startsWith(".")`` at all) and resolves EVERY
+#: subdirectory through ``resolveExtensionEntries``, so a dot-prefixed
+#: directory is still LOADED.  This constant is only the non-destructive
+#: DESTINATION of the rename; what actually stops the producer loading is the
+#: entry point being retired INSIDE it (``index.ts`` → ``index.ts.disabled``),
+#: which the installer does once the replacement seam is verified (#14342).
 PI_DISABLED_DIRNAME = ".tortoise-capture.disabled"
 
 #: The OTHER producer agent-infra installs (#3512, #3713's sibling): a
@@ -1836,6 +1842,50 @@ def _install_pi_volunteer_artifact(
     return changed, actions, ""
 
 
+def _pi_manifest_entries(path: Path) -> tuple[list[str] | None, str | None]:
+    """The ``pi.extensions`` entries Pi's own manifest reader would ACCEPT.
+
+    ONE reader for both halves of the guard (:func:`_pi_entry_is_loadable` and
+    :func:`_retire_pi_entry`), because Pi's rule is subtle enough that two
+    implementations of it disagree — and when they did, the installer retired a
+    producer and then asserted it was still live, forever (#14342 review round
+    4, finding 1).
+
+    Returns ``(entries, error)``:
+
+    * ``([...], None)`` — ``pi.extensions`` is an ARRAY and EVERY element is a
+      string, which is ``readPiManifest``'s shape test
+      (``entries.every(e => typeof e === "string")``). This is a declaration
+      Pi would consider; whether any entry RESOLVES is the caller's question.
+    * ``(None, None)`` — nothing Pi would consider: no ``package.json``, or one
+      it IGNORES (a JSON syntax error makes ``readPiManifest`` return null, and
+      a wrong-shaped ``pi.extensions`` is dropped field-wise) — so the loader
+      falls through to ``index.ts`` / ``index.js``. An ignored manifest is not
+      a declaration and not an obstacle.
+    * ``(None, "<reason>")`` — the file exists but cannot be READ, so no
+      assumption is safe. Deliberately NOT conflated with the ignored case:
+      Pi fails open on unparseable JSON and this installer must not read an
+      I/O failure as the same thing.
+    """
+    manifest = path / "package.json"
+    if not manifest.is_file():
+        return None, None
+    try:
+        # `utf-8-sig`: Pi's `readPiManifest` strips a BOM, so a BOM-ed manifest
+        # is READABLE to the loader — failing on it here would refuse over a
+        # manifest Pi understands.
+        declared = json.loads(manifest.read_text("utf-8-sig"))
+    except ValueError:
+        return None, None  # Pi's `catch { return null }` — it falls through
+    except OSError as e:
+        return None, f"{manifest}: {e.__class__.__name__}: {e}"
+    pi_section = declared.get("pi") if isinstance(declared, dict) else None
+    entries = pi_section.get("extensions") if isinstance(pi_section, dict) else None
+    if isinstance(entries, list) and all(isinstance(name, str) for name in entries):
+        return list(entries), None
+    return None, None
+
+
 def _pi_entry_is_loadable(path: Path) -> bool:
     """Does Pi's loader REGISTER anything at ``path``?
 
@@ -1864,23 +1914,19 @@ def _pi_entry_is_loadable(path: Path) -> bool:
         if not os.path.lexists(path):
             return False
         if path.is_dir():
-            # `readPiManifest` accepts ONLY an array of strings, and
+            entries, unreadable = _pi_manifest_entries(path)
+            if unreadable:
+                return True  # may declare entries; never guess it away
             # `resolveExtensionEntries` takes the manifest branch only when it
-            # is NON-EMPTY — otherwise it falls through to index.ts/index.js.
-            # A manifest that merely *looks* like an extensions list is not one.
-            manifest = path / "package.json"
-            if manifest.is_file():
-                try:
-                    # `utf-8-sig`: Pi's `readPiManifest` strips a BOM, so a
-                    # BOM-ed manifest is READABLE to the loader — failing on it
-                    # here would refuse over a manifest Pi understands.
-                    declared = json.loads(manifest.read_text("utf-8-sig"))
-                except (OSError, ValueError):
-                    return True  # may declare entries; never guess it away
-                pi_section = declared.get("pi") if isinstance(declared, dict) else None
-                entries = pi_section.get("extensions") if isinstance(pi_section, dict) else None
-                if isinstance(entries, list) and entries:
-                    return True
+            # is NON-EMPTY *after filtering to entries that RESOLVE* — so a
+            # manifest naming only missing files contributes no entry point and
+            # Pi falls through to index.ts/index.js.  Modelling "the array is
+            # non-empty" instead leaves this predicate disagreeing with
+            # `_retire_pi_entry` (which models the filter), and the two halves
+            # of one guard then report a retired producer as still live
+            # forever (#14342 review round 4, finding 1).
+            if entries and any(os.path.exists(path / name) for name in entries):
+                return True
             return (path / "index.ts").is_file() or (path / "index.js").is_file()
         return path.name.endswith(".ts") or path.name.endswith(".js")
     except OSError:
@@ -1910,21 +1956,20 @@ def _retire_pi_entry(path: Path) -> str | None:
             path.rename(path.with_name(f"{path.name}.disabled"))
             return None
         if path.is_dir():
-            manifest = path / "package.json"
-            if manifest.is_file():
-                try:
-                    declared = json.loads(manifest.read_text("utf-8-sig"))
-                except (OSError, ValueError):
-                    return (f"{path} carries an unreadable package.json — its "
-                            "declared entries cannot be verified, so it is not "
-                            "retired by this installer. Move it aside by hand.")
-                pi_section = declared.get("pi") if isinstance(declared, dict) else None
-                entries = pi_section.get("extensions") if isinstance(pi_section, dict) else None
-                declared_present = [
-                    str(name) for name in (entries if isinstance(entries, list)
-                                           else [])
-                    if isinstance(name, str) and (path / name).exists()
-                ]
+            entries, unreadable = _pi_manifest_entries(path)
+            if unreadable:
+                return (f"{path} carries an unreadable package.json — its "
+                        "declared entries cannot be verified, so it is not "
+                        "retired by this installer. Move it aside by hand.")
+            if entries is not None:
+                # Only entries Pi itself would HONOUR can be obstacles: the
+                # same filtered-for-resolvable rule `resolveExtensionEntries`
+                # applies. A mixed-type array is not a manifest at all to Pi
+                # (`readPiManifest` requires every element to be a string), so
+                # refusing over it would leave a loaded `index.ts` in place
+                # while the install blamed a manifest the loader ignores.
+                declared_present = [name for name in entries
+                                    if os.path.exists(path / name)]
                 if declared_present:
                     return (f"{path} declares `pi.extensions` in package.json, "
                             "renaming its files would leave that manifest "
@@ -2153,7 +2198,9 @@ def _install_pi(
     # top-level tortoise-capture.ts AND tortoise-capture/index.ts as two
     # extensions, and both POST the same session_id. NON-DESTRUCTIVE: unlink a
     # symlink (the checkout it points at is untouched) or rename a real
-    # directory to a dot-prefixed name the loader skips. Never a recursive
+    # directory aside to PI_DISABLED_DIRNAME. The dot prefix retires nothing
+    # (Pi has no dot-prefix filter) — the entry point inside that directory is
+    # what gets retired, after the replacement is verified. Never a recursive
     # delete.
     #
     # The whole mutation block is wrapped so a WRITE-TIME failure (ENOSPC,
@@ -2173,7 +2220,8 @@ def _install_pi(
             # it here, before the seam write, left a box with ZERO capture
             # producers when that write failed (measured: ENOSPC on a fresh
             # home). The link is left in place until a verified replacement
-            # exists; `_unlink_pi_legacy_symlink` below runs it.
+            # exists; the deferred block below (in this function, after the
+            # verified seam write) is what runs it.
             if dry_run:
                 actions.append(
                     f"[dry-run] would unlink legacy extension {legacy}")

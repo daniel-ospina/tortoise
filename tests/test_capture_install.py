@@ -1257,6 +1257,106 @@ def test_pi_install_refuses_a_second_producer_that_is_a_package_directory(home):
         f"capturing: {_registered_producers(ext_dir)}")
 
 
+def test_pi_entry_is_loadable_mirrors_resolve_extension_entries(tmp_path):
+    """`_pi_entry_is_loadable` is `resolveExtensionEntries`, not "is the array
+    non-empty".
+
+    Pi filters the declared entries down to the ones that RESOLVE and takes the
+    manifest branch only when something survives; with nothing surviving it
+    falls through to `index.ts`/`index.js`. `readPiManifest` drops the field
+    entirely unless every element is a string.
+
+    Mutation: `if isinstance(entries, list) and entries: return True` — the two
+    NOT-loadable rows go True and the installer then calls a producer it has
+    already retired "STILL an extension Pi loads", on every run."""
+    def mk(name: str, manifest: str | None, files: tuple[str, ...]) -> Path:
+        d = tmp_path / name
+        d.mkdir()
+        if manifest is not None:
+            (d / "package.json").write_text(manifest)
+        for f in files:
+            (d / f).write_text("// producer\n")
+        return d
+
+    # A declaration whose entries do not RESOLVE contributes no entry point,
+    # so the index fallback decides — and with no index there is none.
+    assert capture_install._pi_entry_is_loadable(
+        mk("missing-only", '{"pi": {"extensions": ["missing.ts"]}}', ())
+    ) is False
+    assert capture_install._pi_entry_is_loadable(
+        mk("missing-then-index", '{"pi": {"extensions": ["missing.ts"]}}',
+           ("index.ts",))
+    ) is True
+    # A declaration that resolves IS an entry point, index or no index.
+    assert capture_install._pi_entry_is_loadable(
+        mk("declared", '{"pi": {"extensions": ["a.ts"]}}', ("a.ts",))
+    ) is True
+    # A mixed array is not a manifest Pi reads, so it falls through to index.
+    assert capture_install._pi_entry_is_loadable(
+        mk("mixed-no-index", '{"pi": {"extensions": ["a.ts", 5]}}',
+           ("a.ts",))
+    ) is False
+    assert capture_install._pi_entry_is_loadable(
+        mk("mixed-index", '{"pi": {"extensions": ["a.ts", 5]}}',
+           ("a.ts", "index.ts"))
+    ) is True
+
+
+def test_pi_install_retires_a_directory_producer_whose_manifest_names_a_missing_file(home):
+    """A manifest naming only a missing file is a RETIRABLE shape: Pi falls
+    back to `index.ts`, so retiring the entry point does stop the producer —
+    and the install must converge instead of refusing forever.
+
+    Mutation: model the manifest branch of `_pi_entry_is_loadable` as "the
+    array is non-empty". The retirement lands, the post-retirement assertion
+    then calls the very same directory loadable, and `tortoise install pi`
+    fails on this shape on every run with a message that is false on both
+    counts ("STILL an extension Pi loads — … both capture producers stay
+    live")."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "package.json").write_text('{"pi": {"extensions": ["missing.ts"]}}\n')
+    (producer / "index.ts").write_text("// producer\n")
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    assert (producer / "index.ts.disabled").read_text() == "// producer\n"
+    assert (producer / "package.json").exists(), "the user's manifest was edited"
+    assert "reflect-hook.ts/index.ts" not in _registered_producers(ext_dir), (
+        f"the producer is still registered: {_registered_producers(ext_dir)}")
+    # CONVERGENCE, not a one-shot: the shape is stable, so run 2 is green too.
+    assert install_capture("pi", home=home).ok
+
+
+def test_pi_install_retires_a_directory_producer_whose_manifest_is_not_a_string_array(home):
+    """`{"pi": {"extensions": ["a.ts", 5]}}` is not a manifest Pi reads at all
+    (`readPiManifest` requires EVERY element to be a string), so the loader
+    falls through to `index.ts`: the directory is retirable, and refusing it
+    would leave a live producer while blaming a manifest the loader ignores.
+
+    Mutation: filter the declared entries per element instead of requiring the
+    array Pi requires — the refusal fires and the producer stays registered."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "package.json").write_text('{"pi": {"extensions": ["a.ts", 5]}}\n')
+    (producer / "a.ts").write_text("// a resolved entry Pi IGNORES\n")
+    (producer / "index.ts").write_text("// producer\n")
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    assert (producer / "index.ts.disabled").read_text() == "// producer\n"
+    assert (producer / "a.ts").read_text() == "// a resolved entry Pi IGNORES\n", (
+        "the installer edited a manifest entry the loader does not honour")
+    assert "reflect-hook.ts/index.ts" not in _registered_producers(ext_dir), (
+        f"the producer is still registered: {_registered_producers(ext_dir)}")
+
+
 def test_pi_install_retires_a_directory_second_producer_in_place(home):
     """A directory at ``reflect-hook.ts`` with no ``pi.extensions`` (only
     ``index.ts``) cannot be retired by renaming the DIRECTORY — a suffixed
