@@ -10161,26 +10161,26 @@ _H_14544_EXEMPTION_OPEN_RE = re.compile(r"The one cause this paragraph does NOT 
 #: and the RETIRED SENTENCE returned verbatim after the bound with this arm reporting GREEN. A ban
 #: that the graded text can move out from under is not a ban, so every NEGATIVE claim here reads the
 #: whole block; the POSITIVE ones stay paragraph-bounded, where a lost claim reds instead of passing.
-#: ⛔ IT IS NOT A UNIVERSAL BAN AND SAYS SO. Three spellings are graded — the bare pronoun form
-#: (`neither of which`), the ACTIVE form (`#14544` … never/not/didn't/has not … touch…, within 400
-#: characters), and the PASSIVE form (`<that|the|its> <row|entry> … was/were/is/are/has/had not …
-#: touch… … `#14544`, label within 80 characters). Those bounds are STATED because they are real:
-#: measured at `49a6dd89`, padding the active form past 400 characters or the passive label past 80
-#: escapes both, and a pronoun paraphrase (`it was never touched by `#14544``) and a noun this list
-#: does not name are NOT read. A phrase-level guard cannot be widened into honesty — the next noun
-#: or the next verb form is always one edit away — so the graded set is what is claimed, and this
-#: paragraph is the record of what is not. The PASSIVE arm needs its BE verb on purpose: without it,
-#: "the row … does not touch the shard layout, and `#14544`'s cut is separate" reds, which is honest
-#: prose (the subjects differ) and would make the arm a false block.
+#: ⛔ IT IS NOT A UNIVERSAL BAN, AND THIS COMMENT DOES NOT PARAPHRASE IT — the graded set IS the
+#: alternatives in `_H_14544_UNTOUCHED_ANAPHOR_RE` below, and
+#: `test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row` is its contract: every shape
+#: a reader would call "the same claim" is a MATCH fixture there, and the honest-prose fixtures are
+#: what keep it from refusing a true sentence. Two earlier revisions stated the set in prose and were
+#: each wrong in a different direction (one claimed "any distance" over a 40-char window, the next
+#: declared its residual while carrying two undeclared windows), which is why the contract lives in
+#: fixtures rather than in a sentence: a phrase-level guard cannot be widened into honesty — the next
+#: noun or verb form is one edit away — so what is graded is asserted, and what is not graded is not
+#: described.
 _H_14544_UNTOUCHED_ANAPHOR_RE = re.compile(
     r"neither\s+of\s+which"
-    # ACTIVE: `#14544` … (never|not|did not|didn't|has not) … touch…, within 400 characters.
+    # ACTIVE: the label first, then the negation, then the verb.
     r"|#14544[`]?['\u2019]?(?:s)?[\s\S]{0,400}?(?:never|not|did\s+not|didn['\u2019]?t|has\s+not)"
     r"\s+(?:\w+\s+){0,3}touch(?:ed|es|ing)?"
-    # PASSIVE: `<that|the|its> <row|entry> … was/were/is/are/has/had not touched … `#14544`` — the
-    # same claim with the label at the END, which no `#14544`-first arm can reach. The BE verb is
-    # required so an ACTIVE sentence about a different subject does not red this.
-    r"|\b(?:that|the|its)\b[\s\S]{0,40}?\b(?:row|entry)\b[\s\S]{0,400}?"
+    # PASSIVE: the same claim with the label at the END, which no label-first arm can reach. The BE
+    # verb is load-bearing and GRADED — the fixture "the row does not touch the shard layout, and
+    # `#14544`'s cut is separate" is honest prose (the row is not the negated thing) and reds without
+    # it, so the requirement is held by a fixture rather than by this comment.
+    r"|\b(?:that|the|its)\b[\s\S]{0,40}?\b(?:rows?|entr(?:y|ies))\b[\s\S]{0,400}?"
     r"(?:was|were|is|are|has|had)\s+(?:never|not)\s+(?:\w+\s+){0,2}touch(?:ed|es|ing)?"
     r"[\s\S]{0,80}?#14544",
     re.IGNORECASE)
@@ -10339,6 +10339,7 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "that row was not touched by `#14544`",
             "the row itself was never touched by `#14544`",
             "the `durations` entry was never touched by `#14544`",
+            "the rows were never touched by `#14544`",
             "And `#14544`'s cut touched neither of which.",
             "neither of which " + "x" * 95 + " `#14544` touched",
             "`#14544`'s cut took the file off `core`, and that row was never touched",
@@ -10354,6 +10355,9 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "the row's weight was never re-read, and `#14544` cut its cases",
             "another row's weight was retimed; the retime does not touch the shard layout, and "
             "`#14544`'s cut is separate",
+            # ⛔ THE BE-VERB CONTROL: honest prose (the ROW is not the negated thing), and it REDS
+            # without the `(?:was|were|is|are|has|had)` requirement — so that requirement is graded.
+            "the row does not touch the shard layout, and `#14544`'s cut is separate",
             "`#14544`'s removal of the file from the `core` surface cannot move a bin"):
         assert not _H_14544_UNTOUCHED_ANAPHOR_RE.search(honest), (
             f"the anaphor ban REDS honest prose ({honest!r}) — the passive arm is missing its BE "
