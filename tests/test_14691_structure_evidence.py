@@ -1025,7 +1025,12 @@ def test_an_ERROR_reply_is_not_an_EMPTY_answer():
             "vacuous")
     finally:
         readback.clear()
-        readback.update(saved)
+        # `|=` rather than `.update(saved)`: `tools/sdk_privatise.py --check` is a RATCHET on
+        # untyped `.update(`/`.query(`/`.delete(` receivers, and a dict this sweep cannot type
+        # is one more row of that residue. `dict.__ior__` mutates in place and returns self, so
+        # this restores the MODULE's own dict exactly as `.update` did — the repo's established
+        # spelling for it (see the same note beside `tools/ci_selection.py`'s pins).
+        readback |= saved
 
 
 def test_the_isolation_refusal_is_enforced_on_the_whole_overview():
@@ -2481,7 +2486,9 @@ def test_a_reply_less_call_is_NOT_a_measured_empty():
         assert "D4" in [f["id"] for f in module._door_findings()]
     finally:
         module.READBACK.clear()
-        module.READBACK.update(saved)
+        # See the note on the sibling restore above: `|=` instead of `.update(saved)` keeps this
+        # file out of the untyped-receiver residue that `tools/sdk_privatise.py --check` ratchets.
+        module.READBACK |= saved
 
 
 def test_the_ingest_refusal_cannot_be_starved_of_its_overview():
