@@ -10679,12 +10679,16 @@ def _maybe_onboarding_auto_complete(*,
 # ⛔ THE LAST-ERROR EXEMPTION IS EVERY 429, and the tool docstring below still
 # names only the #3060 capacity one — kept that way on purpose, because a
 # docstring edit is a FROZEN-SURFACE change (see the note above). The predicate
-# it describes reads `if (status >= 400 and status != 429 and detail !=
-# _CAPTURE_SESSION_IN_FLIGHT_DETAIL)` — modelled on `hosted_api.py`'s REST
-# wrapper, which carries the same `!= 429` — so since #4051 §3.1 the per-org
-# ingest throttle (#11214) is a THIRD exempt class: a transient server
-# condition that must not paint a harness failure on the dashboard. Recorded
-# here as a comment rather than in the docstring, for the reason above.
+# it describes reads `if (status >= 400 and status != 429 and not
+# _is_capture_in_flight_refusal(detail))` — modelled on `hosted_api.py`'s REST
+# wrapper, which carries the same `!= 429` and the same shared predicate — so
+# since #4051 §3.1 the per-org ingest throttle (#11214) is a THIRD exempt
+# class: a transient server condition that must not paint a harness failure on
+# the dashboard. ⛔ The in-flight 409 arm is `_is_capture_in_flight_refusal`
+# (#14700), NOT the old `detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL` equality
+# this comment used to quote: after the raise site was typed, an equality
+# compare would have stopped matching it. Recorded here as a comment rather
+# than in the docstring, for the reason above.
 
 
 def tortoise_session_capture(conversation: list[dict],
@@ -10749,12 +10753,12 @@ def tortoise_session_capture(conversation: list[dict],
 
     from tortoise.hosted_api import (
         _CAPTURE_MARKER_EXECUTOR,
-        _CAPTURE_SESSION_IN_FLIGHT_DETAIL,
         SessionRequest,
         _capture_abandoned_marker,
         _capture_lane,
         _capture_session_impl,
         _capture_session_key,
+        _is_capture_in_flight_refusal,
         _observed_capture_harness,
         _record_capture_last_error,
         _reserve_capture_slot,
@@ -10872,7 +10876,7 @@ def tortoise_session_capture(conversation: list[dict],
         # failure — never paint it on the dashboard (REST does the same).
         # #3129: likewise the in-flight 409.
         if (status >= 400 and status != 429
-                and detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
+                and not _is_capture_in_flight_refusal(detail)):
             # #4898: attribute the failure to the SESSION's stored harness, NOT
             # the caller's raw ``harness`` argument — the SAME resolution the
             # REST capture applies to both per-harness keys

@@ -1039,6 +1039,15 @@ fly ssh console -a tortoise-y4mjjq -C \
 (#11225) — the message is kept **verbatim** from the pre-#12992 wording, so an old prose matcher
 still matches, but it is not what a client should read.
 
+**The SIBLING `409` on the same route is typed too** (#14700), in the same envelope: a duplicate
+capture already in flight for that `session_id` answers `{"detail": {"code":
+"capture_session_in_flight", "message": …, "retry_after": 30}}` with the `Retry-After: 30` header
+kept — it is a same-key **concurrent writer**, so waiting for the winner to finish and retrying is
+the correct client response. The route's OTHER `409` — `Session recording is disabled for this
+team/graph` — carries **no `code`** and no `retry_after`: it is an org policy that no retry clears.
+`detail.code` is what makes that branch decidable; before #14700 **neither `409` carried a code**, so
+the log line (`HTTP 409 retry_after=30s`) named no class — only the header's presence did, implicitly.
+
 ⛔ **The MCP tool `tortoise_session_capture` is NOT that surface and does not carry `code` or
 `retry_after`.** It reports a capacity refusal as `status: 429` plus the `message` sentence: its
 `code` field is the NUMERIC JSON-RPC vocabulary (`ERR_QUOTA = -32006`), so there is no field that
@@ -4736,7 +4745,7 @@ operator who read the line above as "CI defends this" would never run it.
 > 3. the SDK **read-path** bound — `tortoise/embeddings.py::await_read_ready_reason`,
 >    `:1636` (#13528);
 > 4. the **HOSTED (production) lifespan pre-warm** — `tortoise/hosted_api.py::_lifespan`,
->    `:3685-3689` (the reader that runs on the deployed box — the `elif` that CALLS the flag and
+>    `:3742-3746` (the reader that runs on the deployed box — the `elif` that CALLS the flag and
 >    the thread it starts; the import and the comment above it are not the reader);
 > 5. the boot pre-warm in the shell — `entrypoint.sh::_prewarm_embedder`, `:426-446`, the `_flag`
 >    read at `:432`.
