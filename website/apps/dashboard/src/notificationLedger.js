@@ -372,7 +372,9 @@ export function dismiss(state, episode, now = new Date(), alert = null) {
   // `dismissedFirst` is the dismissed window's START. It is what makes the
   // ACTIVITY arm's `overlap` clause expressible: the client stores only the
   // window END as the watermark, but the server's rule is
-  // `overlap or (0 <= delta <= gap_s)` (`abuse.py:1741-1744`), and `overlap`
+  // `overlap or (0 <= delta <= gap_s)` (`abuse.py::_episode_acknowledged` — cited
+  // by NAME, not by line: a line number rots, this file already cites it that way
+  // six other times), and `overlap`
   // needs BOTH ends of the acknowledged window. Without it the whole arm collapses
   // to the delta test, which accepts negative deltas — the direction the server's
   // own docstring names as the bug it fixed ("an unbounded delta also matched
