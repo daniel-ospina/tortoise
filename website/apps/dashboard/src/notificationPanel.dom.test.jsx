@@ -881,6 +881,16 @@ test('#14686: no usable store at all is reported as its own fact, before any act
 
 /** Two server episodes of the same type with the SAME message — the local
  *  identity is `type|message`, so these are one decision over two rows. */
+/** The accessible name of every control that acts on a row IN THE LIST, per row. */
+function rowActionNames(container) {
+  return [...container.querySelectorAll('.notif-list .notif-row')].map((row) => [
+    row.querySelector('.notif-open').getAttribute('aria-label'),
+    row.querySelector('.notif-snooze').getAttribute('aria-label'),
+    [...row.querySelectorAll('.notif-actions button')]
+      .map((b) => b.getAttribute('aria-label')),
+  ])
+}
+
 function sameWording() {
   const newer = alert({
     message: 'same wording',
@@ -1690,30 +1700,93 @@ test('#14694: every ROW ACTION is named with its own row\'s discriminators', () 
   // actions were not: `<button>{DISMISS}</button>` takes its accessible name from
   // the visible text, so two rows announced "Dismiss" twice and the snooze
   // selects "Snooze for Suspicious activity" twice — an AT user could not tell
-  // which notification each one would act on (review finding). The discriminator
-  // is the count and the age, which is exactly what differs.
+  // which notification each one would act on (review finding).
   const { newer, older } = sameWording()
   const { container } = renderBell({ alerts: [newer, older] })
   fireEvent.click(bell(container))
-  const perRow = [...container.querySelectorAll('.notif-list .notif-row')].map((row) => [
-    row.querySelector('.notif-open').getAttribute('aria-label'),
-    row.querySelector('.notif-snooze').getAttribute('aria-label'),
-    [...row.querySelectorAll('.notif-actions button')]
-      .map((b) => b.getAttribute('aria-label')),
-  ])
+  const perRow = rowActionNames(container)
   assert.equal(perRow.length, 2)
   const flat = perRow.flat(2)
   assert.equal(flat.length, 6, 'two rows, three named actions each')
   assert.equal(new Set(flat).size, flat.length,
     'no two controls may share an accessible name')
-  // …and the discriminator is a real one, not a repeat of the label: each of the
-  // SIX names is distinct, and each non-open action carries the count or the age.
-  for (const [open, snooze, dismiss] of perRow) {
-    assert.match(open, /×[0-9]+|min ago|just now/)
-    assert.match(snooze, /×[0-9]+|min ago|just now/)
-    assert.equal(dismiss.length, 1)
-    assert.match(dismiss[0], /×[0-9]+|min ago|just now/)
+  for (const name of flat) {
+    assert.match(name, / @ /, 'the name carries the row\'s own timestamp')
+    assert.doesNotMatch(name, /^(Details|Snooze for|Dismiss)$/,
+      'a bare visible-text name is the defect this pins')
   }
+})
+
+test('#14694: two rows in ONE age bucket and with NO count are still named apart', () => {
+  // ⛔ THE DISCRIMINATOR CANNOT BE THE COUNT OR THE RELATIVE AGE — both collapse.
+  // `episodeCountLabel` returns '' for a single detection window, and `ageLabel`
+  // floors anything past a day to "1 day ago". So two single-window episodes 30 h
+  // and 40 h old — both CURRENT, both on screen, and visibly different to a
+  // sighted reader by their own `stamp` — announced IDENTICAL names. Measured on
+  // the first version of this fix: 3 distinct names of 6 (review finding). The
+  // absolute stamp is what the row renders, so the name carries that.
+  const ago = (h) => new Date(NOW.getTime() - h * 60 * MIN).toISOString()
+  const rows = [30, 40].map((h) => alert({
+    at: ago(h),
+    first_at: ago(h),
+    count: 1,
+    episode: `flag|surface:Memory writes|${h}`,
+    message: 'Memory writes reached 12 units',
+    details: { surface: 'Memory writes' },
+  }))
+  const { container } = renderBell({ alerts: rows })
+  fireEvent.click(bell(container))
+  const flat = rowActionNames(container).flat(2)
+  assert.equal(flat.length, 6)
+  assert.equal(new Set(flat).size, 6,
+    'the STAMP is what separates two single-window rows in one age bucket')
+})
+
+test('#14694: the reversible and detail actions are named too, not only the list rows', () => {
+  // A fix that named only the visible list left three controls DROPPABLE with both
+  // suites green — measured: deleting the Unsnooze and Restore labels, and the
+  // detail view's Dismiss label, kept 78 vitest rows and 1177 node rows passing
+  // (review finding). Those controls act on a row the reader can no longer see, so
+  // an unnamed one is worse there, not better: two snoozed rows of one identity
+  // both offered a bare "Unsnooze".
+  const ago = (m) => new Date(NOW.getTime() - m * MIN).toISOString()
+  const snoozed = alert({ message: 'snooze me', episode: 'flag||a', at: ago(2) })
+  const dismissed = alert({ message: 'dismiss me', episode: 'flag||b', at: ago(6) })
+  const other = alert({ message: 'open me', episode: 'flag||c', at: ago(9) })
+  const { container } = renderBell({ alerts: [snoozed, dismissed, other] })
+  fireEvent.click(bell(container))
+
+  const list = () => [...container.querySelectorAll('.notif-list .notif-row')]
+  fireEvent.change(list()[0].querySelector('.notif-snooze'), { target: { value: '1h' } })
+  fireEvent.click(list().find((r) => /dismiss me/.test(r.textContent))
+    .querySelector('.notif-actions button'))
+
+  const groupToggle = (re) => [...container.querySelectorAll('.notif-more')]
+    .find((x) => re.test(x.textContent))
+  const buttonByText = (text) => [...container.querySelectorAll('button')]
+    .find((x) => x.textContent.trim() === text)
+
+  fireEvent.click(groupToggle(/Snoozed \(/))
+  const unsnooze = buttonByText(UNSNOOZE)
+  assert.ok(unsnooze, 'precondition: the Snoozed group is open and offers Unsnooze')
+  assert.match(unsnooze.getAttribute('aria-label') || '', /^Unsnooze: /)
+  assert.match(unsnooze.getAttribute('aria-label'), /snooze me/, 'named by ITS row')
+
+  fireEvent.click(groupToggle(/Dismissed \(/))
+  const restore = buttonByText(RESTORE)
+  assert.ok(restore, 'precondition: the Dismissed group is open and offers Restore')
+  assert.match(restore.getAttribute('aria-label') || '', /^Restore: /)
+  assert.match(restore.getAttribute('aria-label'), /dismiss me/, 'named by ITS row')
+
+  // …and the detail view's Dismiss, which acts on the row the reader is reading.
+  fireEvent.click(container.querySelector('.notif-open'))
+  const detail = container.querySelector('.notif-detail')
+  assert.ok(detail, 'precondition: the detail view is open')
+  const detailDismiss = [...detail.querySelectorAll('button')]
+    .find((x) => x.textContent.trim() === 'Dismiss')
+  assert.ok(detailDismiss, 'precondition: the detail view offers Dismiss')
+  assert.match(detailDismiss.getAttribute('aria-label') || '', /^Dismiss: /)
+  assert.match(detailDismiss.getAttribute('aria-label'), /open me/, 'named by ITS row')
 })
 
 test('#14686: two same-identity rows have DISTINCT accessible names', () => {

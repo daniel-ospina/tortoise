@@ -138,15 +138,33 @@ function Badge({ count, warn }) {
  * notification it would dismiss — the same defect the open control was fixed for
  * one row above, just on the controls beside it. Measured on two same-identity
  * rows: both dismissed as "Dismiss", both snoozed as "Snooze for Suspicious
- * activity" (the count and the age are what differ, exactly as for `Details`).
+ * activity".
  *
- * One builder, so a later action cannot quietly be added without one.
+ * ⛔ THE STAMP, NOT THE RELATIVE AGE. The count and the age are NOT enough: a row
+ * whose `count < 2` carries no `×N` (`episodeCountLabel` returns '' for one
+ * detection window) and `ageLabel` floors everything past a day to "1 day ago",
+ * so two single-window episodes 30 h and 40 h old — both CURRENT, both on screen,
+ * visibly different by their own `stamp` — announced identical names. Measured:
+ * 3 distinct names of 6. The absolute stamp is what the row itself renders, so it
+ * is the discriminator to carry.
+ *
+ * The bound, stated rather than implied: two rows that share a label, a message, a
+ * count AND a second are indistinguishable to a sighted reader too, so no name can
+ * separate them — this makes the name exactly as discriminating as the render.
  */
 function actionName(action, entry) {
   if (!entry) return action
+  const label = entry.label || ''
+  // The message is rendered by the row and can differ where the label does not
+  // (two `flag` rows of different rules share `label` 'Suspicious activity').
+  const message = entry.message && entry.message !== label ? ` — ${entry.message}` : ''
   const count = entry.countLabel ? ` ${entry.countLabel}` : ''
-  const age = entry.ageLabel ? ` — ${entry.ageLabel}` : ''
-  return `${action}: ${entry.label}${count}${age}`
+  const stamp = entry.stamp
+    ? ` @ ${entry.stamp}`
+    : entry.ageLabel
+      ? ` — ${entry.ageLabel}`
+      : ''
+  return `${action}: ${label}${message}${count}${stamp}`
 }
 
 function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
