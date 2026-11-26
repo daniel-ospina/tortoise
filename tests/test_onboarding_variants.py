@@ -1989,11 +1989,19 @@ _CONFIG_PREP_RE = re.compile(
 # GREEN (measured) while the same content with the conjunct BEFORE the object is a
 # declared-RED row.
 _SESSION_AND_CONJUNCT_RE = re.compile(
-    r"\band\b[^\n]*?\b(?:actually\s+there|there|listed|present|visible"
-    r"|appearing|appears?|in\s+the\s+list)\b", re.IGNORECASE)
+    r"\band\b[^\n]*?\b(?:actually\s+there"
+    r"|(?:are|is|were|was)\s+(?:actually\s+)?there"
+    r"|listed|present|visible|appearing|appears?|show(?:s)?\s+up"
+    r"|load(?:ed|s)|running|live|in\s+the\s+list)\b", re.IGNORECASE)
 _SESSION_PRESENCE_RE = re.compile(
-    r"\b(?:actually\s+there|there|listed|present|visible|appearing|appears?"
-    r"|show(?:s)?\s+up|in\s+the\s+list)\b", re.IGNORECASE)
+    # ⛔ `there` MUST BE THE COPULA FORM. A bare `\bthere\b` matched existential
+    # "there are no duplicate entries", so an entirely FILE-SIDE conjunct was
+    # graded as an inversion (measured) — the config exclusion exists to keep
+    # exactly that copy GREEN.
+    r"\b(?:actually\s+there|(?:are|is|were|was)\s+(?:actually\s+)?there"
+    r"|listed|present|visible|appearing|appears?"
+    r"|show(?:s)?\s+up|load(?:ed|s)|running|live|in\s+the\s+list)\b",
+    re.IGNORECASE)
 _INSTALL_SIDE_RE = re.compile(
     r"\btools\b[^\n]*?\b(?:are|is|get|gets|getting)\s+(?:(?:all|both)\s+)?"
     r"(?:installed|configured|enabled|set\s+up|added|wired|registered|mounted|provisioned|on\s+the\s+allowlist)\b",
@@ -2038,7 +2046,13 @@ _INSTALL_SIDE_RE = re.compile(
 # and put the inverting clause out of scope (measured: the `-q` twin of the
 # `--cask` row stayed GREEN at the pin level while its `--cask` twin was caught).
 _STATEMENT_BREAK_RE = re.compile(
-    r"(?:[;—–]\s*|(?:(?<=\s)-(?!-)\s+|(?<=\s)--\s+|^-\s*)"
+    # ⛔ A COLON BREAKS A STATEMENT TOO — it introduces the follow-up step, which
+    # is unambiguously forward ("Restart your client: once the tools are listed,
+    # run …"), and the file's own doctrine is that glyph variants are the same
+    # punctuation. Without it the colon twin of a DECLARED-GREEN row was RED and
+    # the colon twin of a declared-RED row was GREEN, both one-character edits
+    # (measured). Whitespace-bounded so `https:` and `e.g.:` do not split.
+    r"(?:[;—–]\s*|:\s+|(?:(?<=\s)-(?!-)\s+|(?<=\s)--\s+|^-\s*)"
     r"|\.\s+(?=[A-Z\"'`(\[*_>])"
     r")")
 
@@ -2052,8 +2066,12 @@ _STATEMENT_BREAK_RE = re.compile(
 # not tell those apart and DISABLED forms (b)/(c)/(d) on every one of them
 # (measured — a false PASS introduced by the fix for the false red). So the rule
 # is scoped to the OBSERVATION verb itself and applied as an explicit skip.
+# ⛔ `see THAT …` IS AN INSTRUCTION, NOT AN OBSERVATION. The distinction this
+# rule draws is verb-class, so the complementizer reading escaped it: "… but
+# first see that no tools are missing" is a pre-restart demand and was GREEN
+# (measured) while its `confirm` twin is a declared-RED row.
 _OBSERVATION_NEGATION_RE = re.compile(
-    r"\b(?:see|saw|seen|seeing|notice[sd]?|noticing)\b[^\n]*?"
+    r"\b(?:see|saw|seen|seeing|notice[sd]?|noticing)\b(?!\s+that\b)[^\n]*?"
     r"\b(?:no|none|zero|nothing)\b", re.IGNORECASE)
 
 # A clause that opens with one of these continues the cue FORWARD ("restart,
@@ -2443,12 +2461,15 @@ def test_3232_generic_restart_lines_are_exact():
     # front of the forms. The split is LOAD-BEARING; do not delete it.
     #
     # What the graded set IS and IS NOT (#14679's reviews measured both):
-    # - It is the SIX forms in `_INVERSION_FORMS`, each observed GREEN before
-    #   its cut: the "after/once/when/if + confirmation-predicate-the-tools"
-    #   clause, "having [first] confirmed the tools", "but first … confirm the
-    #   tools", "confirm the tools … beforehand", "[only] once the tools are
-    #   there", and a PRE-CUE "Confirm the tools … " sentence (form (f), which
-    #   the post-cue scan cannot see).
+    # - It is the SEVEN forms in `_INVERSION_FORMS`, each observed GREEN before
+    #   its cut: (a) the "after/once/when/if + confirmation-predicate-the-tools"
+    #   clause, (b) "having [first] confirmed the tools", (c) "but first …
+    #   confirm the tools", (d) "confirm the tools … beforehand", (d′) "but
+    #   confirm the tools are already there", (e) "[only] once the tools are
+    #   there", and (f) a PRE-CUE "Confirm the tools …" sentence, which the
+    #   post-cue scan cannot see. ⛔ (d′) is the one every enumeration used to
+    #   omit while the tuple held seven — it is load-bearing, so a reader
+    #   auditing the graded surface under-counted it.
     # - It is NOT an open-ended inversion detector. "… when the tools appear";
     #   "after making sure the tools …"; and any other rephrasing outside those
     #   SEVEN (a, b, c, d, d′, e, and the pre-cue-only f) are deliberately NOT
@@ -2465,7 +2486,8 @@ def test_3232_generic_restart_lines_are_exact():
         f"docs/quickstart-cloud.md inverts its own restart cue: {violation!r} "
         "asks the user to confirm the tools this session cannot have loaded "
         "yet — the restart comes FIRST (#3232, #14676). Graded forms are the "
-        "six enumerated in _INVERSION_FORMS; a pre-restart check of the CONFIG "
+        "seven (a, b, c, d, d′, e, and the pre-cue-only f) enumerated in "
+        "_INVERSION_FORMS; a pre-restart check of the CONFIG "
         "is not an inversion unless it also conjoins the tool list, a clause "
         "that opens with a forward sequencer is not a deferral, and rephrasings "
         "outside that closed set are out of scope by design.")
@@ -3093,10 +3115,16 @@ def test_3232_generic_restart_lines_are_exact():
     # it names is removed (measured per arm). A few alternatives in the regexes
     # are live but carry no row of their own: spelling variants, a few untested
     # pronoun/synonym/preposition alternatives (form (e)'s `visible|load`, form
-    # (a)'s `when`, form (c)'s `yet`, `_CONFIG_PREP_RE`'s `that|those` and
-    # `from|inside|per|under`, `_CONFIG_NOUN_RE`'s plural `configs?`, form (f)'s
-    # `look|ensure` verbs), and one that is REDUNDANT rather than untested (form
-    # (a)'s `having`, by form (b) — measured: removing it changes no row).
+    # (c)'s `yet`, `_CONFIG_PREP_RE`'s `that|those` and `from|inside|per|under`,
+    # `_CONFIG_NOUN_RE`'s plural `configs?`, form (f)'s `look|ensure` verbs),
+    # and two that are REDUNDANT rather than untested (form (a)'s `having`, by
+    # form (b), and `_SESSION_AND_CONJUNCT_RE`'s `load(?:ed|s)`, by
+    # `_SESSION_PRESENCE_RE` — both measured: removing each alone changes no row,
+    # though removing the presence copy flips `installed and they are loaded`).
+    # ⛔ `when` used to be listed here and is NOT row-less: replacing form (a)'s
+    # `(?:if|when)` with `(?:if)` flips THREE declared rows (measured), so it is
+    # pinned and the claim that it carries no row was wrong in the safe direction
+    # but still wrong.
     # ⛔ `list` is NOT redundant and is not in that list: it is load-bearing for
     # form (d) and row-pinned (`list the tools beforehand`), which is how a claim
     # of redundancy about a live arm was caught here — measured by deleting it
@@ -3135,6 +3163,34 @@ def test_3232_generic_restart_lines_are_exact():
      "mcp-status --live`.", False),
     ("Restart your client (then once the tools are listed, run `tortoise "
      "mcp-status`).", False),
+    # ── `:` IS A STATEMENT BREAK, like `;` and the dashes. A colon introducing
+    # the follow-up step is ordinary quickstart copy and unambiguously forward;
+    # without the arm its GREEN twin was RED and its pre-cue RED twin was GREEN,
+    # both one-character edits (measured):
+    ("Restart your client: once the tools are listed, run `tortoise "
+     "mcp-status --live`.", False),
+    # ⛔ …and with a COLON the `after confirming` clause FOLLOWS the restart
+    # ("restart: then, after confirming, run …"), so it is forward copy and stays
+    # GREEN. Measured before it was dropped as a wrong expectation.
+    ("Restart your client: after confirming the tools are actually there, run "
+     "`tortoise mcp-status`.", False),
+    ("Delete the old entry: but first confirm the tools are actually there. "
+     "Restart your client, then confirm the tools are actually there.", True),
+    # ── the session-presence vetoes share the file's OWN presence vocabulary.
+    # A narrower copy missed `loaded` / `show up`, so the most natural rendering
+    # of the very claim the arm exists to catch shipped GREEN (measured):
+    ("Restart your client after confirming the tools are installed and they "
+     "are loaded.", True),
+    ("Restart your client after confirming the config lists the tools and they "
+     "show up.", True),
+    # ── …but a bare existential `there are` is NOT a presence claim, so an
+    # entirely file-side conjunct must stay GREEN. `\\bthere\\b` matched it and
+    # graded the clause as an inversion (measured):
+    ("Restart your client after confirming the config lists the tools and "
+     "there are no duplicate entries.", False),
+    # ── `see THAT …` is an INSTRUCTION, not an observation, so the observation
+    # skip must not swallow it (its `confirm` twin is a declared-RED row):
+    ("Restart your client, but first see that no tools are missing.", True),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
