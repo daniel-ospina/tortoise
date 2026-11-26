@@ -799,9 +799,9 @@ def _superseded_below_successor(ann: list[dict], *,
     decreasing depth order, not ``k`` passes — it came out ``B, A, D, C``,
     leaving B above C), and the second bounded MOVES at ``n·(n-1)`` with an
     ``O(n²)`` re-index per pass, i.e. ``O(n³)`` in moves and ``O(n⁴)``
-    overall — measured at 10.2 s for a 160-row pool and 146 s at 320, against
-    the 10 s wait bound #3834 pins. Depth placement makes both the cost and the
-    termination obvious.
+    overall — REVIEW-MEASURED at 10.2 s for a 160-row pool holding a cyclic
+    pair and 146 s at 320, against the 10 s wait bound #3834 pins. Depth
+    placement makes both the cost and the termination obvious.
 
     A CYCLE in the data (X replaced by Y and Y by X — only raw/imported data
     can write one: ``supersede_point`` refuses a terminal endpoint, #2498) has
@@ -838,9 +838,12 @@ def _superseded_below_successor(ann: list[dict], *,
         succ_id = str(succ.get("id")) if isinstance(succ, dict) and succ.get("id") else None
         # Nothing this pass can hold the row below: no successor, a successor
         # that is not in this result set, an unaddressable row, or a row that
-        # names ITSELF (without this guard the move below would pop a row and
-        # then look for the very id it just removed — a ``StopIteration`` that
-        # propagates out of ``rerank`` and fails the whole state read).
+        # names ITSELF. The self-naming guard is load-bearing: without it the
+        # move below pops the row and then looks for the very id it removed, and
+        # the resulting exception propagates out of ``rerank`` into
+        # ``_recall_state`` — the WHOLE state read fails, not one row
+        # (``StopIteration`` from the previous shape's ``next(...)``;
+        # ``ValueError`` from this one's ``list.index`` — both reproduced).
         if (succ_id is None or succ_id == rid
                 or rid not in where or succ_id not in where):
             succ_of.append(None)
