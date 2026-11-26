@@ -206,8 +206,11 @@ const MAX_SNOOZE_ANCHORS = 64
  *  one identity can both be dismissed, and with a single slot the SECOND dismissal
  *  OVERWROTE the first's window — the first row came back, the badge never reached
  *  0, and re-dismissing the other flipped it back, so a member with no org-wide
- *  Acknowledge could never clear both (#14694 review P1). Dropping the OLDEST
- *  window when capped re-SHOWS rows rather than hiding them. */
+ *  Acknowledge could never clear both (#14694 review P1). ⛔ THE CAP DROPS THE OLDEST
+ *  DECISION, never the window with the oldest `last`: the latter evicted an aged
+ *  row's dismissal in the same call that recorded it, which is a silent no-op the
+ *  reader cannot work around (see `dismiss`). Dropping the oldest decision re-SHOWS
+ *  a row instead of hiding one, and re-dismissing it sticks. */
 const MAX_DISMISSED_WINDOWS = 8
 
 function isPlainObject(x) {
@@ -592,14 +595,25 @@ export function dismiss(state, episode, now = new Date(), alert = null) {
   const deduped = win
     ? prevWindows.filter((w) => !(w.first === win.first && w.last === win.last))
     : prevWindows
-  // ⛔ THE CAP KEEPS THE NEWEST ACKNOWLEDGEMENTS, ordered by their own `last` — NOT by
-  // insertion. Dismissals arrive in whatever order the reader clicks them, so keeping
-  // the last-inserted would drop a fresh dismissal of a NEWER row while keeping stale
-  // ones, and the row just cleared would come straight back. Same reasoning as
-  // `MAX_DISMISSED`'s newest-first cap: the newest windows are the ones an in-window
-  // episode can still match.
+  // ⛔ THE CAP KEEPS THE NEWEST **DECISIONS**, IN INSERTION ORDER — NOT the windows
+  // with the newest `last`. It used to sort by `a.last` (the ROW's window end), and
+  // that made dismissing an AGED row a permanent silent NO-OP: the aged window has
+  // the smallest `last`, so `slice(-8)` evicted it in the SAME call that added it.
+  // `dismiss()` returned a state whose window list never gained the new window, and
+  // `isDismissed` short-circuits on `windows.length`, so it answered "not dismissed"
+  // and `buildLedger` filed the row straight back under `older` — every retry
+  // re-evicting its own window, with no message and no way for the reader to
+  // succeed (#14694 round-10 review P1).
+  //
+  // INSERTION ORDER IS DECISION ORDER: `deduped` already removes a re-dismissed
+  // window, and the `win` is appended, so the entry at the front is the OLDEST
+  // DECISION. Dropping that one re-SHOWS a row the reader cleared long ago — which is
+  // recoverable (the row is visible and the control still works, and the next
+  // dismissal becomes the newest decision, so it sticks). Dropping the aged row's
+  // window was NOT recoverable, which is the whole difference. This is the same
+  // correction as `MAX_DISMISSED`'s ordering, one map up.
   const windows = win
-    ? [...deduped, win].sort((a, b) => a.last - b.last).slice(-MAX_DISMISSED_WINDOWS)
+    ? [...deduped, win].slice(-MAX_DISMISSED_WINDOWS)
     : deduped
   return {
     ...base,

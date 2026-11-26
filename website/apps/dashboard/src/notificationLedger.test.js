@@ -543,14 +543,55 @@ test('#14694 P1: TWO dismissals on one decision key both hold — in BOTH orders
   // to `.slice(0, 8)` drops the dismissal the reader JUST made (it comes straight
   // back) with every suite green. Nine dismissals on one key, then the newest must
   // still be covered.
-  const many = Array.from({ length: 9 }, (_, i) => row(NOW.getTime() - (i + 1) * HOUR, `rv||w${i}`))
+  //
+  // ⛔ THE CAP IS ORDERED BY THE DECISION, AND THIS ROW ASSERTED THE OPPOSITE UNTIL
+  // ROUND 10. It used to say "the NEWEST ROW survives, the oldest ROW is dropped" —
+  // which is what sorting by the row's own `last` produced, and that ordering made
+  // dismissing an AGED row a PERMANENT SILENT NO-OP: the aged window has the smallest
+  // `last`, so `slice(-8)` evicted it in the very call that recorded it, and every
+  // retry re-evicted its own window (#14694 round-10 review P1). Rows are dismissed
+  // in whatever order the reader clicks; the invariant the reader can rely on is
+  // that their LATEST DECISION sticks, and a dropped older decision only re-SHOWS a
+  // row that can be dismissed again.
+  // ⛔ ROWS ONE DAY APART, so a dropped window is not silently covered by its
+  // neighbour: `windowCovers` also accepts a row within `EPISODE_GAP_MS` (3 h) of the
+  // acknowledged end, so rows an hour apart all cover each other and the cap's
+  // DIRECTION becomes unobservable.
+  const many = Array.from(
+    { length: 9 },
+    (_, i) => row(NOW.getTime() - (i + 1) * DAY, `rv||w${i}`),
+  )
   let wide = emptyState()
-  for (const r of many) wide = dismiss(wide, key, NOW, r)
+  for (const [i, r] of many.entries()) {
+    wide = dismiss(wide, key, new Date(NOW.getTime() - (9 - i) * MIN), r)
+  }
   assert.equal(wide.dismissedWindows[key].length, 8, 'premise: the cap applies')
-  assert.equal(isDismissed(wide, key, many[0]), true,
-    'the newest dismissal must survive the cap')
-  assert.equal(isDismissed(wide, key, many[8]), false,
-    'the oldest is the one dropped, and dropping it only RE-SHOWS')
+  assert.equal(isDismissed(wide, key, many[8]), true,
+    'the NEWEST DECISION survives the cap, whatever the row\'s own age is')
+  assert.equal(isDismissed(wide, key, many[0]), false,
+    'the oldest DECISION is the one dropped, and dropping it only RE-SHOWS')
+
+  // ⛔ THE AGED-ROW CASE, which is what the sort-by-`last` cap broke (#14694
+  // round-10 review P1): a key that already holds the full window set, and the reader
+  // dismisses a row from the `older` group. Its window has the SMALLEST `last`, so the
+  // old ordering evicted it in the SAME call that recorded it — `dismiss()` returned a
+  // state that never gained the window, `isDismissed` short-circuited on
+  // `windows.length` and answered "not dismissed", and the row came straight back with
+  // the badge on it. Every retry re-evicted its own window: a permanent no-op with no
+  // message.
+  const aged = row(NOW.getTime() - 40 * DAY, 'rv||aged')
+  let withAged = wide
+  for (const r of many.slice(0, 8)) {
+    withAged = dismiss(withAged, key, NOW, r)
+  }
+  assert.equal(withAged.dismissedWindows[key].length, 8, 'premise: the set is full')
+  withAged = dismiss(withAged, key, NOW, aged)
+  assert.equal(isDismissed(withAged, key, aged), true,
+    'dismissing an AGED row must TAKE — the oldest DECISION goes, never this one')
+  assert.equal(
+    buildLedger({ alerts: [aged], state: withAged, now: NOW }).unresolved, 0,
+    'and the row leaves the ledger, badge at 0',
+  )
 
   // The INCIDENT gate is unchanged and applies PER WINDOW: each row is covered by
   // its OWN window, and neither window covers a suspension that happened later.

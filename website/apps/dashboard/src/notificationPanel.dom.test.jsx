@@ -1674,6 +1674,43 @@ test('#14686: a ledger row and its badge are VISIBLE with the real stylesheet', 
   assert.notEqual(badge.visibility, 'hidden')
 })
 
+test('#14694: the MUTED lists are visible too — they are the only route back', () => {
+  // ⛔ THE PIN ABOVE ONLY RENDERS A MAIN-LIST ROW, and the muted lists (snoozed,
+  // dismissed, acknowledged) exist only AFTER a group is expanded — so
+  // `.notif-list-muted .notif-row { display: none; visibility: hidden; }` shipped
+  // green while the comment on the rule it defeats claims "nothing is ever hidden"
+  // (#14694 round-10 review P2). Those rows are the ONLY route back for a snooze or a
+  // dismissal ("a snooze with no way back is a delete"), so hiding them is hiding the
+  // undo — the evasion #4915 exists to catch.
+  const { container } = renderBell({
+    alerts: [alert({ message: 'snooze me' }), alert({ message: 'dismiss me', episode: 'flag||two' })],
+  })
+  fireEvent.click(bell(container))
+  const byText = (text) => [...container.querySelectorAll('.notif-list .notif-row')]
+    .find((r) => r.textContent.includes(text))
+  fireEvent.change(byText('snooze me').querySelector('.notif-snooze'), {
+    target: { value: '1h' },
+  })
+  const dismissable = byText('dismiss me')
+  assert.ok(dismissable, 'precondition: the second row is in the main list')
+  fireEvent.click([...dismissable.querySelectorAll('.notif-actions button')]
+    .find((b) => /Dismiss/.test(b.textContent)))
+
+  for (const [re, name] of [[/Snoozed \(/, 'snoozed'], [/Dismissed \(/, 'dismissed']]) {
+    const trigger = [...container.querySelectorAll('.notif-more')]
+      .find((b) => re.test(b.textContent))
+    assert.ok(trigger, `precondition: the ${name} group exists`)
+    fireEvent.click(trigger)
+  }
+  const muted = [...container.querySelectorAll('.notif-list-muted .notif-row')]
+  assert.equal(muted.length, 2, 'precondition: one snoozed row and one dismissed row are rendered')
+  for (const row of muted) {
+    const style = window.getComputedStyle(row)
+    assert.notEqual(style.display, 'none', 'a reversible row must be VISIBLE — it is the way back')
+    assert.notEqual(style.visibility, 'hidden')
+  }
+})
+
 // ── 8. Renders and signals that had no assertion at all (review round 6) ────
 //
 // Each of these reached a real behaviour that every suite left green under its own
