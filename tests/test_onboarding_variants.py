@@ -1817,24 +1817,29 @@ _INVERSION_FORMS = (
     #     four-word list only re-opened the hole for `previously` / `recently` /
     #     `thoroughly` / `also already` (each measured GREEN with the closed
     #     list).
-    #     ⛔ BUT A RESTRICTIVE OR FREQUENCY ADVERB IS NOT A MANNER ADVERB, and in
-    #     an `if` clause it changes the sense: "if you ONLY see the tools after a
-    #     second restart" describes the SYMPTOM, and this table already declares
+    #     ⛔ THE CONDITIONAL ARMS ARE GATED ON THE VERB'S CLASS, NOT ON AN ADVERB
+    #     LIST. "if you ONLY see the tools after a second restart" describes the
+    #     SYMPTOM that motivates a restart, and this table already declares
     #     "Restart your client if you cannot see the tools in the list" GREEN — a
     #     tool-observation CONDITION is expressly not an inversion here. An
     #     unfiltered `\w+ly` reddened `only` / `barely` / `rarely` / `mostly` /
-    #     `lately` copy that was GREEN at the previous head (each measured).
-    #     ⛔ AND THE EXCLUSION IS SCOPED TO THE CONDITIONAL CONNECTIVES (`if|when`),
-    #     because there the adverb changes the sense of the CONDITION; under
-    #     `after|once` the connective itself already fixes the order and no adverb
-    #     can undo it. A blanket exclusion made the whole form give up instead of
-    #     skipping one word, so "after you have only recently confirmed the tools
-    #     are actually there" went GREEN — a declared-RED shape lost to a
-    #     one-word insertion (measured). Scoping it to `if` ALONE was then too
-    #     narrow in the other direction, and measurably so: `when` introduces a
-    #     condition exactly as `if` does, so the `when` twin of a declared-GREEN
-    #     symptom row was refused ("Restart your client when you only see the tools
-    #     after a second restart.", measured).
+    #     `lately` copy (each measured).
+    #     ⛔ BUT AN EIGHT-WORD ADVERB BLACKLIST WAS THE WRONG SHAPE, twice over.
+    #     It was too wide (the lookahead sat on the whole adverb GROUP, so any
+    #     blacklisted word made the form give up entirely and
+    #     "when you have only recently CONFIRMED the tools are actually there" —
+    #     a declared-RED inversion — went GREEN), and too narrow (a frequency
+    #     adverb outside the eight, or an observation verb with a complement that
+    #     is not a doc noun, was still graded). What actually distinguishes the
+    #     two readings is the VERB: `see` / `look` / `list` name an observation of
+    #     the running session, and everything `_CONFIRM_PREDICATE` admits beyond
+    #     them names a confirmation the user performs. So the gate is a lookahead
+    #     on the observation verbs, and the adverb list is gone.
+    #     ⛔ AND IT IS SCOPED TO THE CONDITIONAL CONNECTIVES (`if|when`), because
+    #     there the adverb changes the sense of the CONDITION; under `after|once`
+    #     the connective itself already fixes the order and no adverb can undo it
+    #     (a blanket exclusion lost "after you have only recently confirmed the
+    #     tools are actually there", measured).
     #     ⛔ A HYPHENATED PREDICATE IS THE SAME PREDICATE: "double-checked" was
     #     GREEN while "checked" is a declared RED row (measured).
     #     ⛔ AND A DOC CROSS-REFERENCE IS NOT A PRESENCE CHECK, the rule form (f)
@@ -1859,8 +1864,8 @@ _INVERSION_FORMS = (
         r"(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
         r"(?:(?:\w+ly|first|already|just|also)\s+)*"
         r"|(?:if|when)\s+(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
-        r"(?:(?!(?:only|barely|rarely|mostly|lately|merely|simply|hardly)\b)"
-        r"(?:\w+ly|first|already|just|also)\s+)*)"
+        r"(?:(?:\w+ly|first|already|just|also)\s+)*"
+        r"(?!(?:see|saw|seen|looking|look|list|listing)\b))"
         r"(?:\w+-)?"
         + _CONFIRM_PREDICATE
         + r"[^\n]*?\btools\b" + _NOT_A_DOC
@@ -1966,7 +1971,7 @@ _CONFIG_PREP_RE = re.compile(
     # spelling `_CONFIG_NOUN_RE`'s own comment records as the false RED this arm
     # exists to prevent — was refused here while `config` was exempted.
     r"|\b(?:in|from|inside|per|under)\s+(?:your\s+|the\s+|its\s+)?"
-    r"(?:(?:client|harness|mcp)\s+|[A-Z][\w.-]*(?:\s+Code)?\s+)?"
+    r"(?:(?:client|harness|mcp)\s+|[`*_]*[A-Z][\w.-]*(?:'s|\u2019s)?[`*_]*(?:\s+Code)?[`*_]*\s+)?"
     r"(?:[`'\"]?)(?:config|settings|\.mcp\.json)\b",
     re.IGNORECASE)
 # ⛔ AN INSTALLATION-SIDE STATE IS A FILE-SIDE FACT, NOT A SESSION ONE. The
@@ -1986,7 +1991,7 @@ _SESSION_PRESENCE_RE = re.compile(
     r"\b(?:actually\s+there|there|listed|present|visible|appearing|appears?"
     r"|show(?:s)?\s+up|in\s+the\s+list)\b", re.IGNORECASE)
 _INSTALL_SIDE_RE = re.compile(
-    r"\btools\b[^\n]*?\b(?:are|is|get|gets|getting)\s+"
+    r"\btools\b[^\n]*?\b(?:are|is|get|gets|getting)\s+(?:(?:all|both)\s+)?"
     r"(?:installed|configured|enabled|set\s+up|added|wired|on\s+the\s+allowlist)\b",
     re.IGNORECASE)
 # ⛔ A TERMINATOR ENDS A STATEMENT ONLY WHEN IT REALLY ENDS ONE. Splitting on a
@@ -2572,6 +2577,10 @@ def test_3232_generic_restart_lines_are_exact():
     # GREEN, which is the inconsistency the arm closes:
     ("Restart your client once the tools are installed.", False),
     ("Restart your client once the tools are configured.", False),
+    # a quantifier between the object and its verb is the same install-side fact
+    # (both were RED while the un-quantified twin above is GREEN):
+    ("Restart your client once the tools are all installed.", False),
+    ("Restart your client once the tools are both configured.", False),
     ("Restart your client once the tools are set up.", False),
     ("Restart your client once the tools are on the allowlist.", False),
     # ── a BARE config mention no longer excuses the clause: the free 40-char
@@ -2734,8 +2743,24 @@ def test_3232_generic_restart_lines_are_exact():
      False),
     ("Restart your client when you have rarely seen the tools appear at all.",
      False),
-    # …and the exclusion is scoped to `if`: under `after|once|when` the connective
-    # already fixes the order, so a blanket exclusion lost these (both were RED):
+    # …and the gate is the VERB, not an adverb list: any adverb in a CONDITIONAL
+    # clause whose verb is an observation is the symptom, not an inversion:
+    ("Restart your client if you see the tools from a previous session.", False),
+    ("Restart your client when you frequently see the tools disappear.", False),
+    ("Restart your client if you occasionally see the tools disappear from the "
+     "list.", False),
+    # …while the same adverb in front of a CONFIRMATION predicate stays an
+    # inversion, `when` included (all three were GREEN under the adverb list):
+    ("Restart your client when you have only recently confirmed the tools are "
+     "actually there.", True),
+    ("Restart your client when you have only just verified the tools are "
+     "actually there.", True),
+    ("Restart your client when you merely confirmed the tools are actually "
+     "there.", True),
+    # …and the exclusion is scoped to the CONDITIONAL connectives (`if|when`),
+    # because there the adverb changes the sense of the CONDITION; under
+    # `after|once` the connective itself already fixes the order. A blanket
+    # exclusion lost these (both were RED):
     ("Restart your client after you have only recently confirmed the tools are "
      "actually there.", True),
     ("Restart your client after you have merely confirmed the tools are "
@@ -2771,6 +2796,15 @@ def test_3232_generic_restart_lines_are_exact():
      "settings.", False),
     ("Restart your client after checking the tools are listed in your Claude "
      "Code settings.", False),
+    # …and the owner may be DECORATED or POSSESSIVE, which is how this repo's own
+    # quickstart writes client names (`**Cursor**`, `**Claude Code**`); all three
+    # were RED while the bare twin above is GREEN:
+    ("Restart your client after checking the tools are listed in your "
+     "**Cursor** settings.", False),
+    ("Restart your client after checking the tools are listed in **Cursor** "
+     "settings.", False),
+    ("Restart your client after checking the tools are listed in Cursor's "
+     "settings.", False),
     # a quantifier between the object and its verb is the same claim, and form
     # (e)'s copula arm already admitted it (measured GREEN before):
     ("Restart your client once the tools all appear.", True),
