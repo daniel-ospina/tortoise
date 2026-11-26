@@ -11546,16 +11546,21 @@ def test_the_row_list_alone_reaches_every_item_it_names():
 #: is exactly why the rot would be silent.
 _DERIVATION_OPEN_RE = re.compile(r"On THIS tree — `origin/main`")
 _DERIVATION_END = "⛔ EVERY file named above"
-#: ONE item of the derivation: an issue label, the span before its row NOUN, and the noun itself.
-#: The noun alternation is the block's own definitional synonym, the same one `_ROW_CLAIM_AFTER_FILE_RE`
+#: ONE item of the derivation: an issue label and ITS OWN text, bounded by the NEXT label.
+#: ⛔ PER-LABEL, not "the text between this label and the next row noun": that span awards an item
+#: the NEXT item's path. MEASURED at `ea6876a918ce` on the block's own list — `#14548`'s item
+#: (`` `#14548`'s residue RATCHET ``) names no path, its neighbour `#14552` carries
+#: `tests/test_record_read_point_vector_keys.py`, and the between-text reader reported `#14548` as
+#: REACHED (`path: True`) while the per-label reader sees that item name no path at all. Where it
+#: BITES is one item over: an item that carries a path and NO row noun absorbs the row claim after
+#: it, so an unpathed row claim is read as reached — measured on the fixture below, `([], 1)` GREEN.
+#: The row NOUN is the block's own definitional synonym, the same one `_ROW_CLAIM_AFTER_FILE_RE`
 #: carries — a matcher bound to `row` alone would read a TRUE rewrite into `entry in `durations`` as
-#: no item at all, the one-spelling class `#14730` files. The span is LAZY and short: a label whose
-#: own item names no path but whose NEXT item does (`` `#14548`'s residue RATCHET, `#14552`'s
-#: `tests/…` row ``) must not be read as reached, and a lenient span keeps that from false-blocking
-#: true prose — the check is per-LABEL, not per-between-text.
-_DERIVATION_ROW_ITEM_RE = re.compile(
-    r"`#(?P<issue>\d+)`'s(?P<between>[^⛔]{0,400}?)"
-    r"(?:rows?\b|entr(?:y|ies)\s+in\s+`?durations`?\b)")
+#: no item at all, the one-spelling class `#14730` files — and only an item that carries the noun
+#: makes a ROW claim, which is why an item naming a registration (`` `#14574`'s drift-reporter
+#: registration ``) is not refused for the path it does not owe.
+_DERIVATION_LABEL_RE = re.compile(r"`#(?P<issue>\d+)`'s")
+_DERIVATION_ROW_NOUN_RE = re.compile(r"rows?\b|entr(?:y|ies)\s+in\s+`?durations`?\b")
 _DERIVATION_PATH_RE = re.compile(r"`tests/(?P<file>[\w/.-]+\.py)`")
 
 
@@ -11573,14 +11578,39 @@ def _derivation_list(header: str) -> str:
     return unquoted[opening.start():end]
 
 
+def _derivation_items(derivation: str) -> list[tuple[str, str]]:
+    """`(label, its OWN item text)` for every labelled item in the derivation.
+
+    An item is bounded by the NEXT label, never by the next row noun: a noun-anchored span swallows
+    the neighbouring item's path and reports an item that names no path as reached (`ea6876a918ce`,
+    the measurement on `_DERIVATION_LABEL_RE`).
+    """
+    marks = list(_DERIVATION_LABEL_RE.finditer(derivation))
+    items: list[tuple[str, str]] = []
+    for i, mark in enumerate(marks):
+        stop = marks[i + 1].start() if i + 1 < len(marks) else len(derivation)
+        text = derivation[mark.end():stop]
+        hard = text.find("⛔")
+        items.append((mark.group("issue"), text if hard == -1 else text[:hard]))
+    return items
+
+
 def _derivation_row_labels_without_path(derivation: str) -> tuple[list[str], int]:
-    """Issue labels whose row item names no file by path, and how many items were read."""
+    """Row items that name no file by path, and how many ROW items were read.
+
+    A ROW item is one whose own text carries the row NOUN (the block's own definition: "a ROW is an
+    entry in `durations`"). An item naming a RATCHET or a registration makes no row claim here, so
+    its missing path is not refused — the row claims those items stand beside are spelled with
+    their paths in the list below, and refusing them here would be the false block `#14730` files.
+    """
     labels: set[str] = set()
     items = 0
-    for match in _DERIVATION_ROW_ITEM_RE.finditer(derivation):
+    for issue, text in _derivation_items(derivation):
+        if not _DERIVATION_ROW_NOUN_RE.search(text):
+            continue
         items += 1
-        if not _DERIVATION_PATH_RE.search(match.group("between")):
-            labels.add(match.group("issue"))
+        if not _DERIVATION_PATH_RE.search(text):
+            labels.add(issue)
     return sorted(labels), items
 
 
@@ -11594,17 +11624,32 @@ def test_the_derivation_list_spells_a_path_beside_every_row_label():
     by stripping `#14560`'s path from the derivation (`3 passed`, every arm in the family).
 
     So the derivation's spelling is graded here, and a fold that drops a path from an item reds it
-    directly. ⛔ NOT a second lock on the same words: the label→noun span is read PER ITEM, a label
-    whose own item names no path is refused even when the item AFTER it names one, and the noun set
-    is the block's own `entry in `durations`` synonym so a TRUE rewrite does not red as an item that
-    vanished.
+    directly. ⛔ NOT a second lock on the same words: each item is read PER LABEL — its own text,
+    bounded by the NEXT label, so a label whose own item names no path is refused even when the
+    item AFTER it names one — and the noun set is the block's own `entry in `durations`` synonym so
+    a TRUE rewrite does not red as an item that vanished.
+
+    ⛔ AND THE BOUND IS THE GRADED PROPERTY, which is why this arm was rewritten at `ea6876a918ce`:
+    the span it read was "this label up to the next row NOUN", so it awarded every item the next
+    item's path. On THIS block that shows up as a mis-attributed reading rather than a missed
+    finding — `#14548`'s item (`` `#14548`'s residue RATCHET ``) names no path, its neighbour
+    `#14552` names `tests/test_record_read_point_vector_keys.py`, and the arm reported `#14548` as
+    `path: True` — while the comment above claimed "the check is per-LABEL, not per-between-text".
+    One item over it becomes a FALSE NEGATIVE: a path-carrying item with no row noun absorbs the row
+    claim that follows it, so an unpathed row claim reads as reached. MEASURED on the fixture below
+    under the between-text span: `([], 1)` — GREEN — where the per-label bound returns
+    `(["14560"], 1)`. The old fixtures could not see either shape: both put the missing path
+    immediately before its OWN noun.
     """
     header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
     derivation = _derivation_list(header)
     ungraded, items = _derivation_row_labels_without_path(derivation)
-    assert items, (
-        "the derivation names no row item, so this arm grades nothing — re-point "
-        "`_derivation_list` at the paragraph the block actually writes")
+    # ⛔ MORE THAN ONE: a reader that merges consecutive labels into one span (the defect the
+    # per-label bound exists to remove) returns 1 however many items the block names.
+    assert items >= 2, (
+        "the derivation was read as ONE row item, so the per-label bound is not splitting items — "
+        "re-point `_derivation_items` at the label spelling the block uses rather than letting it "
+        f"grade nothing (got {items})")
     assert not ungraded, (
         f"the derivation spells {['#' + i for i in ungraded]} by ISSUE with no path beside the "
         "row noun, so `_row_claims` cannot reach those files and the `durations` row the item "
@@ -11628,6 +11673,28 @@ def test_the_derivation_list_spells_a_path_beside_every_row_label():
     assert _derivation_row_labels_without_path(_derivation_list(synonym)) == (["14560"], 1), (
         "the derivation checker reads only the noun `row`, so the block's own `entry in `durations` "
         "synonym walks past it — a TRUE rewrite would be graded by nothing")
+    # ⛔ THE FALSE NEGATIVE the between-text span admits, with the measured pre-fix answer beside it:
+    # `#14574`'s item carries a path and no row noun, so the old span ran on to `#14560`'s noun and
+    # called `#14560` reached off a path that is not its own — `([], 1)`, GREEN over an unpathed row
+    # claim. Per-label it reds, and the `items` count stays 1 because `#14574` makes no row claim.
+    absorbed = (
+        "On THIS tree — `origin/main` `bbef0b8840d7` folded in, carrying `#14574`'s drift-reporter "
+        "registration (`tests/test_fly_secret_declaration_report.py`), `#14560`'s row. "
+        "⛔ EVERY file named above")
+    assert _derivation_row_labels_without_path(_derivation_list(absorbed)) == (["14560"], 1), (
+        "the derivation checker reads an item's path out of the item BEFORE it — a path-carrying item "
+        "with no row noun absorbs the row claim that follows, so an unpathed row claim is graded by "
+        f"nothing: {_derivation_row_labels_without_path(_derivation_list(absorbed))!r}")
+    # ⛔ …AND THE OTHER DIRECTION, so the per-label bound is not a false block: an item that names a
+    # REGISTRATION and no row is not refused for the path it does not owe (`[]`, one item).
+    registration = (
+        "On THIS tree — `origin/main` `bbef0b8840d7` folded in, carrying "
+        "`#14574`'s drift-reporter registration, `#14552`'s "
+        "`tests/test_record_read_point_vector_keys.py` row. ⛔ EVERY file named above")
+    assert _derivation_row_labels_without_path(_derivation_list(registration)) == ([], 1), (
+        "the derivation checker refuses (or double-counts) an item that makes no row claim — it "
+        "names a registration, which owes no `durations` path, and refusing it is the false block "
+        f"`#14730` files: {_derivation_row_labels_without_path(_derivation_list(registration))!r}")
 
 
 def test_the_emission_block_guard_is_not_vacuous():
