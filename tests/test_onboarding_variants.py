@@ -1884,6 +1884,24 @@ _STATEMENT_BREAK_RE = re.compile(
 # then …"), so a subordinator later in it is not a deferral of the restart.
 _FORWARD_SEQUENCER_RE = re.compile(r"^(?:then|and|next|afterwards?)\b", re.IGNORECASE)
 
+# …and a clause that ENDS on one introduces the NEXT clause, whichever side of
+# its own comma the sequencer sits on. `_FORWARD_SEQUENCER_RE` can only see an
+# introducer that starts a clause, so an introducer attached to the cue's own
+# text ("Restart your client AND THEN, once the tools are listed, …") leaves its
+# introduced clause bare — and that clause is then graded standalone, which is a
+# FALSE RED on copy that plainly puts the restart first (measured).
+_SEQUENCER_TAIL_RE = re.compile(
+    r"(?i)(?:^|[\s,;:(—–-])(?P<seq>(?:(?:and|then|next|afterwards?)\b[\s,]*)+)$"
+)
+
+
+# A clause that opens with one of these overrides a forward introducer: its
+# OWN connective decides the order, so "… and then, BUT FIRST confirm the tools
+# are actually there" must not be swallowed by the forward skip (measured — the
+# glued-introducer merge above turned exactly that RED into a GREEN before this
+# guard existed).
+_ADVERSATIVE_LEAD_RE = re.compile(r"^(?:but|however|though|yet)\b", re.IGNORECASE)
+
 
 def _confirmation_scopes_the_config(clause: str) -> bool:
     """Is this clause's confirmation about the CONFIG (a file) rather than the
@@ -2034,14 +2052,22 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     for clause in post_clauses:
         if merged and re.match(r"(?i)^and\b", clause.lstrip('—–-:;(\'" \t')):
             merged[-1] = f"{merged[-1]}, {clause}"
-        elif (merged and re.fullmatch(r"(?i)\s*(?:then|and|next|afterwards?)",
-                                     merged[-1])):
-            # ⛔ A BARE SEQUENCER CLAUSE INTRODUCES THE NEXT ONE. A comma after
-            # the sequencer ("…, then, once the tools are listed run …",
-            # "…, and, …", "…, next, …", "…, afterwards, …") detached the clause
-            # it introduces, so the skip below could not see it and all four
-            # declared-GREEN shapes went RED (measured — one comma each).
-            merged[-1] = f"{merged[-1]}, {clause}"
+        elif (merged and (introducer := _SEQUENCER_TAIL_RE.search(merged[-1]))
+                and not _ADVERSATIVE_LEAD_RE.match(clause)):
+            # ⛔ A SEQUENCER THAT INTRODUCES THE NEXT CLAUSE MAY SIT ON EITHER
+            # SIDE OF ITS OWN COMMA, and both sides detach the clause it
+            # introduces — after which the skip below cannot see it. A comma
+            # after the sequencer ("…, then, once the tools are listed run …",
+            # "…, and, …", "…, next, …", "…, afterwards, …") was measured
+            # RED one comma at a time. So was a sequencer GLUED to the cue's own
+            # clause — "Restart your client AND THEN, once the tools are listed,
+            # …", "… and afterwards, …", "…, then afterwards, …" — because the
+            # match here only ever admitted a clause that was NOTHING BUT the
+            # sequencer, so an introducer sharing its clause with the cue text
+            # was invisible. The introducer is re-attached to the clause it
+            # introduces (never dropped, and never swallowing more of the cue
+            # than the sequencer run itself), so `_FORWARD_SEQUENCER_RE` sees it.
+            merged[-1] = f"{introducer.group('seq').strip(' \t,')}, {clause}"
         else:
             merged.append(clause)
     post_clauses = merged
@@ -2293,6 +2319,21 @@ def test_3232_generic_restart_lines_are_exact():
      "mcp-status`.", False),
     ("Restart your client, then after confirming the tools are actually there, "
      "run `tortoise mcp-status`.", False),
+    # ⛔ AND THE INTRODUCER MAY BE GLUED TO THE CUE'S OWN CLAUSE, not only stand
+    # alone between two commas: "… and then, once …", "… and afterwards, …",
+    # "…, then afterwards, …" were each measured RED, because the introducer
+    # shared its clause with the cue text and so `_FORWARD_SEQUENCER_RE` — which
+    # only ever looks at a clause's START — never saw it. Same meaning as the
+    # three rows above; same verdict required. The adversative row below pins the
+    # other half: the merged clause must NOT swallow an inversion's own marker.
+    ("Restart your client and then, once the tools are listed, run `tortoise "
+     "mcp-status`.", False),
+    ("Restart your client and afterwards, once the tools are listed, run "
+     "`tortoise mcp-status`.", False),
+    ("Restart your client, then afterwards, once the tools are listed, run "
+     "`tortoise mcp-status`.", False),
+    ("Restart your client and then, but first confirm the tools are actually "
+     "there, run `tortoise mcp-status`.", True),
     # two file-side facts CONJOINED are still file-side (measured RED before the
     # pronoun arm existed), and so is a config fact named after the object:
     ("Restart your client after confirming the config file exists and the tools "
