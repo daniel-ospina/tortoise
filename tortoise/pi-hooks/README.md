@@ -29,21 +29,46 @@ Pi's global extension directory:
 
 ```bash
 mkdir -p ~/.pi/agent/extensions
-# #3713 collision guard (see below): disable a pre-existing tortoise-capture/
+# ⛔ THE LINK SHAPES COME FIRST — they are the ones a pasted script gets wrong
+# SILENTLY. Pi resolves a symlink (and a directory) through
+# `resolveExtensionEntries`, so renaming either one to a `.disabled` name
+# retires NOTHING: its index file keeps loading, both producers stay
+# registered, and `mv` still exits 0. Renaming a file THROUGH a symlinked
+# directory is worse — it edits the checkout the link points at.
+if [ -L ~/.pi/agent/extensions/.tortoise-capture.disabled ]; then
+  echo "refusing: .tortoise-capture.disabled is a symlink — renaming inside it would edit the checkout it points at; remove the link by hand, then re-run" >&2
+  exit 1
+fi
+if [ -d ~/.pi/agent/extensions/reflect-hook.ts ]; then
+  echo "refusing: reflect-hook.ts is a directory or a symlink to one — a renamed directory is STILL loaded through its index file, so both producers would stay registered; remove it by hand, then re-run" >&2
+  exit 1
+fi
+# ⛔ COPY FIRST, RETIRE AFTER — and STOP the block if a copy failed. Retiring
+# the old producers before the new seam is on disk would leave a box with NO
+# producer at all, strictly worse than the duplication.
+cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts \
+   ~/.pi/agent/extensions/tortoise-capture.ts \
+  || { echo "refusing: the seam copy failed — no producer was retired" >&2; exit 1; }
+cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-volunteer.ts \
+   ~/.pi/agent/extensions/tortoise-volunteer.ts \
+  || { echo "refusing: the read-seam copy failed — no producer was retired" >&2; exit 1; }
+# #3713 collision guard (see below): disable a pre-existing tortoise-capture/.
+# NON-DESTRUCTIVE: unlink a symlink (the agent-infra checkout is untouched), or
+# move a real directory aside — and then RETIRE its entry point, because Pi's
+# loader has NO dotfile filter. Never a recursive delete.
 if [ -L ~/.pi/agent/extensions/tortoise-capture ]; then
   rm ~/.pi/agent/extensions/tortoise-capture
 elif [ -d ~/.pi/agent/extensions/tortoise-capture ]; then
+  if [ -e ~/.pi/agent/extensions/.tortoise-capture.disabled ]; then
+    echo "refusing: both tortoise-capture/ and .tortoise-capture.disabled exist — move one aside" >&2
+    exit 1
+  fi
   mv ~/.pi/agent/extensions/tortoise-capture ~/.pi/agent/extensions/.tortoise-capture.disabled
 fi
-cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts \
-   ~/.pi/agent/extensions/tortoise-capture.ts
-cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-volunteer.ts \
-   ~/.pi/agent/extensions/tortoise-volunteer.ts
 # ⛔ THE RENAME RETIRED NOTHING, and it is deliberately after the copies: Pi's
 # loader has NO dotfile filter, so `.tortoise-capture.disabled/index.ts` is
 # still LOADED. Retire the entry point itself — and refuse rather than let `mv`
-# overwrite a retired copy. (Retiring before the copies would leave a box with
-# no producer at all if a copy failed.)
+# overwrite a retired copy.
 if [ -e ~/.pi/agent/extensions/.tortoise-capture.disabled/index.ts ]; then
   if [ -e ~/.pi/agent/extensions/.tortoise-capture.disabled/index.ts.disabled ]; then
     echo "refusing: both .tortoise-capture.disabled/index.ts and its .disabled copy exist — move one aside" >&2
@@ -65,8 +90,13 @@ fi
 ```
 
 This is the hand equivalent of what `tortoise install pi` does — and the
-installer is the one to prefer, because it VERIFIES the end state and fails
-rather than reporting success while two producers stay registered.
+installer is the one to prefer, because it VERIFIES the end state (it reads the
+bytes it shipped back off disk) while this snippet can only check that its own
+`cp` returned 0. The snippet refuses the two shapes the installer refuses (a
+symlink through which a rename would edit someone else's checkout, and a
+directory — or link to one — that a `.disabled` suffix does not stop loading)
+and stops before retiring anything if a copy fails, so a pasted copy cannot
+report success while two producers stay registered.
 
 Pi auto-discovers `~/.pi/agent/extensions/*.ts` on the next start. Installing
 the extensions *is* the opt-in — there is deliberately no `autoCapture`-style

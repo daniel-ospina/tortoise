@@ -428,21 +428,41 @@ export const PI_CAPTURE_INSTALL = `${captureInstallNote({
 # each session on exit. Install from your Tortoise checkout
 # (github.com/daniel-ospina/tortoise):
 mkdir -p ~/.pi/agent/extensions
+# ⛔ THE LINK SHAPES COME FIRST — they are the ones a pasted script gets wrong
+# SILENTLY. Pi resolves a symlink (and a directory) through
+# resolveExtensionEntries, so renaming either one to a .disabled name
+# retires NOTHING: its index file keeps loading, both producers stay
+# registered, and mv still exits 0. Renaming a file THROUGH a symlinked
+# directory is worse — it edits the checkout the link points at.
+if [ -L ~/.pi/agent/extensions/.tortoise-capture.disabled ]; then
+  echo "refusing: .tortoise-capture.disabled is a symlink — renaming inside it would edit the checkout it points at; remove the link by hand, then re-run" >&2
+  exit 1
+fi
+if [ -d ~/.pi/agent/extensions/reflect-hook.ts ]; then
+  echo "refusing: reflect-hook.ts is a directory or a symlink to one — a renamed directory is STILL loaded through its index file, so both producers would stay registered; remove it by hand, then re-run" >&2
+  exit 1
+fi
+# ⛔ COPY FIRST, RETIRE AFTER — and STOP the block if the copy failed. Retiring
+# the old producers before the new seam is on disk would leave a box with NO
+# producer at all, strictly worse than the duplication.
+cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts ~/.pi/agent/extensions/tortoise-capture.ts || { echo "refusing: the seam copy failed — no producer was retired" >&2; exit 1; }
 # #3713 collision guard: Pi's loader treats a top-level tortoise-capture.ts
 # AND a tortoise-capture/index.ts as TWO extensions (no basename dedupe).
 # A pre-existing agent-infra tortoise-capture/ registers its own agent_end
 # capture, so both POST the same session_id — doubled work, and the loser can
-# 409. Disable the legacy entry before installing this one. NON-DESTRUCTIVE:
-# unlink a symlink (the agent-infra checkout is untouched), or move a real
-# directory aside — and then RETIRE its entry point, because Pi's loader has
-# NO dotfile filter: a dot-prefixed directory's index.ts is still LOADED.
-# Never a recursive delete.
+# 409. NON-DESTRUCTIVE: unlink a symlink (the agent-infra checkout is
+# untouched), or move a real directory aside — and then RETIRE its entry point,
+# because Pi's loader has NO dotfile filter: a dot-prefixed directory's
+# index.ts is still LOADED. Never a recursive delete.
 if [ -L ~/.pi/agent/extensions/tortoise-capture ]; then
   rm ~/.pi/agent/extensions/tortoise-capture
 elif [ -d ~/.pi/agent/extensions/tortoise-capture ]; then
+  if [ -e ~/.pi/agent/extensions/.tortoise-capture.disabled ]; then
+    echo "refusing: both tortoise-capture/ and .tortoise-capture.disabled exist — move one aside" >&2
+    exit 1
+  fi
   mv ~/.pi/agent/extensions/tortoise-capture ~/.pi/agent/extensions/.tortoise-capture.disabled
 fi
-cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts ~/.pi/agent/extensions/tortoise-capture.ts
 # The rename retired NOTHING, and it comes after the copy on purpose: retiring
 # before it would leave a box with no producer if the copy failed. Refuse
 # rather than let mv overwrite a retired copy.

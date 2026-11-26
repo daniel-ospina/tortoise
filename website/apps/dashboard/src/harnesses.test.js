@@ -603,6 +603,28 @@ test('#3713: the Pi install disables a pre-existing tortoise-capture/ (no double
   // overwrites on POSIX, which would destroy preserved bytes silently.
   assert.match(pi, /refusing:/,
     'a rename over an existing retired copy must be refused, never performed')
+  // #14342 (review round 10): a rename retires a FILE only. Pi resolves a
+  // symlink — and a directory — through `resolveExtensionEntries`, so both must
+  // be REFUSED before any `mv`, with a message: the measured failure is a
+  // `.disabled` suffix over one of those shapes leaving a producer LOADED while
+  // the snippet prints nothing and exits 0.
+  assert.match(pi, /\[ -d ~\/\.pi\/agent\/extensions\/reflect-hook\.ts \]/,
+    'a directory or symlink-to-directory producer must be refused, not renamed — a renamed directory still loads')
+  assert.match(pi, /\[ -L ~\/\.pi\/agent\/extensions\/\.tortoise-capture\.disabled \]/,
+    'renaming index.ts THROUGH a symlinked dot directory edits the checkout it points at — that shape must be refused')
+  // #14342 (review round 10): ordering. The seam copy must come BEFORE any
+  // retirement, and must ABORT the snippet when it fails — otherwise a failed
+  // copy plus a completed retirement leaves a box with NO producer, which the
+  // README calls out as strictly worse than the duplication. Both halves are
+  // pinned: a reordering REDs on the index comparison, a dropped abort REDs on
+  // the guard text.
+  assert.ok(
+    pi.indexOf('cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts')
+      < pi.indexOf('rm ~/.pi/agent/extensions/tortoise-capture'),
+    'the seam copy must precede the retrieval/unlink of the legacy producer — retiring first leaves no producer if the copy fails')
+  assert.match(pi,
+    /cp <path-to-tortoise>\/tortoise\/pi-hooks\/tortoise-capture\.ts[^\n]*\|\| \{ echo [^}]*no producer was retired[^}]*exit 1; \}/,
+    'a failed seam copy must abort BEFORE any retirement — never leave the box with zero producers')
   // non-negotiable: never recursively delete user files from the install snippet.
   assert.doesNotMatch(pi, /rm\s+-/,
     'the collision guard must never `rm` with flags — a bare `rm` can only unlink the symlink')
