@@ -2054,7 +2054,7 @@ def test_the_figures_the_8th_review_measured_as_FREE_are_now_pinned():
     ⛔ #14691 review (8th cycle, P1 — "no prose figure is free" is a union test).
     The net arm below asserts `norm(token) in supported`, and `supported` is the
     union of every scalar, every list length and every file size across
-    `out/*.json` — 233 values, 50 of them ≤ 200. A RIGHT-LOOKING FIGURE IN THE
+    `out/*.json` — 233 values, 133 of them ≤ 200. A RIGHT-LOOKING FIGURE IN THE
     WRONG PLACE is therefore satisfied by a number that belongs somewhere else,
     which is the class the 7th cycle actually reported: the net reds "a number no
     artifact carries", never "the right number on the wrong line".
@@ -2072,6 +2072,21 @@ def test_the_figures_the_8th_review_measured_as_FREE_are_now_pinned():
     Each figure is now read from the field that produces it, and each read is
     LINE-SCOPED, so a sibling line that quotes the same figure (the §8.3 record of
     the mutant does) cannot satisfy the claim.
+
+    ⛔ #14691 review (9th cycle, P2): line-scoping alone was NOT enough — two of
+    the reads were bare substrings with no LEFT boundary, so a figure with a
+    leading digit still satisfied them. Measured at `1120c51554bd`, whole suite
+    per mutant, each restored byte-for-byte:
+
+    * §1 `· 5 captures, 81.7 s …` → `· 15 captures, 81.7 s …` — **63 passed**;
+      15 is a supported value, so neither this arm nor the union net saw it;
+    * §8 `32 element walks` → `132 element walks` — this arm PASSED; only the
+      union net reddened it (`132` is not an artifact value), i.e. the arm was
+      not doing its own job.
+
+    Both reads now carry a boundary: §1 asserts the row's own `· ` separator
+    before the count, and §8 uses `(?<![\d.])` so no digit or decimal point may
+    precede the figure. Re-measured on this head, both mutants now red THIS arm.
     """
     receipt = _receipt()
     module = _load_score_module()
@@ -2082,7 +2097,7 @@ def test_the_figures_the_8th_review_measured_as_FREE_are_now_pinned():
     total_ack = sum(d["ack_seconds"] for d in docs)
     run = _report_line(r"^\| Run \|")
     assert run, "REPORT.md has no §1 Run row"
-    assert (f"{len(docs)} captures, {total_ack:.1f} s of capture ack time "
+    assert (f"· {len(docs)} captures, {total_ack:.1f} s of capture ack time "
             f"({total_ack / 60:.1f} min)") in run, (
         "§1's capture/ack sentence is not the receipt's own totals — the "
         f"per-document acks sum to {total_ack:.1f} s = {total_ack / 60:.1f} min "
@@ -2121,7 +2136,7 @@ def test_the_figures_the_8th_review_measured_as_FREE_are_now_pinned():
     walks = len(_readback()["elements"])
     rb_row = _report_line(r"^\| `out/readback\.json` \|")
     assert rb_row, "REPORT.md §8 has no readback row"
-    assert f"{walks} element walks" in rb_row, (
+    assert re.search(rf"(?<![\d.]){walks} element walks", rb_row), (
         f"§8's readback row does not state the artifact's {walks} element walks: "
         f"{rb_row!r}")
 
