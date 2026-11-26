@@ -87,9 +87,12 @@ version: 1
 # what is GRADED is the FORM rather than the value:
 # `test_the_fast_shards_header_states_no_live_pool_census` reds on a census stated OUTSIDE the
 # fence in the spelling it grades — a bare `fast_pool()` followed by `holds|held|carries|carried`
-# and `N files|entries`. ⛔ SPELLINGS IT CANNOT SEE: a census with no `fast_pool()` in front of it
-# (a quoted fragment is that shape — the quote carries no `fast_pool()` of its own, while the copy
-# it was cut from did), another verb (`contains`, `numbers`), another unit (`members`, `rows`).
+# and `N files|entries`. ⛔ SPELLINGS IT CANNOT SEE — and the list is NOT exhaustive, because the
+# pattern needs the unit BARE and directly after the digits, so `1,335 files`, a backticked unit, an
+# unbackticked `fast_pool()`, a leading adjective between the count and the unit, another verb
+# (`contains`, `numbers`) and another unit (`members`, `rows`) all read as clean — as does a census
+# with no `fast_pool()` in front of it (a quoted fragment is that shape: the quote carries no
+# `fast_pool()` of its own, while the copy it was cut from did).
 # ⛔ THAT IS A SPELLING GUARD, and stating it as more than that is what this clause did until
 # the #14587 review measured it: the census that actually arrived at the `bbef0b88` fold read
 # `holds N entries`, which a `files`-only unit could not see, so the gate was green over a live
@@ -100,14 +103,14 @@ version: 1
 # is read normally — an earlier cut of this repair widened the separator for the wrap and wrote that
 # the gate had missed one, and that reading was of the RAW blob rather than of the joined block the
 # guard is actually handed. No fold has to re-derive a census, and a fold that carries one anyway
-# is what the fence exists to catch.
+# is what the guard reds on.
 # ⛔ HISTORICAL-POOL-CENSUS-BEGIN
-# (measured at `06c10adb`: `fast_pool()` held 1335 files against `origin/main` `a29b5f24ce95`'s 1334,
-# and the ONE addition was `tests/test_14582_creation_hook.py` — this PR's own new suite. The earlier
-# copy of this sentence stated 1333 for `main` and named `#14606`'s
-# `tests/test_14592_operating_model_evidence.py` as a second addition; both were false, because that
-# file is already in `main`'s manifest and so cannot be a delta against `main`. A census measures
-# exactly ONE tree — re-measure it with `ci_selection.fast_pool()` at the head you cite.)
+# (measured at `1c3e433cc5b0`: `fast_pool()` held 1341 files. ⛔ The copy before this one was anchored
+# to `06c10adb`, which does NOT resolve in this repo (`git cat-file -t 06c10adb` -> "Not a valid
+# object name"), so the 1335/1334 pair it stated could be checked by nobody; it also named
+# `tests/test_14592_operating_model_evidence.py` as an addition when that file is in `main`'s
+# manifest, so it could not be a delta against `main`. A census measures exactly ONE tree —
+# re-measure it with `ci_selection.fast_pool(ci_selection.load_manifest())` at the head you cite.)
 # ⛔ HISTORICAL-POOL-CENSUS-END
 # ⛔ No parent's FIGURE is carried here either: the fold re-packed every bin (the packer is greedy),
 # so the per-fold readings this block carried before the union splice — `#14565`'s, `#14574`'s,
@@ -142,7 +145,7 @@ version: 1
 # picked either; the sentence above was a third fresh re-derivation, and it has since been
 # re-derived again rather than re-pointed. ⛔ Neither copy's CENSUS is quoted here: a census figure
 # is history and belongs inside the fence, bound to the sha it was measured at.
-# ⛔ AND IT ARRIVED SPLICED A FIFTH TIME AT THE `origin/main` `bbef0b88` FOLD (this head), where the
+# ⛔ AND IT ARRIVED SPLICED AGAIN AT THE `origin/main` `bbef0b88` FOLD (this head), where the
 # `merge=union` driver applied BOTH parents' derivations once more: this branch's read nine shards
 # at 827.4 s and two at 827.5 s, `main`'s own paragraph — opening mid-sentence, the splice's usual
 # tell — restated that same pair, and `main`'s copy ALSO carried a LIVE `fast_pool()` census (this
