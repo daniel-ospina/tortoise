@@ -332,13 +332,18 @@ test('#14686: snoozing for 1 h hides the row, and the row is back once the hour 
 
 test('#14694: an INCIDENT cannot be snoozed past the episode gap', () => {
   // Snooze is identity-wide by design (the reader chose the period, and it is
-  // listed under "Snoozed (N)"). That reasoning holds for an ACTIVITY row, whose
-  // identity is a stable measurement. It does NOT hold for an incident: a
-  // `suspend`'s customer message is a CONSTANT, so every suspension shares one
-  // decision key, and a one-week snooze on one hid a genuinely NEW suspension
-  // behind a collapsed group with the badge reading ZERO. The dismissal path
-  // already refuses this through the same window test; the snooze control did
-  // not. Measured before the fix: a 1w snooze left the new suspension uncounted.
+  // listed under "Snoozed (N)" with an Unsnooze). For an ACTIVITY row that is
+  // the requested semantics AND its stated residual: the key is the identity, so
+  // a snooze on one bout DOES hide a separate bout of that identity for the
+  // period chosen (measured: a `1w` snooze hides a new flag bout 5 days later).
+  // It does NOT hold for an incident: a `suspend`'s customer message is a
+  // CONSTANT, so every suspension shares one decision key, and a one-week snooze
+  // on one hid a genuinely NEW suspension behind a collapsed group with the
+  // badge reading ZERO. The dismissal path already refuses this through the same
+  // window test; the snooze control did not, so its periods are capped for the
+  // incident register. Measured before that cap: a 1w snooze left a genuinely new
+  // suspension uncounted. The cap is about the TWO REGISTERS, not about a claim
+  // that activity rows can never be hidden.
   const incident = alert({ type: 'suspend', register: 'alert', message: 'Organization suspended by an operator' })
   const { container } = renderBell({ alerts: [incident] })
   fireEvent.click(bell(container))

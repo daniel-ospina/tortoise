@@ -195,14 +195,25 @@ function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
             // server's episode gap (`EPISODE_GAP_MS`, mirrored from
             // `abuse.py::EPISODE_GAP_S`). Snooze is identity-wide by design —
             // the reader chose the period and it is listed under "Snoozed (N)"
-            // — but an incident's customer message is a CONSTANT, so every
-            // `suspend` row shares one decision key: a one-week snooze on a
-            // suspension hid a genuinely NEW suspension behind a collapsed
-            // group with the badge reading ZERO. That is the failure
-            // `_episode_acknowledged` names, and the dismissal path already
-            // refuses it with the same window test. An ACTIVITY row keeps the
-            // full list: its identity is a stable measurement, so a long snooze
-            // cannot swallow a new one.
+            // with an Unsnooze — but an incident's customer message is a
+            // CONSTANT, so every `suspend` row shares one decision key: a
+            // one-week snooze on a suspension hid a genuinely NEW suspension
+            // behind a collapsed group with the badge reading ZERO. That is the
+            // failure `_episode_acknowledged` names, and the dismissal path
+            // already refuses it with the same window test.
+            //
+            // ⛔ An ACTIVITY row keeps the full list, and its RESIDUAL is stated
+            // rather than denied. It used to say the opposite — that a stable
+            // identity means "a long snooze cannot swallow a new one" — which is
+            // backwards: a stable key is exactly what lets ONE snooze cover
+            // several bouts. Measured: a `1w` snooze taken on a flag bout hides
+            // a separate bout 5 days later (badge reads zero), while DISMISSING
+            // the same row re-opens it through the window test. That asymmetry
+            // is deliberate, not an oversight: a snooze is the reader saying
+            // "not this identity for this period", the period is theirs to pick,
+            // and the suppression stays visible and reversible under
+            // "Snoozed (N)". A dismissal makes a claim about ONE bout, so it is
+            // the path that must re-open on a new one.
             .filter((p) => !entry.isIncident || p.ms <= EPISODE_GAP_MS)
             .map((p) => (
               <option key={p.id} value={p.id}>{p.label}</option>
