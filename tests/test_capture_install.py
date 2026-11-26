@@ -2514,6 +2514,69 @@ def test_legacy_obstacle_stays_silent_on_a_converged_retired_name(home):
         "the predicate is silent but the installer refuses — they disagree")
 
 
+def test_retire_pi_entry_refuses_to_overwrite_a_preserved_copy(home):
+    """The plain-FILE branch must refuse like its siblings (#14342 round 25,
+    finding 1).
+
+    Every sibling branch refuses when the produced name already exists. This
+    one called ``path.rename`` straight through, and ``Path.rename`` OVERWRITES
+    on POSIX — so it was the single branch able to destroy a preserved copy
+    while reporting success. MEASURED on the drift it enables: the preserved
+    file's bytes became the live copy's and the install returned ``ok=True``.
+
+    Mutation: drop the ``lexists(produced)`` guard — this row REDs on the bytes.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    live = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    live.write_text("// NEW VERSION FROM THE FARM\n")
+    preserved = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    preserved.write_text("// PRESERVED OLD BYTES\n")
+
+    # The preview must refuse too: the refusal is evaluated by the same code
+    # that performs the rename, so a dry run cannot plan what the real one
+    # refuses.
+    planned = capture_install._retire_pi_entry(live, dry_run=True)
+    assert planned and "overwrite preserved bytes" in planned, planned
+
+    error = capture_install._retire_pi_entry(live)
+    assert error and "overwrite preserved bytes" in error, error
+    assert preserved.read_text() == "// PRESERVED OLD BYTES\n", (
+        "the only preserved copy was overwritten")
+    assert live.exists(), "the live producer was moved despite the refusal"
+
+
+def test_legacy_obstacle_names_a_symlinked_retired_copy(home):
+    """The mirror must use the installer's PREDICATE, not a digest (#14342
+    round 25, finding 2).
+
+    ``_sha256_file`` follows a link, so a ``retired`` that IS a link to the live
+    producer yields two equal digests read from ONE file — the hint answered
+    ``''`` while the installer refused at its ``is_symlink() or not is_file()``
+    guard. MEASURED before the fix: hint ``''``, ``ok=False`` ("…exists and is
+    not a regular file").
+
+    Mutation: put the digest comparison back ahead of the link/regular-file
+    test — this row REDs on the missing obstacle.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    live = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    live.write_text("// the live producer\n")
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.symlink_to(live)
+
+    obstacle = capture_install.legacy_extension_obstacle("pi", ext_dir)
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, (
+        "the installer no longer refuses this shape, so this row pins nothing")
+    assert obstacle, (
+        f"the hint was silent over a refusing verb ({res.error!r})")
+    assert "not a regular file" in obstacle, obstacle
+
+
+
 def test_registered_producers_helper_models_the_manifest_branch(home):
     """The TEST ORACLE must model the same rule the module does, including
     ``resolveExtensionEntries``' manifest branch (#14342 round 17, finding 3).

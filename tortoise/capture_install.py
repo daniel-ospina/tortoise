@@ -362,7 +362,18 @@ PI_SECOND_PRODUCER_NAME = "reflect-hook.ts"
 #: loader takes top-level ``*.ts`` / ``*.js`` (``dist/core/extensions/loader.js``),
 #: so ``<stem>.ts.disabled`` is skipped while the file itself lives on — the
 #: same non-destructive contract as the legacy guard above.
-PI_SECOND_PRODUCER_DISABLED_NAME = "reflect-hook.ts.disabled"
+#:
+#: ⛔ DERIVED FROM THE NAME, NOT SPELLED OUT (#14342 round 25, finding 1).
+#: :func:`_retire_pi_entry` produces its rename target from the PATH
+#: (``f"{path.name}.disabled"``), so a hand-spelled ``"reflect-hook.ts.disabled"``
+#: would be a SECOND derivation of one fact — and the drift is destructive, not
+#: cosmetic. MEASURED with the two spellings disagreeing: a box holding a
+#: preserved ``reflect-hook.ts.disabled`` plus a farm-recreated live
+#: ``reflect-hook.ts`` returned ``ok=True``, the preserved bytes became the live
+#: copy's, and the live copy was unlinked — a refusal turned into silent
+#: destruction of the only preserved copy, reported GREEN. Deriving it here
+#: makes the guards and the mutation read the same name by construction.
+PI_SECOND_PRODUCER_DISABLED_NAME = f"{PI_SECOND_PRODUCER_NAME}.disabled"
 
 #: ⛔ THE SAME PRODUCER UNDER THE OTHER NAME PI LOADS (#14342 round 19,
 #: finding 6). Pi's ``isExtensionFile`` accepts ``*.ts`` **or** ``*.js``, so a
@@ -1416,7 +1427,8 @@ def legacy_extension_obstacle(harness: str,
                     f"extensions directory")
     # ⛔ THE RETIRED NAME IS GUARD STATE, NOT A BY-PRODUCT OF THIS RUN —
     # mirrored here (#14342 round 24, finding 2). The installer re-reads
-    # `retired` on EVERY run and refuses when Pi still loads it (:2367), guard
+    # `retired` on EVERY run and refuses when Pi still loads it (the
+    # retired-name arm in `_disable_pi_second_producer`), guard
     # state that does not depend on `active` existing. The mirror's arm was
     # gated on `lexists(active)`, so on a box that carries ONLY the retired
     # name it was SILENT while `tortoise install pi` refused. MEASURED on the
@@ -1436,8 +1448,21 @@ def legacy_extension_obstacle(harness: str,
                 f"loads — move it out of the extensions directory")
     if (os.path.lexists(active) and os.path.lexists(retired)
             and _pi_entry_is_loadable(active)):
+        # ⛔ MIRROR THE INSTALLER'S PREDICATE, NOT A DIGEST (#14342 round 25,
+        # finding 2). `_sha256_file` FOLLOWS a link, so a `retired` that IS a
+        # link to the live producer yields two equal digests read from ONE file
+        # — the hint answered "" while the installer refused at its
+        # `retired.is_symlink() or not retired.is_file()` guard. Two surfaces of
+        # one guard disagreeing is the drift this predicate exists to stop, and
+        # it landed on the very shape the installer's own comment calls the
+        # hazard. Ask the same question the installer asks, first.
+        if retired.is_symlink() or not retired.is_file():
+            return (f"the disabled copy of the second capture producer at "
+                    f"{PI_SECOND_PRODUCER_DISABLED_NAME} is not a regular file "
+                    f"(a symlink or a directory) — the install refuses rather "
+                    f"than overwrite it; move one aside")
         live = _sha256_file(active) if active.is_file() else None
-        kept = _sha256_file(retired) if retired.is_file() else None
+        kept = _sha256_file(retired)
         if live is None or live != kept:
             return (f"the second capture producer is registered AND its "
                     f"disabled copy already exists at "
@@ -2113,8 +2138,24 @@ def _retire_pi_entry(path: Path, *, dry_run: bool = False) -> str | None:
                     if not dry_run:
                         entry.rename(preserved)
             return None
+        # ⛔ THE PLAIN-FILE BRANCH MUST REFUSE LIKE ITS SIBLINGS (#14342 round
+        # 25, finding 1). The symlink branch above and the directory-entry
+        # branch below both refuse when the produced name already exists; this
+        # one called `path.rename(...)` straight through, and `Path.rename`
+        # OVERWRITES on POSIX — so it was the one branch that could silently
+        # destroy a preserved copy inside an install that reports success.
+        # MEASURED: with the caller's guard and this target disagreeing, the
+        # preserved file's bytes were replaced by the live copy's and the result
+        # was `ok=True`. The guard is what makes the two spellings impossible to
+        # drift destructively. Evaluated OUTSIDE `if not dry_run`, exactly like
+        # the symlink branch, so a preview cannot plan a rename the real run
+        # refuses.
+        produced = path.with_name(f"{path.name}.disabled")
+        if os.path.lexists(produced):
+            return (f"{produced} already exists — retiring {path} would "
+                    f"overwrite preserved bytes")
         if not dry_run:
-            path.rename(path.with_name(f"{path.name}.disabled"))
+            path.rename(produced)
         return None
     except OSError as e:  # ENOSPC, EROFS, EDQUOT, an immutable target
         return f"{path}: {e.__class__.__name__}: {e}"
@@ -2334,11 +2375,14 @@ def _disable_pi_second_producer(
     """
     active = ext_dir / PI_SECOND_PRODUCER_NAME
     # ⛔ ONE FACT, ONE DERIVATION (#14342 round 24, finding 1). This was an
-    # f-string re-derivation of a name that already has a constant, which the
-    # mirror reads (:1398). Two derivations drift: change the constant and the
-    # installer keeps renaming to the OLD name while `legacy_extension_obstacle`
+    # f-string re-derivation of a name that already has a constant, which
+    # `legacy_extension_obstacle` already reads. Two derivations drift: change
+    # one and the installer keeps renaming to the OLD name while the predicate
     # reports a collision at a path that no longer exists — a phantom "move one
-    # aside" on a converged box.
+    # aside" on a converged box. (And the drift is destructive if it is the
+    # DUPLICATE backstop that stops matching: see
+    # `PI_SECOND_PRODUCER_DISABLED_NAME`, which is now derived from the name
+    # for exactly this reason.)
     retired = ext_dir / PI_SECOND_PRODUCER_DISABLED_NAME
     # ⛔ THE RECEIPT MUST NOT CLAIM A WRITE THIS RUN DID NOT MAKE. Every refusal
     # below runs AFTER `_install_pi` handled the seam, so the same InstallResult
