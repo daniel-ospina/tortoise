@@ -3951,6 +3951,50 @@ def test_rule_event_between_passes_both_bounds_to_the_control_plane():
     assert [op for _, op, _ in conds] == ["gt", "lte"], seen[0]
 
 
+def test_org_allowance_is_one_read_of_one_column_and_unknown_is_none():
+    """#14687: the tier-relative alert level's read, pinned where it is made.
+
+    `SupabaseAbuseStore.org_allowance` feeds `max(configured, ratio *
+    ops_allowance)`, so its two contract points are both load-bearing:
+
+    * it is ONE read of ONE column off the `organizations` row `org_state`
+      reads — not a second, separately-maintained read of the same row (the
+      table's query sites are also counted by the `sdk_privatise`
+      untyped-receiver ratchet, so a copy is both drift and a new counted site);
+    * an absent row, or a value that is not a number, answers ``None``, never a
+      fabricated ``0`` — the caller keeps the configured absolute level on
+      ``None``, while a ``0`` would silently become the floor and turn a
+      known-unknown into a measurement.
+    """
+    from tortoise.abuse import SupabaseAbuseStore
+
+    class _RowsCP:
+        def __init__(self, rows):
+            self._rows = rows
+            self.calls: list[tuple[str, dict]] = []
+
+        def query(self, table, **kw):
+            self.calls.append((table, kw))
+            return self._rows
+
+    cp = _RowsCP([{"ops_allowance": "25000"}])
+    assert SupabaseAbuseStore(cp).org_allowance("org-x") == 25000
+    assert len(cp.calls) == 1, cp.calls
+    table, kw = cp.calls[0]
+    assert table == "organizations"
+    assert kw["select"] == ["ops_allowance"]
+    assert kw["filters"] == [("id", "eq", "org-x")]
+
+    # A missing row is "unknown", not a tier of zero.
+    assert SupabaseAbuseStore(_RowsCP([])).org_allowance("org-x") is None
+    # A garbled value is "unknown" too — never int()'s coercion of a stray type.
+    assert SupabaseAbuseStore(_RowsCP([{"ops_allowance": "lots"}])) \
+        .org_allowance("org-x") is None
+    # A present-but-null column is the same answer as an absent one.
+    assert SupabaseAbuseStore(_RowsCP([{"ops_allowance": None}])) \
+        .org_allowance("org-x") is None
+
+
 # ── #4038: the keyset walk (query_all) ─────────────────────────────────────
 # The activation scorecard's stage-4 read needs a REAL count over a tenant's
 # analytics window. ``query`` could not give one: a full page is a lower bound,

@@ -1187,13 +1187,16 @@ class SupabaseAbuseStore:
         tier-relative alert level and the customer-visible tier cannot come from
         two different places. A missing row answers ``None`` (unknown), never a
         fabricated 0-that-is-really-a-tier.
+
+        Read through the existing ``_org_field`` single-column helper rather than
+        a second literal ``query`` of the same table: this store's query sites are
+        counted by the ``sdk_privatise`` untyped-receiver RATCHET, which reds when
+        the count rises (`self._cp.query` was 14 on the merge base). A new
+        copy of the same read is a new counted site AND a second place to keep in
+        step with ``org_state``; the helper is already the one-read path the
+        owner-email lookup uses.
         """
-        rows = self._cp.query(
-            "organizations", select=["ops_allowance"],
-            filters=[("id", "eq", org_id)])
-        if not rows:
-            return None
-        return _as_int(rows[0].get("ops_allowance"))
+        return _as_int(self._org_field(org_id, "ops_allowance"))
 
     def active_flag_episodes(self, org_id: str) -> list[dict]:
         """The org's ACTIVE per-rule flag episodes (#4874) from ``abuse_events``.
