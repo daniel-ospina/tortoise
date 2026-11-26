@@ -164,9 +164,11 @@ def test_the_in_flight_code_is_not_the_policy_409() -> None:
     # The policy 409 answers a bare STRING and declares no delay: nothing about
     # it should ever satisfy the in-flight predicate, and — the real asymmetry,
     # read off the shape rather than off an invented literal — it carries no
-    # `code` at all, so a client cannot branch on one. (`capture_recording_
-    # disabled` exists NOWHERE in the tree; asserting that literal proved
-    # nothing about the production refusal, #14700 review.)
+    # `code` at all, so a client cannot branch on one. ⛔ (No PRODUCTION raise
+    # site emits `capture_recording_disabled` — the only occurrence in the tree
+    # is the rejection INPUT asserted BELOW — so asserting it as though
+    # the route could emit it proved nothing about the production refusal,
+    # #14700 review.)
     policy = _POLICY_409_DETAIL
     assert not ha._is_capture_in_flight_refusal(policy)
     assert not ha._is_capture_in_flight_refusal({"message": policy})
