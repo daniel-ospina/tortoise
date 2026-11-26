@@ -2837,7 +2837,11 @@ def _is_completed_concession(clause: str) -> bool:
 # row below. What it DOES guarantee is the property that matters — every shape it
 # does not recognise keeps the graded verdict it has today, so the cut cannot ship
 # a fresh seam: neutralising `_and_half_opens_its_own_clause` flips exactly the 6
-# declared rows that pin these two forms and nothing else (measured).
+# declared rows that pin these two forms, PLUS the one dedicated test that asserts
+# the graded clause behind the `first`-anchor row — 7 failures and nothing else
+# (measured at this head). ⛔ The previous wording said "6 … and nothing else",
+# which the dedicated test added in the SAME commit had already made false: a
+# count is a measurement, so it is stated as the number a run actually reports.
 #
 # Every verdict in this block is MEASURED at this head, not asserted — the
 # previous cut of it claimed GREEN for row 2 while the row three thousand lines
@@ -2859,8 +2863,28 @@ def _is_completed_concession(clause: str) -> bool:
 #          are actually there.                       (same; form (a) across the seam)
 #
 # The residual is stated, not hidden: an imperative OUTSIDE the closed list below
-# keeps the graded verdict — that is the pre-fix behaviour, so it is a false PASS
-# that already existed, never a new one.
+# keeps the pre-fix verdict, which for this shape is FOLDED IN AND GRADED — a
+# false RED of #3429's class (`… and once the tools are listed grep the log.`
+# measures RED here). It already existed and is not made worse. ⛔ THE DIRECTION
+# IS PART OF THE CLAIM: this block called it "a false PASS", which is the
+# opposite of what the declared-residual row in the `line, inverted` table pins
+# (`True` = RED) — the same prose-vs-row contradiction the review at
+# `4f33aad5ff2f` closed as P2, one round after it was closed.
+#
+# ⛔ AND THE SHAPES THIS CUT DOES NOT REACH ARE DECLARED TOO, so a later reviewer
+# does not have to rediscover them: a PRE-CUE `first` anchor followed by more
+# clause is still GREEN where the sentence is an inversion — measured by direct
+# call at this head, both GREEN and both unchanged by the fold (so their root is
+# the pre-cue governing-clause walk, NOT this cut, and re-opening them is not a
+# fifth arm here):
+#
+#   GREEN (want RED)  Confirm the tools are actually there first, and once they
+#                     are listed restart your client.
+#   GREEN (want RED)  Confirm the tools are actually there first, and if so
+#                     restart your client.
+#
+# Six such spellings were measured and are recorded with their verdicts on
+# #14717, which owns the "scope the pin down vs parse it" decision.
 _AND_FORWARD_SEQUENCER_RE = re.compile(
     r"(?i)^and\s+(?:then|next|afterwards?)\b")
 _AND_SUBORDINATE_HALF_RE = re.compile(
