@@ -1267,14 +1267,17 @@ def _boundary_is_unaskable(boundary: Path) -> bool:
 
     ⛔ AND A BOUNDARY WHOSE METADATA DECLARES NO WORK TREE (`core.bare=true` on a worktree
     `.git`) STAYS REFUSED — a KNOWN, DISCLOSED OVER-BLOCK, not a claim of coverage
-    (#14741 review, P2, measured). `--show-toplevel` ERRORS for it, and the obvious second
-    question does not answer it: `--absolute-git-dir` returns `<b>/.git`,
-    `<common>/worktrees/<n>`, `<super>/.git/modules/<n>` or an external gitdir for the four
-    pointer forms — NEVER the boundary — so a fallback comparing it with the boundary
-    cannot permit anything. That fallback was written here and removed after review
-    measured it dead (deleting it left the suite green); the shape is therefore refused
-    fail-closed exactly as it was before this round, which is the safe direction, and it
-    is recorded as a residual rather than half-fixed.
+    (#14741 review, P2/P3, measured). `--show-toplevel` ERRORS for it, and a second
+    question does not settle it in general: for the four ordinary pointer forms
+    `--absolute-git-dir` answers `<b>/.git`, `<common>/worktrees/<n>`,
+    `<super>/.git/modules/<n>` or an external gitdir — never the boundary — so a fallback
+    comparing it with the boundary cannot permit those. A FIFTH form does name the
+    boundary (`a .git` FILE holding `gitdir: .` with `core.bare=true`), and for it the
+    fallback would have permitted — but that shape is refused end-to-end anyway by the GIT
+    METADATA guard (measured: rc 2, nothing written, every variant), so the fallback moved
+    no user-visible verdict and no assertion graded it (deleting it left the suite green).
+    It was therefore removed, and this shape is disclosed as a residual rather than
+    half-fixed — the fail-closed direction the earlier rounds also chose.
     """
     has_pointer = os.path.lexists(boundary / ".git")
     boundary_real = os.path.realpath(boundary)
@@ -1430,19 +1433,21 @@ def _destination_probes(
         # overwrite the only file that recorded the tracking. Presence-only is the
         # fail-closed choice for bytes at risk; this over-block class is narrowed, not
         # closed.
-        # ⛔ AND THE FLOOR'S ONE REMAINING SKIP SHAPE WAS MEASURED UNREACHABLE THROUGH
-        # `--render` (#14741 review, P3, REFUTED at the call site — and the REFUTATION'S
-        # OWN FIRST DRAFT named the wrong guard, corrected here after measurement): an
-        # index-less HEALTHY bare gitdir is dropped from the walk here, but the destination
-        # is still asked — `add(probe_dir, …)` below is UNCONDITIONAL, so the probe set is
-        # IDENTICAL with and without this term, and what refuses the HEAD-named path is the
-        # tracked probe's `_path_in_HEAD` half (`refusing to render over a TRACKED path …
-        # this path IS in HEAD even though the index does not list it`), which runs BEFORE
-        # the metadata probe. The GIT METADATA guard is the BACKSTOP (measured to fire for
-        # a destination under the gitdir that HEAD does NOT name). Both measured: `--render
-        # sub/bare.git/docs/K.md` answers 2 with AND without the index term. The remaining
-        # reach is a DAMAGED gitdir with no index, which no term can separate from the
-        # lookalike — recorded as a residual, not fixed here.
+        # ⛔ AND THE FLOOR'S ONE REMAINING SKIP SHAPE WAS MEASURED TO CHANGE NO VERDICT
+        # (#14741 review, P3, REFUTED at the call site — and both this note and its first
+        # draft were corrected after measurement, twice). An index-less HEALTHY bare gitdir
+        # is dropped from the walk here, and what refuses the HEAD-named path depends on the
+        # destination's shape, so BOTH measured variants are stated rather than a universal
+        # claim: with the destination's parent directory ABSENT the probe set is identical
+        # with and without this term and the tracked probe's `_path_in_HEAD` half fires
+        # (`refusing to render over a TRACKED path … this path IS in HEAD even though the
+        # index does not list it`); with it PRESENT the probe set differs (the boundary is
+        # added as a probe without this term) and `_path_in_HEAD` is false at every probe,
+        # so the GIT METADATA guard is the SOLE refuser — and it refuses a destination HEAD
+        # DOES name. `add(probe_dir, …)` below is unconditional, which is why the first
+        # variant's probe set cannot shrink. Every variant answers `--render` rc 2 with and
+        # without the index term. The remaining reach is a DAMAGED gitdir with no index,
+        # which no term can separate from the lookalike — a residual, not fixed here.
         if not (os.path.lexists(boundary / ".git")
                 or (_looks_like_git_metadata(boundary)
                     and (boundary / "index").exists())):
