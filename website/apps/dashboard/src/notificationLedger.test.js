@@ -346,11 +346,11 @@ test('an episode renders as ONE row carrying its ×N count and window', () => {
 })
 
 test('two episodes that share an identity are TWO rows, each with its own count', () => {
-  // The DECISION identity is `type|message`, and two separate bouts of the same
-  // flag type share it (the customer-facing flag message carries no rule token).
-  // They are still two server episodes, so they are two ROWS: collapsing them
-  // deleted an episode from a security list, and keying the render on the shared
-  // identity made React drop one of two children with the same key.
+  // Two bouts of the same identity are still two server EPISODES, so they are two
+  // ROWS: collapsing them deleted an episode from a security list, and keying the
+  // render on the shared identity made React drop one of two children with the
+  // same key. (The client key is `type|surface` where the payload carries one —
+  // the pre-#14702 collapse on the message is what this replaces.)
   const olderBout = alert({
     message: 'same wording',
     at: new Date(NOW.getTime() - 3 * DAY).toISOString(),
@@ -697,9 +697,10 @@ test('a truncated bout says its count is a FLOOR, in the row and in the detail',
 })
 
 test('an ACKNOWLEDGED row must not hide an older UNACKNOWLEDGED one', () => {
-  // Review finding (P1): the server's identity for a `flag` is type + RULE, and the
-  // customer message deliberately omits the rule — so two genuinely different
-  // episodes share the client key. Collapsing to the newest meant that once
+  // Review finding (P1): the server's identity for a `flag` is type + RULE while
+  // the client key was the message, which for a `flag` omitted the rule (until
+  // #14702 put the measurements in it) — so two genuinely different episodes
+  // shared the client key. Collapsing to the newest meant that once
   // today's bout was acknowledged, an older unacknowledged one was neither listed
   // nor counted: an alert made invisible on a security surface.
   const olderUnacked = alert({
@@ -765,29 +766,67 @@ test('an activity row is flagged as a measurement, an incident row is not', () =
   )
 })
 
-test('the local key is the episode IDENTITY, so a re-keyed bout cannot resurrect a dismissal', () => {
-  const first = alert({ episode: 'flag||2026-11-25T11:55:00Z' })
-  const key = entryKeyOf(first)
-  assert.ok(key.length > 0)
-  assert.equal(key, entryKeyOf({ ...first }), 'the key is stable across reads')
+test('the local key survives a GROWN bout — the message moves, the identity does not', () => {
+  // ⛔ THE FIXTURE THIS REPLACES HELD `message` CONSTANT while bumping `count`, so
+  // it could never fail on the real payload. Since #14702 the count is IN the
+  // message (`_point_rate_message`) and `group_alert_episodes` keeps the NEWEST
+  // row's message, so the same episode renders a DIFFERENT sentence on every
+  // detection window. Keyed on `type|message`, that gave two decision keys for
+  // one episode: a Dismiss or Snooze taken on the first matched neither on the
+  // second read — the owner's "I can't clear them" restored (round-6 review, P1).
+  const messageFor = (units) =>
+    `Memory writes reached ${units.toLocaleString('en-US')} units in the last 1 `
+    + 'hour, against an alert level of 500 units. This is informational; it did '
+    + 'not disable anything.'
+  const readAt = (units, at, firstAt) => alert({
+    // The real shape after #14702: a `flag` row is an ACTIVITY row, and the
+    // activity arm's window test is what lets a grown bout stay covered. (With
+    // `register: 'alert'` the INCIDENT watermark would re-open it, which is
+    // correct for a suspension and wrong for this row.)
+    register: 'activity',
+    message: messageFor(units),
+    details: { count: units, threshold: 500, window_s: 3600, surface: 'Memory writes' },
+    at,
+    first_at: firstAt,
+    episode: `flag||${firstAt}`,
+  })
+  const firstAt = new Date(NOW.getTime() - 10 * MIN).toISOString()
+  const earlier = readAt(600, firstAt, firstAt)
+  // Same bout, next window: a bigger count, same rule/surface, `at` moves on.
+  const grown = readAt(1400, new Date(NOW.getTime()).toISOString(), firstAt)
 
-  // The server re-derives the episode as the scan window slides: same bout, new
-  // `episode` and a moved `first_at`. The local dismissal must survive that —
-  // otherwise the row reappears and the reader learns the control is broken.
-  const rekeyed = {
-    ...first,
-    episode: 'flag||2026-11-24T09:00:00Z',
-    first_at: '2026-11-24T09:00:00Z',
-    count: 12,
-  }
-  assert.equal(entryKeyOf(rekeyed), key, 'a growing bout keeps its identity')
-  // The dismissal is recorded against the row's own `at` (what the reader saw),
-  // so a re-keyed episode whose `at` did NOT move stays dismissed.
-  const state = dismiss(emptyState(), key, NOW, first)
-  assert.equal(buildLedger({ alerts: [rekeyed], state, now: NOW }).unresolved, 0)
-  // …and the row identity DOES move with the server key, which is the point of
-  // keeping the two keys apart.
-  assert.notEqual(rowKeyOf(rekeyed), rowKeyOf(first))
+  // The premise, asserted so this test cannot silently stop testing it.
+  assert.notEqual(earlier.message, grown.message, 'the server re-renders the count')
+  assert.equal(entryKeyOf(earlier), entryKeyOf(grown), 'the identity must not move')
+  // …and the identity is the server's own grouping key in customer-safe form.
+  assert.equal(entryKeyOf(earlier), 'flag|surface:Memory writes')
+
+  // A dismissal taken on the earlier read still covers the grown one.
+  const state = dismiss(emptyState(), entryKeyOf(earlier), NOW, earlier)
+  assert.equal(
+    buildLedger({ alerts: [grown], state, now: NOW }).unresolved, 0,
+    'Dismiss must not evaporate when another window fires',
+  )
+
+  // …and so does a snooze, which is identity-wide by design.
+  const snoozed = snooze(emptyState(), entryKeyOf(earlier), HOUR, NOW)
+  assert.ok(
+    snoozedUntil(snoozed, entryKeyOf(grown), NOW) > 0,
+    'Snooze must not evaporate when another window fires',
+  )
+
+  // A DIFFERENT rule is a different identity: the surface is per-rule, which is
+  // what makes this the server's identity rather than a per-type collapse.
+  assert.notEqual(
+    entryKeyOf(grown),
+    entryKeyOf({ ...grown, details: { ...grown.details, surface: 'API key creation' } }),
+  )
+  // A row with NO surface keeps the message key, which IS stable for it — a
+  // velocity sentence carries no rolling number.
+  assert.equal(
+    entryKeyOf(alert({ type: 'auth_ip', message: 'Access from a new location: ES' })),
+    'auth_ip|Access from a new location: ES',
+  )
 
   // A DIFFERENT subject is a different identity: the `auth_ip` message embeds the
   // country, so two sign-in locations are never one dismissal.
@@ -796,7 +835,7 @@ test('the local key is the episode IDENTITY, so a re-keyed bout cannot resurrect
     entryKeyOf(alert({ type: 'auth_ip', message: 'Access from a new location: FR' })),
   )
   // …and so is a different type with the same wording.
-  assert.notEqual(key, entryKeyOf({ ...first, type: 'review_needed' }))
+  assert.notEqual(entryKeyOf(grown), entryKeyOf({ ...grown, type: 'review_needed' }))
   assert.equal(entryKeyOf(null), '')
 })
 

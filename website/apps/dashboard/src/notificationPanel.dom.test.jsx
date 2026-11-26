@@ -1096,6 +1096,55 @@ test('#14686: a refusal stays readable after the feed re-read drops its row', ()
   assert.match(note.textContent, /Suspicious activity/)
 })
 
+test('#14686: Escape closes on the FIRST press when the open detail\'s row is gone', () => {
+  // The state the test above PROVES is reachable: `detailKey` still names an
+  // episode the feed has dropped, so the panel is already rendering the bare
+  // LEDGER (`{detailAlert ? …}`). Both Escape handlers branched on `detailKey`,
+  // so they still took the "back out of the detail" arm: the first press did
+  // nothing visible and handed focus to the container, and only the second
+  // closed the panel. Measured on the pre-fix tree: open after the first press,
+  // closed after the second. The key must do what the SCREEN shows.
+  const row = alert({ message: 'gone on the re-read' })
+  function Harness() {
+    const [alerts, setAlerts] = React.useState([row])
+    const [ackError, setAckError] = React.useState(null)
+    return (
+      <NotificationBell
+        alerts={alerts}
+        userId={USER}
+        orgId={ORG}
+        canAcknowledge
+        ackError={ackError}
+        onAcknowledge={() => {
+          setAckError({
+            episode: row.episode,
+            orgId: ORG,
+            label: row.label,
+            message: 'That alert is no longer in the feed — reload to refresh.',
+          })
+          setAlerts([]) // the re-read: the episode is no longer in the feed
+        }}
+        now={NOW}
+        storage={fakeStorage()}
+      />
+    )
+  }
+  const { container } = render(<Harness />)
+  fireEvent.click(bell(container))
+  fireEvent.click(container.querySelector('.notif-open'))
+  fireEvent.click([...container.querySelectorAll('.notif-detail-actions button')]
+    .find((b) => /Acknowledge for everyone/.test(b.textContent)))
+
+  assert.equal(container.querySelector('.notif-detail'), null,
+    'precondition: the detail is off screen, so the panel is showing the ledger')
+  assert.ok(panel(container), 'precondition: the panel is still open')
+
+  fireEvent.keyDown(panel(container), { key: 'Escape' })
+  assert.equal(panel(container), null,
+    'with no detail on screen, ONE Escape must close the panel — not silently '
+    + 'consume the press returning to a ledger it already shows')
+})
+
 test('#14686: a refusal does not follow the reader into another Organization', () => {
   // `switchTeam` clears `ackError`, but a refusal still IN FLIGHT when the switch
   // lands arrives after that clear — and the ledger branch has no row to scope it
