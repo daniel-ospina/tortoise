@@ -434,8 +434,9 @@ export function snoozedUntil(state, episode, now = new Date()) {
  *  re-opens. It is NOT the window test's forward gap: testing `delta <= gap` here
  *  instead kept a suspension that fired 40 minutes after the snooze hidden, which
  *  is the exact direction that docstring calls the worse failure. The snooze
- *  therefore covers the row the reader snoozed (same instant) and anything at or
- *  before it — never a suspension that fires afterwards.
+ *  therefore covers ONLY the row whose `at` IS the snoozed instant — never a
+ *  suspension that fires afterwards (the gate), and never an EARLIER bout that
+ *  shares the decision key (the window half is what cuts those).
  *
  *  An ACTIVITY row keeps the whole period, and its RESIDUAL is stated rather than
  *  denied. Its key is the identity too (`type|surface:…`), so a snooze taken on
@@ -473,9 +474,14 @@ export function effectiveSnoozedUntil(state, entry, now = new Date()) {
     // earlier episode sharing the decision key: measured, a never-acknowledged
     // suspension 5 days BEFORE the snoozed one moved into "Snoozed" and out of
     // the badge while `/v1/team/alerts` still reported it current. With both
-    // halves intersected — the episode's window overlapping the snoozed row, AND
-    // nothing happening after it — the only covered rows are the one the reader
-    // snoozed and anything its own episode still spans.
+    // halves intersected — the gate cuts everything that happened AFTER the
+    // snoozed instant, and the `anchor <= atMs` half cuts every EARLIER row — so
+    // the two pinch to `entry.atMs === anchor`: the ONLY covered row is the one
+    // whose `at` IS the instant the reader snoozed. `episodeStart <= anchor`
+    // encodes the window overlap the server requires, but once `atMs === anchor`
+    // it cannot admit or reject anything on its own — do not read this as "a bout
+    // that merely SPANS the snooze is covered": its newer window re-opens it
+    // (the gate) and its older rows never matched the window half.
     const episodeStart = firstMsOf(entry.alert) || atMs
     const overlaps = anchor <= atMs && episodeStart <= anchor
     return overlaps && atMs <= anchor ? until : 0
