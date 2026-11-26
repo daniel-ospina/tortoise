@@ -9381,11 +9381,14 @@ def _row_claims(header: str) -> list[str]:
     one" until a fresh-context review measured the difference (2026-11-26, P3). A fifth spelling
     was live in this very block: "… and `#14671`'s
     `tests/test_13450_ep_position_axis_participation.py` — `core`-registered, carrying its own
-    `durations` row …", where the word sits three tokens off the path. MEASURED: `_row_claims`
-    omitted the file, and DELETING its `durations` row left all six of this PR's arms GREEN — the
-    exact "a claim graded by nothing rots" class the block exists to warn about, reproduced in the
-    matcher cut to catch it. The sentence was re-spelled to `<path> row in `durations`` (the same
-    repair the `#14544` paragraph took), so the claim is now reachable and the row's deletion reds
+    `durations` row …", where the claim word sat past a `core`-registered clause instead of
+    beside the path — six tokens and 51 characters away, measured on the OLD sentence quoted
+    right here, so that distance is fixed history rather than a figure restated from a run.
+    MEASURED: `_row_claims` omitted the file, and DELETING its `durations` row left all six of
+    this PR's arms GREEN — the exact "a claim graded by nothing rots" class the block exists to
+    warn about, reproduced in the matcher cut to catch it. The sentence was re-spelled to
+    `<path> row in `durations`` (the same repair the `#14544` paragraph took), so the claim is
+    now reachable and the row's deletion reds
     `test_the_fast_shards_header_block_calls_a_row_only_what_has_one`.
 
     The four shapes, stated so a new spelling has something to be checked against: `<file>` row,
