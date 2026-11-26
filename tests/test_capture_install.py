@@ -1231,6 +1231,39 @@ def test_pi_install_does_not_claim_an_install_the_noop_run_skipped(home):
     assert "ALREADY in place" in error, error
 
 
+def test_pi_install_second_producer_refusal_does_not_claim_an_install_it_skipped(
+        home):
+    """The `wrote=False` branch on the SECOND producer's plane: a re-run on a
+    box whose seam is already current skips the copy, then refuses on a retired
+    name that still loads — and used to point at "the actions above" when the
+    same InstallResult carries no actions at all.
+
+    This is the pin for the `seam_written=` argument and the helper's `wrote=False`
+    branch: without it, reverting either leaves the whole suite green (#14342
+    round 14)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    seeded = install_capture("pi", home=home)
+    assert seeded.ok, seeded.error
+    assert seeded.changed_artifacts, (
+        "the seeding run was expected to WRITE the seam")
+
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// the other producer, elsewhere\n")
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert res.actions == (), res.actions
+    assert res.changed_artifacts == (), res.changed_artifacts
+    assert "see the actions above" not in error, (
+        f"a no-op run pointed at action lines it does not have: {error!r}")
+    assert "ALREADY in place" in error, error
+
+
 #: The names Pi's loader would REGISTER from ``~/.pi/agent/extensions``.
 #: ``dist/core/extensions/loader.js``: a direct entry loads iff its name ENDS
 #: WITH ``.ts`` / ``.js`` (``isExtensionFile``); **every** subdirectory is

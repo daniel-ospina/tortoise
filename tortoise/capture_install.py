@@ -2068,7 +2068,7 @@ def _assert_pi_entry_not_loadable(path: Path) -> str | None:
 
 def _disable_pi_second_producer(
         ext_dir: Path, *, dry_run: bool,
-        seam_written: bool = True) -> tuple[bool, list[str], str | None]:
+        seam_written: bool) -> tuple[bool, list[str], str | None]:
     """Disable agent-infra's ``reflect-hook.ts`` — the other capture producer.
 
     Returns ``(changed, actions, error)``. NON-DESTRUCTIVE: the entry is
