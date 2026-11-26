@@ -1597,7 +1597,7 @@ class TestAlertRegistersAndAcks:
             self):
         """#14687 round-2 review (P2). The sustained alert's "if you need a
         higher limit, contact support" was justified as true BECAUSE the level is
-        half the org's allowance — but that only holds when the tier floor
+        a share of the org's allowance — but that only holds when the tier floor
         actually contributed. On the absolute detector constant (selfhost, no tier
         registry, a cold start, ratio 0) the same sentence would be the untruth
         this change exists to remove, so the route follows the recorded fact."""

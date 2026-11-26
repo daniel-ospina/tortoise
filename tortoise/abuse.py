@@ -1676,18 +1676,24 @@ def _alert_dict(row: dict) -> dict:
         # rule threshold was crossed), what was NOT changed (nothing is
         # disabled), and how to reach us. A human's involvement is not one of
         # the facts this row can know.
-        # Round 15: "This is informational" is the ACTIVITY register's own
-        # self-description, and this row is REGISTER_ALERT (it re-opens an
-        # acknowledgement, because a flag is a state change). Saying it here
-        # blurred the one distinction this change exists to draw, so the phrase is
-        # gone while the FACTS it carried stay: nothing was disabled, and here is
-        # the route. The two registers now read as what they are — one reports a
-        # rate it measured, the other reports something that happened.
+        # Round 15 (HISTORY — superseded by #14687, kept so the reversal is
+        # legible rather than looking like drift): at THAT head "this row is
+        # REGISTER_ALERT (it re-opens an acknowledgement, because a flag is a
+        # state change)" was true, so this string dropped "This is
+        # informational" to keep the two registers apart. #14687's owner ruling
+        # (comment 7174797019) re-classified `review_needed` as a RATE
+        # MEASUREMENT — `ALERT_REGISTER_OF[EVENT_REVIEW]` is REGISTER_ACTIVITY,
+        # and `_episode_acknowledged`'s incident gate no longer re-opens a
+        # dismissal for it — so BOTH clauses of that paragraph are false at this
+        # head and the phrase is back. Rounds 1-3 of review each re-raised it;
+        # the reason it kept surviving is that a rationale reads as history, so
+        # it is now labelled as one.
         # #14687: same plumbing as EVENT_FLAG, with the route that the
         # tier-relative floor makes TRUE. Before it, "if you need a higher
         # limit" was copy on an alert about a 500-unit level, which is not a
-        # limit; the level is now half the org's own allowance, so asking for a
-        # higher one is the remedy that actually exists.
+        # limit; the level is now a share of the org's own allowance, so asking
+        # for a higher one is the remedy that actually exists. ("a share", not
+        # "half": the ratio is the `TORTOISE_ABUSE_TIER_FLOOR_RATIO` knob.)
         EVENT_REVIEW: _point_rate_message(details, sustained=True),
         EVENT_SUSPEND: "Organization suspended by an operator",
         # Round 6 (reviewer C): `recovery_velocity` is in ALERT_TYPES and is
