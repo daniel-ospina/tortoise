@@ -837,16 +837,17 @@ def test_the_quote_audit_artifact_is_re_derived_from_the_receipt():
     # `not_in_corpus` used to be a 10-row list of the OPPOSITE bucket, so its
     # LENGTH (the display cap) was read as a population. It is a count now, and it
     # must equal the invented arm the same scorer reports.
-    assert quotes["not_in_corpus"] == audit["not_in_corpus"], (
-        quotes["not_in_corpus"], audit["not_in_corpus"])
+    assert quotes["below_sentence_band"] == audit["not_in_corpus"], (
+        quotes["below_sentence_band"], audit["not_in_corpus"])
     # ⛔ THE AUDIT'S POPULATION IS SENTENCE-SCOPED, AND THAT IS NOT THE INVENTED ONE
     # (#14723 review, round 10, P2). `not_in_corpus` used to be asserted equal to
     # `invented` because both were the single-sentence bucket. A faithful multi-fact
     # summary cannot clear a single-sentence band, so the decider is now the TURN and
     # the two populations differ by exactly the summaries: 12 = 9 invented + 3
     # summaries. The audit artifact is untouched — it measured what it measured.
-    assert quotes["not_in_corpus"] == quotes["below_sentence_band"], (
-        "`not_in_corpus` is the SENTENCE-scope population, not the invented count")
+    assert "not_in_corpus" not in quotes, (
+        "the artifact still carries `not_in_corpus` — a field whose NAME asserts "
+        "`the corpus never says it` about a population that includes 3 rows it does")
     assert (quotes["invented"] + quotes["summary_in_one_turn"]
             == quotes["below_sentence_band"]), (
         "the below-sentence-band population is not (invented + summary)")
@@ -932,8 +933,7 @@ def test_the_quote_breakdown_in_the_report_is_the_claim_layer():
         f"REPORT.md's §7 quote breakdown is not the claim layer's: expected "
         f"{want!r}")
     # ...and the two populations §7 names are the artifact's, each by its own name
-    assert cl["not_in_corpus"] == cl["below_sentence_band"], cl
-    assert cl["not_in_corpus"] != cl["invented"], (
+    assert cl["below_sentence_band"] != cl["invented"], (
         "§7 and the artifact agree only if the sentence-scope population is NOT "
         "the invented count — otherwise the round-10 P2 gloss is back")
     assert (f"**{cl['below_sentence_band']}** below the single-sentence band"
@@ -1308,7 +1308,7 @@ def test_the_A4_count_TABLE_and_the_S8_artifact_row_are_the_claim_layer():
     audit_row = _report_line(r"^\| `out/t6-quote-audit\.json` \|.*verbatim")
     assert audit_row, "REPORT.md §8 has no row for out/t6-quote-audit.json"
     want = (f"({claim['verbatim']} verbatim / {claim['paraphrase']} paraphrase / "
-            f"{claim['not_in_corpus']} not in corpus)")
+            f"{claim['below_sentence_band']} not in corpus)")
     assert want in audit_row, (
         f"§8's quote-audit row is not the claim layer's: expected {want!r} in "
         f"{audit_row!r}")

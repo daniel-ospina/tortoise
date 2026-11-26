@@ -786,18 +786,17 @@ def a4_invention() -> dict:
               # (#14723 review, round 10, P2): a quote whose support exists only
               # across a turn is neither a sentence paraphrase nor an invention.
               "summary_in_one_turn": 0,
-              # ⛔ `not_in_corpus` IS A COUNT, NOT A LIST (#14691 review, 5th
-              # cycle, N5). It used to be a 10-row list of the BEST-ANCHORED
-              # PARAPHRASES — the opposite bucket — so a consumer reading its
-              # LENGTH as "quotes the corpus never states" got 10, the cap, where
-              # the real figure is `invented`. The paraphrase rows it held are
-              # preserved under `paraphrase_examples`; the name now carries the
-              # number it promises.
-              # ⛔ AND ITS SCOPE IS SENTENCE-SCOPED, which equals the peer audit's
-              # own figure (`out/t6-quote-audit.json` `not_in_corpus`) because
-              # that probe made the same measurement — it is `below_sentence_band`
-              # here and it is NOT the invented count (#14723 review, round 10).
-              "not_in_corpus": 0,
+              # ⛔ THE COUNT IS `below_sentence_band`, AND IT IS NOT `invented`
+              # (#14723 review, round 10, P2). It used to be called
+              # `not_in_corpus` — which asserted exactly the thing the measure
+              # cannot establish: 3 of the 12 rows it counted ARE stated by the
+              # corpus, just across a turn rather than inside one sentence. The
+              # name now states the scope, and `invented` carries the finding.
+              # The round-5 fix this REPLACES is kept: it is a COUNT, never the
+              # length of a capped sample list (that was the original defect).
+              # It is also the figure `out/t6-quote-audit.json` counts as its own
+              # `not_in_corpus`, because that probe made the same sentence-scoped
+              # measurement.
               "below_sentence_band": 0,
               "paraphrase_examples": [], "invented_examples": [],
               "summary_examples": [],
@@ -851,7 +850,6 @@ def a4_invention() -> dict:
                 quotes["bands_turn_scope"]["at_or_above_0_6"] += 1
             if ov < BAND:
                 quotes["below_sentence_band"] += 1
-                quotes["not_in_corpus"] += 1
             if t_ov >= BAND:
                 # supported by the corpus — the only question is WHERE
                 bucket = "paraphrase" if ov >= BAND else "summary_in_one_turn"
@@ -1296,7 +1294,6 @@ def _claim_layer() -> dict:
             #: the stricter SINGLE-SENTENCE population (the peer audit's own
             #: number). Recorded, never read as the invented count.
             "below_sentence_band": q["below_sentence_band"],
-            "not_in_corpus": q["not_in_corpus"],
             "bands": dict(q["bands"]),
             "bands_turn_scope": dict(q["bands_turn_scope"]),
             "invented_examples": q["invented_examples"][:6],
