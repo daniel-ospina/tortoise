@@ -3544,7 +3544,14 @@ class TestProductRootMarkerContract:
 HEADING_TAG_RE = re.compile(r"<h([1-6])\b[^>]*>", re.I)
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 STYLE_OR_SCRIPT_RE = re.compile(r"<(style|script)\b.*?</\1>", re.S | re.I)
-MEDIA_PRELUDE_RE = re.compile(r"@media\s*\(\s*max-height:\s*(\d+)\s*px\s*\)\s*\{")
+#: ⛔ `re.IGNORECASE` because at-rule names are ASCII case-insensitive: an
+#: `@MEDIA (max-height: 820px)` hatch is the SAME query to the browser, and a
+#: case-sensitive reader classified it as unmodelled — which, on the enabling
+#: side, is the difference between a stray `auto` being credited and not
+#: (#14683 review cycle 3, P2).
+MEDIA_PRELUDE_RE = re.compile(
+    r"@media\s*\(\s*max-height:\s*(\d+)\s*px\s*\)\s*\{",
+    re.IGNORECASE)
 
 
 #: `@media (max-width: Npx) { ... }` — the narrow-viewport blocks. Height has
@@ -3615,7 +3622,13 @@ def _css_blanked(css: str) -> str:
 #: / `@font-face` / `@property` / `@page` are deliberately NOT in this set: their
 #: bodies are not conditional wrappers around a rule, they are the rule.
 _CONDITIONAL_AT_RULE_RE = re.compile(
-    r"@(media|supports|container|layer|scope|starting-style)\b[^{;]*\{")
+    r"@(media|supports|container|layer|scope|starting-style)\b[^{;]*\{",
+    # ⛔ AT-RULE NAMES ARE ASCII CASE-INSENSITIVE, and this regex was not: an
+    # `@MEDIA (max-height: 400px)` block holding the auto pair was classified
+    # "not a condition", ranked as BASE, and the guard reported GREEN over a
+    # page the browser top-aligns — the exact fail-open the asymmetry above
+    # exists to close, reachable by pressing Shift (#14683 review cycle 3, P2).
+    re.IGNORECASE)
 
 
 def _conditional_at_rule_spans(css: str) -> list[tuple[int, int]]:
@@ -4840,7 +4853,7 @@ def _css_tokens(value: str) -> list[str]:
 #: against `auto` (a fail-open); `margin-top: auto !important` — the pinned
 #: intent, only stronger — reads as a COMPETING declaration to the slack row;
 #: and `display: flex !important` reads as not `flex` (both false REDs).
-_CSS_IMPORTANT = re.compile(r"!\s*important\s*$")
+_CSS_IMPORTANT = re.compile(r"!\s*important\s*$", re.IGNORECASE)
 
 
 def _without_important(value: str) -> str:
@@ -5667,7 +5680,8 @@ def _max_height_media_spans(css: str) -> list[tuple[int, int, int]]:
 #: guard — #14697 residual 1, one query family over (measured GREEN before this
 #: reader existed).
 MIN_HEIGHT_MEDIA_RE = re.compile(
-    r"@media\s*\(\s*min-height:\s*(\d+)\s*px\s*\)\s*\{")
+    r"@media\s*\(\s*min-height:\s*(\d+)\s*px\s*\)\s*\{",
+    re.IGNORECASE)  # at-rule names are ASCII case-insensitive, as above
 
 
 def _min_height_media_spans(css: str) -> list[tuple[int, int, int]]:
@@ -5885,21 +5899,43 @@ def _beats_whose_ground(
     rule is fail-closed only when the rule would ENABLE the mechanism (`auto`);
     for a rule that DISABLES it (`margin-top: 0`, `all: initial`) the browser
     still applies what this reader never collected, so the guard is GREEN over
-    the top-aligned page. Measured: `.beat.workflow > :first-child { margin-top:
-    0 !important }` and `#beat-hero:has(.doc-grid) > :first-child { margin-top:
-    0 }` both render #14677 on the affected beats while this reader reports no
-    problem. Every such escape needs `!important`, a functional pseudo on the
-    subject, a redundant id+class subject or an inline `style=` — none of which
-    this page uses — so it is recorded as #13837 R-C rather than chased here
-    (#14697's ruling: residuals are filed, not chased).
+    the top-aligned page. That is why a rule naming the ground WITHOUT the
+    `:first-child`/`:last-child` pseudo is collected too: `#beat-intro >
+    p.lead { margin-top: 0 }` and `#beat-hero > .doc-grid { margin-top: 0 }`
+    name the very element the markup declares, need no `!important` and no
+    functional pseudo, and both re-rendered #14677 with the row GREEN before
+    this arm existed (#14683 review cycle 3, P2). `_ground_selector_matches`
+    decides it against the ELEMENT, so a rule naming some other child does not
+    qualify.
+
+    Still NOT collected, and now stated without the false "unreachable" claim
+    an earlier version made: a subject carrying a functional pseudo
+    (`:has()`, `:is()`) or extra qualification (`.beat.workflow`), and an inline
+    `style=` attribute. Recorded as #13837 R-C; every in-idiom spelling this
+    page uses is caught.
     """
     compact = _compact_selector(selector)
     out: list[str] = []
     for beat, sides in grounds.items():
         for subject in (f"#{beat}", ".beat"):
+            subject_re = rf"(?<![-\w]){re.escape(subject)}(?![-\w])>"
             match = re.search(
-                rf"(?<![-\w]){re.escape(subject)}(?![-\w])>"
-                rf"([^\s>]*):{side}(?![\w-])", compact)
+                rf"{subject_re}([^\s>]*):{side}(?![\w-])", compact)
+            if match and _ground_selector_matches(match.group(1),
+                                                  sides.get(side)):
+                out.append(beat)
+                break
+            # The same rule written WITHOUT the structural pseudo — the shape a
+            # reset actually takes (`#beat-hero > .doc-grid { margin-top: 0 }`).
+            # Its simple selector is resolved against the element the markup
+            # declares, and an EMPTY one (`#beat-hero > { … }`, unparseable) is
+            # not credited. ⛔ The class EXCLUDES `:`, so this arm can never
+            # attribute a pseudo to the WRONG end — `:first-child` is the primary
+            # arm's business, and letting it fall through here credited
+            # `margin-bottom: auto` on the first child to the last child's home
+            # (measured: the swapped-pair discriminator went GREEN).
+            match = re.search(rf"{subject_re}([^\s>{{:]+)(?=[\s,{{:]|$)",
+                              compact)
             if match and _ground_selector_matches(match.group(1),
                                                   sides.get(side)):
                 out.append(beat)
@@ -5968,7 +6004,13 @@ def _ground_end_declaration(body: str, side: str) -> tuple[str, bool] | None:
         if not separator:
             continue
         name = name.strip().lower()
-        value = " ".join(value.split())
+        # ⛔ CSS values are ASCII case-insensitive (`AUTO` is `auto`), and this
+        # reader compared them literally: `margin-top: AUTO` was reported as a
+        # rule that "wins the cascade" with a non-`auto` value, i.e. a false RED
+        # over a page that IS centred (#14683 review cycle 3, P3). Lowercasing
+        # here is the single place both consumers (`== "auto"` and
+        # `_shorthand_end_value`) read.
+        value = " ".join(value.split()).lower()
         important = bool(_CSS_IMPORTANT.search(value))
         if important:
             value = _without_important(value)
@@ -6331,16 +6373,24 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
         the layout for the page's whole reading column rather than for the
         beats that overrun it, and pinned every one of them to `padding-top`.
 
-        That is #14677, measured rather than inferred — Chromium at 375x812,
-        content height against the 748px box, off-centre as
-        `(topGap-padT) - (bottomGap-padB)`:
+        That is #14677, measured rather than inferred — `origin/main`'s page,
+        Chromium at 375x812, the hatch firing. Columns: the children's summed
+        height, the off-centre skew `(topGap-padT) - (bottomGap-padB)` (0 =
+        centred), and the gap between the last child and the beat's bottom
+        edge (which includes the beat's own 32px `padding-bottom`):
 
-            #beat-ingest    173.9  -574.1   606.1px of dead space below
-            #beat-onboard   189.2  -558.8   590.8px
-            #beat-reason    197.0  -551.0   583.0px
-            #beat-organize  304.8  -443.2   475.2px
-            #beat-compute   391.3  -356.7   388.7px
-            #beat-intro     417.6  -330.4   362.4px
+            beat             copy    off-centre   gap below
+            #beat-ingest     153.9    -574.1      606.1px
+            #beat-onboard    169.2    -558.8      590.8px
+            #beat-reason     177.0    -551.0      583.0px
+            #beat-organize   246.4    -481.6      513.6px
+            #beat-intro      338.5    -353.5      385.5px
+            #beat-compute    339.3    -356.7      388.7px
+
+        (Four of these six reproduce the figures an earlier version of this
+        docstring carried to 0.1px; `#beat-intro` and `#beat-organize` did not,
+        and are re-measured here rather than inherited — #14683 review cycle 3,
+        P3.)
 
         and every title box at y=52 — 2.4px UNDER the fixed Login pill, whose
         button ends at y=54.4 — for 61-187px² of painted overlap on five of the
@@ -6349,9 +6399,9 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
         ⛔ AND WHY THE HATCH CANNOT SAY `justify-content: safe center`, although
         the base `.beat` rule does: `safe` cannot express this on a browser that
         does not honour it, and declaration ORDER does not rescue that. Chrome
-        before 115 (and Safari before 17.6) RECOGNISES the value but ignores the
-        modifier (MDN BCD: `version_added` 115, note "Before version 115, this
-        value is recognized, but has no effect"), so it keeps
+        before 115 RECOGNISES the value but ignores the modifier (MDN BCD:
+        `version_added` 115, note "Before version 115, this value is recognized,
+        but has no effect"), so it keeps
         the declaration, applies a plain `center`, and any `flex-start` written
         above it never runs — on that band the hero is centred unsafely, top
         clipped and h1 under the pill, which is worse than the bug being fixed.
@@ -6417,8 +6467,8 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
                 f"{' '.join(selector.split())} declares "
                 f"`justify-content: safe center` ({values!r}). A browser that "
                 "recognises `safe` but ignores the modifier KEEPS that "
-                "declaration and applies a plain `center` (before Chrome 115, "
-                "before Safari 17.6), so "
+                "declaration and applies a plain `center` (before Chrome 115; "
+                "Safari before 17.6 drops it and inherits the base `center`), so "
                 "the alignment it is ordered after never runs and an "
                 "over-flowing beat is clipped at the top with its heading "
                 "under the Login pill. Centre the beat with `margin-*: auto` "
@@ -6647,6 +6697,102 @@ class TestShortViewportCentringIsGradedPerBlock:
                 "    .beat > :first-child { margin-top: auto; }\n"
                 "    .beat > :last-child { margin-bottom: auto; }"))
         assert _short_viewport_centring_problems(page) == []
+
+    def test_centring_in_an_unmodelled_condition_is_red(self):
+        """The ENABLING-side fail-open: `auto` inside a condition we cannot read.
+
+        Mutants named, each measured GREEN-and-broken against the reader before
+        this arm existed (#14683 review cycle 2 P1 and cycle 3 P2): the pair
+        moved into `@media (orientation: landscape)`, into `@media screen and
+        (max-height: 400px)`, into `@media (max-height: 820px) and (min-width:
+        500px)`, into `@supports (display: grid)`, and into an `@MEDIA
+        (max-height: 400px)` spelled in upper case — every one of them leaves
+        375x812 top-aligned (titles back at y=52, 574px of dead space on
+        `#beat-ingest`) while the reader reported the mechanism intact.
+
+        "Could not classify this condition" is not "this condition is always
+        true": ranking an `auto` as a BASE candidate was the fail-open, and the
+        widening case below is what stops the fix from over-blocking.
+        """
+        for wrapper in (
+            "@media (orientation: landscape) {\n%s\n}",
+            "@media screen and (max-height: 400px) {\n%s\n}",
+            "@media (max-height: 820px) and (min-width: 500px) {\n%s\n}",
+            "@supports (display: grid) {\n%s\n}",
+            "@MEDIA (max-height: 400px) {\n%s\n}",
+            "@SUPPORTS (display: grid) {\n%s\n}",
+        ):
+            page = self._page(
+                hatch=self.ALIGNED_HATCH,
+                extra=wrapper % (self.AUTO_MARGINS_HATCH))
+            problems = _short_viewport_centring_problems(page)
+            assert problems, (
+                f"the centring pair inside {wrapper.splitlines()[0]!r} was "
+                "reported CLEAN — a condition this reader cannot evaluate was "
+                "credited as firing at the hatch's height, so the guard "
+                "certifies a page that top-aligns every beat")
+
+    def test_centring_in_a_WIDER_unmodelled_condition_is_accepted(self):
+        """The over-block the asymmetric ranking must NOT buy.
+
+        Mutant: the pair moved into a WIDER `max-height` (`900px`), which does
+        fire wherever the 820px hatch does. Ranking an unmodelled condition as
+        never-active would false-RED this legitimate edit; ranking a MODELLED
+        one by its band keeps it green. Measured GREEN at this head.
+        """
+        page = self._page(
+            hatch=self.ALIGNED_HATCH,
+            extra=(f"@media (max-height: 900px) {{\n"
+                   f"{self.AUTO_MARGINS_HATCH}\n}}"))
+        assert _short_viewport_centring_problems(page) == [], (
+            "a centring pair in a WIDER max-height block was false-RED: the "
+            "block fires wherever the hatch does, so the mechanism is intact")
+
+    def test_a_reset_that_names_the_ground_without_the_pseudo_is_red(self):
+        """Mutant: `#beat-hero > .doc-grid { margin-top: 0 }` — #14677 on the hero.
+
+        The ground is addressed by its own class, with no `:first-child`, which
+        is how a reset is actually written. Measured before this arm existed:
+        rendered h1 top back to 80 (from 86.03 centred) with the reader GREEN,
+        and the same shape on `#beat-intro > p.lead` top-aligned that beat
+        (353.5px of dead space below) — #14677 with no `!important`, no
+        functional pseudo and no inline style (#14683 review cycle 3, P2).
+
+        The control below is what keeps this from becoming a false RED on every
+        rule that merely names a child: `> h2` addresses a DIFFERENT element,
+        so it neither centres nor disables the ground's margin.
+        """
+        page = self._page(
+            hatch=self.CENTRED_HATCH,
+            extra="    #beat-hero > .doc-grid { margin-top: 0; }")
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "a `margin-top: 0` addressed to the ground by its own class was "
+            "not seen: the reader only credited selectors carrying "
+            "`:first-child`/`:last-child`")
+        control = self._page(
+            hatch=self.CENTRED_HATCH,
+            extra="    #beat-hero > h2 { margin-top: 0; }")
+        assert _short_viewport_centring_problems(control) == [], (
+            "a rule naming some OTHER child red the guard: the ground's own "
+            "margin is untouched")
+
+    def test_an_uppercase_auto_value_is_still_auto(self):
+        """Mutant: `margin-top: AUTO` — valid CSS, and it centres.
+
+        CSS values are ASCII case-insensitive, and the reader compared them
+        literally, so the correct page was reported as a beat whose margin "is "
+        "not `auto`" — a false RED over content that is centred (#14683 review
+        cycle 3, P3).`!IMPORTANT` is matched case-insensitively too.
+        """
+        page = self._page(
+            hatch=self.ALIGNED_HATCH,
+            extra=("@media (max-height: 900px) {\n"
+                   "  #beat-hero > :first-child { margin-top: AUTO; }\n"
+                   "  #beat-hero > :last-child { margin-bottom: AUTO; }\n}"))
+        assert _short_viewport_centring_problems(page) == [], (
+            "`AUTO` was not recognised as `auto`, so a centred page was "
+            "reported as uncentred")
 
     def test_a_commented_out_beat_section_is_not_a_beat(self):
         """A comment is dead to the browser, so it is not a beat (#14683 F1).

@@ -813,9 +813,12 @@
         overflow-y: auto;
       }
       /* Centred when the copy FITS, `start` when it OVERFLOWS — without the
-         `safe` keyword. Chrome before 115 (and Safari before 17.6) RECOGNISES
-         `safe center` but ignores the modifier (MDN BCD), keeping the
-         declaration and aligning unsafely, so
+         `safe` keyword. Chrome before 115 RECOGNISES `safe center` but ignores
+         the modifier (MDN BCD: `version_added` 115, note "Before version 115,
+         this value is recognized, but has no effect"), keeping the declaration
+         and aligning unsafely; Safari has no `safe` support before 17.6 and
+         DROPS the value instead, so the base rule's plain `center` takes over
+         there. Both land on an unsafe centre for an over-flowing beat, so
          an order-based fallback silently does nothing there: the hero would be
          clipped above and its h1 painted under the Login pill. Auto margins
          have no such band — they absorb the free space when there is any and
