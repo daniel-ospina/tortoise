@@ -1884,9 +1884,15 @@ def _inversion_form(pattern: str) -> re.Pattern[str]:
 #
 # `_SEQUENCER_FRAGMENT_RE` already lists `always` as a word that "carries no
 # imperation", so the two arms of this file disagreed about the same closed
-# class. `often`/`never`/`ever` are the same frequency family and are added with
-# it: a bare adverb in front of the imperative is the ONE-INSERTED-WORD defect
-# whatever its family.
+# class. `often` is added with it as the same frequency family.
+# ⛔ `never`/`ever` ARE DELIBERATELY NOT MEMBERS, and the first cut of this
+# comment wrongly said they were. A NEGATED imperative is not a confirmation —
+# `Never confirm the tools are actually there. Restart your client.` is copy
+# telling the user NOT to do it, so grading it as a deferred confirmation would
+# be a FALSE RED, which is the direction this file treats as the more expensive
+# one to add. Only `always` carries rows; `often` is declared in the row-less
+# list (measured: removing it alone flips 0 rows), so nothing here is an
+# undeclared arm.
 _ADVERBS = (r"(?:\w+ly|very|so|too|quite|rather|first|already|just|also"
             r"|now|still|always|often)")
 # ⛔ THE PRE-CUE VERB LIST, ONE DEFINITION — form (f) spelled it twice and a
@@ -3693,17 +3699,32 @@ def _confirmation_predicate_setting_a_tool_list(clause: str) -> bool:
     return False
 
 
-# ⛔ A COMMA-DELIMITED PREPOSITIONAL ASIDE, stripped from a post-cue sentence
-# before it is split into clauses. One arm, one job: the split on `,` is what
-# grades the inversion inside the cue's own sentence, and an aside wedged between
+# ⛔ A COMMA-DELIMITED PREPOSITIONAL ASIDE, stripped from BOTH sides of the cue
+# before either is split into clauses. One arm, one job: the split on `,` is what
+# grades the inversion inside the cue's own statement, and an aside wedged between
 # the predicate and its object must not supply that break. Both ends are required
 # (an opening comma AND a closing comma), so a TRAILING aside and every ordinary
 # `, then|and|but|so` clause are left to the split exactly as before.
 #
-# Measured at `8c96f5de` with this arm removed vs present: 616 of 616 declared
-# rows and the 41 non-parametrized `test_3232_*` / `test_5153_*` tests return the
-# same verdict, so the arm is additive and cannot flip a pinned row — the rows
-# that GAIN a verdict from it are the declared-RED rows added below it.
+# ⛔ THE PRE-CUE SIDE IS LOAD-BEARING AND WAS MISSING IN THE FIRST CUT. Applying
+# the strip only post-cue left the IDENTICAL aside work on the other side of the
+# cue: the aside became the clause that GOVERNS the cue, matched no inversion
+# form, and form (f) — the pin's largest arm — was silently disarmed (#14679
+# review at `1960427e`, measured). Inserting `, in the client's MCP/tool list,`
+# turned the canonical declared-RED inversion GREEN, and 47 of the declared-RED
+# rows had a GREEN twin at a comma boundary:
+#
+#     RED    Confirm the tools are actually there, then restart your client.
+#     GREEN  Confirm the tools are actually there, in the client's MCP/tool
+#            list, then restart your client.      (before this fix)
+#     RED    … the same, after this fix
+#
+# Measured at `8c96f5de` with the POST-cue strip removed vs present: 616 of 616
+# declared rows and the 41 non-parametrized `test_3232_*` / `test_5153_*` tests
+# returned the same verdict, so the arm is additive and cannot flip a pinned row
+# on its own; the rows that GAIN a verdict from it are the declared-RED rows
+# pinned below it. The pre-cue half is pinned the same way (`…, in the client's
+# MCP/tool list, then restart …`), so neither side can be dropped silently.
 _ASIDE_RE = re.compile(
     r",\s*(?:in|on|under|from|per|within|inside|via|at)\b[^,]{1,80}?,\s*",
     re.IGNORECASE,
@@ -3719,6 +3740,10 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     # a pre-cue form (f) inversion went GREEN ("Confirm the tools appear after the
     # v1.2 upgrade. Restart your client …", "Delete the old entry — but first
     # confirm the tools are actually there") while the comma twin was RED.
+    # ⛔ THE ASIDE IS STRIPPED ON THIS SIDE TOO — see `_ASIDE_RE`'s block. Without
+    # it the aside becomes the clause that governs the cue and form (f) never
+    # fires, which is a false PASS of the canonical inversion (measured).
+    before = _ASIDE_RE.sub(" ", before)
     pre_statements = [s for s in _STATEMENT_BREAK_RE.split(
         before.lstrip(" \t,.;:—–-")) if s.strip()]
     # ⛔ AND EACH CLAUSE, not just the statement: the LAST clause is what form (f)
@@ -3759,7 +3784,8 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     # are actually there` is graded as the one clause it is. Only an aside that
     # BOTH opens with a preposition AND is closed by a following comma is removed,
     # so a trailing aside (no closing comma) and every `, then|and|but …` clause
-    # are untouched — the suite's 616 rows are the guard on that.
+    # are untouched — the declared rows are the guard on that (626 of them when
+    # this arm landed at `8c96f5de`; the count names its sha because it rots).
     post_sentence = _ASIDE_RE.sub(" ", post_sentence)
     post_clauses = [c.strip() for c in post_sentence.split(",")]
     # ⛔ AN `and`-LED CLAUSE CONTINUES THE PREVIOUS ONE — UNLESS IT OPENS ITS OWN
@@ -5000,12 +5026,13 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # form (b), and `_SESSION_AND_CONJUNCT_RE`'s `load(?:ed|s)`, by
     # `_SESSION_PRESENCE_RE` — both measured: removing each alone changes no row,
     # though removing the presence copy flips `installed and they are loaded`).
-    # ⛔ AND THE ADVERB FAMILY ADDED AT CYCLE 50: `always` carries its own rows,
-    # while `often`/`never`/`ever` are LIVE (each flips a pre-cue shape RED) but
-    # row-less — they are the same bare-adverb class as `always`, so they are
-    # declared here rather than left as silent unexercised arms. The whole family
-    # was absent from `_ADVERBS` at `8c96f5de`, which is what made one inserted
-    # `always` re-open the pre-cue half of the pin.
+    # ⛔ AND `always` FROM THE ADVERB FAMILY (cycle 50): it carries its own rows,
+    # while `often` is LIVE but row-less (measured: removing it alone flips 0
+    # rows) and declared here rather than left silent. `never`/`ever` are NOT
+    # members on purpose — a negated imperative is not a confirmation, so grading
+    # it would be a false RED (`_ADVERBS`' own block states this). The family was
+    # absent at `8c96f5de`, which is what made one inserted `always` re-open the
+    # pre-cue half of the pin.
     # ⛔ `when` used to be listed here and is NOT row-less: replacing form (a)'s
     # `(?:if|when|whenever|as soon as)` with `(?:if|whenever|as soon as)` flips
     # **5** declared rows (measured at `8c96f5de` — the fourth was the
@@ -5385,6 +5412,22 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # post-cue side had this machinery (`_SEQUENCER_TAIL_RE`); the pre-cue side
     # has `_SEQUENCER_FRAGMENT_RE` + `_cue_governing_clause` now.
     ("Confirm the tools are actually there, then restart your client.", True),
+    # ⛔ THE PRE-CUE ASIDE — the same arm as the post-cue one, on the other side
+    # of the cue, and it was MISSING until #14679's review at `1960427e` measured
+    # that inserting `, in the client's MCP/tool list,` turned every one of these
+    # declared-RED rows GREEN (47 of them had an aside twin): the aside became the
+    # clause that governs the cue, so form (f) never fired. `_ASIDE_RE` is now
+    # applied to `before` as well.
+    ("Confirm the tools are actually there, in the client's MCP/tool list, then "
+     "restart your client.", True),
+    ("Confirm the tools are actually there, under MCP, then restart your client.",
+     True),
+    ("Confirm the tools are actually there, at the MCP panel, then restart your "
+     "client.", True),
+    ("Confirm the tools are actually there, from the menu, then restart your "
+     "client.", True),
+    ("Restart your client, in the client's MCP/tool list, then confirm the tools "
+     "are actually there.", False),
     ("Confirm the tools are actually there, **then** restart your client.", True),
     ("Confirm the tools are actually there, and then restart your client.", True),
     ("Confirm the tools are actually there. Then restart your client.", True),
