@@ -11156,8 +11156,13 @@ def test_the_fast_shards_header_block_does_not_claim_its_row_list_is_complete():
         "retired wording")
     # …and a QUOTED record of a retired frame is NOT a live claim: a guard that reds on its own
     # retraction would force the block's history out of the file.
+    # ⛔ THE QUOTE SITS INSIDE THE `⛔`-BOUNDED SLICE ON PURPOSE: `_row_enumeration` stops at the
+    # FIRST `⛔`, so a fixture that puts its quoted frame after the bound never puts the quote in
+    # the text this arm reads — the assertion then stays GREEN under a mask regression, which is
+    # the dead-weight shape `#14623` round 16 named (F2). Measured both ways: with the frame after
+    # the bound, `_unquoted_block -> header` left the arm GREEN.
     quoted_record = (
-        "A ROW is an entry in `durations` — `tests/test_quoted_record.py` row. ⛔ it once said "
+        "A ROW is an entry in `durations` — `tests/test_quoted_record.py` row. it once said "
         '"THAT ENUMERATION IS COMPLETE" · and does not now. ⛔ next sentence')
     assert _COMPLETENESS_CLAIM_RE.search(_row_enumeration(quoted_record)) is None, (
         "a QUOTED record of a retired completeness frame is being read as a live claim — the "
