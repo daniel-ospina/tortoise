@@ -1655,6 +1655,92 @@ def test_a_TRACKED_destination_elsewhere_is_refused_in_ITS_OWN_repository(
         "the basename in an ancestor directory")
 
 
+def test_a_render_through_a_HARDLINK_to_git_metadata_is_refused(tmp_path, monkeypatch,
+                                                               capsys):
+    """…and metadata can also be reached by a SECOND NAME, which no path guard sees.
+
+    ⛔ THE LAST RESIDUAL OF THE DESTINATION GUARDS (#14625 review, P3). Every guard
+    above decides metadata-ness from the PATH: the tracked-path probe asks the index,
+    the metadata probe asks git where the metadata LIVES, and the `.git` component
+    test reads the destination's parts. A hardlink is ONE inode with TWO names, so
+    `ln -f <repo>/.git/config /tmp/x/doc.md` satisfies all three — the destination
+    carries no `.git` component, is untracked, and sits in no repository — and the
+    write lands THROUGH the link. Measured at `059a0382`, with every other guard in
+    place: rc **0**, `render: wrote 2451 lines`, and the repository's 92-byte config
+    became 391,249 bytes; `git -C <repo> rev-parse --git-dir` then answered 128 ("bad
+    config line 1") on a repository nothing restores. `Path.resolve()` cannot see it
+    — it follows symlinks, and a hardlink is not one — so the guard is the link COUNT.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    config = repo / ".git" / "config"
+    assert config.is_file(), "the premise: the scratch repo carries its own config"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    hard = outside / "doc.md"
+    os.link(config, hard)
+    assert hard.stat().st_nlink == 2, (
+        "the premise: ONE inode under TWO names, and the destination path carries no "
+        "`.git` component — the shape no path-based guard above can classify")
+    before = config.read_bytes()
+    rc = census.main(["--render", str(hard)])
+    assert rc == 2, (
+        f"`--render` must refuse a destination that is a second name for git metadata "
+        f"— pre-fix this exited 0 and the write landed THROUGH the link on a config "
+        f"git cannot restore; got {rc}")
+    assert config.read_bytes() == before, (
+        "the repository's config was overwritten through a hardlink: the write follows "
+        "the inode, so a path-based guard permits it while the bytes land on metadata")
+    err = capsys.readouterr().err
+    assert "hard" in err.lower() and "link" in err.lower(), (
+        f"the refusal must name the property it refused on (the link count); stderr:\n{err}")
+
+
+def test_a_second_name_for_a_PLAIN_destination_is_refused_too(tmp_path, monkeypatch):
+    """…and the refusal is about the LINK COUNT, not about metadata-ness.
+
+    ⛔ THE POINT OF THIS ARM IS WHAT THIS DESTINATION IS NOT: an ordinary file outside
+    every repository, hardlinked to another ordinary file. A guard phrased as a fourth
+    "is this metadata?" predicate would pass it — that is the shape three review rounds
+    of findings kept producing (a predicate naming one damage mode, then one file, then
+    one repository), so the invariant is stated over the NUMBER OF NAMES the destination
+    inode has. Two names means the generated document is written through to the other
+    one wherever it lives, which is the one thing `--render`'s output must never do.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    other = outside / "notes.md"
+    other.write_text("# somebody else's file\n", encoding="utf-8")
+    linked = outside / "doc.md"
+    os.link(other, linked)
+    assert linked.stat().st_nlink == 2, "the premise: two names, one inode"
+    assert not any(
+        part.lower() == ".git" for part in linked.parts
+    ), "the premise: no `.git` component, so only the link count can decide"
+    assert not census._looks_like_git_metadata(outside), (
+        "the premise: this directory is not metadata, so a metadata-shaped guard would "
+        "permit it — the link count is the only term that can refuse")
+    before = other.read_bytes()
+    rc = census.main(["--render", str(linked)])
+    assert rc == 2, (
+        f"a destination with a second name is written through to that name; pre-fix "
+        f"this exited 0; got {rc}")
+    assert other.read_bytes() == before, (
+        "the document was written through the hardlink onto an unrelated file")
+
+
 def test_an_UPPERCASE_dot_GIT_component_is_refused_too(tmp_path, monkeypatch, capsys):
     """…and the component test is CASE-INSENSITIVE, which nothing used to grade.
 
@@ -3826,6 +3912,15 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # `_tracked_destination_refusal` to the `rel is not None` gate reds the second.
         "test_a_git_directory_that_lost_objects_is_STILL_refused",
         "test_a_TRACKED_destination_elsewhere_is_refused_in_ITS_OWN_repository",
+        # ⛔ AND THE LAST PATH-BLIND RESIDUAL (#14625 review, P3): a HARDLINK is one
+        # inode under two names, so it defeats every path-based guard at once — no
+        # `.git` component, untracked, in no repository — and the write lands through
+        # the link (measured at `059a0382`: rc 0, a 92-byte config became 391,249
+        # bytes). Deleting the `st_nlink > 1` branch reds the first arm; phrasing the
+        # guard as a fourth metadata predicate instead reds the second, which is
+        # deliberately a PLAIN file so that only the link count can refuse it.
+        "test_a_render_through_a_HARDLINK_to_git_metadata_is_refused",
+        "test_a_second_name_for_a_PLAIN_destination_is_refused_too",
         # ⛔ AND THE COMPONENT TEST'S OWN CASE-INSENSITIVITY, which a round-3 reviewer
         # found ungraded: `part.lower() == ".git"` is what stops `.GIT/config` on a
         # case-insensitive filesystem, and reverting it to `part` reds nothing else.
@@ -3928,8 +4023,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 42, (
-        f"expected EXACTLY 40 named split arms; got {len(split_arms)} — either a "
+    assert len(split_arms) == 44, (
+        f"expected EXACTLY 44 named split arms; got {len(split_arms)} — either a "
         "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
@@ -3950,9 +4045,14 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # in `split_arms` (when it carries a #13098 split invariant) or bump this count
     # deliberately — a red a reviewer reads rather than slack that a silently-added arm
     # rides. Counted over `defined`, so the 9 decorated arms are inside it too.
+    # 99 -> 103, in two landings that each ADDED arms rather than pruned a name: the
+    # round-6 timeout bound took it to 101 (with `split_arms` 41 -> 42), and this
+    # hardlink pair takes it to 103 (`test_a_render_through_a_HARDLINK_to_git_metadata_is_refused`
+    # and `test_a_second_name_for_a_PLAIN_destination_is_refused_too`, also named in
+    # `split_arms`, which moved 42 -> 44 with them).
     test_functions = {n for n in defined if n.startswith("test_")}
-    assert len(test_functions) == 101, (
-        f"expected EXACTLY 99 test functions in this module; got "
+    assert len(test_functions) == 103, (
+        f"expected EXACTLY 103 test functions in this module; got "
         f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")

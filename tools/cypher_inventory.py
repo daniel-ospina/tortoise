@@ -1330,6 +1330,48 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+        # ⛔ A HARDLINK IS GIT METADATA WEARING A FOREIGN PATH, and every guard above
+        # decides metadata-ness from the PATH (#14625 review, P3 — the last residual of
+        # the destination guards). A hardlink has TWO names for ONE inode, so
+        # `ln -f <repo>/.git/config /tmp/x/doc.md` then `--render /tmp/x/doc.md` carries
+        # no `.git` component, is untracked, and sits in no repository: all three guards
+        # permit it and the write lands THROUGH the link on the config. Measured at
+        # `059a0382` (this head, after every other guard was in place): rc **0**,
+        # `render: wrote 2451 lines`, and the repository's 92-byte config became
+        # 391,249 bytes — `git -C <repo> rev-parse --git-dir` then answered 128, "bad
+        # config line 1", on a repository no git command can restore.
+        #
+        # The property is the LINK COUNT, not the metadata: a destination with a second
+        # name is written through to that name wherever it lives (a tracked doc, a peer
+        # checkout, a repository's metadata), which is the one thing a GENERATED document
+        # must never do. `Path.resolve()` cannot answer this — it follows symlinks, and a
+        # hardlink is not one — so it is `stat`d.
+        #
+        # A destination that does not exist yet has no inode to share and needs no check;
+        # a `stat` that fails for any OTHER reason is refused, for the same reason every
+        # unanswerable probe in this module is: a false refusal costs a re-run with
+        # another path, a false permit costs a file nothing restores.
+        try:
+            links = target.stat().st_nlink
+        except (FileNotFoundError, NotADirectoryError):
+            # No inode yet: nothing to write through. `NotADirectoryError` is routed to
+            # the WRITE rather than refused here on purpose — the destination's parent
+            # is a regular file, and the write guard below names that failure
+            # (`could not write … [Errno 20] Not a directory`) instead of this one.
+            links = 1
+        except OSError as err:
+            print(f"render: could not inspect {args.render}: {err}", file=sys.stderr)
+            return 2
+        if links > 1:
+            print(
+                f"refusing to render over {args.render}: {target} has {links} hard\n"
+                "links, so the document would be written THROUGH every other name of\n"
+                "that file. A hardlink to a repository's metadata destroys it and git\n"
+                "cannot restore it. Pick a path with exactly one link (the default\n"
+                "writes the gitignored `CYPHER-INVENTORY.md`).",
+                file=sys.stderr,
+            )
+            return 2
         try:
             # `ROOT.resolve()` is inside the guard too: a symlink loop on the tree root
             # raises `RuntimeError` here, and only `ValueError` (path outside ROOT) was
