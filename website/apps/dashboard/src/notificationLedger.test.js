@@ -330,6 +330,53 @@ test('#14694 P3: Unsnooze restores ONLY the row it is named for', () => {
   assert.equal(unsnooze(state, key, take(NOW.toISOString(), 'suspend||zz')).snoozed[key], undefined)
 })
 
+test('#14694 P2: an EXPIRED anchor is not revived by snoozing a sibling row', () => {
+  // Anchors describe the snooze that was LIVE when written, and expiry is pruned
+  // only by `readState` (on open) — not by the panel's 30 s tick. So a panel left
+  // open past a snooze still holds the elapsed row's anchor, and APPENDING to it
+  // made the reader's next click on a sibling row re-cover the row they had just
+  // watched come back. Measured before the fix: A snoozed 1 h, 65 min later A is in
+  // `current`, then snoozing B dropped the badge 2 -> 0 and put A back under
+  // "Snoozed" — a hide nobody asked for, and it survived a reload.
+  const take = (at, episode) => alert({
+    type: 'suspend',
+    label: 'Organization suspended',
+    message: 'Organization suspended by an operator',
+    at,
+    first_at: at,
+    episode,
+  })
+  const a = take(new Date(NOW.getTime() - 2 * DAY).toISOString(), 'suspend||a')
+  const b = take(new Date(NOW.getTime() - 1 * HOUR).toISOString(), 'suspend||b')
+  const key = entryKeyOf(a)
+
+  const snoozedA = snooze(emptyState(), key, periodMs('1h'), NOW, a)
+  // 65 minutes later the deadline has passed and A is back on screen…
+  const later = new Date(NOW.getTime() + 65 * MIN)
+  const revived = buildLedger({ alerts: [a, b], state: snoozedA, now: later })
+  assert.equal(revived.snoozed.length, 0)
+  assert.equal(revived.unresolved, 2, 'both rows are current again')
+
+  // …and snoozing B now must cover B ONLY. A is not re-hidden.
+  const snoozedB = snooze(snoozedA, key, periodMs('1h'), later, b)
+  assert.deepEqual(snoozedB.snoozedAt[key], [new Date(b.at).getTime()],
+    'the elapsed anchor must be dropped, not appended to')
+  const after = buildLedger({ alerts: [a, b], state: snoozedB, now: later })
+  assert.equal(after.snoozed.length, 1, 'only B is snoozed')
+  assert.equal(after.snoozed[0].rowKey, rowKeyOf(b))
+  assert.equal(after.unresolved, 1, 'A stays visible — its own snooze had ended')
+
+  // A snooze that is still LIVE keeps its anchors: re-snoozing the key re-sets the
+  // period for every row already anchored on a period the reader chose.
+  const liveAgain = snooze(snoozedB, key, periodMs('1d'), new Date(later.getTime() + 10 * MIN), a)
+  assert.equal(liveAgain.snoozedAt[key].length, 2, 'both live anchors are kept')
+  assert.equal(
+    buildLedger({ alerts: [a, b], state: liveAgain, now: new Date(later.getTime() + 11 * MIN) })
+      .unresolved,
+    0,
+  )
+})
+
 test('#14694 P1: a snooze on an INCIDENT does not cover a NEWER one', () => {
   // `suspend`'s customer message is a CONSTANT, so every suspension shares one
   // decision key — a bare deadline on that key hid a genuinely new suspension for

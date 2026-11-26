@@ -358,13 +358,29 @@ export function snooze(state, episode, ms, now = new Date(), alert = null) {
     // "Snoozed" list still showed a snooze — the reader's first snooze silently
     // undone by their second (#14694 review P2).
     //
+    // ⛔ AND THE LIST STARTS FRESH ONCE THE KEY'S DEADLINE HAS ELAPSED. Anchors
+    // describe the snooze that was LIVE when they were written, and expiry is
+    // pruned only by `readState` (on open) — not by the 30 s tick. A panel left
+    // open past a snooze therefore still holds the elapsed row's anchor, and
+    // appending to it made the NEXT click on a sibling row re-cover the row the
+    // reader had just watched come back (measured: two `suspend` rows, A snapped
+    // for 1 h, 65 min later A is in `current`, then snoozing B dropped the badge
+    // 2 -> 0 and put A back under "Snoozed"). A stale anchor must never be
+    // revived by a fresh deadline (#14694 review P2).
+    //
     // The DEADLINE stays one per key (`snoozed` above, overwritten): that is what
     // identity-wide snoozing means here — re-snoozing the key re-sets the period
-    // it is hidden for, and every row already anchored on that key stays covered
-    // until the new deadline. Never write a deadline LONGER than the reader just
-    // chose at this click, and never let an anchor outlive its key's snooze (the
-    // `readState` prune keeps that true across a reload).
-    const anchors = anchorsOfValue(base.snoozedAt && base.snoozedAt[episode])
+    // it is hidden for, and every row still anchored on a LIVE snooze stays
+    // covered until the new deadline, because a period the reader already chose
+    // for this key is the only thing that bound can ever mean.
+    const live = snoozedUntil(base, episode, now) > 0
+    const anchors = live
+      ? anchorsOfValue(base.snoozedAt && base.snoozedAt[episode])
+      : []
+    next.snoozedAt = {
+      ...(base.snoozedAt || {}),
+      [episode]: anchors.includes(atMs) ? anchors : [...anchors, atMs].slice(-MAX_SNOOZE_ANCHORS),
+    }
     next.snoozedAt = {
       ...(base.snoozedAt || {}),
       [episode]: anchors.includes(atMs) ? anchors : [...anchors, atMs].slice(-MAX_SNOOZE_ANCHORS),
@@ -447,7 +463,17 @@ export function dismiss(state, episode, now = new Date(), alert = null) {
   }
 }
 
-/** Bring a dismissed episode back into the ledger. */
+/** Bring a dismissed episode back into the ledger.
+ *
+ *  ⛔ KEY-WIDE, and deliberately so — the asymmetry with the now row-scoped
+ *  `unsnooze` is intentional, not an oversight (#14694 review P3). A dismissal is
+ *  a WATERMARK on the decision key, not a per-row fact: `isDismissed` is asked per
+ *  key, and `buildLedger` files every row the window/gap test covers under that
+ *  key into the `dismissed` bucket, so `Restore` on one of them restores the group
+ *  the reader sees there. That is the reading of a reversible group, and the
+ *  direction is visibility-INCREASING — nothing is hidden by it. A snooze is the
+ *  opposite: it HIDES, which is why that one had to become row-scoped.
+ */
 export function undismiss(state, episode) {
   const base = state || emptyState()
   if (!episode || !(episode in (base.dismissed || {}))) return base
