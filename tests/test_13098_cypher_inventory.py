@@ -1548,6 +1548,87 @@ def test_a_repository_BETWEEN_ROOT_and_the_destination_cannot_permit_what_it_tra
         "repository that tracks the path was neither of them")
 
 
+def test_a_repository_ABOVE_an_OUT_of_ROOT_destination_cannot_permit_what_it_tracks(
+    tmp_path, monkeypatch, capsys
+):
+    """…and the boundary walk is not skipped for a destination OUTSIDE `ROOT`.
+
+    ⛔ THE WALK WAS BUILT INSIDE `if rel is not None:` (#14625 review, round 11, P2,
+    measured). So this arm — the arm above with ROOT swapped for an UNRELATED
+    repository — took the other branch, which produced exactly ONE provider, and ONE
+    `git -C` invocation answers from the INNERMOST repository git discovers, never an
+    enclosing one (`git-ls-files(1)`: `--error-unmatch` is a membership test on the
+    CURRENT repository's index and does not search ancestors). `--render` exited **0**,
+    no stderr, and replaced content the OUTER repository's index AND HEAD both hold.
+
+    The trigger is the BRANCH, not a deeper nesting level, which is why no in-ROOT arm
+    could see it: `peer` is a sibling of ROOT, so `target.relative_to(ROOT)` raises and
+    `rel` is None. Every premise below is measured, and the destination's own
+    repository answers "untracked" so this cannot grade the destination half.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)  # ROOT — unrelated to `peer`
+    peer = tmp_path / "peer"  # the OUTER repository: NOT ROOT, which is the whole point
+    keeper = peer / "inner" / "deeper" / "docs" / "DOC.md"
+    keeper.parent.mkdir(parents=True)
+    keeper.write_text("keep me\n", encoding="utf-8")
+    config = ["-c", "user.email=a@b", "-c", "user.name=a"]
+    subprocess.run(["git", "-C", str(peer), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(peer), "add", "--", "inner/deeper/docs/DOC.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(peer), *config, "commit", "-qm", "peer tracks it"],
+        check=True,
+    )
+    deeper = peer / "inner" / "deeper"
+    # ⛔ THE DESTINATION'S OWN REPOSITORY GETS A COMMIT THAT DOES NOT NAME THE KEEPER,
+    # and NOT via `git add -A`: that would put the keeper in THIS index and the
+    # destination half would refuse for the wrong reason (the vacuous-fixture trap the
+    # arm above names).
+    subprocess.run(["git", "-C", str(deeper), "init", "-q"], check=True)
+    (deeper / "placeholder.txt").write_text("unrelated\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(deeper), "add", "--", "placeholder.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(deeper), *config, "commit", "-qm", "unrelated"], check=True)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # THE PREMISE THAT MAKES THIS ARM GRADES THE `rel is None` BRANCH AT ALL: `peer` is
+    # a SIBLING of ROOT, so the destination is not under it.
+    with pytest.raises(ValueError):
+        keeper.relative_to(repo)
+    # AND THE OTHER TWO HALVES, MEASURED: only the OUTER repository may know the path.
+    peer_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "inner/deeper/docs/DOC.md"],
+        cwd=peer, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert peer_answer.returncode == 0, (
+        "the premise: the OUTER repository must track the destination; got "
+        f"rc={peer_answer.returncode} — without that there is nothing for it to refuse")
+    dest_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "docs/DOC.md"],
+        cwd=deeper, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert dest_answer.returncode == 1, (
+        "the premise: the DESTINATION's own repository must NOT name it; got "
+        f"rc={dest_answer.returncode} — if it did, this arm would grade the "
+        "destination half rather than the repository above it")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", str(keeper)])
+    assert rc == 2, (
+        f"a repository ABOVE the destination must not permit what it tracks, got {rc} — "
+        "the boundary walk was built only when the destination sat under ROOT, so an "
+        "OUTSIDE-ROOT destination asked ONE provider and that provider is the "
+        "INNERMOST repository git discovers")
+    err = capsys.readouterr().err
+    assert "TRACKED path" in err, f"the refusal must name the tracked path; stderr:\n{err}"
+    assert keeper.read_bytes() == before, (
+        "tracked content was overwritten: the guard asked only the destination's own "
+        "repository, and the repository that tracks the path was above it")
+
+
 def test_a_NESTED_repository_under_ROOT_cannot_permit_what_ROOT_tracks(
     tmp_path, monkeypatch, capsys
 ):
@@ -4667,6 +4748,12 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # arm a fifth output verb would silently drop its neighbour with every
         # hand-written pair list in this file still green.
         "test_the_output_verb_refusal_is_pinned_over_the_PARSER_not_over_a_hand_list",
+        # ⛔ AND THE BRANCH, NOT THE DEPTH (#14625 review, round 11, P2): the boundary
+        # walk was built inside `if rel is not None:`, so a destination OUTSIDE ROOT got
+        # one provider and `--render` overwrote an outer repository's TRACKED file at
+        # rc 0. Every in-ROOT arm stays green with the walk deleted from that branch, so
+        # this is the only arm that pins it.
+        "test_a_repository_ABOVE_an_OUT_of_ROOT_destination_cannot_permit_what_it_tracks",
     }
     # ⛔ AND THE SET'S OWN SIZE — the direction `missing` structurally cannot see.
     # `missing` reds for a NAME that no longer resolves; it stays GREEN for a member
@@ -4677,8 +4764,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 53, (
-        f"expected EXACTLY 53 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
+    assert len(split_arms) == 54, (
+        f"expected EXACTLY 54 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
     missing = sorted(split_arms - defined)
@@ -4734,8 +4821,12 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `surface_files`'s `git ls-files` and `_tracked_destination_refusal`'s probe are
     # GREEN from the raise-only arms alone. The metadata probe's arm records
     # `passed_kwargs` and DOES see its own bound, so it is not one of the blind ones.
-    assert len(test_functions) == 112, (
-        f"expected EXACTLY 112 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
+    # ⛔ AND THE `rel is None` BRANCH TAKES IT 112 -> 113 (`split_arms` 53 -> 54): the
+    # boundary walk was built only for a destination under ROOT, so an OUTSIDE-ROOT
+    # destination asked one provider — the innermost repository — and an OUTER
+    # repository's TRACKED file was overwritten at rc 0 (#14625 review, round 11, P2).
+    assert len(test_functions) == 113, (
+        f"expected EXACTLY 113 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
 

@@ -1216,11 +1216,16 @@ def _destination_probes(target: Path, rel: str | None) -> tuple[tuple[Path, str,
     stderr and replaced 11 bytes of content `inner`'s index AND HEAD both hold. Probing
     two named providers is an enumeration that keeps losing to the next nesting depth, so
     the guard now asks every repository BOUNDARY on the path: ROOT, each ancestor
-    directory below it that holds a `.git` (a nested repo, a linked worktree's own
-    gitdir, a submodule's gitlink), and finally the destination's nearest existing
-    directory — which covers a checkout entirely outside ROOT.
+    directory between it and the destination that holds a `.git` (a nested repo, a linked
+    worktree's own gitdir, a submodule's gitlink), and finally the destination's nearest
+    existing ancestor.
 
-    Order matters only for the message: ROOT's refusal is the most legible.
+    ⛔ AND THE WALK RUNS FOR BOTH BRANCHES, NOT ONLY INSIDE `ROOT` (#14625 review, round
+    11, P2). For a destination outside ROOT the walk continues past where ROOT would be
+    and stops at the filesystem root, because the outermost repository is then NOT ROOT —
+    and that is the one provider rounds 7-10 never asked. See the walk's own note below.
+
+    Order matters only for the message: the OUTERMOST refusal is the most legible.
     """
     probes: list[tuple[Path, str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -1234,18 +1239,35 @@ def _destination_probes(target: Path, rel: str | None) -> tuple[tuple[Path, str,
 
     if rel is not None:
         add(ROOT, rel, rel)
-        # every boundary BELOW `ROOT` — `target.parent` upwards, stopping at ROOT. A
-        # boundary is decided the way `_looks_like_git_metadata` decides it elsewhere:
-        # a `.git` entry that is merely PRESENT (`lexists`, so a dangling symlink to an
-        # unmounted gitdir still counts) or a bare gitdir's own three markers.
-        chain: list[Path] = []
-        cursor = target.parent
-        while cursor != ROOT and cursor != cursor.parent:
-            chain.append(cursor)
-            cursor = cursor.parent
-        for boundary in reversed(chain):
-            if os.path.lexists(boundary / ".git") or _looks_like_git_metadata(boundary):
-                add(boundary, target.relative_to(boundary).as_posix(), str(target))
+    # ⛔ EVERY BOUNDARY ABOVE THE DESTINATION — AND NOT INSIDE THE `rel is not None`
+    # BRANCH (#14625 review, round 11, P2, measured). This walk used to be built only
+    # when the destination sat under ROOT, so a destination OUTSIDE ROOT got exactly ONE
+    # provider — `probe_dir` below — and ONE `git -C` invocation answers from the
+    # INNERMOST repository git discovers, never an enclosing one (`git-ls-files(1)`:
+    # `--error-unmatch` is a membership test on the CURRENT repository's index, and
+    # ancestors are not searched; `--recurse-submodules` covers submodules only). So the
+    # round-10 shape with the outermost repository *not* being ROOT still exited **0**
+    # and replaced content that repository's index AND HEAD both hold — the trigger was
+    # the BRANCH, not a deeper nesting level, which is why no in-ROOT arm could see it.
+    # A boundary is decided the way `_looks_like_git_metadata` decides it elsewhere: a
+    # `.git` entry that is merely PRESENT (`lexists`, so a dangling symlink to an
+    # unmounted gitdir still counts) or a bare gitdir's own three markers.
+    chain: list[Path] = []
+    cursor = target.parent
+    # ⛔ STOPPING AT ROOT FOR A DESTINATION UNDER IT IS LOAD-BEARING, and it is why this
+    # is `stop` rather than dropping the term: a linked worktree's ancestors include the
+    # MAIN checkout, which is a repository that tracks the same relative paths — walking
+    # past ROOT there would refuse `--render docs/...` in every worktree lane. `None`
+    # only where there is no ROOT below the destination, i.e. the destination is outside
+    # it, and there the walk must reach the filesystem root because the outermost
+    # repository is then a repository that is not ROOT.
+    stop = ROOT if rel is not None else None
+    while cursor != stop and cursor != cursor.parent:
+        chain.append(cursor)
+        cursor = cursor.parent
+    for boundary in reversed(chain):
+        if os.path.lexists(boundary / ".git") or _looks_like_git_metadata(boundary):
+            add(boundary, target.relative_to(boundary).as_posix(), str(target))
     probe_dir = target.parent
     while not probe_dir.is_dir() and probe_dir != probe_dir.parent:
         probe_dir = probe_dir.parent
