@@ -11264,9 +11264,9 @@ function claimIntentInFlight() {
         ) : null}
         {/* #14686: the badge's title names the surface that actually exists — the
             alerts live in the header's notifications menu now, and "security
-            alerts" was the heading of the block this issue removed. */}
-        {team && team.status === 'flagged' && (
-          {/* TWO decisions meet on this line and BOTH survive:
+            alerts" was the heading of the block this issue removed.
+
+            TWO decisions meet on this line and BOTH survive:
               * #14687/#14702 (calibration) retired "Suspicious activity detected"
                 — a `flag` row is a rate MEASUREMENT, and accusing a customer of
                 suspicious activity for one is the false-incident framing that
@@ -11274,11 +11274,12 @@ function claimIntentInFlight() {
               * #14686 retires the old pointer to the heading of the block this PR
                 deletes. A pointer to a surface that no longer exists is how a
                 reader learns the dashboard is stale.
-              So: main's verb, this PR's destination. Neither half is optional —
-              reverting either one re-introduces a defect the other fixed.
-              ⛔ Do not spell the RETIRED pointer out in this file: the pin in
-              `securityAlerts.test.js` asserts its absence from this source, so a
-              comment that quotes it fails the very test it is explaining. */}
+            So: main's verb, this PR's destination. Neither half is optional —
+            reverting either one re-introduces a defect the other fixed.
+            ⛔ Do not spell the RETIRED pointer out in this file: the pin in
+            `securityAlerts.test.js` asserts its absence from this source, so a
+            comment that quotes it fails the very test it is explaining. */}
+        {team && team.status === 'flagged' && (
           <span className="tier-badge" title="Unusual activity measured — see notifications">⚠ flagged</span>
         )}
       </header>
