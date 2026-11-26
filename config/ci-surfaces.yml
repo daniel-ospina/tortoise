@@ -93,9 +93,11 @@ version: 1
 # ⛔ THAT IS A SPELLING GUARD, and stating it as more than that is what this clause did until
 # the #14587 review measured it: the census that actually arrived at the `bbef0b88` fold read
 # `holds N entries`, which a `files`-only unit could not see, so the gate was green over a live
-# census until that unit was added. ⛔ A COMMENT WRAP IS NOT A GAP: `_emission_block_header` joins
-# the block's comment lines before the pattern reads them, so a census split across two lines is
-# read normally — an earlier cut of this repair widened the separator for the wrap and wrote that
+# census for as long as that unit read `files` only — the census itself was then deleted (this
+# block's own remedy, in an earlier commit of this same repair) and the unit widened after it, so
+# neither change alone is what closed it. ⛔ A COMMENT WRAP IS NOT A GAP: `_emission_block_header`
+# joins the block's comment lines before the pattern reads them, so a census split across two lines
+# is read normally — an earlier cut of this repair widened the separator for the wrap and wrote that
 # the gate had missed one, and that reading was of the RAW blob rather than of the joined block the
 # guard is actually handed. No fold has to re-derive a census, and a fold that carries one anyway
 # is what the fence exists to catch.
