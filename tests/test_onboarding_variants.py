@@ -1855,10 +1855,12 @@ _INVERSION_FORMS = (
     _inversion_form(
         r"\b(?:(?:after|once)\s+"
         r"(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
-        r"(?:(?:\w+ly|first|already|just|also)\s+)*"
+        r"(?:(?:\w+ly|very|so|too|quite|rather|first|already|just|also)\s+)*"
         r"|(?:if|when)\s+(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
-        r"(?:(?:\w+ly|first|already|just|also)\s+)*"
-        r"(?!(?:see(?:s)?|saw|seen|look(?:ing|s|ed)?|list(?:ing|s|ed)?)\b))"
+        r"(?:(?:\w+ly|very|so|too|quite|rather|first|already|just|also)\s+)*"
+        r"(?!(?:see(?:s)?|saw|seen|look(?:ing|s|ed)?|list(?:ing|s|ed)?)\b"
+        r"(?!.*?\b(?:confirm|check|verif(?:y|ies|ied)|ensur(?:e|es|ed))\w*\b"
+        r"[^\n]*?\b(?:tools|they|it)\b)))"
         r"(?:\w+-)?"
         + _CONFIRM_PREDICATE
         + r"[^\n]*?\btools\b" + _NOT_A_DOC
@@ -1964,7 +1966,7 @@ _CONFIG_PREP_RE = re.compile(
     # spelling `_CONFIG_NOUN_RE`'s own comment records as the false RED this arm
     # exists to prevent — was refused here while `config` was exempted.
     r"|\b(?:in|from|inside|per|under)\s+(?:your\s+|the\s+|its\s+)?"
-    r"(?:(?:client|harness|mcp)\s+|[`*_]*[A-Z][\w.-]*(?:\s+Code)?(?:'s|\u2019s)?[`*_]*(?:\s+Code)?[`*_]*\s+)?"
+    r"(?:(?:client|harness|mcp)\s+|[`*_]*[A-Z][\w.-]*(?:\s+Code)?[`*_]*(?:'s|\u2019s)?[`*_]*\s+)?"
     r"(?:[`'\"]?)(?:config|settings|\.mcp\.json)\b",
     re.IGNORECASE)
 # ⛔ AN INSTALLATION-SIDE STATE IS A FILE-SIDE FACT, NOT A SESSION ONE. The
@@ -1994,7 +1996,7 @@ _SESSION_PRESENCE_RE = re.compile(
     r"|show(?:s)?\s+up|in\s+the\s+list)\b", re.IGNORECASE)
 _INSTALL_SIDE_RE = re.compile(
     r"\btools\b[^\n]*?\b(?:are|is|get|gets|getting)\s+(?:(?:all|both)\s+)?"
-    r"(?:installed|configured|enabled|set\s+up|added|wired|on\s+the\s+allowlist)\b",
+    r"(?:installed|configured|enabled|set\s+up|added|wired|registered|mounted|provisioned|on\s+the\s+allowlist)\b",
     re.IGNORECASE)
 # ⛔ A TERMINATOR ENDS A STATEMENT ONLY WHEN IT REALLY ENDS ONE. Splitting on a
 # bare `[.;—]` cut INSIDE dotted tokens — `v1.2`, `e.g.`, `.mcp.json` — which let
@@ -2609,6 +2611,7 @@ def test_3232_generic_restart_lines_are_exact():
     # (both were RED while the un-quantified twin above is GREEN):
     ("Restart your client once the tools are all installed.", False),
     ("Restart your client once the tools are both configured.", False),
+    ("Restart your client once the tools are registered.", False),
     # ⛔ THE NEGATED-OBJECT ARM NEEDS AN `after|once` ROW TO BE OBSERVABLE. The
     # `if|when` rows above are GREEN for the different reason the observation
     # gate gives them, so deleting the arm left this suite fully green (measured
@@ -2803,6 +2806,12 @@ def test_3232_generic_restart_lines_are_exact():
     ("Restart your client if you have rarely looked for the tools at all.",
      False),
     ("Restart your client if you simply listed the tools in the panel.", False),
+    # …but an observation followed by a CONFIRMATION is still an inversion — the
+    # gate must not blind the whole clause (both were GREEN before this):
+    ("Restart your client if you have looked in the panel and confirmed the "
+     "tools are actually there.", True),
+    ("Restart your client if you have listed the tools in the panel and "
+     "confirmed they appear.", True),
     ("Restart your client when you frequently see the tools disappear.", False),
     ("Restart your client if you occasionally see the tools disappear from the "
      "list.", False),
@@ -2814,6 +2823,11 @@ def test_3232_generic_restart_lines_are_exact():
      "actually there.", True),
     ("Restart your client when you merely confirmed the tools are actually "
      "there.", True),
+    # …and a degree intensifier before the adverb is the same adverb:
+    ("Restart your client after you have very recently confirmed the tools "
+     "are actually there.", True),
+    ("Restart your client when you have only very recently confirmed the "
+     "tools are actually there.", True),
     # …and the exclusion is scoped to the CONDITIONAL connectives (`if|when`),
     # because there the adverb changes the sense of the CONDITION; under
     # `after|once` the connective itself already fixes the order. A blanket
@@ -2866,6 +2880,12 @@ def test_3232_generic_restart_lines_are_exact():
     # (measured RED while its one-token twin above is GREEN):
     ("Restart your client after checking the tools are listed in Claude "
      "Code's settings.", False),
+    # …and decoration and the possessive COMPOSE (both were RED while each alone
+    # was GREEN):
+    ("Restart your client after checking the tools are listed in "
+     "**Cursor**'s settings.", False),
+    ("Restart your client after checking the tools are listed in "
+     "**Claude Code**'s settings.", False),
     # a quantifier between the object and its verb is the same claim, and form
     # (e)'s copula arm already admitted it (measured GREEN before):
     ("Restart your client once the tools all appear.", True),
