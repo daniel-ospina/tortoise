@@ -10320,6 +10320,16 @@ _H_14544_IMPERSONAL_NEGATION_RE = re.compile(
     r"\bnothing\b[^,;.!?]{0,80}?" + _H_14544_CHANGE_VERB
     + r"[^,;.!?]{0,80}?(?:#14544|that\s+cut|the\s+cut)",
     re.IGNORECASE)
+#: ⛔ THE DECLARED RESIDUAL, in the artifact rather than implied — filed as #14715 with six measured
+#: reproductions. This family reads clause structure off PUNCTUATION plus a subordinator list, which
+#: is a partial parser of English prose, so three shapes still escape it: (R1) a comma-set-off adjunct
+#: or a coordinated object puts the row noun in what this code calls another clause; (R2) the
+#: ROW-first arm's two gaps are still `[\s\S]` and can bridge a clause; (R3) a foreign agent in
+#: SUBJECT position is invisible, because the excuse is read only from a post-verbal `by …`. ⛔ Every
+#: round that bounded one of those gaps produced the opposite error on a sibling arm (rounds 7, 8 and
+#: 9 each did — measured), so they are filed rather than circled: the guard closes the classes a fold
+#: actually reintroduces, and #14715 carries the acceptance fixtures for the rest. What this arm does
+#: NOT do is certify the paragraph is true; the shapes that have shipped are fixtures here.
 #: The required claims stated the OTHER way round, beside the true one — measured GREEN at
 #: `148ab7c` (#14623 review round 5, F1d/F1e): keep `The REGISTRATION is the ONLY half exempt` and
 #: add "though both halves are exempt"; keep the true conclusion and add "this paragraph DOES
