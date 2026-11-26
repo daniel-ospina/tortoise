@@ -163,6 +163,50 @@ mode → teach-human fallback).
 > fallback, never a setup you present as durable. **Hosted? Skip to §3b**
 > (the dashboard universal command + per-harness rows).
 
+### One command first (preferred — #14607)
+
+Before any of the hand-written steps below, try the installer. It does what the
+comparables do (installer + hooks + skill, with the MCP as the *deep* surface)
+and it **verifies with a live call** instead of leaving the agent to discover a
+broken config by failing to use it:
+
+```bash
+tortoise onboard --harness pi        # claude | cursor | pi  (codex: see below)
+```
+
+⚠️ `--harness codex` is **refused by name**, not silently botched: Codex reads
+TOML (`~/.codex/config.toml`), and this installer writes JSON configs only — a
+JSON document there would leave Codex unable to parse the file while the install
+reported success. The refusal prints the `[mcp_servers.tortoise]` table to paste,
+and the Codex sections below are the hand path.
+
+It registers the MCP as the **credential-free bridge**
+(`python3 -m tortoise.mcp_bridge`), so the config carries no `${VAR}` to expand
+and nothing to go stale; it installs the capture + per-turn recall seam; and it
+writes the two MCP-first sentences into `AGENTS.md`/`CLAUDE.md` — **as a diff you
+can see, idempotently, reversible with `--uninstall`**. It refuses to write those
+sentences while the MCP does not verify, because instructing an agent to use a
+door that does not open is the silent fallback they exist to end.
+
+Useful flags: `--verify` (change nothing, print the verdict), `--dry-run` (show
+every planned write), `--scope user` (the harness's global catalog instead of the
+repo's), `--no-hooks`, `--no-instructions`.
+
+**When the MCP does not load, ask the product why — not a search engine:**
+
+```bash
+tortoise mcp-status          # ONE line: the class, the layer, and the fix
+tortoise mcp-status --json   # {status, detail, fix, source, exit_code}
+```
+
+Exit `0` = proven loadable · `1` = down (the class names the layer) · `3` =
+abstention (unprobed, or the config format cannot be read — never a pass). The
+classes are closed and not collapsible: `entry-absent`, `env-unset`,
+`command-missing`, `cwd-missing`, `python-lacks-tortoise`, `no-credential`,
+`endpoint-unreachable`, `auth-rejected`, `server-error`, `resolves-unprobed`,
+`probe-unknown`. `endpoint-unreachable` is a TRANSPORT failure and must never be
+read as a credential problem.
+
 ### 3a. Self-hosted install: Docker Compose + FalkorDB first (the supported path)
 
 The supported self-hosted path is **Docker Compose with the real FalkorDB
@@ -266,6 +310,13 @@ and the dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
 
 ### Claude Code (self-install)
 
+> **Prefer `tortoise onboard --harness claude`** — it registers the
+> credential-free stdio bridge and verifies with a live call. The recipe below is
+> the hand path when the installer cannot run, and it uses Claude Code's own
+> `${VAR}` expansion in a header: that value is captured when the client starts,
+> so a re-minted or rotated key is not picked up until a restart, and an unset one
+> expands to an empty bearer. The bridge has neither problem.
+
 ```bash
 export TORTOISE_API_KEY=tt_YOUR_KEY   # this shell
 claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ \
@@ -356,9 +407,13 @@ by walking **up from the current directory**. Both have silent failure modes.
 Follow these four steps in order — each one is load-bearing, the first two are
 yours to execute, step 3 is a handoff to the user, and step 4 is the check.
 
-**1. Export the key to your shell profile.** Pi expands `${VAR}` from
-`process.env` **at process start**, so a missing export produces an empty
-bearer token (`Authorization: Bearer`) and a 401 — not a config error:
+**1. Export the key to your shell profile.** The **bridge reads the key from the
+environment on every request**, and a missing one is its own named refusal
+(`MCP-KEY-EMPTY`, listing the sources it read) — not a silent empty bearer. The
+old `${VAR}`-in-a-header config DID capture it at process start and send
+`Authorization: Bearer` (empty), and that mechanism is why the recipe below no
+longer uses one. Export it because every entry point reads it, not because the
+config expands it:
 
 ```bash
 # Idempotent: a bare `>>` stacks a second export on every re-run.
@@ -376,11 +431,11 @@ that alias and is still OPEN, so it is landed by the #10605 fix in
 `tortoise/mcp_client.py` and not by a change of its own — because the fleet host
 exports that name; the recipes below do not rely on it, so nothing
 here changes. Giving the MCP credential a
-different name is a legitimate policy choice (#3615) — but the committable
-`.mcp.json` (project scope) expands `${TORTOISE_API_KEY}` from `process.env`, so a
-differently-named credential that is NOT also aliased sends an empty Bearer and
-401s while every entry point above goes unauthenticated — a config-name
-mismatch that reads as an auth failure (#5153). If the profile names it
+different name is a legitimate policy choice (#3615) — but `TORTOISE_API_KEY` is the
+name the client resolves (`mcp_client.py`), so a differently-named credential that
+is NOT also aliased is simply not found: the bridge refuses by name
+(`MCP-KEY-EMPTY`) while every entry point above goes unauthenticated — a
+config-name mismatch that reads as an auth failure (#5153). If the profile names it
 separately, alias it:
 
 ```bash
@@ -412,17 +467,42 @@ entry — even one that only lives in the home/base config — run the collision
 protocol below BEFORE writing):
 
 ```json
-{ "mcpServers": { "tortoise": { "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${TORTOISE_API_KEY}" } } } }
+{ "mcpServers": { "tortoise": { "command": "python3", "args": ["-m", "tortoise.mcp_bridge"], "env": { "TORTOISE_MCP_URL": "https://api.premiselabs.co/mcp/" } } } }
 ```
 
-Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
+(`type` may be omitted here: the harness dispatches on `command`/`url` — a `type`
+field is an agreement constraint rather than a selector, and `tortoise mcp-status`
+grades the merge the same way. Note `tortoise onboard` DOES add a `type: stdio`
+field and a `_comment` to the entry it installs, so what it writes is this block
+plus those two fields — for EVERY harness, Cursor included. The block ABOVE omits `type` because that is the entry by hand; the only harness-specific by-hand recipe that also omits it is the Cursor one in `docs/quickstart-cloud.md`.)
 
-> **Resolution order — a project `.mcp.json` SHADOWS the home config.** Pi
-> walks up from the current directory (to the git top-level) and takes the
-> FIRST `.mcp.json` it finds, falling back to `~/.pi/agent/.mcp.json`
-> (`resolveMcpJsonPath`, agent-infra #104). Writing only
-> `~/.pi/agent/.mcp.json` is therefore a silent no-op inside any repo that
-> has its own `.mcp.json` — write the PROJECT file.
+⛔ **This is the entry `tortoise onboard --harness pi` installs (see above), and it
+is deliberately credential-free.** The older recipe here expanded
+`${TORTOISE_API_KEY}` in an `Authorization` header; that is a **capture** — the
+value is frozen at the harness's process start, an unset variable expands to an
+empty bearer the server can only answer `-32001`, and a rotated key changes
+nothing until restart. The bridge resolves the key **per request** (env →
+`./.tortoise` → `~/.tortoise/credentials.json`) and refuses a missing one by name
+(`MCP-KEY-EMPTY`). Never re-introduce `${TORTOISE_API_KEY}` into a config file —
+`docs/quickstart-cloud.md` states the same prohibition, and `docs/evidence/14607-mcp-not-loaded.md`
+records the defect it came from.
+
+> **Resolution order — BOTH layers are read, and they MERGE PER FIELD.** Pi
+> walks up from the current directory to the git top-level for the repo's
+> `.mcp.json`, AND reads `~/.pi/agent/.mcp.json` as the hub's base layer
+> (`resolveMcpConfigPaths` + `mergeMcpLayers`, agent-infra #104/#3612 — the
+> older "first file wins" shim `resolveMcpJsonPath` is a BACK-COMPAT SHIM whose
+> own docstring says it is "exactly the shape that made the base inert").
+> **The repo wins each field it SETS and inherits each field it omits**, so a
+> repo entry that sets only `timeoutMs` keeps the base's `url`/`headers`/`env`.
+> Two rules follow: (a) writing only `~/.pi/agent/.mcp.json` IS inert inside a
+> repo that declares its own `tortoise` transport field — write the PROJECT
+> file; (b) declaring a transport drops the other transport's fields (a repo
+> entry with `command` deletes the base's `url`/`headers`/`oauth`), and an
+> entry that declares BOTH `url` and `command` is ignored whole **when it is a
+> delta over an existing entry; a repo-only entry is KEPT and runs over `url`**
+> (dropping it would zero a working server). `tortoise
+> mcp-status` grades exactly this merge.
 >
 > ⛔ **Collision protocol — a `tortoise` entry already exists.** `mcpServers`
 > is a JSON object, so writing the `tortoise` key over an existing `tortoise`
@@ -434,13 +514,14 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 > through these five steps before writing — step 1 can stop you early if the
 > entry is already correct:
 >
-> 1. **Detect** — resolve which `.mcp.json` is EFFECTIVE first (the first one
->    found walking up from cwd, else `~/.pi/agent/.mcp.json` — a project file
->    shadows the home config), then read that file's `tortoise` entry before
->    writing. Never write blind. An entry that looks right in a SHADOWED file
->    does not count: if the effective file has no `tortoise`, the connection
->    is absent. If the effective entry already matches the intended shape
->    (same `url` AND `Authorization: Bearer ${TORTOISE_API_KEY}`), report
+> 1. **Detect** — resolve the EFFECTIVE entry first: walk up from cwd to the git
+>    top-level for the repo's `.mcp.json` AND read `~/.pi/agent/.mcp.json` as the
+>    base, then MERGE them per field (the repo wins each field it sets, inherits
+>    each field it omits — see the resolution-order note). Never write blind. A
+>    field inherited from the base DOES count: an entry that looks empty in the
+>    repo file may still be complete once merged. If the effective entry already matches the intended shape
+>    (the same `TORTOISE_MCP_URL` AND a credential-free entry — the bridge, with no
+>    `${VAR}` in any `headers`), report
 >    "already correct — no repoint needed" and STOP: no confirm, no preserve,
 >    no rewrite. Same `url` with a DIFFERENT KEY VARIABLE (e.g.
 >    `${TORTOISE_MCP_API_KEY}`) is a **policy difference, not a defect**: a
@@ -458,8 +539,9 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 >    and 401s (#5153), so report which of the two states you found. Only a
 >    genuinely BROKEN entry (wrong `url`, missing or headerless
 >    `Authorization`) is yours to correct — and only after the confirm gate.
->    A home/base entry is left untouched and merely shadowed, so nothing is
->    overwritten and there is no preserve step.
+>    A home/base entry is left untouched and its FIELDS are inherited where the
+>    repo entry omits them, so nothing is overwritten and there is no preserve
+>    step.
 > 2. **Report** — tell the human the existing entry's backend (its `url`, or
 >    the local stdio `command`) and its graph size when that backend is
 >    reachable (local/self-hosted: query the node count). If it is
@@ -492,8 +574,9 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 >    entry.
 > 5. **Write** — only now add the hosted `tortoise` entry above. Prefer the
 >    PROJECT `.mcp.json`; write the home/base config only when no project file
->    is in play, since a project file always shadows it and a home write is
->    then a silent no-op (see the resolution-order note).
+>    is in play, since a repo entry declaring a transport field wins it over the
+>    base and a home-only write is then inert for that field (see the
+>    resolution-order note).
 >
 > Preserving the prior entry does **not** certify it: a preserved local stdio
 > entry can be broken in more than one way — a wrong port or password, and the
@@ -502,8 +585,8 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 
 **3. Restart Pi from a NEW shell** (hand this to the user — the running Pi
 process cannot restart itself). Not `/reload`, and not a restart of an
-already-open terminal: expansion reads the **launching shell's** env, so a
-reload (or a restart that reuses the old process env) silently keeps the
+already-open terminal: the bridge **child inherits the launching process's env**,
+so a reload (or a restart that reuses the old process env) silently keeps the
 stale or absent value. Tell the user: quit Pi, open a new terminal, and start
 Pi again from it.
 

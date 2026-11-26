@@ -76,8 +76,10 @@ def _node_identity(props: dict) -> tuple[Any, str | None]:
     return None, None
 
 
-def _resolve_root(g: Any, entity_id: str) -> tuple[str | None, dict, str | None]:
-    """Index-backed root lookup: returns (label, properties, key) or (None, {}, None).
+def _resolve_root(
+    g: Any, entity_id: str,
+) -> tuple[str | None, dict, str | None, list[str]]:
+    """Index-backed root lookup: ``(label, properties, key, labels)`` or the empty form.
 
     One UNION query over labeled branches — each branch index-backed (#327).
     ``key`` is the identity property the matched branch used (``id`` / ``eventId``
@@ -85,33 +87,47 @@ def _resolve_root(g: Any, entity_id: str) -> tuple[str | None, dict, str | None]
     ``id``. A url-only `:Source` root carries no ``id``, so the old
     ``MATCH (n:Source {id:$eid})`` hop from it matched nothing: the root was
     found but came back with an empty neighbourhood (#5448).
+
+    ``labels`` is the node's WHOLE label set (``labels(n)``), and it is returned
+    rather than kept private because the readers that PUBLISH the root need it to
+    grade the payload themselves (``entity_reads._root_preview``). ⛔ A reader
+    that grades on ``label`` — the branch that MATCHED — grades only as strongly
+    as that branch's position in the union: a hybrid ``(:Object:Source)``
+    resolves through the ``Object`` branch, so a ``label == "Source"`` test
+    skipped it and the root handed back its stored ``text``/``content`` (#14593
+    review P2, measured on ``GET /v1/entities/{id}/relations``).
     """
     union_q = " UNION ".join(
         f"MATCH (n:{label}) WHERE n.{prop} = $eid "
-        f"RETURN '{label}' AS label, properties(n) AS props, '{prop}' AS key "
+        f"RETURN '{label}' AS label, properties(n) AS props, '{prop}' AS key, "
+        f"labels(n) AS labels "
         f"LIMIT 1"
         for label, prop in _ROOT_BRANCHES
     )
     rows = g.query(union_q, params={"eid": entity_id}).result_set
     if not rows:
-        return None, {}, None
+        return None, {}, None, []
     row = rows[0]
     label, props = row[0], row[1]
     # A 2-column row is the pre-#5448 shape (mock fixtures, legacy callers): the
     # key is then unknowable from the row, and "id" is what every one of those
-    # callers matched, so it preserves their behavior exactly.
+    # callers matched, so it preserves their behavior exactly. Likewise a
+    # 3-column row predates ``labels(n)``; the branch label is then the strongest
+    # thing the row states, and grading it is exactly the previous behaviour
+    # rather than a skip of the rule.
     key = row[2] if len(row) > 2 else "id"
-    parsed = dict(props)
-    if label == "Source":
-        # #3998 (D30): the ROOT is a read path too. `_parse_node` filters the
-        # CONNECTED nodes; filtering only there left the same `:Source` root
-        # handing its raw payload straight back — measured, a document created
-        # with a 2400-byte `text` returned that `text` on the root through
-        # `entityProfile` AND `tortoise_traverse`, while `get_entity` correctly
-        # withheld it. A guarantee that holds on one read path and not another
-        # is not a guarantee, so the root takes the same filter as its
-        # neighbours.
-        parsed = _filter_source_props(parsed)
+    labels = [lbl for lbl in (row[3] or ())] if len(row) > 3 else []
+    labels = labels or [label]
+    # #3998 (D30): the ROOT is a read path too. `_parse_node` filters the
+    # CONNECTED nodes; filtering only there left the same `:Source` root
+    # handing its raw payload straight back — measured, a document created
+    # with a 2400-byte `text` returned that `text` on the root through
+    # `entityProfile` AND `tortoise_traverse`, while `get_entity` correctly
+    # withheld it. A guarantee that holds on one read path and not another
+    # is not a guarantee, so the root takes the same filter as its
+    # neighbours — and, like every other door, graded over the WHOLE label set
+    # (``projection.entities.publishable_payload``), never the branch label.
+    parsed = _publishable_payload(dict(props), labels)
     # #8538: the ROOT carries the same public identity as a discovered
     # neighbour. `key` is a public, addressable key (a url-only `:Source`'s
     # `url` is also the value the caller passed), so surfacing it as `id` keeps
@@ -121,7 +137,7 @@ def _resolve_root(g: Any, entity_id: str) -> tuple[str | None, dict, str | None]
     if not parsed.get("id"):
         parsed["id"] = entity_id
     parsed["type"] = label
-    return label, parsed, key
+    return label, parsed, key, labels
 
 
 #: Safe label-identifier pattern — fail-closed before interpolating a graph
@@ -182,7 +198,7 @@ def entityProfile(
     g = db.select_graph(graph_name)
 
     # 1. Fetch the root entity (index-backed labeled union, #327)
-    root_label, root, root_key = _resolve_root(g, entity_id)
+    root_label, root, root_key, _root_labels = _resolve_root(g, entity_id)
     if root_label is None:
         return {"entity": {}, "connected": {"points": [], "documents": [],
                "events": [], "subjects": [], "objects": []}}
@@ -300,7 +316,7 @@ def tortoise_traverse(
     g = db.select_graph(graph_name)
 
     # Fetch root (index-backed labeled union, #327)
-    root_label, root, root_key = _resolve_root(g, entity_id)
+    root_label, root, root_key, _root_labels = _resolve_root(g, entity_id)
 
     # BFS with depth tracking; frontier carries (id, label, key, depth) so each
     # per-hop query can bind the source label AND identity key for index-backed
@@ -449,3 +465,19 @@ def _filter_source_props(props: dict) -> dict:
     from tortoise.projection.entities import filter_source_props
 
     return filter_source_props(props)[0]
+
+
+def _publishable_payload(props: dict, labels: list[str]) -> dict:
+    """A root's property map under the shared ``#3998`` rule, graded as a SET.
+
+    Delegates to ``projection.entities.publishable_payload`` — the one
+    composition of the shared decision (``label_set_publishable``) and the
+    shared filter (``filter_source_props``) — for the reason
+    ``_filter_source_props`` above delegates a single label: a second spelling of
+    the rule here is a second rule, and this module's root is a read path that
+    ``entityProfile``, ``tortoise_traverse`` AND ``entity_relations`` all
+    publish.
+    """
+    from tortoise.projection.entities import publishable_payload
+
+    return publishable_payload(props, labels)
