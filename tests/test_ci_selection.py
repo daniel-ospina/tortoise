@@ -10933,6 +10933,19 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The REGISTRATION is exempt, and so is the row.",
             "The REGISTRATION is exempt; the row is exempt too.",
             "The REGISTRATION stays exempt, and the row remains exempt.",
+            # ⛔ ONE FIXTURE PER ADMITTED SPELLING of the subject form, because the run is only as
+            # graded as the fixtures that reach it (#14623 review round 25, P3). The alternative is
+            # `the row (?:is|stays|remains) (?:also|still|now)? exempt`; without these, a later lane
+            # could narrow ANY copula or adverb out of it and the whole 504-case file stays GREEN —
+            # `The REGISTRATION is exempt, and the row is still exempt:` would ship as a clean
+            # paragraph, the exact reading `#14612` deletes. Measured: dropping `stays`, or the
+            # `still|now` adverb run, left `1 passed` until each spelling below was pinned.
+            "The REGISTRATION is exempt, and the row is also exempt.",
+            "The REGISTRATION is exempt, and the row is still exempt.",
+            "The REGISTRATION is exempt, and the row is now exempt.",
+            "The REGISTRATION is exempt, and the row stays exempt.",
+            "The REGISTRATION stays exempt, and the row stays exempt.",
+            "The REGISTRATION remains exempt, and the row remains exempt.",
             "On the record's own numbers this paragraph DOES exclude it."):
         assert _H_14544_INVERTED_RE.search(inverse), (
             f"the inverse ban misses {inverse!r} — a constant no fixture exercises can be blanked "
