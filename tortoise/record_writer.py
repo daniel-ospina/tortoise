@@ -3346,8 +3346,8 @@ def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
         "This line repeats at most once per %.0fs per graph",
         org_id, graph_id, reason, org_id, graph_id,
         # ⛔ THE REASON AND THE GRAPH, so the published verb is the one that
-        # reaches THIS state (#14610 review, P2): `mode_seeded` is outside the
-        # population verb's population and needs the single-graph `arm`.
+        # reaches THIS state (#14610 P2; re-cut by #14624 F1): `arm` is the NARROWER
+        # verb for `seeded` (`backfill --arm` reaches it too); `halted` needs `reopen` FIRST.
         uncut_graph_remedy(org_id, graph_id=graph_id, reason=reason),
         UNCUT_GRAPH_WARN_SECONDS,
     )
