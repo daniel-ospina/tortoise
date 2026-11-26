@@ -1,0 +1,1619 @@
+{
+  "issue": 14691,
+  "test": "T6",
+  "graph": "xv14691_business_structure",
+  "corpus_chars": 4295,
+  "directions_source": "tortoise.pack_registry.SEMANTICS_DIRECTIONS",
+  "directions": {
+    "dependsOn": "->",
+    "ownedBy": "->",
+    "managedBy": "->",
+    "hasPart": "<->",
+    "related": "-",
+    "produces": "<-"
+  },
+  "A1_type_coverage": {
+    "declared": 28,
+    "present": 28,
+    "right_kind": 28,
+    "per_type": {
+      "product": {
+        "declared": 2,
+        "present": 2,
+        "right_kind": 2
+      },
+      "feature": {
+        "declared": 5,
+        "present": 5,
+        "right_kind": 5
+      },
+      "team": {
+        "declared": 3,
+        "present": 3,
+        "right_kind": 3
+      },
+      "role": {
+        "declared": 4,
+        "present": 4,
+        "right_kind": 4
+      },
+      "person": {
+        "declared": 4,
+        "present": 4,
+        "right_kind": 4
+      },
+      "component": {
+        "declared": 7,
+        "present": 7,
+        "right_kind": 7
+      },
+      "customer": {
+        "declared": 2,
+        "present": 2,
+        "right_kind": 2
+      },
+      "customerSegment": {
+        "declared": 1,
+        "present": 1,
+        "right_kind": 1
+      }
+    },
+    "missing": [],
+    "mis_typed": [],
+    "name_variants": [
+      {
+        "declared": "ingest-gateway",
+        "stored": "ingest-gateway component",
+        "role": "component"
+      }
+    ],
+    "passes": true,
+    "kind_population": {
+      "object": {
+        "product-strategy:product": [
+          "Lumen Field",
+          "Lumen Core"
+        ],
+        "product-strategy:feature": [
+          "Asset Register",
+          "Crew Dispatch",
+          "Load Forecast",
+          "Outage Alerts",
+          "Grid Map"
+        ],
+        "product-strategy:customer": [
+          "Helio Health",
+          "Northwind Logistics"
+        ],
+        "product-strategy:customerSegment": [
+          "mid-market utilities segment",
+          "mid-market utilities",
+          "field crews",
+          "control-room customers"
+        ],
+        "dev:code": [
+          "identity-db",
+          "auth-service",
+          "web-dashboard",
+          "signal-engine",
+          "fact-store",
+          "event-bus",
+          "ingest-gateway component"
+        ],
+        "agent-ops:rule": [
+          "ownership accountability convention"
+        ],
+        "core:workflow": [
+          "enterprise renewals",
+          "on-call rotation"
+        ]
+      },
+      "subject": {
+        "core:team": [
+          "Customer team",
+          "Product team",
+          "Platform team"
+        ],
+        "core:role": [
+          "Account Executive",
+          "Product Manager",
+          "Site Reliability Engineer",
+          "Staff Engineer"
+        ],
+        "core:naturalPerson": [
+          "Jonas Bauer",
+          "Amara Osei",
+          "Tomas Ferreira",
+          "Dana Whitlock"
+        ]
+      }
+    }
+  },
+  "A2_edges": {
+    "containment": [
+      {
+        "product": "Lumen Core",
+        "feature": "Grid Map",
+        "present": true,
+        "predicates": [
+          "hasPart"
+        ],
+        "parent_is_src": true,
+        "edges": [
+          {
+            "doc": "doc-01",
+            "predicate": "hasPart",
+            "src": "Lumen Core",
+            "dst": "Grid Map",
+            "src_kind": "product-strategy:product",
+            "dst_kind": "product-strategy:feature",
+            "write_path": "structural"
+          },
+          {
+            "doc": "doc-05",
+            "predicate": "hasPart",
+            "src": "Lumen Core",
+            "dst": "Grid Map",
+            "src_kind": "product-strategy:product",
+            "dst_kind": "product-strategy:feature",
+            "write_path": "structural"
+          }
+        ]
+      },
+      {
+        "product": "Lumen Core",
+        "feature": "Outage Alerts",
+        "present": true,
+        "predicates": [
+          "hasPart"
+        ],
+        "parent_is_src": true,
+        "edges": [
+          {
+            "doc": "doc-01",
+            "predicate": "hasPart",
+            "src": "Lumen Core",
+            "dst": "Outage Alerts",
+            "src_kind": "product-strategy:product",
+            "dst_kind": "product-strategy:feature",
+            "write_path": "structural"
+          },
+          {
+            "doc": "doc-05",
+            "predicate": "hasPart",
+            "src": "Lumen Core",
+            "dst": "Outage Alerts",
+            "src_kind": "product-strategy:product",
+            "dst_kind": "product-strategy:feature",
+            "write_path": "structural"
+          }
+        ]
+      },
+      {
+        "product": "Lumen Core",
+        "feature": "Load Forecast",
+        "present": true,
+        "predicates": [
+          "hasPart"
+        ],
+        "parent_is_src": true,
+        "edges": [
+          {
+            "doc": "doc-01",
+            "predicate": "hasPart",
+            "src": "Lumen Core",
+            "dst": "Load Forecast",
+            "src_kind": "product-strategy:product",
+            "dst_kind": "product-strategy:feature",
+            "write_path": "structural"
+          },
+          {
+            "doc": "doc-05",
+            "predicate": "hasPart",
+            "src": "Lumen Core",
+            "dst": "Load Forecast",
+            "src_kind": "product-strategy:product",
+            "dst_kind": "product-strategy:feature",
+            "write_path": "structural"
+          }
+        ]
+      },
+      {
+        "product": "Lumen Field",
+        "feature": "Crew Dispatch",
+        "present": true,
+        "predicates": [
+          "hasPart"
+        ],
+        "parent_is_src": true,
+        "edges": [
+          {
+            "doc": "doc-01",
+            "predicate": "hasPart",
+            "src": "Lumen Field",
+            "dst": "Crew Dispatch",
+            "src_kind": "product-strategy:product",
+            "dst_kind": "product-strategy:feature",
+            "write_path": "structural"
+          }
+        ]
+      },
+      {
+        "product": "Lumen Field",
+        "feature": "Asset Register",
+        "present": true,
+        "predicates": [
+          "hasPart"
+        ],
+        "parent_is_src": true,
+        "edges": [
+          {
+            "doc": "doc-01",
+            "predicate": "hasPart",
+            "src": "Lumen Field",
+            "dst": "Asset Register",
+            "src_kind": "product-strategy:product",
+            "dst_kind": "product-strategy:feature",
+            "write_path": "structural"
+          }
+        ]
+      }
+    ],
+    "membership": [
+      {
+        "person": "Dana Whitlock",
+        "team": "Platform team",
+        "present": true,
+        "predicates": [
+          "related"
+        ],
+        "edges": [
+          {
+            "doc": "doc-02",
+            "predicate": "related",
+            "src": "Dana Whitlock",
+            "dst": "Platform team",
+            "src_kind": "core:naturalPerson",
+            "dst_kind": "core:team",
+            "write_path": "structural"
+          }
+        ]
+      },
+      {
+        "person": "Tomas Ferreira",
+        "team": "Platform team",
+        "present": true,
+        "predicates": [
+          "related"
+        ],
+        "edges": [
+          {
+            "doc": "doc-02",
+            "predicate": "related",
+            "src": "Tomas Ferreira",
+            "dst": "Platform team",
+            "src_kind": "core:naturalPerson",
+            "dst_kind": "core:team",
+            "write_path": "structural"
+          }
+        ]
+      },
+      {
+        "person": "Amara Osei",
+        "team": "Product team",
+        "present": true,
+        "predicates": [
+          "related"
+        ],
+        "edges": [
+          {
+            "doc": "doc-02",
+            "predicate": "related",
+            "src": "Amara Osei",
+            "dst": "Product team",
+            "src_kind": "core:naturalPerson",
+            "dst_kind": "core:team",
+            "write_path": "structural"
+          }
+        ]
+      },
+      {
+        "person": "Jonas Bauer",
+        "team": "Customer team",
+        "present": true,
+        "predicates": [
+          "related"
+        ],
+        "edges": [
+          {
+            "doc": "doc-02",
+            "predicate": "related",
+            "src": "Jonas Bauer",
+            "dst": "Customer team",
+            "src_kind": "core:naturalPerson",
+            "dst_kind": "core:team",
+            "write_path": "structural"
+          }
+        ]
+      }
+    ],
+    "role_links": [
+      {
+        "role": "Staff Engineer",
+        "person": "Dana Whitlock",
+        "present": true,
+        "predicates": [
+          "related"
+        ],
+        "edges": [
+          {
+            "doc": "doc-02",
+            "predicate": "related",
+            "src": "Dana Whitlock",
+            "dst": "Staff Engineer",
+            "src_kind": "core:naturalPerson",
+            "dst_kind": "core:role",
+            "write_path": "structural"
+          }
+        ]
+      },
+      {
+        "role": "Site Reliability Engineer",
+        "person": "Tomas Ferreira",
+        "present": true,
+        "predicates": [
+          "related"
+        ],
+        "edges": [
+          {
+            "doc": "doc-02",
+            "predicate": "related",
+            "src": "Tomas Ferreira",
+            "dst": "Site Reliability Engineer",
+            "src_kind": "core:naturalPerson",
+            "dst_kind": "core:role",
+            "write_path": "structural"
+          }
+        ]
+      },
+      {
+        "role": "Product Manager",
+        "person": "Amara Osei",
+        "present": true,
+        "predicates": [
+          "related"
+        ],
+        "edges": [
+          {
+            "doc": "doc-02",
+            "predicate": "related",
+            "src": "Amara Osei",
+            "dst": "Product Manager",
+            "src_kind": "core:naturalPerson",
+            "dst_kind": "core:role",
+            "write_path": "structural"
+          }
+        ]
+      },
+      {
+        "role": "Account Executive",
+        "person": "Jonas Bauer",
+        "present": true,
+        "predicates": [
+          "related"
+        ],
+        "edges": [
+          {
+            "doc": "doc-02",
+            "predicate": "related",
+            "src": "Jonas Bauer",
+            "dst": "Account Executive",
+            "src_kind": "core:naturalPerson",
+            "dst_kind": "core:role",
+            "write_path": "structural"
+          }
+        ]
+      }
+    ],
+    "team_role_containment": [],
+    "ownership": [
+      {
+        "thing": "Lumen Core",
+        "owner": "Amara Osei",
+        "present": true,
+        "n_edges": 2,
+        "orientation": [
+          "INVERTED"
+        ],
+        "verdicts": [
+          {
+            "edge": {
+              "doc": "doc-02",
+              "predicate": "ownedBy",
+              "src": "Amara Osei",
+              "dst": "Lumen Core",
+              "src_kind": "core:naturalPerson",
+              "dst_kind": "product-strategy:product",
+              "write_path": "structural"
+            },
+            "direction": "->",
+            "src_is_owner": true,
+            "orientation": "INVERTED"
+          },
+          {
+            "edge": {
+              "doc": "doc-05",
+              "predicate": "ownedBy",
+              "src": "Amara Osei",
+              "dst": "Lumen Core",
+              "src_kind": "core:naturalPerson",
+              "dst_kind": "product-strategy:product",
+              "write_path": "structural"
+            },
+            "direction": "->",
+            "src_is_owner": true,
+            "orientation": "INVERTED"
+          }
+        ]
+      },
+      {
+        "thing": "ingest-gateway",
+        "owner": "Dana Whitlock",
+        "present": true,
+        "n_edges": 1,
+        "orientation": [
+          "INVERTED"
+        ],
+        "verdicts": [
+          {
+            "edge": {
+              "doc": "doc-02",
+              "predicate": "ownedBy",
+              "src": "Dana Whitlock",
+              "dst": "ingest-gateway component",
+              "src_kind": "core:naturalPerson",
+              "dst_kind": "dev:code",
+              "write_path": "structural"
+            },
+            "direction": "->",
+            "src_is_owner": true,
+            "orientation": "INVERTED"
+          }
+        ]
+      },
+      {
+        "thing": "on-call rotation",
+        "owner": "Tomas Ferreira",
+        "present": true,
+        "n_edges": 1,
+        "orientation": [
+          "INVERTED"
+        ],
+        "verdicts": [
+          {
+            "edge": {
+              "doc": "doc-02",
+              "predicate": "ownedBy",
+              "src": "Tomas Ferreira",
+              "dst": "on-call rotation",
+              "src_kind": "core:naturalPerson",
+              "dst_kind": "core:workflow",
+              "write_path": "structural"
+            },
+            "direction": "->",
+            "src_is_owner": true,
+            "orientation": "INVERTED"
+          }
+        ]
+      },
+      {
+        "thing": "enterprise renewals",
+        "owner": "Jonas Bauer",
+        "present": true,
+        "n_edges": 2,
+        "orientation": [
+          "INVERTED"
+        ],
+        "verdicts": [
+          {
+            "edge": {
+              "doc": "doc-02",
+              "predicate": "ownedBy",
+              "src": "Jonas Bauer",
+              "dst": "enterprise renewals",
+              "src_kind": "core:naturalPerson",
+              "dst_kind": "core:workflow",
+              "write_path": "structural"
+            },
+            "direction": "->",
+            "src_is_owner": true,
+            "orientation": "INVERTED"
+          },
+          {
+            "edge": {
+              "doc": "doc-04",
+              "predicate": "ownedBy",
+              "src": "Jonas Bauer",
+              "dst": "enterprise renewals",
+              "src_kind": "core:naturalPerson",
+              "dst_kind": "core:workflow",
+              "write_path": "structural"
+            },
+            "direction": "->",
+            "src_is_owner": true,
+            "orientation": "INVERTED"
+          }
+        ]
+      }
+    ],
+    "dependency": [
+      {
+        "dependent": "ingest-gateway",
+        "dependency": "event-bus",
+        "present": true,
+        "n_edges": 1,
+        "orientation": [
+          "correct"
+        ],
+        "verdicts": [
+          {
+            "edge": {
+              "doc": "doc-03",
+              "predicate": "dependsOn",
+              "src": "ingest-gateway component",
+              "dst": "event-bus",
+              "src_kind": "dev:code",
+              "dst_kind": "dev:code",
+              "write_path": "structural"
+            },
+            "orientation": "correct"
+          }
+        ]
+      },
+      {
+        "dependent": "event-bus",
+        "dependency": "fact-store",
+        "present": true,
+        "n_edges": 1,
+        "orientation": [
+          "correct"
+        ],
+        "verdicts": [
+          {
+            "edge": {
+              "doc": "doc-03",
+              "predicate": "dependsOn",
+              "src": "event-bus",
+              "dst": "fact-store",
+              "src_kind": "dev:code",
+              "dst_kind": "dev:code",
+              "write_path": "structural"
+            },
+            "orientation": "correct"
+          }
+        ]
+      },
+      {
+        "dependent": "signal-engine",
+        "dependency": "event-bus",
+        "present": true,
+        "n_edges": 1,
+        "orientation": [
+          "correct"
+        ],
+        "verdicts": [
+          {
+            "edge": {
+              "doc": "doc-03",
+              "predicate": "dependsOn",
+              "src": "signal-engine",
+              "dst": "event-bus",
+              "src_kind": "dev:code",
+              "dst_kind": "dev:code",
+              "write_path": "structural"
+            },
+            "orientation": "correct"
+          }
+        ]
+      },
+      {
+        "dependent": "signal-engine",
+        "dependency": "fact-store",
+        "present": true,
+        "n_edges": 1,
+        "orientation": [
+          "correct"
+        ],
+        "verdicts": [
+          {
+            "edge": {
+              "doc": "doc-03",
+              "predicate": "dependsOn",
+              "src": "signal-engine",
+              "dst": "fact-store",
+              "src_kind": "dev:code",
+              "dst_kind": "dev:code",
+              "write_path": "structural"
+            },
+            "orientation": "correct"
+          }
+        ]
+      },
+      {
+        "dependent": "web-dashboard",
+        "dependency": "signal-engine",
+        "present": true,
+        "n_edges": 1,
+        "orientation": [
+          "correct"
+        ],
+        "verdicts": [
+          {
+            "edge": {
+              "doc": "doc-03",
+              "predicate": "dependsOn",
+              "src": "web-dashboard",
+              "dst": "signal-engine",
+              "src_kind": "dev:code",
+              "dst_kind": "dev:code",
+              "write_path": "structural"
+            },
+            "orientation": "correct"
+          }
+        ]
+      },
+      {
+        "dependent": "web-dashboard",
+        "dependency": "auth-service",
+        "present": true,
+        "n_edges": 1,
+        "orientation": [
+          "correct"
+        ],
+        "verdicts": [
+          {
+            "edge": {
+              "doc": "doc-03",
+              "predicate": "dependsOn",
+              "src": "web-dashboard",
+              "dst": "auth-service",
+              "src_kind": "dev:code",
+              "dst_kind": "dev:code",
+              "write_path": "structural"
+            },
+            "orientation": "correct"
+          }
+        ]
+      },
+      {
+        "dependent": "auth-service",
+        "dependency": "identity-db",
+        "present": true,
+        "n_edges": 1,
+        "orientation": [
+          "correct"
+        ],
+        "verdicts": [
+          {
+            "edge": {
+              "doc": "doc-03",
+              "predicate": "dependsOn",
+              "src": "auth-service",
+              "dst": "identity-db",
+              "src_kind": "dev:code",
+              "dst_kind": "dev:code",
+              "write_path": "structural"
+            },
+            "orientation": "correct"
+          }
+        ]
+      }
+    ],
+    "other": [
+      {
+        "edge": {
+          "doc": "doc-05",
+          "predicate": "produces",
+          "src": "Platform team",
+          "dst": "ingest-gateway component",
+          "src_kind": "core:team",
+          "dst_kind": "dev:code",
+          "write_path": "structural"
+        },
+        "direction": "<-",
+        "src_is_producer": true,
+        "orientation": "INVERTED"
+      },
+      {
+        "edge": {
+          "doc": "doc-05",
+          "predicate": "produces",
+          "src": "Platform team",
+          "dst": "event-bus",
+          "src_kind": "core:team",
+          "dst_kind": "dev:code",
+          "write_path": "structural"
+        },
+        "direction": "<-",
+        "src_is_producer": true,
+        "orientation": "INVERTED"
+      },
+      {
+        "edge": {
+          "doc": "doc-05",
+          "predicate": "produces",
+          "src": "Platform team",
+          "dst": "fact-store",
+          "src_kind": "core:team",
+          "dst_kind": "dev:code",
+          "write_path": "structural"
+        },
+        "direction": "<-",
+        "src_is_producer": true,
+        "orientation": "INVERTED"
+      },
+      {
+        "edge": {
+          "doc": "doc-05",
+          "predicate": "produces",
+          "src": "Platform team",
+          "dst": "signal-engine",
+          "src_kind": "core:team",
+          "dst_kind": "dev:code",
+          "write_path": "structural"
+        },
+        "direction": "<-",
+        "src_is_producer": true,
+        "orientation": "INVERTED"
+      },
+      {
+        "edge": {
+          "doc": "doc-05",
+          "predicate": "produces",
+          "src": "Platform team",
+          "dst": "auth-service",
+          "src_kind": "core:team",
+          "dst_kind": "dev:code",
+          "write_path": "structural"
+        },
+        "direction": "<-",
+        "src_is_producer": true,
+        "orientation": "INVERTED"
+      },
+      {
+        "edge": {
+          "doc": "doc-05",
+          "predicate": "produces",
+          "src": "Platform team",
+          "dst": "identity-db",
+          "src_kind": "core:team",
+          "dst_kind": "dev:code",
+          "write_path": "structural"
+        },
+        "direction": "<-",
+        "src_is_producer": true,
+        "orientation": "INVERTED"
+      },
+      {
+        "edge": {
+          "doc": "doc-05",
+          "predicate": "produces",
+          "src": "Product team",
+          "dst": "web-dashboard",
+          "src_kind": "core:team",
+          "dst_kind": "dev:code",
+          "write_path": "structural"
+        },
+        "direction": "<-",
+        "src_is_producer": true,
+        "orientation": "INVERTED"
+      },
+      {
+        "edge": {
+          "doc": "doc-02",
+          "predicate": "related",
+          "src": "Dana Whitlock",
+          "dst": "Platform team",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:team",
+          "write_path": "structural"
+        },
+        "direction": "-"
+      },
+      {
+        "edge": {
+          "doc": "doc-02",
+          "predicate": "related",
+          "src": "Tomas Ferreira",
+          "dst": "Platform team",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:team",
+          "write_path": "structural"
+        },
+        "direction": "-"
+      },
+      {
+        "edge": {
+          "doc": "doc-02",
+          "predicate": "related",
+          "src": "Amara Osei",
+          "dst": "Product team",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:team",
+          "write_path": "structural"
+        },
+        "direction": "-"
+      },
+      {
+        "edge": {
+          "doc": "doc-02",
+          "predicate": "related",
+          "src": "Jonas Bauer",
+          "dst": "Customer team",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:team",
+          "write_path": "structural"
+        },
+        "direction": "-"
+      },
+      {
+        "edge": {
+          "doc": "doc-02",
+          "predicate": "related",
+          "src": "Dana Whitlock",
+          "dst": "Staff Engineer",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:role",
+          "write_path": "structural"
+        },
+        "direction": "-"
+      },
+      {
+        "edge": {
+          "doc": "doc-02",
+          "predicate": "related",
+          "src": "Tomas Ferreira",
+          "dst": "Site Reliability Engineer",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:role",
+          "write_path": "structural"
+        },
+        "direction": "-"
+      },
+      {
+        "edge": {
+          "doc": "doc-02",
+          "predicate": "related",
+          "src": "Amara Osei",
+          "dst": "Product Manager",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:role",
+          "write_path": "structural"
+        },
+        "direction": "-"
+      },
+      {
+        "edge": {
+          "doc": "doc-02",
+          "predicate": "related",
+          "src": "Jonas Bauer",
+          "dst": "Account Executive",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:role",
+          "write_path": "structural"
+        },
+        "direction": "-"
+      },
+      {
+        "edge": {
+          "doc": "doc-04",
+          "predicate": "related",
+          "src": "Northwind Logistics",
+          "dst": "mid-market utilities",
+          "src_kind": "product-strategy:customer",
+          "dst_kind": "product-strategy:customerSegment",
+          "write_path": "structural"
+        },
+        "direction": "-"
+      },
+      {
+        "edge": {
+          "doc": "doc-04",
+          "predicate": "related",
+          "src": "Helio Health",
+          "dst": "mid-market utilities",
+          "src_kind": "product-strategy:customer",
+          "dst_kind": "product-strategy:customerSegment",
+          "write_path": "structural"
+        },
+        "direction": "-"
+      },
+      {
+        "edge": {
+          "doc": "doc-05",
+          "predicate": "related",
+          "src": "Northwind Logistics",
+          "dst": "Lumen Core",
+          "src_kind": "product-strategy:customer",
+          "dst_kind": "product-strategy:product",
+          "write_path": "structural"
+        },
+        "direction": "-"
+      },
+      {
+        "edge": {
+          "doc": "doc-05",
+          "predicate": "related",
+          "src": "Helio Health",
+          "dst": "Lumen Field",
+          "src_kind": "product-strategy:customer",
+          "dst_kind": "product-strategy:product",
+          "write_path": "structural"
+        },
+        "direction": "-"
+      },
+      {
+        "edge": {
+          "doc": "doc-05",
+          "predicate": "related",
+          "src": "Northwind Logistics",
+          "dst": "mid-market utilities segment",
+          "src_kind": "product-strategy:customer",
+          "dst_kind": "product-strategy:customerSegment",
+          "write_path": "structural"
+        },
+        "direction": "-"
+      },
+      {
+        "edge": {
+          "doc": "doc-05",
+          "predicate": "related",
+          "src": "Helio Health",
+          "dst": "mid-market utilities segment",
+          "src_kind": "product-strategy:customer",
+          "dst_kind": "product-strategy:customerSegment",
+          "write_path": "structural"
+        },
+        "direction": "-"
+      },
+      {
+        "edge": {
+          "doc": "doc-05",
+          "predicate": "managedBy",
+          "src": "Jonas Bauer",
+          "dst": "Northwind Logistics",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "product-strategy:customer",
+          "write_path": "structural"
+        },
+        "direction": "->"
+      },
+      {
+        "edge": {
+          "doc": "doc-05",
+          "predicate": "managedBy",
+          "src": "Jonas Bauer",
+          "dst": "Helio Health",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "product-strategy:customer",
+          "write_path": "structural"
+        },
+        "direction": "->"
+      },
+      {
+        "edge": {
+          "doc": "doc-01",
+          "predicate": "IMPL",
+          "src": "Lumen Core",
+          "dst": "control-room customers",
+          "src_kind": "product-strategy:product",
+          "dst_kind": "product-strategy:customerSegment",
+          "write_path": "direct"
+        },
+        "direction": "?"
+      },
+      {
+        "edge": {
+          "doc": "doc-01",
+          "predicate": "IMPL",
+          "src": "Lumen Field",
+          "dst": "field crews",
+          "src_kind": "product-strategy:product",
+          "dst_kind": "product-strategy:customerSegment",
+          "write_path": "direct"
+        },
+        "direction": "?"
+      }
+    ],
+    "totals": {
+      "containment_present": "5/5",
+      "containment_parent_is_product": "5/5",
+      "membership_present": "4/4",
+      "role_links_present": "4/4",
+      "team_to_role_edges": 0,
+      "ownership_present": "4/4",
+      "ownership_oriented_correct": 0,
+      "ownership_inverted": 4,
+      "dependency_present_and_correct": "7/7"
+    },
+    "passes": false
+  },
+  "A3_hierarchy": {
+    "declared": {
+      "products": 2,
+      "features": 5,
+      "edges": 5
+    },
+    "reported": {
+      "hasPart_write_rows": 8,
+      "hasPart_distinct_pairs": 5,
+      "rewritten_by_a_later_doc": 3,
+      "distinct_parents": 2,
+      "distinct_children": 5,
+      "parents_that_are_products": [
+        "lumen core",
+        "lumen field"
+      ],
+      "children_that_are_features": [
+        "asset register",
+        "crew dispatch",
+        "grid map",
+        "load forecast",
+        "outage alerts"
+      ]
+    },
+    "flat_list": false,
+    "passes": true,
+    "edges": [
+      {
+        "doc": "doc-01",
+        "predicate": "hasPart",
+        "src": "Lumen Core",
+        "dst": "Grid Map",
+        "src_kind": "product-strategy:product",
+        "dst_kind": "product-strategy:feature",
+        "write_path": "structural"
+      },
+      {
+        "doc": "doc-01",
+        "predicate": "hasPart",
+        "src": "Lumen Core",
+        "dst": "Outage Alerts",
+        "src_kind": "product-strategy:product",
+        "dst_kind": "product-strategy:feature",
+        "write_path": "structural"
+      },
+      {
+        "doc": "doc-01",
+        "predicate": "hasPart",
+        "src": "Lumen Core",
+        "dst": "Load Forecast",
+        "src_kind": "product-strategy:product",
+        "dst_kind": "product-strategy:feature",
+        "write_path": "structural"
+      },
+      {
+        "doc": "doc-01",
+        "predicate": "hasPart",
+        "src": "Lumen Field",
+        "dst": "Crew Dispatch",
+        "src_kind": "product-strategy:product",
+        "dst_kind": "product-strategy:feature",
+        "write_path": "structural"
+      },
+      {
+        "doc": "doc-01",
+        "predicate": "hasPart",
+        "src": "Lumen Field",
+        "dst": "Asset Register",
+        "src_kind": "product-strategy:product",
+        "dst_kind": "product-strategy:feature",
+        "write_path": "structural"
+      },
+      {
+        "doc": "doc-05",
+        "predicate": "hasPart",
+        "src": "Lumen Core",
+        "dst": "Grid Map",
+        "src_kind": "product-strategy:product",
+        "dst_kind": "product-strategy:feature",
+        "write_path": "structural"
+      },
+      {
+        "doc": "doc-05",
+        "predicate": "hasPart",
+        "src": "Lumen Core",
+        "dst": "Outage Alerts",
+        "src_kind": "product-strategy:product",
+        "dst_kind": "product-strategy:feature",
+        "write_path": "structural"
+      },
+      {
+        "doc": "doc-05",
+        "predicate": "hasPart",
+        "src": "Lumen Core",
+        "dst": "Load Forecast",
+        "src_kind": "product-strategy:product",
+        "dst_kind": "product-strategy:feature",
+        "write_path": "structural"
+      }
+    ]
+  },
+  "A4_no_invention": {
+    "untraceable_entities": [
+      {
+        "kind": "agent-ops:rule",
+        "name": "ownership accountability convention"
+      }
+    ],
+    "declared_structure_untraceable": [],
+    "entity_names_checked": 34,
+    "invented_relations": [],
+    "quotes": {
+      "total": 50,
+      "verbatim": 11,
+      "paraphrase": 27,
+      "invented": 12,
+      "not_in_corpus": [
+        {
+          "doc": "doc-01",
+          "quote": "**Lumen Core**, the energy-operations platform that control-room customers run",
+          "best_sentence_overlap": 0.636,
+          "point": "Lumen Core is the energy-operations platform that control-room customers run."
+        },
+        {
+          "doc": "doc-01",
+          "quote": "**Lumen Field**, the mobile product their field crews run",
+          "best_sentence_overlap": 0.875,
+          "point": "Lumen Field is the mobile product that field crews run."
+        },
+        {
+          "doc": "doc-01",
+          "quote": "Lumen Core carries three features \u2014 Grid Map (network topology view), Outage Alerts (notifies operators when a feeder trips), and Load Forecast (predicts demand per substation).",
+          "best_sentence_overlap": 0.958,
+          "point": "Lumen Core carries three features: Grid Map, Outage Alerts, and Load Forecast."
+        },
+        {
+          "doc": "doc-01",
+          "quote": "Grid Map (network topology view)",
+          "best_sentence_overlap": 1.0,
+          "point": "Grid Map is the network topology view feature of Lumen Core."
+        },
+        {
+          "doc": "doc-01",
+          "quote": "Outage Alerts (notifies operators when a feeder trips)",
+          "best_sentence_overlap": 1.0,
+          "point": "Outage Alerts notifies operators when a feeder trips."
+        },
+        {
+          "doc": "doc-01",
+          "quote": "Load Forecast (predicts demand per substation)",
+          "best_sentence_overlap": 1.0,
+          "point": "Load Forecast predicts demand per substation."
+        },
+        {
+          "doc": "doc-01",
+          "quote": "Lumen Field carries two \u2014 Crew Dispatch (assigns crews to open jobs) and Asset Register (records pole and transformer inventory).",
+          "best_sentence_overlap": 0.941,
+          "point": "Lumen Field carries two features: Crew Dispatch and Asset Register."
+        },
+        {
+          "doc": "doc-01",
+          "quote": "Crew Dispatch (assigns crews to open jobs)",
+          "best_sentence_overlap": 1.0,
+          "point": "Crew Dispatch assigns crews to open jobs."
+        },
+        {
+          "doc": "doc-01",
+          "quote": "Asset Register (records pole and transformer inventory)",
+          "best_sentence_overlap": 1.0,
+          "point": "Asset Register records pole and transformer inventory."
+        },
+        {
+          "doc": "doc-02",
+          "quote": "Dana Whitlock as Staff Engineer ... on Platform",
+          "best_sentence_overlap": 1.0,
+          "point": "Dana Whitlock is the Staff Engineer on the Platform team"
+        }
+      ],
+      "invented_examples": [
+        {
+          "doc": "doc-01",
+          "quote": "The session confirmed there is no shared feature surface between the two: every feature belongs to exactly one product.",
+          "best_sentence_overlap": 0.357,
+          "point": "There is no shared feature surface between Lumen Core and Lumen Field: every feature belongs to exactly one product."
+        },
+        {
+          "doc": "doc-01",
+          "quote": "the two products are distinct delivery surfaces serving distinct users (operators vs.\n\nfield crews), not a single platform with a mobile skin.",
+          "best_sentence_overlap": 0.222,
+          "point": "Lumen Core and Lumen Field are distinct delivery surfaces serving distinct users (operators vs. field crews), not a single platform with a m"
+        },
+        {
+          "doc": "doc-01",
+          "quote": "Any future proposal to share or duplicate a feature across the boundary would be a change to this baseline, not a continuation of it.",
+          "best_sentence_overlap": 0.2,
+          "point": "Any future proposal to share or duplicate a feature across the Lumen Core / Lumen Field boundary would be a change to this baseline, not a c"
+        },
+        {
+          "doc": "doc-02",
+          "quote": "Three teams exist: Platform (engineering), Product (product management), and Customer (commercial).",
+          "best_sentence_overlap": 0.3,
+          "point": "Three teams exist: Platform (engineering), Product (product management), and Customer (commercial)"
+        },
+        {
+          "doc": "doc-02",
+          "quote": "ownership is a responsibility claim, so future questions of \"who decides / who is answerable\" route to these named owners rather than to whoever happens to be working on the item.",
+          "best_sentence_overlap": 0.211,
+          "point": "Ownership is a responsibility claim, so questions of who decides or who is answerable route to the named owners rather than to whoever happe"
+        },
+        {
+          "doc": "doc-03",
+          "quote": "We recorded the system architecture as a seven-component dependency graph: ingest-gateway (meter telemetry intake), event-bus (internal events), fact-store (time-series facts), signal-engine (outage s",
+          "best_sentence_overlap": 0.4,
+          "point": "The system architecture is a seven-component dependency graph: ingest-gateway, event-bus, fact-store, signal-engine, web-dashboard, auth-ser"
+        },
+        {
+          "doc": "doc-03",
+          "quote": "fact-store availability is not a local concern but a root dependency for telemetry ingestion and signal computation alike",
+          "best_sentence_overlap": 0.312,
+          "point": "Fact-store availability is not a local concern but a root dependency for telemetry ingestion and signal computation alike"
+        },
+        {
+          "doc": "doc-03",
+          "quote": "which tempers any future decision to treat fact-store resilience as a lower-priority item than the components visibly closer to operators",
+          "best_sentence_overlap": 0.167,
+          "point": "Fact-store resilience should not be treated as a lower-priority item than the components visibly closer to operators"
+        },
+        {
+          "doc": "doc-04",
+          "quote": "Enterprise renewals, owned by Jonas Bauer (Account Executive)",
+          "best_sentence_overlap": 0.571,
+          "point": "Enterprise renewals are owned by Jonas Bauer, Account Executive."
+        },
+        {
+          "doc": "doc-04",
+          "quote": "the segment is the planning unit, which supports treating it as the durable commercial frame",
+          "best_sentence_overlap": 0.3,
+          "point": "The segment being the planning unit supports treating it as the durable commercial frame."
+        }
+      ]
+    },
+    "warnings": {
+      "total": 36,
+      "no_source_turn": 26,
+      "token_overlap_band": 1,
+      "not_written": 2
+    },
+    "relations_not_written": [
+      {
+        "doc": "doc-04",
+        "warning": "narrative relation not written (#11237): transacts 'Northwind Logistics' \u2192 'Lumen Core' \u2014 `transacts` binds no declared write path (relation_write_paths() -> ()) \u2014 it is neither in the structural writer's predicate set nor bound to a mechanism, so nothing is w"
+      },
+      {
+        "doc": "doc-04",
+        "warning": "narrative relation not written (#11237): transacts 'Helio Health' \u2192 'Lumen Field' \u2014 `transacts` binds no declared write path (relation_write_paths() -> ()) \u2014 it is neither in the structural writer's predicate set nor bound to a mechanism, so nothing is written"
+      }
+    ],
+    "passes": true
+  },
+  "claim_layer": {
+    "quotes_total": 50,
+    "verbatim": 11,
+    "paraphrase": 27,
+    "invented": 12,
+    "invented_examples": [
+      {
+        "doc": "doc-01",
+        "quote": "The session confirmed there is no shared feature surface between the two: every feature belongs to exactly one product.",
+        "best_sentence_overlap": 0.357,
+        "point": "There is no shared feature surface between Lumen Core and Lumen Field: every feature belongs to exactly one product."
+      },
+      {
+        "doc": "doc-01",
+        "quote": "the two products are distinct delivery surfaces serving distinct users (operators vs.\n\nfield crews), not a single platform with a mobile skin.",
+        "best_sentence_overlap": 0.222,
+        "point": "Lumen Core and Lumen Field are distinct delivery surfaces serving distinct users (operators vs. field crews), not a single platform with a m"
+      },
+      {
+        "doc": "doc-01",
+        "quote": "Any future proposal to share or duplicate a feature across the boundary would be a change to this baseline, not a continuation of it.",
+        "best_sentence_overlap": 0.2,
+        "point": "Any future proposal to share or duplicate a feature across the Lumen Core / Lumen Field boundary would be a change to this baseline, not a c"
+      },
+      {
+        "doc": "doc-02",
+        "quote": "Three teams exist: Platform (engineering), Product (product management), and Customer (commercial).",
+        "best_sentence_overlap": 0.3,
+        "point": "Three teams exist: Platform (engineering), Product (product management), and Customer (commercial)"
+      },
+      {
+        "doc": "doc-02",
+        "quote": "ownership is a responsibility claim, so future questions of \"who decides / who is answerable\" route to these named owners rather than to whoever happens to be working on the item.",
+        "best_sentence_overlap": 0.211,
+        "point": "Ownership is a responsibility claim, so questions of who decides or who is answerable route to the named owners rather than to whoever happe"
+      },
+      {
+        "doc": "doc-03",
+        "quote": "We recorded the system architecture as a seven-component dependency graph: ingest-gateway (meter telemetry intake), event-bus (internal events), fact-store (time-series facts), signal-engine (outage s",
+        "best_sentence_overlap": 0.4,
+        "point": "The system architecture is a seven-component dependency graph: ingest-gateway, event-bus, fact-store, signal-engine, web-dashboard, auth-ser"
+      }
+    ],
+    "passes": false
+  },
+  "A5_retrieval": {
+    "probes": [
+      {
+        "element": "features-of-product",
+        "query": "What features belong to Lumen Core?",
+        "expected": [
+          "Grid Map",
+          "Outage Alerts",
+          "Load Forecast"
+        ],
+        "found_in_search_top8": {
+          "Grid Map": true,
+          "Outage Alerts": true,
+          "Load Forecast": true
+        },
+        "first_rank_in_search": {
+          "Grid Map": 2,
+          "Outage Alerts": 2,
+          "Load Forecast": 2
+        },
+        "answered_by_search_text": true,
+        "walk_root": "[user] And the features of each?",
+        "walk_root_is_entity": false,
+        "walk_neighbour_count": 1,
+        "top8": [
+          "[user] And the features of each?",
+          "Lumen Core carries three features: Grid Map, Outage Alerts, and Load Forecast.",
+          "Lumen Field carries two features: Crew Dispatch and Asset Register.",
+          "Northwind Logistics runs Lumen Core",
+          "[assistant] Amara Osei reviews dashboard changes because she owns Lumen Core, and Lumen Core contains Grid Map, Outage A",
+          "Northwind Logistics is a customer and runs Lumen Core in its control room.",
+          "Amara Osei owns Lumen Core, the product itself",
+          "Lumen Core is the energy-operations platform that control-room customers run."
+        ]
+      },
+      {
+        "element": "who-is-on-team",
+        "query": "Who is on the Platform team?",
+        "expected": [
+          "Dana Whitlock",
+          "Tomas Ferreira"
+        ],
+        "found_in_search_top8": {
+          "Dana Whitlock": true,
+          "Tomas Ferreira": true
+        },
+        "first_rank_in_search": {
+          "Dana Whitlock": 2,
+          "Tomas Ferreira": 1
+        },
+        "answered_by_search_text": true,
+        "walk_root": "Tomas Ferreira is the Site Reliability Engineer on the Platform team",
+        "walk_root_is_entity": false,
+        "walk_neighbour_count": 3,
+        "top8": [
+          "Tomas Ferreira is the Site Reliability Engineer on the Platform team",
+          "Dana Whitlock is the Staff Engineer on the Platform team",
+          "[assistant] There are three teams. The Platform team is the engineering team. The Product team is the product management",
+          "[user] Let us put the team structure on the record. Which teams do we have and who is in them?",
+          "Three teams exist: Platform (engineering), Product (product management), and Customer (commercial)",
+          "The Platform team builds the ingest-gateway, event-bus, fact-store, signal-engine, auth-service and identity-db",
+          "The Product team builds the web-dashboard with the Platform team's support",
+          "Lumen Core is the energy-operations platform that control-room customers run."
+        ]
+      },
+      {
+        "element": "depends-on-component",
+        "query": "What depends on the fact-store?",
+        "expected": [
+          "event-bus",
+          "signal-engine"
+        ],
+        "found_in_search_top8": {
+          "event-bus": true,
+          "signal-engine": true
+        },
+        "first_rank_in_search": {
+          "event-bus": 3,
+          "signal-engine": 1
+        },
+        "answered_by_search_text": true,
+        "walk_root": "The web-dashboard depends on the signal-engine and the auth-service",
+        "walk_root_is_entity": false,
+        "walk_neighbour_count": 5,
+        "top8": [
+          "The web-dashboard depends on the signal-engine and the auth-service",
+          "The auth-service depends on the identity-db",
+          "The event-bus depends on the fact-store",
+          "[user] So if the fact-store goes down, what breaks?",
+          "Fact-store availability is not a local concern but a root dependency for telemetry ingestion and signal computation alik",
+          "Fact-store resilience should not be treated as a lower-priority item than the components visibly closer to operators",
+          "[user] Which components depend on which?",
+          "The Platform team builds the ingest-gateway, event-bus, fact-store, signal-engine, auth-service and identity-db"
+        ]
+      },
+      {
+        "element": "product-of-customer",
+        "query": "Which product does Northwind Logistics run?",
+        "expected": [
+          "Lumen Core"
+        ],
+        "found_in_search_top8": {
+          "Lumen Core": true
+        },
+        "first_rank_in_search": {
+          "Lumen Core": 1
+        },
+        "answered_by_search_text": true,
+        "walk_root": "[assistant] Jonas Bauer (Account Executive): We have two named customers. Northwind Logistics is a customer, and Helio H",
+        "walk_root_is_entity": false,
+        "walk_neighbour_count": 1,
+        "top8": [
+          "[assistant] Jonas Bauer (Account Executive): We have two named customers. Northwind Logistics is a customer, and Helio H",
+          "[assistant] Northwind Logistics runs Lumen Core, and Helio Health runs Lumen Field. Both customers are in the mid-market",
+          "Northwind Logistics is a customer and runs Lumen Core in its control room.",
+          "Both Northwind Logistics and Helio Health sit inside the mid-market utilities segment.",
+          "[assistant] Our customer segment is mid-market utilities: regional electricity distributors with between fifty thousand ",
+          "[user] Is anything shared between the two products?",
+          "[assistant] Amara Osei (Product Manager): We sell two products. The first is Lumen Core, our energy-operations platform.",
+          "Northwind Logistics and Helio Health are both in the mid-market utilities segment"
+        ]
+      },
+      {
+        "element": "what-team-builds",
+        "query": "Which team builds the signal-engine?",
+        "expected": [
+          "Platform team"
+        ],
+        "found_in_search_top8": {
+          "Platform team": true
+        },
+        "first_rank_in_search": {
+          "Platform team": 4
+        },
+        "answered_by_search_text": true,
+        "walk_root": "The signal-engine depends on both the event-bus and the fact-store",
+        "walk_root_is_entity": false,
+        "walk_neighbour_count": 5,
+        "top8": [
+          "The signal-engine depends on both the event-bus and the fact-store",
+          "Three teams exist: Platform (engineering), Product (product management), and Customer (commercial)",
+          "The web-dashboard depends on the signal-engine and the auth-service",
+          "The Product team builds the web-dashboard with the Platform team's support",
+          "[user] Let us connect the structure: which team builds which component?",
+          "[assistant] There are three teams. The Platform team is the engineering team. The Product team is the product management",
+          "[user] Let us put the team structure on the record. Which teams do we have and who is in them?",
+          "The system architecture is a seven-component dependency graph: ingest-gateway, event-bus, fact-store, signal-engine, web"
+        ]
+      }
+    ],
+    "totals": {
+      "answered_by_search_text": "5/5",
+      "walk_resolved_to_an_ENTITY": "0/5"
+    },
+    "passes_text": true,
+    "passes_structure": false,
+    "verdict": "PARTIAL"
+  },
+  "door_findings": [
+    {
+      "id": "D1",
+      "question": "is this structural edge oriented src\u2192dst?",
+      "answer_over_mcp": "NO \u2014 the edge and its type are visible, its direction is not",
+      "evidence": {
+        "structural_edges_seen": [
+          "dependsOn",
+          "hasPart",
+          "managedBy",
+          "ownedBy"
+        ],
+        "explore_connections": "UNIONs -[r]-> with <-r- and keeps type(r) only (tortoise/navigation.py:172-179)",
+        "expand_relationships": "reports direction, but only for IMPL|NAND|hasPart (tortoise/entity_reads.py:551-559)",
+        "the_read_that_can": "entity_reads.entity_relations behind GET /v1/entities/{id}/relations \u2014 no MCP/SDK door"
+      }
+    },
+    {
+      "id": "D2",
+      "question": "can a declared structure element be resolved by NAME through the MCP doors?",
+      "answer_over_mcp": "NO for 2 of 32",
+      "unresolved": [
+        "component:ingest-gateway",
+        "ownedThing:ingest-gateway"
+      ]
+    },
+    {
+      "id": "D3",
+      "question": "does the full-scan door accept the BARE kind the packs declare?",
+      "answer_over_mcp": "NO \u2014 a bare kind returns an EMPTY list with no error while the namespaced spelling returns rows",
+      "evidence": {
+        "bare_returned": {
+          "object:product": 0,
+          "subject:team": 0
+        },
+        "namespaced_returned": {
+          "product-strategy:product": 2,
+          "product-strategy:feature": 5,
+          "product-strategy:customer": 2,
+          "product-strategy:customerSegment": 4,
+          "dev:code": 7,
+          "agent-ops:rule": 1,
+          "core:workflow": 2,
+          "core:team": 3,
+          "core:role": 4,
+          "core:naturalPerson": 4
+        },
+        "silent_zero_for": [
+          "object:product",
+          "subject:team"
+        ]
+      }
+    }
+  ],
+  "extraction_tokens": {
+    "calls": 19,
+    "prompt_tokens": 130804,
+    "completion_tokens": 17137,
+    "total_tokens": 147941,
+    "corpus_tokens_estimate": 1074,
+    "amplification_x": 138,
+    "by_doc": {
+      "doc-01": {
+        "calls": 3,
+        "prompt_tokens": 25328,
+        "completion_tokens": 3672,
+        "cost_usd": 0.0,
+        "calls_without_cost": 3
+      },
+      "doc-02": {
+        "calls": 4,
+        "prompt_tokens": 26079,
+        "completion_tokens": 2992,
+        "cost_usd": 0.0,
+        "calls_without_cost": 4
+      },
+      "doc-03": {
+        "calls": 4,
+        "prompt_tokens": 26345,
+        "completion_tokens": 3512,
+        "cost_usd": 0.0,
+        "calls_without_cost": 4
+      },
+      "doc-04": {
+        "calls": 4,
+        "prompt_tokens": 25496,
+        "completion_tokens": 2366,
+        "cost_usd": 0.0,
+        "calls_without_cost": 4
+      },
+      "doc-05": {
+        "calls": 4,
+        "prompt_tokens": 27556,
+        "completion_tokens": 4595,
+        "cost_usd": 0.0,
+        "calls_without_cost": 4
+      }
+    }
+  },
+  "edge_count": 46,
+  "edges_by_predicate": {
+    "hasPart": 8,
+    "IMPL": 2,
+    "related": 14,
+    "ownedBy": 6,
+    "dependsOn": 7,
+    "produces": 7,
+    "managedBy": 2
+  },
+  "verdicts": {
+    "A1": "PASS",
+    "A2": "FAIL",
+    "A3": "PASS",
+    "A4": "PASS",
+    "A5": "PARTIAL"
+  }
+}
