@@ -1682,9 +1682,33 @@ _RESTART_CUE = "Restart your client"
 # The predicate stems carry their OWN morphology: `verify\w*` (an earlier cut)
 # cannot match "verified" (y→i), and `ensure\w*` cannot match "ensuring" (the
 # silent e) — both measured as false PASSES of the very form this set grades.
+# ⛔ ONE DOC-REFERENCE RULE, USED BY EVERY FORM. A documentation noun after
+# `tools`, or a participial doc phrase after it ("the tools listed above", "the
+# tools available in this guide"), is a CROSS-REFERENCE, not a presence claim —
+# and correct copy that points at the docs went RED in every form that lacked
+# this. Two forms carried different, shorter lists, so `… checked the tools
+# overview` was GREEN in one and RED in the other, and forms (b)/(c)/(d) had no
+# exclusion at all (each measured). The rule is defined once here and appended to
+# every form's object, so it cannot drift again.
+_DOC_NOUN = (r"(?:section|reference|table|guide|docs?|page|overview|summary"
+             r"|readme|appendix)")
+_DOC_PARTICIPLE = r"(?:listed|shown|available|described|documented)"
+_DOC_PLACE = (r"(?:above|below|earlier|later|here|there|in\s+this\s+guide"
+              r"|in\s+the\s+table|on\s+this\s+page)")
+# Appended immediately after the object in a form's pattern.
+_NOT_A_DOC = (r"(?!\s+" + _DOC_NOUN + r"\b)"
+              r"(?!\s+" + _DOC_PARTICIPLE + r"\s+" + _DOC_PLACE + r"\b)")
+
 _CONFIRM_PREDICATE = (
     r"\b(?:confirm|check|verif(?:y|ies|ied|ying)|ensur(?:e|es|ed|ing)"
     r"|see|saw|seen|look|list)(?:ing|ed|s|es|d)?\b"
+    # ⛔ A NEGATED OBJECT IS A SYMPTOM CONDITION, NOT A CONFIRMATION. "if you see
+    # NO tools in the list" describes the failure the restart fixes — the same
+    # class this table already declares GREEN as "if you cannot see the tools in
+    # the list" — and it was RED (measured) with `no` / `none` / `zero` /
+    # `nothing`, because negation by anything but `cannot` fell through the
+    # predicate. The lookahead sits on the PREDICATE, so every form inherits it.
+    r"(?!\s+(?:no|none|zero|nothing|not)\b)"
 )
 
 
@@ -1737,9 +1761,7 @@ _PRE_CUE_ONLY = _inversion_form(
     # date" — the one shape the predicate arm alone would still refuse). The
     # predicate arm above is what carries the general case; this list only
     # guards the copula-after-a-doc-noun shape, so it stays small on purpose.
-    r"(?!\s+(?:section|reference|table|guide|docs?|page|overview|summary"
-    r"|readme|appendix)\b)"
-    r"(?:\s+[\w'’-]+){0,3}\s+"
+    + _NOT_A_DOC + r"(?:\s+[\w'’-]+){0,3}\s+"
     r"(?:are|is|was|were|be|been|appear|appears|show|shows|listed|visible"
     r"|available|loaded|enabled|present|running|live|up|there|exist|exists"
     r"|work|works|load|loads|connect|connects|respond|responds|import"
@@ -1841,12 +1863,12 @@ _INVERSION_FORMS = (
         r"(?:\w+ly|first|already|just|also)\s+)*)"
         r"(?:\w+-)?"
         + _CONFIRM_PREDICATE
-        + r"[^\n]*?\btools\b(?!\s+(?:section|reference|table|guide|docs?|page"
-        r"|overview|summary|readme|appendix)\b)"
+        + r"[^\n]*?\btools\b" + _NOT_A_DOC
     ),
     # (b) a participle that places the confirmation before the restart:
     #     "Restart your client, having first confirmed the tools are there".
-    _inversion_form(r"\bhaving\b[^\n]*?" + _CONFIRM_PREDICATE + r"[^\n]*?\btools\b"),
+    _inversion_form(r"\bhaving\b[^\n]*?" + _CONFIRM_PREDICATE
+                    + r"[^\n]*?\btools\b" + _NOT_A_DOC),
     # (c) an ADVERSATIVE clause leading with the pre-restart marker:
     #     "Restart your client, but first confirm the tools are actually there".
     #     A BARE leading "first" is deliberately not graded — "Restart your
@@ -1855,7 +1877,7 @@ _INVERSION_FORMS = (
     _inversion_form(
         r"^(?:but|however|though|yet)\b[^\n]*?\b(?:first|beforehand)\b[^\n]*?"
         + _CONFIRM_PREDICATE
-        + r"[^\n]*?\btools\b"
+        + r"[^\n]*?\btools\b" + _NOT_A_DOC
     ),
     # (d) a marker trailing the object, unambiguous about the order:
     #     "… confirm the tools are actually there beforehand". `first` is the
@@ -1871,7 +1893,7 @@ _INVERSION_FORMS = (
     #     confirmed, and reding it turned a declared-GREEN row RED under a
     #     one-word change (measured; its adversative twin below still reds).
     _inversion_form(
-        _CONFIRM_PREDICATE + r"[^\n]*?\btools\b[^\n]*?"
+        _CONFIRM_PREDICATE + r"[^\n]*?\btools\b" + _NOT_A_DOC + r"[^\n]*?"
         r"(?:\b(?:beforehand|before restarting|before you restart)\b"
         r"|\bfirst\b(?=[\s.,;:!?)\]}\"'`*_—–…]*$))"
     ),
@@ -1880,7 +1902,7 @@ _INVERSION_FORMS = (
     #     already there" = confirm first). Measured GREEN before this form.
     _inversion_form(
         r"^(?:but|however|though|yet)\b[^\n]*?" + _CONFIRM_PREDICATE
-        + r"[^\n]*?\btools\b[^\n]*?\balready\b"
+        + r"[^\n]*?\btools\b" + _NOT_A_DOC + r"[^\n]*?\balready\b"
     ),
     # (e) the restart conditioned on the tools ALREADY being present:
     #     "Restart your client only once the tools are actually there",
@@ -1957,6 +1979,12 @@ _CONFIG_PREP_RE = re.compile(
 # running session. Deliberately bound to the state copula (`are|is|get`), never
 # to a confirmation predicate — "after confirming the tools are installed" is a
 # check of the file and is exempt for the same reason.
+# The RUNNING-SESSION half of the same question: does the clause claim the tools
+# the CURRENT session can see? Used to stop an install-side anchor from excusing
+# a clause that also makes a session-presence claim.
+_SESSION_PRESENCE_RE = re.compile(
+    r"\b(?:actually\s+there|there|listed|present|visible|appearing|appears?"
+    r"|show(?:s)?\s+up|in\s+the\s+list)\b", re.IGNORECASE)
 _INSTALL_SIDE_RE = re.compile(
     r"\btools\b[^\n]*?\b(?:are|is|get|gets|getting)\s+"
     r"(?:installed|configured|enabled|set\s+up|added|wired|on\s+the\s+allowlist)\b",
@@ -2031,7 +2059,15 @@ _ADVERSATIVE_LEAD_RE = re.compile(r"^(?:but|however|though|yet)\b", re.IGNORECAS
 # that anchors on its own punctuation. Replaced by a SPACE, never deleted: `_`
 # and `*` can sit between the words of a sequencer run, and deleting them would
 # fuse tokens a `\b` boundary depends on.
-_DECORATION_RE = re.compile(r"[*_`>]")
+# ⛔ WORD-INTERNAL `_`/`*` ARE NOT DECORATION. An unconditional substitution
+# turns `check_then` into "check then", which MANUFACTURES the boundary the
+# tail anchor needs — so `run `check_then`, once the tools are listed` went
+# GREEN (measured) with the inverting clause skipped. Only a decoration
+# that is NOT flanked by word characters is replaced, and the set carries
+# the bracket/brace glyphs the clause strip set (`_PRE_CUE_PREFIX`) already
+# has, or `[then]` / `{then}` stayed RED while `**then**` was GREEN.
+_DECORATION_RE = re.compile(
+    r"(?<![A-Za-z0-9])[*_`>\[\]{}|]|[*_`>\[\]{}|](?![A-Za-z0-9])")
 
 
 def _confirmation_scopes_the_config(clause: str) -> bool:
@@ -2061,8 +2097,14 @@ def _confirmation_scopes_the_config(clause: str) -> bool:
     tools_at = clause.lower().find("tools")
     if tools_at < 0:
         return False
-    # An installation/config STATE is file-side whatever else the clause says.
-    if _INSTALL_SIDE_RE.search(clause):
+    # An installation/config STATE is file-side — but it is an ANCHOR, not a
+    # short-circuit. Returning True here BYPASSED the conjunction rule below, so
+    # `… confirming the tools are installed AND the tools are actually there` was
+    # GREEN while its `are actually there`-only twin is a declared-RED row
+    # (measured, with its `configured and they appear in the list` twin). A
+    # clause that also claims the RUNNING session's tools is still an inversion.
+    if (_INSTALL_SIDE_RE.search(clause)
+            and not _SESSION_PRESENCE_RE.search(clause)):
         return True
     before = clause[:tools_at]
     after_object = clause[tools_at:]
@@ -2141,7 +2183,17 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     forms. Rephrasings outside that set are out of scope BY DESIGN; this function
     grades what it claims and claims only what it grades.
     """
-    para = next(p for p in quick.split("\n\n") if _RESTART_CUE in p)
+    # ⛔ EVERY CUE PARAGRAPH, not just the first. `next(...)` graded only the
+    # first paragraph containing the cue, so a troubleshooting/FAQ paragraph
+    # later in the doc could invert the order with no signal (measured).
+    for para in [p for p in quick.split("\n\n") if _RESTART_CUE in p]:
+        violation = _paragraph_cue_order_violation(para)
+        if violation is not None:
+            return violation
+    return None
+
+
+def _paragraph_cue_order_violation(para: str) -> str | None:
     flat = " ".join(para.split())
     cue_at = flat.index(_RESTART_CUE)
     before, after = flat[:cue_at], flat[cue_at + len(_RESTART_CUE):]
@@ -2540,6 +2592,63 @@ def test_3232_generic_restart_lines_are_exact():
      "the tools are actually there.", True),
     ("Verify the tools are actually there. Restart your client, then confirm "
      "the tools are actually there.", True),
+    # ── an INSTALLATION-side state is an ANCHOR, not a short-circuit. Each of
+    # these ALSO claims the running session's tools, so the conjunction rule
+    # still grades it — they were GREEN while the install-side return
+    # short-circuited the rule (measured), against a declared-RED row one
+    # phrase away:
+    ("Restart your client after confirming the tools are installed and the "
+     "tools are actually there.", True),
+    ("Restart your client after confirming the tools are installed and "
+     "actually listed in the client.", True),
+    ("Restart your client, but first confirm the tools are configured and they "
+     "appear in the list.", True),
+    ("Confirm the tools are installed and the tools are actually there. "
+     "Restart your client, then confirm the tools are actually there.", True),
+    # ── ONE doc-reference rule for EVERY form (`_NOT_A_DOC`). Before it was
+    # shared, form (a) carried a shorter noun list than form (f) — so
+    # `overview`/`summary`/`readme`/`appendix` were GREEN before the cue and RED
+    # after it — and forms (b)/(c)/(d) had no exclusion at all, so a PARTICIPLE
+    # doc reference ("the tools listed above") redded in every form (measured):
+    ("Restart your client after you have checked the tools overview.", False),
+    ("Restart your client, having checked the tools reference.", False),
+    ("Restart your client, but first check the tools reference.", False),
+    ("Restart your client, check the tools reference beforehand.", False),
+    ("Check the tools listed above for the exact names. Restart your client, "
+     "then confirm the tools are actually there.", False),
+    ("See the tools available in this guide. Restart your client, then confirm "
+     "the tools are actually there.", False),
+    # ── a NEGATED object is a SYMPTOM condition, the same class as the declared
+    # GREEN `if you cannot see the tools in the list` — `no`/`none`/`zero` were
+    # RED because negation by anything but `cannot` fell through the predicate:
+    ("Restart your client if you see no `tortoise_*` tools.", False),
+    ("Restart your client if you see zero tools in the list.", False),
+    # ── form (f)'s `see` verb, which carried no discriminating row (every other
+    # `See the tools …` row is doc-excluded and stayed GREEN either way):
+    ("See the tools are actually there. Restart your client, then confirm the "
+     "tools are actually there.", True),
+    # ── `_DECORATION_RE` is word-internal-safe. An unconditional substitution
+    # turned `check_then` into "check then" and MANUFACTURED the sequencer the
+    # tail anchor needs, so this inverting clause was skipped (measured):
+    ("Restart your client, run `check_then`, once the tools are listed, run "
+     "`tortoise mcp-status`.", True),
+    # ── the clause-strip set and the decoration-cleared copy carry the SAME
+    # glyphs, or `[then]`/`{then}` were RED while `**then**` was GREEN:
+    ("Restart your client, [then], once the tools are listed, run `tortoise "
+     "mcp-status`.", False),
+    ("Restart your client, {then}, once the tools are listed, run `tortoise "
+     "mcp-status`.", False),
+    # ── the PRE-CUE `after restarting` exemption, which changed no row before
+    # this one existed — a pre-restart check that defers its own assertion past
+    # the restart is forward copy:
+    ("Confirm the tools are working after restarting. Restart your client, "
+     "then confirm the tools are actually there.", False),
+    # ── `_CONFIG_PREP_RE`'s POSITIVE half. The four install-side rows above are
+    # satisfied by `_INSTALL_SIDE_RE` alone, so this arm had no row of its own;
+    # `are listed` is not an install participle, so only this regex can exempt it:
+    ("Restart your client after checking the tools are listed in your client "
+     "settings.", False),
+    ("Restart your client after checking the tools are listed in them.", False),
     # two file-side facts CONJOINED are still file-side (measured RED before the
     # pronoun arm existed), and so is a config fact named after the object:
     ("Restart your client after confirming the config file exists and the tools "
@@ -2921,6 +3030,21 @@ def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     else:
         assert violation is None, (
             f"false red on forward copy ({violation!r}): {line!r}")
+
+
+def test_3232_every_cue_paragraph_is_graded():
+    """⛔ NOT JUST THE FIRST CUE PARAGRAPH. A troubleshooting or FAQ paragraph
+    that repeats the cue can invert the order, and `next(...)` graded only the
+    first paragraph containing the cue — so the second one shipped with no signal
+    (measured). The doc-level test above cannot cover this: the real quickstart
+    has a single cue paragraph."""
+    good = "Restart your client, then confirm the tools are actually there."
+    bad = "Restart your client after confirming the tools are actually there."
+    assert _restart_cue_order_violation(f"{good}\n\n{good}") is None
+    assert _restart_cue_order_violation(f"{bad}\n\n{good}") is not None
+    assert _restart_cue_order_violation(f"{good}\n\n{bad}") is not None, (
+        "a SECOND cue paragraph must be graded — this is the shape that was "
+        "silent while only the first paragraph was read")
 
 
 # The POSITIVE bound's window, pinned. Without these rows the window is unpinned:
