@@ -1383,6 +1383,15 @@ def _destination_probes(
         # test that separates it from the lookalike. Requiring the index picks the
         # fail-CLOSED side for the shape that has bytes to lose and leaves the heuristic
         # from over-blocking a directory that has none.
+        # ⛔ AND THE FLOOR IS PRESENCE, NOT VALIDITY, ON PURPOSE (#14741 review, cycle 4,
+        # RESIDUAL, measured): a lookalike that also holds a file or directory named
+        # `index` is still over-blocked. The obvious refinement — require the 4-byte
+        # `DIRC` signature — trades that over-block for a FAIL-OPEN on a gitdir whose
+        # index is corrupt or truncated, because git cannot read such an index either, so
+        # the boundary would be skipped and the enclosing repository's permit would
+        # overwrite the only file that recorded the tracking. Presence-only is the
+        # fail-closed choice for bytes at risk; this over-block class is narrowed, not
+        # closed.
         if not (os.path.lexists(boundary / ".git")
                 or (_looks_like_git_metadata(boundary)
                     and (boundary / "index").exists())):
@@ -1440,11 +1449,29 @@ def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
             # (#14741 review, P2 + cycle 2 P1, measured). Naming the BOUNDARY, not the
             # destination: the destination is fine, the repository entry on its path is
             # the damage.
+            # ⛔ THE DIAGNOSIS MUST BE TRUE OF THE FORM IT NAMES (#14741 review,
+            # cycle 4, P2, measured). `spec is None` is recorded for BOTH boundary
+            # forms, and the two are damaged in different places: a `.git`-POINTER
+            # boundary (the dangling-symlink row of `_boundary_is_unaskable`'s own table)
+            # has no work-tree index AT the boundary at all — its index lives in the
+            # gitdir the entry points at, and in that row the gitdir does not exist — so
+            # telling the operator it "carries a git index" sends them to a repair that
+            # cannot exist. Only the metadata-in-place form is required to hold one (the
+            # `index` term in `_destination_probes`).
+            if os.path.lexists(cwd / ".git"):
+                detail = (
+                    "that directory's `.git` entry does not resolve to a repository git\n"
+                    "will use, so it answers as the repository ABOVE it — and that\n"
+                    "repository does not hold this path."
+                )
+            else:
+                detail = (
+                    "that directory carries a git index but git does not resolve it as a\n"
+                    "repository of its own, so it answers as the repository ABOVE it —\n"
+                    "and that repository does not hold this path."
+                )
             print(
-                f"render: could not probe {label} for tracking: git does not resolve\n"
-                "that directory as a repository of its own, even though it carries a git\n"
-                "index, so it answers as the repository ABOVE it — and that repository\n"
-                "does not hold this path.",
+                f"render: could not probe {label} for tracking: {detail}",
                 file=sys.stderr,
             )
             return 2

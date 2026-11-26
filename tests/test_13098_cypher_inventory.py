@@ -5431,7 +5431,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `objects/`+`refs/` directory unaskable and turned a legitimate render into rc 2
     # (#14741 review, cycle 4, P2, measured against `origin/main`).
     assert len(split_arms) == 61, (
-        f"expected EXACTLY 60 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
+        f"expected EXACTLY 61 named split arms; got {len(split_arms)} — either a "
+        "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
     missing = sorted(split_arms - defined)
@@ -5440,7 +5441,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 60` reds a name PRUNED from the literal and `missing` reds a
+    # `len(split_arms) == 61` reds a name PRUNED from the literal and `missing` reds a
     # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
