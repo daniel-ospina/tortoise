@@ -839,8 +839,17 @@ def test_the_quote_audit_artifact_is_re_derived_from_the_receipt():
     # must equal the invented arm the same scorer reports.
     assert quotes["not_in_corpus"] == audit["not_in_corpus"], (
         quotes["not_in_corpus"], audit["not_in_corpus"])
-    assert quotes["not_in_corpus"] == quotes["invented"], (
-        "`not_in_corpus` and `invented` are the same population, counted twice")
+    # ⛔ THE AUDIT'S POPULATION IS SENTENCE-SCOPED, AND THAT IS NOT THE INVENTED ONE
+    # (#14723 review, round 10, P2). `not_in_corpus` used to be asserted equal to
+    # `invented` because both were the single-sentence bucket. A faithful multi-fact
+    # summary cannot clear a single-sentence band, so the decider is now the TURN and
+    # the two populations differ by exactly the summaries: 12 = 9 invented + 3
+    # summaries. The audit artifact is untouched — it measured what it measured.
+    assert quotes["not_in_corpus"] == quotes["below_sentence_band"], (
+        "`not_in_corpus` is the SENTENCE-scope population, not the invented count")
+    assert (quotes["invented"] + quotes["summary_in_one_turn"]
+            == quotes["below_sentence_band"]), (
+        "the below-sentence-band population is not (invented + summary)")
     assert (audit["quotes_total"]
             == audit["verbatim"] + audit["paraphrase"] + audit["not_in_corpus"])
     # The `audited` rows are a SAMPLE, not a population, and the artifact does not
@@ -865,7 +874,8 @@ def test_the_quote_audit_artifact_is_re_derived_from_the_receipt():
     # already derives both populations on this run, so membership is available
     # without trusting the peer's prose.
     derived = [_norm_words(e["quote"])
-               for e in quotes["paraphrase_examples"] + quotes["invented_examples"]]
+               for e in quotes["paraphrase_examples"] + quotes["summary_examples"]
+               + quotes["invented_examples"]]
     for row in audit["audited"]:
         quote = _norm_words(row["quote"])[:80]
         assert quote and any(d.startswith(quote) or quote.startswith(d)
@@ -876,6 +886,7 @@ def test_the_quote_audit_artifact_is_re_derived_from_the_receipt():
     # sample is complete, which is the same "a length is not a count" defect.
     assert quotes["paraphrase_examples_truncated"] is (quotes["paraphrase"] > 10)
     assert quotes["invented_examples_truncated"] is (quotes["invented"] > 10)
+    assert quotes["summary_examples_truncated"] is (quotes["summary_in_one_turn"] > 10)
     for per_list, population in (("paraphrase_examples_truncated", "paraphrase"),
                                  ("invented_examples_truncated", "invented")):
         assert per_list in quotes, (
@@ -907,16 +918,32 @@ def test_the_quote_breakdown_in_the_report_is_the_claim_layer():
     #14691 review (5th cycle, F1): `(11 verbatim / 27 paraphrase / 12 not in
     corpus)` -> `(50 / 0 / 0)` left 18/18 green, so the prose could state a
     fidelity the artifact refutes.
+    ⛔ AND `12 not in the corpus` WAS ITSELF THE NEXT DEFECT (#14723 review, round
+    10, P2): 12 is the SENTENCE-scope population, 3 of which the corpus does
+    state. §7 now carries the DECIDER's count (invented) and names the 12 as the
+    single-sentence population, so both numbers are pinned and neither is glossed
+    as the other.
     """
     cl = _score()["claim_layer"]
     want = (f"**{cl['verbatim']} verbatim / {cl['paraphrase']} paraphrase / "
-            f"{cl['invented']} not in the corpus**")
+            f"{cl['invented']} unstated in any turn**")
     flat = " ".join(_report().split())
     assert want in flat, (
         f"REPORT.md's §7 quote breakdown is not the claim layer's: expected "
         f"{want!r}")
-    # ...and the claim layer's own count is the artifact's (§8 table row)
-    assert cl["not_in_corpus"] == cl["invented"], cl
+    # ...and the two populations §7 names are the artifact's, each by its own name
+    assert cl["not_in_corpus"] == cl["below_sentence_band"], cl
+    assert cl["not_in_corpus"] != cl["invented"], (
+        "§7 and the artifact agree only if the sentence-scope population is NOT "
+        "the invented count — otherwise the round-10 P2 gloss is back")
+    assert (f"**{cl['below_sentence_band']}** below the single-sentence band"
+            in flat), (
+        "§7 no longer names the peer audit's single-sentence population")
+    assert (f"**{cl['summary_in_one_turn']}**" in flat
+            or f"{cl['summary_in_one_turn']} summaries" in flat), (
+        "§3's A4 table does not carry the summary bucket")
+    assert cl["verbatim"] + cl["paraphrase"] + cl["summary_in_one_turn"] \
+        + cl["invented"] == cl["quotes_total"]
 
 
 def test_the_orphan_second_measurement_agrees_with_the_primary():
@@ -961,6 +988,44 @@ def test_the_orphan_second_measurement_agrees_with_the_primary():
     assert iv["A3"]["distinct_hasPart_pairs"] == a3["hasPart_distinct_pairs"] == 5
     assert len(iv["A2"]["hasPart"]) == 5
     assert len(iv["A2"]["dependsOn"]) == 7
+
+
+def test_D6_owners_and_row_count_are_DERIVED_not_typed():
+    r"""Reds if D6's owner set or its `ownedBy` figure is a literal.
+
+    ⛔ #14723 review, round 10, P3. `asked_owners` filtered the witness names
+    against a HARDCODED
+    `{"Amara Osei", "Dana Whitlock", "Tomas Ferreira", "Jonas Bauer"}` and the
+    answer's figure "holding 6 ownedBy rows" was typed. Both are facts about this
+    run, so a re-run with a different population would emit a finding whose number
+    contradicts the artifacts — and the REPORT↔artifact arm could not see it,
+    because a shared literal drifts on both sides at once.
+
+    MEASURED on the pre-fix code: `evidence.owned_by_rows` does not exist (the
+    row count was only ever prose), and dropping a person from the DECLARED people
+    left `owners_asked` at all four — the witness filter never read the corpus.
+    """
+    module = _load_score_module()
+
+    def d6(mod):
+        return {f["id"]: f for f in mod._door_findings()}["D6"]
+
+    baseline = d6(module)
+    owned_rows = [e for e in module.EDGES if e["predicate"] == "ownedBy"]
+    assert baseline["evidence"]["owned_by_rows"] == len(owned_rows), (
+        "D6's ownedBy figure is not the write receipt's row count")
+    assert f"holding {len(owned_rows)} ownedBy rows" in baseline["answer_over_mcp"]
+    assert baseline["evidence"]["owners_asked"] == sorted(
+        set(module.DECL["people"])
+        & set((module.READBACK.get("link_witness") or {}).keys()))
+    # ...and the owner set FOLLOWS the declared people: remove one, D6 asks three
+    module.DECL["people"] = [p for p in module.DECL["people"]
+                             if p != "Jonas Bauer"]
+    mutated = d6(module)
+    assert "Jonas Bauer" not in mutated["evidence"]["owners_asked"], (
+        "D6 still asks a person the corpus no longer declares — the set is a "
+        "literal, so a re-run with a different population would keep the old one")
+    assert len(mutated["evidence"]["owners_asked"]) == 3
 
 
 def test_each_door_finding_answer_states_the_artifacts_ANSWER():
@@ -1226,7 +1291,8 @@ def test_the_A4_count_TABLE_and_the_S8_artifact_row_are_the_claim_layer():
     rows = {
         "verbatim": _report_line(r"^\| verbatim \(a real substring of the corpus\)"),
         "paraphrase": _report_line(r"^\| paraphrase \(≥60% of the quote"),
-        "invented": _report_line(r"^\| \*\*invented\*\* \(<60% overlap"),
+        "summary_in_one_turn": _report_line(r"^\| summary — the same share only"),
+        "invented": _report_line(r"^\| \*\*no ≥60% support in any corpus turn\*\*"),
     }
     for bucket, row in rows.items():
         assert row, f"REPORT.md has no A4 count row for {bucket!r}"
@@ -1237,6 +1303,8 @@ def test_the_A4_count_TABLE_and_the_S8_artifact_row_are_the_claim_layer():
     # TWO rows name that artifact (§7's source list and §8's artifact table);
     # the one that STATES the figures is the one pinned here, and the other
     # stating a DIFFERENT figure would be caught by the sentence pin above.
+    # ⛔ THE ROW CARRIES THE AUDIT'S OWN (SENTENCE-SCOPE) NUMBER, not `invented`
+    # (#14723 review, round 10, P2) — the artifact counted what its rule counted.
     audit_row = _report_line(r"^\| `out/t6-quote-audit\.json` \|.*verbatim")
     assert audit_row, "REPORT.md §8 has no row for out/t6-quote-audit.json"
     want = (f"({claim['verbatim']} verbatim / {claim['paraphrase']} paraphrase / "
@@ -1414,9 +1482,17 @@ def test_the_over_typed_table_matches_the_paragraph_that_describes_it():
     #   `11 / 1 / 27`     -> `11 / 2 / 26`   (a false histogram, in the sentence
     #                                    whose stated purpose is to read it)
     quotes_for_bands = _score()["A4_no_invention"]["quotes"]
-    assert f"**{quotes_for_bands['invented']}** at `< 0.6`" in flat, (
-        "the report's below-0.6 total is not `invented` "
-        f"({quotes_for_bands['invented']})")
+    # ⛔ THE SENTENCE READS THE SENTENCE-SCOPE HISTOGRAM, so the figure it states is
+    # the SENTENCE-scope population (`below_sentence_band`), not `invented`
+    # (#14723 review, round 10, P2: those diverged once the decider moved to the
+    # turn, and pinning the wrong one would force the prose back to the gloss).
+    assert f"**{quotes_for_bands['below_sentence_band']}** at `< 0.6`" in flat, (
+        "the report's below-0.6 total is not `below_sentence_band` "
+        f"({quotes_for_bands['below_sentence_band']})")
+    assert (f"{quotes_for_bands['invented']} of those are unsupported by any corpus "
+            f"turn" in flat), (
+        "the sentence-scope figure is not qualified with the invented count it "
+        "does not equal")
     triple = f"{bands['below_0_5']} / {bands['from_0_5_to_0_6']} / {bands['at_or_above_0_6']}"
     assert f"`{triple}`" in flat, (
         f"the report's band histogram is not the artifact's ({triple}) — a false "
@@ -1427,12 +1503,23 @@ def test_the_over_typed_table_matches_the_paragraph_that_describes_it():
     assert sum(bands.values()) == quotes["total"] - quotes["verbatim"], (
         bands, quotes["total"], quotes["verbatim"])
     # the two real invariants of the histogram against the buckets
-    assert bands["below_0_5"] <= quotes["invented"], (
+    # ⛔ the histogram is SENTENCE-scoped, so its below-band arm is the
+    # sentence-scope population (`below_sentence_band`), not `invented` — the two
+    # diverged when the decider moved to the turn (#14723 review, round 10, P2).
+    assert bands["below_0_5"] <= quotes["below_sentence_band"], (
         f"{bands['below_0_5']} quotes are below 0.5 but only "
-        f"{quotes['invented']} are below the 0.6 band", bands, quotes)
+        f"{quotes['below_sentence_band']} are below the 0.6 band", bands, quotes)
     assert bands["at_or_above_0_6"] == quotes["paraphrase"], (
         f"the at-or-above-0.6 band ({bands['at_or_above_0_6']}) is not the "
         f"paraphrase bucket ({quotes['paraphrase']})", bands, quotes)
+    # ...and the DECIDER's histogram partitions the same population
+    turn = _score()["A4_no_invention"]["quotes"]["bands_turn_scope"]
+    assert sum(turn.values()) == quotes["total"] - quotes["verbatim"], turn
+    assert turn["at_or_above_0_6"] == (quotes["paraphrase"]
+                                        + quotes["summary_in_one_turn"]), (
+        "the turn-scope histogram's supported arm is not paraphrase + summary",
+        turn, quotes)
+    assert turn["below_0_5"] <= quotes["invented"], (turn, quotes)
 
 
 def test_the_remaining_prose_figures_are_the_artifacts_figures():
@@ -1546,6 +1633,13 @@ def test_the_example_BUCKETS_are_the_bands_their_names_claim():
                 assert over < 0.6, (bucket, over)
             else:
                 assert 0.6 <= over <= 1.0, (bucket, over)
+    # ⛔ AND THE THIRD BUCKET IS BOUNDED ON BOTH SIDES (#14723 review, round 10,
+    # P2): a summary is a row the SENTENCE band rejects and the TURN band supports.
+    # A row that satisfies only the first half is an invention, so asserting the
+    # upper bound is what makes the bucket name true.
+    for row in quotes["summary_examples"]:
+        assert row["best_sentence_overlap"] < 0.6, row
+        assert row["best_turn_overlap"] >= 0.6, row
     # and the truncation is DECLARED, not implied by a silent cap — PER LIST
     # (#14691, merged lanes). This arm originally asserted ONE shared
     # `examples_truncated` flag; a single boolean cannot say WHICH sample is
@@ -1558,6 +1652,69 @@ def test_the_example_BUCKETS_are_the_bands_their_names_claim():
             bucket, quotes[f"{bucket}_examples_truncated"], expected,
             quotes[bucket], len(examples))
 
+
+def test_the_quote_bucket_is_decided_by_the_TURN_and_the_corpus_STATES_them():
+    r"""Reds if the band is decided by ONE SENTENCE, grading a summary as invented.
+
+    ⛔ #14723 review, round 10, P2. `best_overlap` looked only inside a single
+    corpus sentence, so a faithful MULTI-FACT summary — which by construction
+    cannot put ≥60% of its words into one sentence — was graded `invented`, and
+    REPORT's gloss ("<60% overlap — the corpus never says it") asserted a property
+    the measure could not establish. MEASURED on the pre-fix code: this suite's
+    86 arms were green while `invented_examples` carried
+    `Three teams exist: Platform (engineering), Product (product management), and
+    Customer (commercial).` at 0.30 — a sentence whose every fact the corpus
+    states. On that code `quotes["summary_examples"]` does not exist at all, so
+    this arm reds there.
+
+    The decisive arm is the last one: each summary's own content words must be
+    present in the corpus, so the bucket is not a licence to wave a claim through.
+    """
+    module = _load_score_module()
+    quotes = module.a4_invention()["quotes"]
+    summaries = quotes["summary_examples"]
+    assert len(summaries) == quotes["summary_in_one_turn"] > 0, quotes
+    assert (quotes["invented"] + quotes["summary_in_one_turn"]
+            == quotes["below_sentence_band"]), quotes
+    # the row the review named is IN the summary bucket, not the invented one
+    named = [r for r in summaries if r["quote"].startswith("Three teams exist")]
+    assert named, [r["quote"][:60] for r in summaries]
+    assert named[0]["best_sentence_overlap"] < 0.6 <= named[0]["best_turn_overlap"]
+    assert all(r["best_turn_overlap"] >= 0.6 for r in summaries), summaries
+    # ...and the invented bucket did NOT shrink to let it through: every row there
+    # is unsupported in EVERY corpus turn, which is the claim the prose makes.
+    assert all(r["best_turn_overlap"] < 0.6 for r in quotes["invented_examples"])
+    # ⛔ NON-VACUITY OF THE SWING: the corpus supplies the summarised CONTENT. The
+    # band is a bag-of-words share over a turn, so it says "these facts are stated
+    # in one turn", never "every token appears" — the extractor's own framing words
+    # (`exist`, `owned`, `recorded`) are what it does not account for. What must
+    # hold is that the two rows the REVIEW named carry their facts, and that the
+    # invented bucket is SEPARATED from the band rather than sitting on its edge.
+    corpus = json.loads((BUNDLE / "corpus" / "structure-corpus.json").read_text())
+    text = " ".join(t["content"] for d in corpus["documents"] for t in d["turns"])
+
+    def words(s):
+        return set(re.findall(r"[a-z]{3,}", " ".join(s.lower().split())))
+
+    corpus_words = words(text)
+    by_quote = {r["quote"]: r for r in summaries}
+    for prefix, facts in (
+            ("Three teams exist", {"three", "teams", "platform", "engineering",
+                                  "product", "management", "customer",
+                                  "commercial"}),
+            ("Enterprise renewals", {"enterprise", "renewals", "jonas", "bauer",
+                                     "account", "executive"})):
+        row = next((r for q_, r in by_quote.items() if q_.startswith(prefix)), None)
+        assert row, f"the review's {prefix!r} row is not in the summary bucket"
+        assert facts <= corpus_words, sorted(facts - corpus_words)
+        assert len(words(row["quote"]) - corpus_words) <= 1, row["quote"][:80]
+    # the invented bucket must sit BELOW the band with margin, not on it
+    assert all(r["best_turn_overlap"] < 0.5 for r in quotes["invented_examples"]), (
+        "an invented row sits inside half a band of the cut, so the rule is a hair "
+        "away from grading a recombined claim as stated",
+        [(r["best_turn_overlap"], r["quote"][:50])
+         for r in quotes["invented_examples"]])
+    assert all(r["best_turn_overlap"] >= 0.6 for r in summaries), summaries
 
 def test_each_door_finding_ANSWER_is_the_artifacts_answer_in_SUBSTANCE():
     r"""Reds if a REPORT answer keeps its leading "No" and reverses its claim.
@@ -2653,8 +2810,10 @@ def test_the_quote_audit_ROWS_are_the_paraphrase_examples():
                             strict=True):
         assert row["overlap"] == example["best_sentence_overlap"], (row, example)
         assert row["quote"][:40] == example["quote"][:40], (row, example)
+    # ⛔ the audit's `not_in_corpus` is the SENTENCE-scope population; the claim
+    # layer's `invented` is the TURN-scope one (#14723 review, round 10, P2).
     assert (audit["verbatim"], audit["paraphrase"], audit["not_in_corpus"]) == (
-        cl["verbatim"], cl["paraphrase"], cl["invented"])
+        cl["verbatim"], cl["paraphrase"], cl["below_sentence_band"])
 
 
 def test_the_tool_surface_NAMES_are_the_readback_census():
@@ -2879,7 +3038,14 @@ def test_the_VERIFICATION_writeup_states_the_artifacts_numbers():
     assert f"| verbatim substring of the corpus | {cl['verbatim']} |" in doc
     assert (f"| faithful paraphrase (≥60% of the quote's words in one corpus "
             f"sentence) | {cl['paraphrase']} |") in doc
-    assert f"| **best corpus-sentence overlap < 60% — the corpus does not say it** | **{cl['invented']}** |" in doc
+    assert (f"| **best corpus-sentence overlap < 60%** | **{cl['below_sentence_band']}** |"
+            in doc), (
+        "VERIFICATION's sentence-scope row does not state the artifact's "
+        "below-sentence-band population — and it must NOT state the invented "
+        "count there, which is what the round-10 P2 gloss did")
+    assert (f"{cl['invented']}" in doc), (
+        "VERIFICATION does not name the invented count its table's gloss was "
+        "corrected to defer to")
     totals = _score()["A2_edges"]["totals"]
     assert (f"| `ownedBy` | `->` | **the target owns the source** | 6 (4 pairs) | "
             f"**{totals['ownership_oriented_correct']}** |") in doc, (

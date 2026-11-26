@@ -279,10 +279,21 @@ to turn 3 by the token-overlap band, not a verbatim anchor`.
 | | count |
 |---|---|
 | verbatim (a real substring of the corpus) | **11** |
-| paraphrase (≥60% of the quote's words in one corpus sentence) | **27** |
-| **invented** (<60% overlap — the corpus never says it) | **12** |
+| paraphrase (≥60% of the quote's content words in one corpus sentence) | **27** |
+| summary — the same share only across ONE corpus turn (a multi-fact span the single-sentence rule cannot see) | **3** |
+| **no ≥60% support in any corpus turn** — the corpus does not state it | **9** |
 
-Examples of the invented 12 (`out/t6-score.json` → `claim_layer.invented_examples`):
+⛔ **The unit of support is a TURN, not a sentence, and the difference is a number.** 12 of the 50
+fall below the *single-sentence* band, but **3 of those 12 are faithful multi-fact summaries the
+corpus does state** — doc-02's three teams, doc-03's seven-component architecture, doc-04's
+enterprise-renewals row — so a sentence-scoped count is not an invented count, and any gloss reading
+*"the corpus never says it"* off that 12 would assert a property the measure cannot establish. The
+sentence-scope figure is `below_sentence_band` (**12**, the population `out/t6-quote-audit.json`
+counts as `not_in_corpus`); the **invented** count is **9**, and it is the one this report carries.
+The turn unit is bounded on purpose: support cannot be assembled across unrelated paragraphs, so a
+recombined claim still scores low and the FAIL direction is unchanged.
+
+Examples of the invented 9 (`out/t6-score.json` → `claim_layer.invented_examples`):
 
 ```text
 "The session confirmed there is no shared feature surface between the two: every feature
@@ -404,9 +415,9 @@ and the same **4** `ownedBy` pairs (the receipt's 6 write rows reduce to those 4
 the RECEIPT's row count, `4` is the pair count both reads land on); the same `dev:code` typing for all seven components; the same duplicate
 `mid-market utilities` / `mid-market utilities segment` nodes; the same `expand_relationships`
 silence on structural edges; `tortoise_list_topics` answering `Entity … not found` for nodes two
-other doors resolve; and the same quote audit (**11 verbatim / 27 paraphrase / 12 not in the
-corpus**). Its count of inverted pairs — **13** — is the number this report's A2 line derives
-independently.
+other doors resolve; and the same quote audit — **11 verbatim / 27 paraphrase /
+9 unstated in any turn** — with the same **12** below the single-sentence band as its `not_in_corpus`
+(that 12 is the SENTENCE-scope population, not this report's invented count; see §3/A4). Its count of inverted pairs — **13** — is the number this report's A2 line derives independently.
 
 **Its strongest finding was not in my first cut, and I re-measured it before adopting it**: the
 `type="governance"` ownership door returns `[]` for every owner (§3/A2, D6). That claim cited
@@ -496,9 +507,22 @@ Three content defects were corrected rather than re-pinned:
 - **`not_in_corpus` was the wrong bucket, and it truncated.** In `t6-score.json` it was a 10-row list
   of the **best-anchored paraphrases** (overlaps 0.636–1.0) — the opposite population — so a consumer
   reading its length as "quotes the corpus never states" got the display cap, `10`, which is the
-  figure the PR description carried. It is now a **count** (`12`, equal to `invented`), the paraphrase
-  rows live under `paraphrase_examples`, and each capped list carries its OWN
-  `*_examples_truncated` flag (one shared boolean could not say which sample was complete).
+  figure the PR description carried. It is now a **count**, the paraphrase rows live under
+  `paraphrase_examples`, and each capped list carries its OWN `*_examples_truncated` flag (one shared
+  boolean could not say which sample was complete).
+- **The quote band's unit of support was one SENTENCE, which graded faithful multi-fact summaries as
+  inventions** (10th review, P2). `Three teams exist: Platform (engineering), Product (product
+  management), and Customer (commercial).` scores 0.30 against a single sentence and 0.80 against its
+  own turn, because a summary cannot put ≥60% of its words into one sentence — so the old table read
+  "**invented** (<60% overlap — the corpus never says it) | **12**", calling 2 of those 12 (and a
+  third, doc-03's component list) things the corpus does not say. The decider is now the **turn**:
+  **9** invented, **3** summaries, with the sentence-scope population kept as `below_sentence_band`
+  (`12`) and the peer audit's own count. The FAIL direction is unchanged — 9 is still not 0.
+- **D6's owner set and its `ownedBy` figure were typed by hand** (10th review, P3): the witness set
+  `{"Amara Osei", …}` was a literal, so a run whose witnesses named anyone else would have made
+  `asked_owners` empty and silently WITHDRAWN the bundle's headline finding. Both are now derived —
+  the owners from the corpus's declared `people`, the row count from the write receipt's `ownedBy`
+  edges — and the row count is emitted as `evidence.owned_by_rows`.
 - **An unclassifiable `produces` row was graded `correct`** because the check was
   `"INVERTED" if src_kind_is_an_agent else "correct"`. It is now its own
   `UNCLASSIFIABLE` bucket, counted in `asymmetric_rows_unclassifiable` and in neither arm.
@@ -553,7 +577,9 @@ and **not** to the primary artifact, and the prose pins reached two headings out
 
 Two content fixes came with it: `managedBy` had `produces`'s two-way bug mirrored (an unreadable
 `dst_kind` graded the row `INVERTED`), now `UNCLASSIFIABLE` like its twin; and the PR body's A4 figure ("10 … overlap < 0.5") was corrected **in the body itself, before any
-clean attestation existed** — the artifacts say **12** at `< 0.6`, of which **11 fall below 0.5** — a figure the scorer now
+clean attestation existed** — the artifacts say **12** at `< 0.6` in the single-SENTENCE scope
+(`below_sentence_band`; 9 of those are unsupported by any corpus turn, which is the invented count),
+of which **11 fall below 0.5** — a figure the scorer now
 persists as `claim_layer.bands` (`11 / 1 / 27` below-0.5, 0.5–0.6, at-or-above), so it is read
 rather than retyped. ⚠️ It was unbacked before that: no artifact carried a 0.5 threshold, and the
 only `11` the bundle held was `claim_layer.verbatim`, a disjoint bucket. The A3 figure
