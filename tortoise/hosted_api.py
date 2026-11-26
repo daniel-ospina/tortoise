@@ -1755,6 +1755,328 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
     return _CaptureSlot(session_key)
 
 
+# ── #14342: THE CAPTURE INTAKE QUEUE — accept a turn, never refuse it ──────
+# Why this exists, in one paragraph: the capacity gate above REFUSES the 17th
+# concurrent capture, and every refusal pushed the turn back onto the client,
+# whose second producer parked a recovery copy in
+# `~/.tortoise/session-events/` — a folder nothing ever drained (106 MB /
+# 22 day-files / 17 894 records, measured 2026-11-25). For a background memory
+# product, refusing an agent's turn is the one thing that must never happen:
+# the agent has already moved past the turn and cannot retry it.
+#
+# So over the ceiling the request is ACCEPTED: its exact payload becomes a
+# durable `:CaptureIntake` row in the tenant's record (`tortoise/capture_intake`,
+# which owns the queue invariants and is tested without a server), the caller
+# gets 202 + a status address, and a tenant-scoped drain re-enters THIS SAME
+# capture path — no second extraction implementation, per
+# EXTRACTOR-V4-ARCHITECTURE's "extraction is the only producer of the logical
+# model". The map and the decisions are `docs/architecture/CAPTURE-INGEST-PLAN.md`.
+#
+# ⛔ WHAT THE DRAIN NEEDS THAT THE QUEUE MODULE DOES NOT OWN: the tenant. The row
+# is tenant-scoped (it lands in the tenant's record, like
+# `batch_ingest.GraphBatchStore`), so there is no global scan — the accept that
+# enqueued is what starts the drain, and any later capture request by the same
+# tenant picks a stranded item back up. State this rather than imply a global
+# worker that does not exist.
+from tortoise.capture_intake import (  # noqa: E402 - grouped with the seam
+    CaptureIntake as _CaptureIntakeQueue,
+    CaptureIntakeItem as _CaptureIntakeItem,
+    GraphIntakeStore as _GraphIntakeStore,
+    IntakeCounters as _IntakeCounters,
+    IntakeStoreUnavailable as _IntakeStoreUnavailable,
+)
+
+#: Process-wide counters (observability only). The QUEUE is per tenant, so one
+#: object cannot serve two tenants — the counters are the seam that keeps the
+#: published numbers meaningful across per-request queue objects.
+_CAPTURE_INTAKE_COUNTERS = _IntakeCounters()
+#: Tenants with a drain task ALREADY running. One drainer per tenant, for the
+#: same reason the client's spool has a claim (`tortoise/drain_claim.py`): two
+#: drainers of one queue compete for the same slots and neither converges.
+_CAPTURE_INTAKE_DRAINERS: set[str] = set()
+_CAPTURE_INTAKE_TASKS: set = set()
+#: How long a drain waits for a capture slot before yielding its turn. Short:
+#: the drainer is a queue consumer, and the next tick costs nothing.
+_CAPTURE_INTAKE_SLOT_WAIT_S = 5.0
+#: How long a drain sleeps when the store itself is unavailable.
+_CAPTURE_INTAKE_STORE_BACKOFF_S = 30.0
+
+
+def _capture_intake_enabled() -> bool:
+    """The rollback seam. Default ON; `TORTOISE_CAPTURE_INTAKE=0` restores the
+    pre-#14342 refusal exactly, which is what a deploy needs if the drain is
+    ever found to misbehave in production."""
+    return os.environ.get("TORTOISE_CAPTURE_INTAKE", "1").strip().lower() not in (
+        "0", "false", "no", "off")
+
+
+def _is_capture_capacity_refusal(exc: BaseException) -> bool:
+    """True for the CAPACITY refusal specifically (`capture_capacity_saturated`).
+
+    ⛔ Not "any 429": the per-org ingest window (`ingest_rate_limited`, #4051
+    §3.1) is a verdict about the CALLER's rate and stays a refusal. Only the
+    server's own concurrency condition becomes a queue, because only that one is
+    a fact about the box that the caller can do nothing about.
+    """
+    detail = getattr(exc, "detail", None)
+    return (getattr(exc, "status_code", None) == 429
+            and isinstance(detail, dict)
+            and detail.get("code") == _CAPTURE_CAPACITY_CODE)
+
+
+def _capture_intake_for_proj(proj) -> _CaptureIntakeQueue:
+    """A queue over THIS tenant's record. Cheap: the store holds no handle."""
+    return _CaptureIntakeQueue(store=_GraphIntakeStore(proj.g.query),
+                              counters=_CAPTURE_INTAKE_COUNTERS)
+
+
+def _capture_intake_accept_sync(org: dict, payload: dict):
+    """Write the intake row. Runs OFF the event loop (one SDK open + one write).
+
+    ⛔ EVERY failure becomes :class:`_IntakeStoreUnavailable`, which the caller
+    turns into a retryable 503 — never into a 2xx. The client prunes its spool
+    entry the moment it sees a 2xx (both legs: `capture_spool` files any 2xx,
+    `tortoise-capture.ts`'s `landed` band is `200 <= status < 300`), so
+    acknowledging an item that was not stored is a destroyed conversation
+    (#10479).
+    """
+    sdk = None
+    try:
+        sdk = _data_sdk(org)
+        proj = sdk._get_proj()
+        return _capture_intake_for_proj(proj).accept(
+            org_id=org.get("org_id") or "unknown",
+            graph=_data_graph_name(org),
+            session_id=str(payload.get("session_id") or ""),
+            payload=payload)
+    except Exception as exc:  # noqa: BLE001 - ONE fault class for the caller
+        raise _IntakeStoreUnavailable(
+            f"capture intake store unavailable: {type(exc).__name__}: {exc}"
+        ) from exc
+    finally:
+        if sdk is not None:
+            with contextlib.suppress(Exception):
+                sdk.close()
+
+
+def _capture_intake_ack(body, org: dict, acceptance,
+                        session_id: str) -> JSONResponse:
+    """The 202 the agent gets instead of a 429.
+
+    ⛔ 202 and not 200: the body's `status: accepted` says the same thing the
+    #14261 ACK says, and the HTTP code says it too, so no client can read this as
+    "processed". Both client legs treat 2xx as FILED (the spool drop their
+    retry), which is the point — the turn is now ours, durably.
+    """
+    now = datetime.now(UTC).isoformat()
+    extra = {
+        "session_id": session_id,
+        "turns": len(body.conversation),
+        # ⛔ A ZERO HERE IS "NOT YET", not "nothing": the extraction has not run.
+        # `outcome_known: False` is what stops a client printing a terminal count
+        # (#12362's defect class).
+        "extracted": 0,
+        "points": [],
+        "surfaced": [],
+        "extraction_mode": None,
+        "errors": [],
+        "warnings": [],
+        "diagnostics": [],
+        "stats": {},
+        "capture_redactions": 0,
+        "extraction": {
+            "outcome_known": False,
+            "phase": "queued",
+            "queued": True,
+        },
+        "status_url": f"/v1/sessions/{session_id}",
+        "intake": acceptance.as_payload(),
+    }
+    verb = _build_write_verb(
+        source_session=session_id,
+        source_harness=(body.harness or "unknown"),
+        ingested_at=now,
+        status=_STATUS_ACCEPTED,
+        error=None,
+        extra=extra,
+    )
+    return JSONResponse(status_code=202, content=verb)
+
+
+async def _capture_accept_into_intake(body, request, org: dict) -> JSONResponse:
+    """Accept an over-capacity capture: durable row first, then the 202."""
+    from tortoise.ids import mint_session_id
+
+    session_id = body.session_id or mint_session_id()
+    payload = body.model_dump(mode="json")
+    payload["session_id"] = session_id
+    try:
+        acceptance = await _run_off_loop(
+            _CAPTURE_EXECUTOR, _capture_intake_accept_sync, org, payload)
+    except _IntakeStoreUnavailable as exc:
+        # ⛔ THE ONE REFUSAL THIS DESIGN MAY PRODUCE, and it is the safe
+        # direction: we could not store the turn, so the caller must keep it.
+        # 503 is retryable for both client legs (neither unlinks on 5xx).
+        _logger.warning("capture intake accept failed org=%r: %s",
+                        org.get("org_id"), exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "capture_intake_unavailable",
+                    "message": ("the capture could not be accepted for "
+                                "processing — retry shortly"),
+                    "retry_after": _CAPTURE_CAPACITY_RETRY_AFTER_S},
+            headers={"Retry-After": str(_CAPTURE_CAPACITY_RETRY_AFTER_S)},
+        ) from exc
+    _capture_intake_kick(org, _data_graph_name(org))
+    return _capture_intake_ack(body, org, acceptance, session_id)
+
+
+def _capture_intake_kick(org: dict, graph: str | None) -> None:
+    """Start this tenant's drain if one is not already running.
+
+    ⛔ ONE driver per tenant, and it is THIS accept — the row is tenant-scoped,
+    so there is nothing global to scan. Two drains of one queue compete for the
+    same slots; the client's spool solved the same problem with a claim file.
+    """
+    key = f"{org.get('org_id')}:{graph}"
+    if key in _CAPTURE_INTAKE_DRAINERS:
+        return
+    try:
+        task = asyncio.create_task(_capture_intake_drain(org, graph, key))
+    except RuntimeError:  # no running loop (a sync caller/test) — nothing to do
+        return
+    _CAPTURE_INTAKE_DRAINERS.add(key)
+    _CAPTURE_INTAKE_TASKS.add(task)
+
+    def _done(t):
+        _CAPTURE_INTAKE_DRAINERS.discard(key)
+        _CAPTURE_INTAKE_TASKS.discard(t)
+        if not t.cancelled():
+            exc = t.exception()
+            if exc is not None:
+                _logger.warning("capture intake drain (%s) ended: %r", key, exc)
+
+    task.add_done_callback(_done)
+
+
+async def _capture_intake_drain(org: dict, graph: str | None, key: str) -> None:
+    """Drain THIS tenant's intake: claim, run the capture path, settle.
+
+    The loop ends when the queue is empty (nothing left to claim), when the store
+    is unavailable, or when the drain is cancelled at shutdown. An item whose
+    worker dies is reclaimed by the queue's own lease (`reclaim_stale`) on the
+    next drain of that tenant — never silently dropped.
+    """
+    # ⛔ RECLAIM FIRST: a drain task that died mid-item left its row `extracting`
+    # (no query for `queued` can ever see it again). The lease reclaim is what
+    # makes a mid-flight kill survivable, and the start of a drain is the only
+    # moment it can be acted on.
+    with contextlib.suppress(Exception):
+        await _run_off_loop(_CAPTURE_EXECUTOR,
+                           _capture_intake_reclaim_sync, org)
+    while True:
+        try:
+            item = await _run_off_loop(
+                _CAPTURE_EXECUTOR, _capture_intake_claim_sync, org)
+        except _IntakeStoreUnavailable as exc:
+            _logger.warning("capture intake claim failed (%s): %s", key, exc)
+            await asyncio.sleep(_CAPTURE_INTAKE_STORE_BACKOFF_S)
+            continue
+        if item is None:
+            return
+        slot = None
+        try:
+            # ⛔ THE DRAIN OBEYS THE SAME CEILING AS A LIVE CAPTURE. It is a
+            # consumer of the 8 slots, not a bypass of them — a queue that
+            # ignored the ceiling would just move the overload into the pool.
+            while slot is None:
+                try:
+                    slot = _reserve_capture_slot(None)
+                except HTTPException as exc:
+                    if not _is_capture_capacity_refusal(exc):
+                        raise
+                    await asyncio.sleep(_CAPTURE_INTAKE_SLOT_WAIT_S)
+        except asyncio.CancelledError:
+            # Shutdown mid-item: the row stays `extracting` and is reclaimed by
+            # the lease. Re-raise so the task ends cancelled, as the lifespan
+            # expects.
+            raise
+        try:
+            queued_body = SessionRequest(**item.payload)
+            await _capture_session_impl(queued_body, None, org, slot=slot,
+                                        state={}, deferred_resume=True)
+            await _run_off_loop(_CAPTURE_EXECUTOR,
+                                _capture_intake_finish_sync, org, item)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:  # noqa: BLE001 - one item's fault
+            state = await _capture_intake_fail_sync(org, item, exc)
+            _logger.warning(
+                "capture intake item %s %s after attempt %s: %r",
+                item.item_id, state, item.attempts, exc)
+        finally:
+            if slot is not None:
+                slot.release()
+
+
+def _capture_intake_reclaim_sync(org: dict) -> int:
+    sdk = None
+    try:
+        sdk = _data_sdk(org)
+        return _capture_intake_for_proj(sdk._get_proj()).reclaim()
+    finally:
+        if sdk is not None:
+            with contextlib.suppress(Exception):
+                sdk.close()
+
+
+def _capture_intake_claim_sync(org: dict):
+    sdk = None
+    try:
+        sdk = _data_sdk(org)
+        return _capture_intake_for_proj(sdk._get_proj()).next_item()
+    except _IntakeStoreUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - normalised for the caller
+        raise _IntakeStoreUnavailable(
+            f"capture intake claim unavailable: {type(exc).__name__}: {exc}"
+        ) from exc
+    finally:
+        if sdk is not None:
+            with contextlib.suppress(Exception):
+                sdk.close()
+
+
+def _capture_intake_finish_sync(org: dict, item) -> None:
+    sdk = None
+    try:
+        sdk = _data_sdk(org)
+        _capture_intake_for_proj(sdk._get_proj()).finish(item)
+    finally:
+        if sdk is not None:
+            with contextlib.suppress(Exception):
+                sdk.close()
+
+
+async def _capture_intake_fail_sync(org: dict, item, exc: BaseException) -> str:
+    """Settle a failed pass. Never raises: the item's own record is at stake and
+    a raise here would also skip this function's own reporting."""
+    sdk = None
+    try:
+        sdk = await asyncio.to_thread(_data_sdk, org)
+        return await asyncio.to_thread(
+            lambda: _capture_intake_for_proj(sdk._get_proj()).fail(
+                item, f"{type(exc).__name__}: {exc}"[:800]))
+    except Exception:  # noqa: BLE001 - a failed settle must not mask the fault
+        _logger.exception("capture intake item %s could not be settled",
+                          item.item_id)
+        return "unknown"
+    finally:
+        if sdk is not None:
+            with contextlib.suppress(Exception):
+                sdk.close()
+
+
 async def _run_capture_bounded(slot, fn, /, *args, **kwargs):
     """Run one capture extraction on the capture pool, owning ``slot``.
 
@@ -8317,8 +8639,26 @@ def _capture_health() -> dict:
                 "refusing": None, "refusal_window_s": _CAPTURE_REFUSAL_WINDOW_S,
                 "code": _CAPTURE_CAPACITY_CODE,
                 "retry_after": _CAPTURE_CAPACITY_RETRY_AFTER_S,
+                # ⛔ THE DEGRADED ARM PUBLISHES THE SAME KEYS (#12992 review P2).
+                "intake": {"enabled": None, "accepted": None,
+                           "completed": None, "failed": None},
                 "error": str(exc)[:200]}
     refusing = last is not None and (time.time() - last) <= _CAPTURE_REFUSAL_WINDOW_S
+    # ── #14342: the INTAKE counters ────────────────────────────────────────
+    # ⛔ Counters only, deliberately: the intake ROWS are per tenant (they land
+    # in the tenant's record), so a deploy-wide depth would have to scan every
+    # tenant's graph on a health path that collects no I/O. The depth an operator
+    # needs is published where it can be read for free — the 202's
+    # `intake.depth` and the tenant's own next capture. What the process CAN
+    # answer for free is whether the conversion is live and how much it has
+    # taken. Never raises: one object read.
+    _ic = _CAPTURE_INTAKE_COUNTERS
+    intake = {
+        "enabled": _capture_intake_enabled(),
+        "accepted": _ic.accepted,
+        "completed": _ic.completed,
+        "failed": _ic.failed,
+    }
     return {
         "in_flight": in_flight,
         "max_in_flight": ceiling,
@@ -8329,6 +8669,7 @@ def _capture_health() -> dict:
         "refusal_window_s": _CAPTURE_REFUSAL_WINDOW_S,
         "code": _CAPTURE_CAPACITY_CODE,
         "retry_after": _CAPTURE_CAPACITY_RETRY_AFTER_S,
+        "intake": intake,
         "error": None,
     }
 
@@ -22822,7 +23163,20 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
         # #3060: reserve ADMISSION before ANY state is written. Reserving (not
         # merely checking) bounds the queue under a concurrent burst, and a
         # 429 here cannot leave a half-created Session behind.
-        slot = _reserve_capture_slot(_capture_session_key(org, body.session_id))
+        try:
+            slot = _reserve_capture_slot(_capture_session_key(org, body.session_id))
+        except HTTPException as _capacity_exc:
+            # ── #14342: OVER THE CEILING IS NOT A REFUSAL ANY MORE ────────────
+            # The old shape pushed the turn back onto the client, whose second
+            # producer parked a recovery copy nothing ever drained. Accept it
+            # into the tenant's intake queue instead and answer 202.
+            # ⛔ Only the CAPACITY refusal is converted (`_is_capture_capacity_refusal`):
+            # every other 429/409/402 is a verdict about the CALLER or the ENTRY
+            # and must keep its meaning.
+            if (_capture_intake_enabled()
+                    and _is_capture_capacity_refusal(_capacity_exc)):
+                return await _capture_accept_into_intake(body, request, org)
+            raise
         # #3129: the impl records whether an ATTEMPT started and whether it
         # FINALIZED (recorded its outcome). If the request is cancelled between
         # the two, the Session would be left at `capture_ok=NULL`, which the
@@ -23200,7 +23554,8 @@ def _capture_connection_warning(relation_write: dict | None,
 async def _capture_session_impl(body: SessionRequest, request: Request | None,
                                 org: dict, slot: _CaptureSlot,
                                 state: dict | None = None,
-                                _graph_ops: GraphOpsCounter | None = None) -> dict:
+                                _graph_ops: GraphOpsCounter | None = None,
+                                deferred_resume: bool = False) -> dict:
     """The capture pipeline (gates + writes). Shared by the REST endpoint and
     the ``tortoise_session_capture`` MCP tool (mcp_server.py) so the two
     surfaces can never drift on gate order.
@@ -23479,6 +23834,26 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         session_existed and prior_capture_ok is False
         and prior_capture_extractor in _CAPTURE_EXTRACTOR_LANES_RETRYABLE
         and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
+    # ── #14342: THE DRAIN'S ONE EXTRA PREDICATE ────────────────────────────
+    # An item the intake QUEUED was accepted and then never processed: nothing
+    # was written for it at accept time (the refusal happened before any write),
+    # so on the drain's first run the session does not exist and this whole block
+    # is inert. It matters on a RE-ENTRY after a crash mid-item: the record phase
+    # may have run and the extraction may not, leaving `capture_ok` NULL — which
+    # the #2335 rule above reads as "legacy, presumed captured" and serves as a
+    # REPLAY (200, 0 extracted). That is a silent loss of the extraction, on a
+    # turn the client already dropped from its spool because we answered 2xx.
+    # So a deferred item whose prior did NOT succeed takes the TRUE-retry lane.
+    # Bounded by the same two gates the explicit retry obeys: the lane must be
+    # convergent (`_CAPTURE_EXTRACTOR_LANES_RETRYABLE`, or unrecorded — which
+    # only happens when the record phase never finalized) and the deployment must
+    # not be m2 (whose non-deterministic ids would duplicate).
+    if (deferred_resume and not retry_failed_capture and session_existed
+            and prior_capture_ok is not True
+            and (prior_capture_extractor in _CAPTURE_EXTRACTOR_LANES_RETRYABLE
+                 or prior_capture_extractor is None)
+            and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2"):
+        retry_failed_capture = True
 
     # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
     # PR #976: the points quota counts NON-episodic Points only, and turn

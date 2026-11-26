@@ -83,6 +83,7 @@ __all__ = [
     "CaptureIntake",
     "CaptureIntakeItem",
     "GraphIntakeStore",
+    "IntakeCounters",
     "IntakeState",
     "IntakeStoreUnavailable",
     "MemoryIntakeStore",
@@ -220,6 +221,9 @@ class IntakeStore(Protocol):
 
     def oldest_queued_at(self) -> float | None: ...
 
+    def reclaim_stale(self, now: float,
+                      after_s: float = CAPTURE_INTAKE_RECLAIM_AFTER_S) -> int: ...
+
     def rows(self, *, state: str | None = None,
              limit: int = 100) -> list[CaptureIntakeItem]: ...
 
@@ -280,6 +284,30 @@ class MemoryIntakeStore:
             envs = [float(r["enqueued_at"]) for r in self._rows.values()
                     if r["state"] == IntakeState.QUEUED.value]
             return min(envs) if envs else None
+
+    def reclaim_stale(self, now: float,
+                      after_s: float = CAPTURE_INTAKE_RECLAIM_AFTER_S) -> int:
+        """The same lease reclaim the graph store does (see its docstring).
+
+        Present on BOTH stores: a drain that only survives a kill on one
+        substrate is a drain whose kill-survival depends on configuration.
+        """
+        cutoff = float(now) - float(after_s)
+        with self._lock:
+            reclaimed = 0
+            for row in self._rows.values():
+                if row["state"] != IntakeState.EXTRACTING.value:
+                    continue
+                claimed_at = row.get("claimed_at")
+                if claimed_at is None or float(claimed_at) > cutoff:
+                    continue
+                row["state"] = IntakeState.QUEUED.value
+                row["claimed_at"] = None
+                row["next_attempt_at"] = None
+                row["last_error"] = ("previous drain stopped before this item "
+                                     "finished (claim reclaimed)")
+                reclaimed += 1
+            return reclaimed
 
     def rows(self, *, state: str | None = None,
              limit: int = 100) -> list[CaptureIntakeItem]:
@@ -492,6 +520,22 @@ class IntakeAcceptance:
 
 
 @dataclass
+class IntakeCounters:
+    """Counters since process start — observability only, never a verdict.
+
+    ⛔ A SEPARATE object from :class:`CaptureIntake` because the queue is built
+    per REQUEST (the store is tenant-scoped, so one object cannot serve two
+    tenants). Without this seam every caller would mint its own counters and
+    every published number would read as zero — the "observability that cannot
+    observe" shape.
+    """
+
+    accepted: int = 0
+    completed: int = 0
+    failed: int = 0
+
+
+@dataclass
 class CaptureIntake:
     """The queue's policy layer: accept, claim, settle, publish depth.
 
@@ -503,10 +547,7 @@ class CaptureIntake:
     now: Callable[[], float] = time.time
     max_attempts: int = CAPTURE_INTAKE_MAX_ATTEMPTS
     depth_ceiling: int = CAPTURE_QUEUE_MAX_DEPTH
-    #: Counters since process start — observability only, never a verdict.
-    accepted: int = field(default=0, init=False)
-    completed: int = field(default=0, init=False)
-    failed: int = field(default=0, init=False)
+    counters: IntakeCounters = field(default_factory=IntakeCounters)
 
     # ── the door ───────────────────────────────────────────────────────────
     def accept(self, *, org_id: str, graph: str | None, session_id: str,
@@ -530,7 +571,7 @@ class CaptureIntake:
             state=IntakeState.QUEUED.value,
         )
         self.store.put(item)
-        self.accepted += 1
+        self.counters.accepted += 1
         depth = self._safe_depth()
         return IntakeAcceptance(
             item_id=item.item_id,
@@ -542,6 +583,17 @@ class CaptureIntake:
         )
 
     # ── the drain ──────────────────────────────────────────────────────────
+    def reclaim(self) -> int:
+        """Return any dead drain's claimed items to the queue. Idempotent.
+
+        Called at the START of a drain (not on a timer): the only moment a stale
+        claim can be acted on is when a drain is about to run anyway.
+        """
+        try:
+            return int(self.store.reclaim_stale(float(self.now())))
+        except Exception:  # noqa: BLE001 - a reclaim failure must not stop a drain
+            return 0
+
     def next_item(self) -> CaptureIntakeItem | None:
         """Claim the oldest runnable item, respecting per-item backoff."""
         return self.store.claim_next(float(self.now()))
@@ -553,7 +605,7 @@ class CaptureIntake:
         item deleted on a merely-attempted pass is the silent loss class.
         """
         self.store.complete(item.item_id)
-        self.completed += 1
+        self.counters.completed += 1
 
     def fail(self, item: CaptureIntakeItem, error: str) -> str:
         """Requeue with backoff, or park as `failed` past the attempt bound.
@@ -571,7 +623,7 @@ class CaptureIntake:
         self.store.release(item.item_id, error=error, now=now,
                            next_attempt_at=next_at, terminal=terminal)
         if terminal:
-            self.failed += 1
+            self.counters.failed += 1
             return IntakeState.FAILED.value
         return IntakeState.QUEUED.value
 
@@ -584,11 +636,12 @@ class CaptureIntake:
 
     def stats(self) -> dict:
         """The published shape (`/health`, and the 202's `intake` block)."""
+        c = self.counters
         try:
             depth = int(self.store.depth())
         except IntakeStoreUnavailable:
-            return {"available": False, "accepted": self.accepted,
-                    "completed": self.completed, "failed": self.failed}
+            return {"available": False, "accepted": c.accepted,
+                    "completed": c.completed, "failed": c.failed}
         oldest = None
         try:
             oldest = self.store.oldest_queued_at()
@@ -602,7 +655,7 @@ class CaptureIntake:
                              if oldest is not None else None),
             "over_depth": depth >= self.depth_ceiling,
             "depth_ceiling": self.depth_ceiling,
-            "accepted": self.accepted,
-            "completed": self.completed,
-            "failed": self.failed,
+            "accepted": c.accepted,
+            "completed": c.completed,
+            "failed": c.failed,
         }

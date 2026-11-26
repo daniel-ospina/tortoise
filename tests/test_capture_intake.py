@@ -63,7 +63,7 @@ def test_accept_returns_after_the_row_exists_and_never_swallows_a_write_failure(
     with pytest.raises(IntakeStoreUnavailable):
         q.accept(org_id="o1", graph="g1", session_id="s1",
                  payload={"conversation": [{"role": "user", "content": "hi"}]})
-    assert q.accepted == 0, "a failed write must not be counted as accepted"
+    assert q.counters.accepted == 0, "a failed write must not be counted as accepted"
 
 
 def test_the_stored_row_carries_the_payload_verbatim_and_no_credential():
