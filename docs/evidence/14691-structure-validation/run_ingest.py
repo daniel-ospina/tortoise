@@ -117,6 +117,10 @@ def occupancy(before) -> dict:
     return found
 
 
+#: The sections an overview must CARRY before its emptiness can be judged.
+_OVERVIEW_KEYS = ("taxonomy", "structure", "status")
+
+
 def refuse_if_not_fresh(before, graph: str = GRAPH) -> None:
     """Raise SystemExit unless `before` describes an EMPTY graph.
 
@@ -127,6 +131,17 @@ def refuse_if_not_fresh(before, graph: str = GRAPH) -> None:
     enforcement can be deleted while its evidence stays measurable. A falsifier
     can now call this and observe the SystemExit itself.
     """
+    # ⛔ AN ABSENT OVERVIEW IS NOT A FRESH GRAPH (#14691 review, 6th round,
+    # P3-7). `(before or {})` made `None` and `{}` walk to "no contamination" and
+    # the run proceeded — a premise established by a measurement that never
+    # happened. A refusal needs the measurement, so an unreadable overview is a
+    # REFUSAL, not a pass.
+    if not isinstance(before, dict) or not set(_OVERVIEW_KEYS) <= set(before):
+        raise SystemExit(
+            "REFUSING TO MEASURE A GRAPH THAT IS NOT FRESH: "
+            f"{graph} returned an overview with no {sorted(set(_OVERVIEW_KEYS) - set(before or {}))} "
+            "section, so the emptiness of the graph could not be established at "
+            "all. The isolation premise is a MEASUREMENT, not an assumption.")
     occupied = {k: v for k, v in ((before or {}).get("taxonomy") or {}).items() if v}
     structure_total = ((before or {}).get("structure") or {}).get("total") or 0
     contamination = occupancy(before)

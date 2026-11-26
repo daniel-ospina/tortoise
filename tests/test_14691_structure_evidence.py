@@ -1051,8 +1051,8 @@ def test_the_isolation_refusal_is_enforced_on_the_whole_overview():
         "the receipt's own empty_before reads as populated, so the guard would "
         f"refuse a real run: {ingest.occupancy(before)}")
     # the PREDICATE's coverage only — the RAISE and the call site are pinned in
-    # `test_the_isolation_refusal_is_WIRED_into_the_ingest_runner`, so this file
-    # grades each half of the guard exactly once.
+    # `test_the_refusal_FIRES_on_the_run_path`, so this file grades each half of
+    # the guard exactly once.
     for dotted, value in (("taxonomy.Point", 5),
                           ("structure.total", 2),
                           ("status.total_entities", 500),
@@ -2068,3 +2068,457 @@ def test_the_independent_measurements_FINDING_payload_is_pinned_row_by_row():
     # (3) every retrieval probe the corroboration ran answered
     for element, block in indep["A5"].items():
         assert block["search_ok"] is True, (element, block)
+
+
+
+# ── the 6th-round review's residue: prose figures, absent-reply states, credits
+def test_the_A4_heading_clause_is_the_claim_layer_verdict():
+    """Reds if A4's post-em-dash clause drifts — 6th round, P2-2.
+
+    `FAIL (the claim layer above it)` → `PASS (…)` left 39 passed: the verdict arm
+    reads the FIRST token after the em dash, so the clause naming the claim layer
+    was free while `claim_layer.passes` said `false` in the same bundle.
+    """
+    cl = _score()["claim_layer"]
+    head = _report_line(r"^#{2,4} A4 · ")
+    assert head, "REPORT.md has no A4 heading"
+    clause = ("PASS" if cl["passes"] else "FAIL") + " (the claim layer above it)"
+    assert clause in head, (clause, head)
+    assert cl["passes"] is False and cl["invented"] > 0, cl
+
+
+def test_the_A2_table_cells_are_the_artifact_totals():
+    """Reds if an A2 cell states a figure the totals do not — 6th round, P2-6.
+
+    Two cells were pinned by SUBSTRING, so `**5/5**` → `**9/9**` in the "oriented
+    correctly" column (which carries the same figure) and `team → role **0**` →
+    `**1**` both left 39 passed. Each row's cells are now read positionally and
+    equated to the artifact's own totals.
+    """
+    totals = _score()["A2_edges"]["totals"]
+    rows = {}
+    for line in _report().splitlines():
+        if line.startswith("| ") and line.count("|") >= 5:
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) >= 4:
+                rows[cells[0].replace("*", "")] = cells
+
+    def cell(pattern: str, index: int) -> str:
+        for label, cells in rows.items():
+            if re.search(pattern, label):
+                return cells[index]
+        raise AssertionError(f"REPORT.md has no A2 row matching {pattern!r}: "
+                             f"{sorted(rows)[:12]}")
+
+    assert cell(r"^product → feature", 1) == f"**{totals['containment_present']}**"
+    assert cell(r"^person → team", 1) == f"**{totals['membership_present']}**"
+    assert cell(r"^person → role", 1) == f"**{totals['role_links_present']}**"
+    assert cell(r"^team → role", 1) == f"**{totals['team_to_role_edges']}**"
+    owned_rows = sum(
+        1 for doc in _receipt()["documents"]
+        for edge in ((doc.get("result") or {}).get("relation_write") or {}).get("edges") or []
+        if edge.get("predicate") == "ownedBy")
+    assert cell(r"^thing → owner", 1) == (
+        f"**{totals['ownership_present']}** ({owned_rows} rows)"), cell(r"^thing → owner", 1)
+    assert cell(r"^thing → owner", 2) == (
+        f"**{totals['ownership_oriented_correct']}/{owned_rows} — every row "
+        "INVERTED**"), cell(r"^thing → owner", 2)
+    assert cell(r"^dependent → dependency", 1) == (
+        f"**{totals['dependency_present_and_correct']}**")
+    assert cell(r"^dependent → dependency", 2) == (
+        f"**{totals['dependency_present_and_correct']}**")
+
+
+def test_the_report_section_5_counts_are_the_artifacts():
+    """Reds if §5's "Could/Could not" counts drift — 6th round, P2-4.
+
+    §5 is the section that ANSWERS the PR's question, and none of its seven
+    counts was pinned: all of them could be falsified at once, and `*Which team a
+    role belongs to* — absent.` could become `— present and typed.`, with the
+    suite green.
+    """
+    declared = _corpus()["_declared_structure"]
+    totals = _score()["A2_edges"]["totals"]
+    flat = " ".join(_report().replace("*", " ").split())
+    words = {2: "two", 5: "five", 3: "three", 4: "four", 7: "seven"}
+    inventory = (f"Two products, "
+                 f"{words[len(declared['features'])]} features, which feature "
+                 f"belongs to which product; {words[len(declared['teams'])]} "
+                 f"teams; {words[len(declared['roles'])]} roles and who holds "
+                 f"each; {words[len(declared['people'])]} people; "
+                 f"{words[len(declared['components'])]} components and what "
+                 f"depends on what; {words[len(declared['customers'])]} "
+                 "customers and the segment they sit in.")
+    assert inventory in flat, ("REPORT.md §5's inventory is not the corpus's "
+                               f"declaration: expected {inventory!r}")
+    assert totals["team_to_role_edges"] == 0, totals
+    assert "Which team a role belongs to — absent." in flat, (
+        "REPORT.md §5 no longer states the absent team→role class its own "
+        f"artifact measures as {totals['team_to_role_edges']}")
+    assert totals["membership_present"] == "4/4" and totals["role_links_present"] == "4/4"
+
+
+def test_the_cost_table_is_the_receipt():
+    """Reds if a §2 cost-table cell drifts from the receipt — 6th round, P3-11.
+
+    `doc-04 … 3 written` → `9`, and the ack seconds across the table, were free
+    text. Every cell is derived here: ack to one decimal, the LLM counters, the
+    point and relation counts, and the total row (mean ack, sums).
+    """
+    docs = {d["doc_id"]: d for d in _receipt()["documents"]}
+    rows = {}
+    for line in _report().splitlines():
+        if line.startswith("| doc-0") and line.count("|") >= 7:
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            rows[cells[0]] = cells
+    assert len(rows) == len(docs), (sorted(rows), sorted(docs))
+    total_ack = 0.0
+    for doc_id, doc in docs.items():
+        res = doc.get("result") or {}
+        llm = (res.get("stats") or {}).get("llm") or {}
+        edges = (res.get("relation_write") or {}).get("edges") or []
+        cells = rows[doc_id]
+        assert cells[1] == f"{doc['ack_seconds']:.1f}", (doc_id, cells)
+        assert cells[2] == str(llm.get("calls")), (doc_id, cells)
+        assert cells[3] == f"{llm.get('prompt_tokens'):,}", (doc_id, cells)
+        assert cells[4] == f"{llm.get('completion_tokens'):,}", (doc_id, cells)
+        assert cells[5] == str(len(res.get("points") or [])), (doc_id, cells)
+        assert cells[6].startswith(str(len(edges))), (doc_id, cells)
+        total_ack += doc["ack_seconds"]
+    totals = [c.strip() for c in _report_line(r"^\| \*\*total\*\* \|").strip().strip("|").split("|")]
+    tk = _score()["extraction_tokens"]
+    assert totals[1] == f"**{total_ack / len(docs):.1f} avg**", totals
+    assert totals[2] == f"**{tk['calls']}**", totals
+    assert totals[3] == f"**{tk['prompt_tokens']:,}**", totals
+    assert totals[4] == f"**{tk['completion_tokens']:,}**", totals
+    assert totals[6] == f"**{_score()['edge_count']}**", totals
+
+
+def test_the_quote_audit_ROWS_are_the_paraphrase_examples():
+    """Reds if the audit's per-row overlaps drift — 6th round, P3-8.
+
+    Only `overlap >= 0.6` was asserted, so `audited[0].overlap 0.636 → 0.05`
+    passed — an "audit" row disagreeing with the bucket it demonstrates. The rows
+    are the claim layer's own paraphrase examples.
+    """
+    audit = json.loads((BUNDLE / "out" / "t6-quote-audit.json").read_text())
+    cl = _score()["claim_layer"]
+    q = _score()["A4_no_invention"]["quotes"]
+    assert len(audit["audited"]) == len(q["paraphrase_examples"]), (
+        len(audit["audited"]), len(q["paraphrase_examples"]))
+    for row, example in zip(audit["audited"], q["paraphrase_examples"],
+                            strict=True):
+        assert row["overlap"] == example["best_sentence_overlap"], (row, example)
+        assert row["quote"][:40] == example["quote"][:40], (row, example)
+    assert (audit["verbatim"], audit["paraphrase"], audit["not_in_corpus"]) == (
+        cl["verbatim"], cl["paraphrase"], cl["invented"])
+
+
+def test_the_tool_surface_NAMES_are_the_readback_census():
+    """Reds if tool names are swapped while the count is preserved — 6th round, P3-9.
+
+    Measured: renaming 34 of the 39 keys left 39 passed, because only the count
+    and the schemas' presence were checked. The census in `readback.json` is the
+    measurement of the live surface; the artifact is a per-tool detail view of it.
+    """
+    surface = json.loads((BUNDLE / "out" / "tool-surface.json").read_text())
+    census = _readback()["tool_surface"]
+    assert set(surface) == set(census["names"]), (
+        "the tool-surface artifact names tools the live census does not: "
+        f"{sorted(set(surface) - set(census['names']))[:5]} / missing "
+        f"{sorted(set(census['names']) - set(surface))[:5]}")
+    assert len(surface) == census["count"]
+
+
+def test_the_structure_check_reply_is_the_empty_answer_the_report_states():
+    """Reds if `structure_check` is unread or its count is invented — P3-10.
+
+    `readback.structure_check` was read by nothing: replacing it with a 15-issue
+    reply stayed green while REPORT §6.4 said it "returned `[]`". That sentence's
+    "12 inverted-or-untyped relation classes" also matches no artifact (15 rows,
+    13 distinct pairs), so the figure is now the artifact's.
+    """
+    probe = _readback()["structure_check"]
+    assert _measured(probe.get("reply"), "check_structure") == [], probe
+    flat = " ".join(_report().split())
+    assert "`check_structure` returned `[]`" in flat
+    totals = _score()["A2_edges"]["totals"]
+    assert (f"{totals['asymmetric_rows_inverted']} inverted relation rows "
+            f"({totals['asymmetric_pairs_inverted']} distinct pairs)") in flat, (
+        "REPORT §6.4 does not state the inverted-row figure its own artifact "
+        f"measures ({totals['asymmetric_rows_inverted']} rows / "
+        f"{totals['asymmetric_pairs_inverted']} pairs)")
+
+
+def test_a_reply_less_call_is_NOT_a_measured_empty():
+    """Reds if absence is read as an empty ANSWER — 6th round, P2-3 / P3-7.
+
+    `measured_empty({})` returned True and `rows(call.get("reply"))` is `[]` for a
+    call that was never asked, so a witness row carrying `expand_relationships`
+    with NO `reply` key still manufactured D4 — the opposite of what the D6 guard
+    beside it implements.
+    """
+    module = _load_score_module()
+    assert module.measured_empty({}) is False
+    assert module.measured_empty({"tool": "t"}) is False
+    assert module.measured_empty({"tool": "t", "reply": []}) is True
+    assert module.measured_empty({"tool": "t", "reply": {"result": []}}) is True
+    # the D4 arm, driven on the module's own readback
+    saved = json.loads(json.dumps(module.READBACK))
+    try:
+        module.READBACK["door_findings"] = [
+            f for f in module.READBACK.get("door_findings") or [] if f.get("id") != "D4"]
+        for w in module.READBACK["link_witness"].values():
+            w["expand_relationships"] = {"tool": "t", "explore": True}
+        assert "D4" not in [f["id"] for f in module._door_findings()], (
+            "a call carrying no `reply` key at all manufactured D4 — never asked "
+            "is not an empty answer")
+        for w in module.READBACK["link_witness"].values():
+            w["expand_relationships"] = {"tool": "t", "reply": {"result": []}}
+        assert "D4" in [f["id"] for f in module._door_findings()]
+    finally:
+        module.READBACK.clear()
+        module.READBACK.update(saved)
+
+
+def test_the_ingest_refusal_cannot_be_starved_of_its_overview():
+    """Reds if an unreadable overview counts as a FRESH graph — P3-7.
+
+    `refuse_if_not_fresh(None)` and `({})` were both accepted: `(before or {})`
+    walked to "no contamination", so a premise established by no measurement
+    passed the one guard that enforces it.
+    """
+    spec = importlib.util.spec_from_file_location("t6_ingest",
+                                                  BUNDLE / "run_ingest.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.refuse_if_not_fresh(_receipt()["empty_before"])
+    for starved in (None, {}, {"taxonomy": {}}, {"status": {"total_entities": 0}}):
+        try:
+            module.refuse_if_not_fresh(starved)
+        except SystemExit as exc:
+            assert "NOT FRESH" in str(exc), (starved, str(exc))
+        else:
+            raise AssertionError(
+                f"an unmeasurable overview ({starved!r}) was accepted as a fresh "
+                "graph — the premise would rest on no measurement at all")
+
+
+def test_the_corroboration_declaration_and_pairs_are_the_CORPUS_ones():
+    """Reds if the peer lane's declaration or pair DIRECTION is rewritten — P2-5.
+
+    Measured on `df788ab`: `declared.products → ["Alpha","Beta"]` and
+    `A2.dependsOn → 7 junk pairs` each left 39 passed, because the corroboration
+    arm compared LENGTHS. A corroboration whose content is free corroborates
+    nothing.
+    """
+    iv = json.loads((BUNDLE / "out" / "t6-independent-verification.json").read_text())
+    declared = _corpus()["_declared_structure"]
+    for key in ("products", "features", "teams", "roles", "people", "components",
+                "customers", "customerSegments"):
+        assert {n.lower() for n in iv["declared"][key]} == {
+            n.lower() for n in declared[key]}, (
+            f"the independent measurement declares different {key}s than the "
+            "corpus does")
+    for key in ("containment", "membership", "ownership", "dependencies", "serves"):
+        assert [list(p) for p in iv["declared"][key]] == [
+            list(p) for p in declared[key]], key
+
+    # direction, not just membership: dependsOn is (dependent, dependency)
+    depends = [(r["src"], r["dst"]) for r in iv["A2"]["dependsOn"]]
+    assert len(depends) == len(declared["dependencies"]), depends
+    for dependent, dependency in declared["dependencies"]:
+        hits = [row for row in depends
+                if row[0].lower().startswith(dependent.lower())
+                and row[1] == dependency]
+        assert len(hits) == 1, (dependent, dependency, depends)
+    # hasPart is (parent, child), and ownedBy is (subject, object) — the inversion
+    products = {p.lower() for p in declared["products"]}
+    for row in iv["A2"]["hasPart"]:
+        assert row["src"].lower() in products, row
+    component_names = {c.lower() for c in declared["components"]}
+    for row in iv["A2"]["ownedBy"]:
+        # the stored name may carry a welded collective noun (the D2 finding)
+        assert row["src_kind"] == "subject" and row["dst_kind"] == "object", row
+        owned = row["dst"].lower()
+        assert (owned in products
+                or any(owned.startswith(c) for c in component_names)
+                or owned in {"on-call rotation", "enterprise renewals"}), row
+
+
+def test_the_second_measurements_COUNTS_and_witness_rows_are_pinned():
+    """Reds if the peer artifact's counts/witness rows are rewritten — P3-11/13.
+
+    Measured on `df788ab`: `A1.objects 24 → 1`, `A5` rewritten, and every
+    `witness_neighbourhood_doors[*].explore_rows → 99` left 39 passed — while
+    REPORT §3 states "24 Objects and 11 Subjects" from the same population.
+    """
+    iv = json.loads((BUNDLE / "out" / "t6-independent-verification.json").read_text())
+    typed = iv["A1"]["typed_nodes"]
+    object_kinds = ("product-strategy:product", "product-strategy:customerSegment",
+                    "product-strategy:customer", "product-strategy:feature",
+                    "core:workflow", "agent-ops:rule", "dev:architectureDoc",
+                    "dev:code")
+    subject_kinds = ("core:naturalPerson", "core:team", "core:role")
+    assert len(iv["A1"]["objects"]) == sum(typed.get(k, 0) for k in object_kinds)
+    assert len(iv["A1"]["subjects"]) == sum(typed.get(k, 0) for k in subject_kinds)
+    flat = " ".join(_report().split())
+    assert (f"{len(iv['A1']['objects'])} Objects and "
+            f"{len(iv['A1']['subjects'])} Subjects") in flat, (
+        "REPORT.md's Objects/Subjects sentence is not the peer artifact's")
+    # the neighbourhood witness: explore_rows is the length of the rows it kept
+    for name, w in iv["witness_neighbourhood_doors"].items():
+        assert w["explore_rows"] == len(w["explore"]), (name, w)
+    # and the peer's A5 block is the text leg only
+    assert all(set(v) == {"search_ok"} and v["search_ok"] is True
+               for v in iv["A5"].values()), iv["A5"]
+
+
+def test_the_VERIFICATION_writeup_states_the_artifacts_numbers():
+    """Reds if the second write-up states figures the bundle refutes — P3-12.
+
+    Measured: `11 → 50` verbatim and `ownedBy … **0** → **6**` (which ERASES the
+    inversion) both left 39 passed — the tests read REPORT.md only, so the sibling
+    document was free to describe a different bundle.
+    """
+    doc = (BUNDLE / "VERIFICATION-independent.md").read_text()
+    cl = _score()["claim_layer"]
+    assert f"| verbatim substring of the corpus | {cl['verbatim']} |" in doc
+    assert (f"| faithful paraphrase (≥60% of the quote's words in one corpus "
+            f"sentence) | {cl['paraphrase']} |") in doc
+    assert f"| **best corpus-sentence overlap < 60% — the corpus does not say it** | **{cl['invented']}** |" in doc
+    totals = _score()["A2_edges"]["totals"]
+    assert (f"| `ownedBy` | `->` | **the target owns the source** | 6 (4 pairs) | "
+            f"**{totals['ownership_oriented_correct']}** |") in doc, (
+        "VERIFICATION's ownedBy row does not state the artifact's correct-row count")
+    inverted = totals["asymmetric_rows_inverted"]
+    pairs = totals["asymmetric_pairs_inverted"]
+    assert f"**{inverted}**" in doc and f"**{pairs} distinct pairs**" in doc, (
+        "VERIFICATION does not state the artifact's inverted-row / distinct-pair "
+        f"counts ({inverted} / {pairs})")
+    # the byte figure the REPORT states is the committed file's own
+    size = (BUNDLE / "out" / "readback.json").stat().st_size
+    assert f"{size:,} bytes" in _report(), size
+
+
+def test_the_D4_neighbour_figures_are_the_witnesses():
+    """Reds if the D4 evidence's neighbour counts are rewritten — P3-11.
+
+    Measured: `6 / 10 / 10` → `60 / 100 / 100` left 39 passed. They are the link
+    witness's own `explore_neighbour_count` values for the three nodes D4 names.
+    """
+    witness = _readback()["link_witness"]
+    names = ("Amara Osei", "Platform team", "event-bus")
+    literal = " / ".join(str(witness[n]["explore_neighbour_count"]) for n in names)
+    assert re.search(rf"sees {re.escape(literal)}(?!\d)", " ".join(_report().split())), (
+        f"REPORT's D4 row does not state the witness counts ({literal})")
+
+
+# ── no figure in the two documents is free (the reviewers' recurring class) ──
+_SUP_NORM = None
+
+
+def _supported_numbers() -> set[str]:
+    """Every number the bundle's artifacts actually carry, normalised.
+
+    Scalars, LIST LENGTHS (a 24-entry list supports "24"), file sizes in bytes and
+    KiB, and the receipt's ack-seconds derived figures (each to 1 dp, the mean, and
+    the total in minutes) — the three places REPORT's tables get a number the raw
+    JSON does not spell.
+    """
+    def norm(x) -> str:
+        f = float(str(x).replace(",", ""))
+        return str(int(f)) if f == int(f) else str(f)
+
+    out: set[str] = set()
+
+    def walk(obj) -> None:
+        if isinstance(obj, dict):
+            for value in obj.values():
+                walk(value)
+        elif isinstance(obj, list):
+            out.add(norm(len(obj)))
+            for value in obj:
+                walk(value)
+        elif isinstance(obj, bool):
+            return
+        elif isinstance(obj, (int, float)):
+            out.add(norm(obj))
+
+    for path in (BUNDLE / "out").glob("*.json"):
+        walk(json.loads(path.read_text()))
+        size = path.stat().st_size
+        out |= {norm(size), norm(round(size / 1024))}
+    acks = [d["ack_seconds"] for d in _receipt()["documents"]]
+    out |= {norm(round(a, 1)) for a in acks}
+    out |= {norm(round(sum(acks) / len(acks), 1)), norm(round(sum(acks) / 60, 1)),
+            norm(round(sum(acks), 1))}
+    return out
+
+
+#: Contexts in which a number is NOT a claim about the artifacts. Each pattern
+#: carries its reason, and the pattern is REMOVED before tokenising — so a number
+#: cannot ride in on an allowlist entry that does not match its context.
+_PROSE_ALLOWED = (
+    (r"§\d+(?:\.\d+)?", "a section reference"),
+    (r"(?m)^#{1,4} \d+(?:\.\d+)?", "a heading number"),
+    (r"[\w./-]+\.(?:py|md|yml|json|sh|toml):\d+(?:-\d+)?", "a source line reference"),
+    (r"#\d{3,}", "an issue/PR reference"),
+    (r"\b[0-9a-f]{7,40}\b", "a commit sha"),
+    (r"\b20\d\d-\d\d-\d\d\b", "a date"),
+    (r"\b\d\d:\d\d(?:[–-]\d\d:\d\d)?\b", "a wall-clock time"),
+    (r"\b\d+\.\d+\.\d+\.\d+(?::\d+)?\b", "an address/port"),
+    (r"\b\d+(?:\.\d+)?%", "a threshold, stated in words as well"),
+    (r"\bMD0\d\d\b", "a markdownlint rule id"),
+    (r"(?<![\w.])(?:A[1-5]|D[1-6]|T[1-6]|P[0-3]|G[12]|S[1-5]|W[1-5])\b",
+     "an assertion/finding/witness id"),
+    (r"[<≥] ?\d+\.\d+", "a threshold comparison (`< 0.6`)"),
+    (r"docs/evidence/\d+[\w-]*/", "a sibling bundle's path"),
+    (r"\bnode_count: \d+, edge_count: \d+\b",
+     "the PEER probe's own node/edge counts for Lumen Core, which this bundle "
+     "does not produce (VERIFICATION §2, stated as the peer's measurement)"),
+)
+
+
+def _prose_tokens() -> set[str]:
+    text = (_report() + "\n\n" + (BUNDLE / "VERIFICATION-independent.md").read_text())
+    # the mutant tables quote invented figures ON PURPOSE — they describe what a
+    # falsifier reds on, not what the bundle measures.
+    text = re.sub(r"### 8\.1 What the falsifier suite.*?(?=\n## 9\.)", " ", text,
+                  flags=re.S)
+    text = re.sub(r"```.*?```", " ", text, flags=re.S)
+    for pattern, _reason in _PROSE_ALLOWED:
+        text = re.sub(pattern, " ", text, flags=re.M)
+    return {t for t in re.findall(r"\b\d[\d,]*(?:\.\d+)?\b", text)}
+
+
+def test_no_FIGURE_in_the_two_documents_is_free():
+    """Reds if a number in the shipped prose matches no artifact value.
+
+    ⛔ THE CLASS THE REVIEWERS KEPT FINDING (5th, 6th and 7th cycles): a number in
+    prose that nothing recomputes. Individual pins close the figures they name —
+    and the next figure is free again. This arm inverts the burden: every numeric
+    token left after removing contexts that are not claims (section refs, source
+    line refs, issue ids, dates, times, addresses, thresholds, lint rule ids) must
+    be a number some committed artifact actually carries.
+
+    Measured mutants that this arm reds (each green before it existed):
+    `24 Objects and 11 Subjects` → `99/98`, `809,812 bytes · 791 KB` →
+    `809,999 · 792`, `6 / 10 / 10` → `60 / 100 / 100`, and any invented figure in
+    VERIFICATION-independent.md.
+    """
+    def norm(x: str) -> str:
+        f = float(x.replace(",", ""))
+        return str(int(f)) if f == int(f) else str(f)
+
+    supported = {norm(n) for n in _supported_numbers()}
+    tokens = _prose_tokens()
+    assert len(tokens) > 60, (
+        f"the prose scan found only {len(tokens)} numeric tokens — the extraction "
+        "itself has stopped working, so this arm would be vacuous")
+    unsupported = sorted((t for t in tokens if norm(t) not in supported),
+                         key=lambda x: float(x.replace(",", "")))
+    assert not unsupported, (
+        "these numbers appear in REPORT.md / VERIFICATION-independent.md and in "
+        "no committed artifact — a claim nothing in the bundle supports: "
+        f"{unsupported}. Pin the figure to its field, or drop it.")

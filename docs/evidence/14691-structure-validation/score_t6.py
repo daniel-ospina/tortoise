@@ -114,6 +114,20 @@ def is_error_reply(reply) -> bool:
         except (ValueError, TypeError):
             return False
     if isinstance(reply, dict):
+        # ⛔ THE MCP SPEC'S OWN ERROR SHAPE (#14691 review, 6th round, P2-1).
+        # MCP 2025-06-18 reports a tool EXECUTION error inside the RESULT as
+        # `{"content": [...], "isError": true}` — no `error` key, no `ok` key — so
+        # this guard could not see it. Measured: replacing both bare-kind probes,
+        # or all seven witness `expand_relationships` replies, with that envelope
+        # left 39 passed and D3/D4 in place: the findings were sourced from calls
+        # that never answered, which is the exact shape this guard exists for.
+        if reply.get("isError") is True or reply.get("is_error") is True:
+            return True
+        content = reply.get("content")
+        if isinstance(content, list) and any(
+                isinstance(item, dict) and item.get("isError") is True
+                for item in content):
+            return True
         return bool(reply.get("error")) or reply.get("ok") is False
     return False
 
@@ -139,7 +153,13 @@ def measured_empty(call) -> bool:
     FAILED call is not a measured empty, and every finding here depends on the
     difference (#14691 review, 5th cycle, N1).
     """
-    return isinstance(call, dict) and not call_failed(call) and not rows(call.get("reply"))
+    # ⛔ ABSENCE IS NOT EMPTINESS (#14691 review, 6th round, P3-7). `call.get(
+    # "reply")` is None for a call that was never asked, and `rows(None) == []`,
+    # so a reply-less call read as "the door answered nothing" — the third state
+    # this function's own docstring distinguishes, inverted. `"reply" in call` is
+    # the distinction: asked-and-empty versus not asked.
+    return (isinstance(call, dict) and "reply" in call
+            and not call_failed(call) and not rows(call.get("reply")))
 
 
 # ── the entity map: id → {name, kind} ─────────────────────────────────────
@@ -979,8 +999,9 @@ def _door_findings() -> list[dict]:
         silent = {name: {"expand_rows": 0,
                          "explore_neighbours": w.get("explore_neighbour_count")}
                   for name, w in witness.items()
-                  if not rows((w.get("expand_relationships") or {})
-                              .get("reply"))
+                  if "reply" in (w.get("expand_relationships") or {})
+                  and not rows((w.get("expand_relationships") or {})
+                               .get("reply"))
                   and not call_failed(w.get("expand_relationships"))
                   and (w.get("explore_neighbour_count") or 0) > 0}
         if silent:
