@@ -1,0 +1,218 @@
+"""Guard: an own-site link's ``#fragment`` must land on an id the page declares (#11939).
+
+THE DEFECT CLASS. ``https://premiselabs.co/docs#appeal`` is not a broken link —
+it 200s. It is a link that lands at the TOP of the docs page, because that page
+declares no ``id="appeal"``. The fragment is resolved by the browser, never sent
+to the server, so no crawler, no status-code check and no HTML validator sees
+it. ``tortoise/abuse.py`` (``appeal_url()``) is where it was found, but the site
+is one instance of the class, not the class: every hand-written ``href`` and
+every string literal that becomes one can carry a fragment nobody verified.
+
+WHY THIS TEST AND NOT A LINK CHECKER. ``.github/scripts/docs-link-check.sh``
+fetches URLs; a fetch cannot answer this question, because the answer lives on
+the client side of the response. The only way to see it is to compare the two
+halves we already have in the tree: the hrefs our sources EMIT, and the ids our
+pages DECLARE. That is what this file does, statically, with no network.
+
+WHAT IT READS (and why each shape is here):
+  * ``website/*.html`` — same-page ``href="#frag"`` links, resolved against the
+    page's own declared ids.
+  * ``tortoise/**/*.py`` — string LITERALS that are code, not docstrings (an
+    AST walk, so a URL quoted in prose is not mistaken for one we emit). The
+    ``appeal_url()`` default is exactly this shape.
+  * ``website/apps/dashboard/src/**/*.{js,jsx,ts,tsx}`` — ``href="…"`` /
+    ``href={'…'}`` / ``href={`…`}`` attributes only, so a URL quoted in a
+    comment about a past defect is not read back as a live one.
+  * markdown under ``tortoise/`` and ``website/apps/dashboard/public/skills/``
+    — ``[text](url#frag)`` links, which is how the onboarding copies carry
+    ``#chatgpt``.
+
+RESOLUTION. ``website/_redirects`` + ``website/functions/_middleware.ts`` decide
+which file serves a path (``/tortoise`` → ``product.html``, ``/docs`` and
+``/tortoise/docs`` → ``docs.html``, and so on), and a browser PRESERVES the
+fragment across a redirect whose target carries none — which is why
+``/product.html#pricing`` was still dead after that path 301'd to ``/``. The
+table below is that map, spelled out rather than derived: deriving it means
+parsing a TS middleware branch, and an unmapped path FAILS here (with the page
+and the path in the message) instead of passing quietly, so adding a page forces
+this table to be taught.
+
+LIMIT, declared rather than discovered: an id rendered at runtime by a
+``setAttribute``/``id={…}`` expression is invisible to a static read. The
+dashboard's ``#settings-memory-heading`` is a literal ``id=`` in ``main.jsx``
+today, so it IS seen; the day a fragment is written only that way, this test
+goes quiet about it, and that is the same class one level in — do not read a
+green run as "no dynamic ids exist".
+"""
+from __future__ import annotations
+
+import ast
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+TESTS_DIR = Path(__file__).resolve().parent
+REPO = TESTS_DIR.parent
+WEBSITE = REPO / "website"
+
+sys.path.insert(0, str(TESTS_DIR))
+from _html_links import extract_element_ids  # noqa: E402
+
+OWN_HOSTS = ("premiselabs.co", "www.premiselabs.co", "tortoise.premiselabs.co")
+
+#: path (no fragment, no query) → the page file that serves it.
+#:
+#: ``_middleware.ts``: the product document has ONE canonical address,
+#: ``premiselabs.co/tortoise``, served by a rewrite onto ``product.html``; the
+#: turtle host root and every ``/product``, ``/product.html`` spelling collapse
+#: onto it. ``/docs`` and ``/docs.html`` are the docs page (``_redirects`` 301s
+#: the ``.html`` spelling to the clean one), and ``/tortoise/docs`` is the same
+#: document under the product prefix.
+PATH_TO_PAGE = {
+    "/": "product.html",
+    "/tortoise": "product.html",
+    "/product": "product.html",
+    "/product.html": "product.html",
+    "/docs": "docs.html",
+    "/docs.html": "docs.html",
+    "/tortoise/docs": "docs.html",
+    "/tortoise/faq": "faq.html",
+    "/faq": "faq.html",
+    "/contact": "contact.html",
+    "/tos": "tos.html",
+    "/privacy": "privacy.html",
+    "/license": "license.html",
+    "/security": "security.html",
+    "/self-hosted": "self-hosted.html",
+    "/investors": "investors.html",
+    "/dpa": "dpa.html",
+}
+
+_OWN_URL = re.compile(
+    r"https?://(?:%s)/(?P<path>[^\"'\s)>`#]*)#(?P<frag>[^\"'\s)>`#]+)"
+    % "|".join(re.escape(h) for h in OWN_HOSTS)
+)
+_HREF_ATTR = re.compile(r"""href=(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|\{(?P<expr>[^}]*)\})""")
+_JS_STR = re.compile(r"""["'`](?P<url>[^"'`]*#[^"'`]*)["'`]""")
+_MD_LINK = re.compile(r"\]\((?P<url>https?://[^)\s#]+#[^)\s]+)\)")
+_SAME_PAGE = re.compile(r"""href="#(?P<frag>[^"]+)\"""")
+
+_PAGE_ID_CACHE: dict[str, set[str]] = {}
+
+
+def page_ids(name: str) -> set[str]:
+    """Ids a page DECLARES, plus the legacy ``<a name>`` a browser also honours."""
+    if name not in _PAGE_ID_CACHE:
+        path = WEBSITE / name
+        html = path.read_text(encoding="utf-8")
+        ids = {i for i, _line in extract_element_ids(html)}
+        ids |= set(re.findall(r"""<a\s[^>]*\bname="([^"]+)\"""", html))
+        _PAGE_ID_CACHE[name] = ids
+    return _PAGE_ID_CACHE[name]
+
+
+def resolve(path: str) -> str | None:
+    """The page file serving ``path``, or None when the path is one we must learn."""
+    if path in PATH_TO_PAGE:
+        return PATH_TO_PAGE[path]
+    for candidate in (path.lstrip("/") + ".html",):
+        if (WEBSITE / candidate).is_file():
+            return candidate
+    tail = path.rstrip("/").rsplit("/", 1)[-1]
+    if tail and (WEBSITE / f"{tail}.html").is_file():
+        return f"{tail}.html"
+    return None
+
+
+def own_site_targets() -> list[tuple[str, int, str, str]]:
+    """``(site, line, url, fragment)`` for every own-site fragment URL we emit."""
+    found: list[tuple[str, int, str, str]] = []
+
+    for py in sorted(REPO.glob("tortoise/**/*.py")):
+        source = py.read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(source, filename=str(py))
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                body = getattr(node, "body", [])
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                    docstrings.add(id(body[0].value))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            if id(node) in docstrings:
+                continue
+            for match in _OWN_URL.finditer(node.value):
+                found.append((str(py.relative_to(REPO)), node.lineno, match.group(0), match.group("frag")))
+
+    js_suffixes = {".js", ".jsx", ".ts", ".tsx"}
+    for js in sorted((WEBSITE / "apps" / "dashboard" / "src").rglob("*")):
+        if js.suffix not in js_suffixes or not js.is_file():
+            continue
+        for lineno, line in enumerate(js.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            stripped = line.lstrip()
+            if stripped.startswith(("//", "*", "/*")):
+                # Prose about a past defect (e.g. the #4392 comment that quotes
+                # the dead `product.html#pricing` link it removed) is not a link
+                # we emit; reading it back would demand an id for a URL nobody
+                # renders any more.
+                continue
+            for attr in _HREF_ATTR.finditer(line):
+                literal = attr.group("dq") or attr.group("sq")
+                if literal is not None:
+                    candidates = [literal]
+                else:
+                    candidates = [m.group("url") for m in _JS_STR.finditer(attr.group("expr"))]
+                for url in candidates:
+                    match = _OWN_URL.search(url)
+                    if match:
+                        found.append((str(js.relative_to(REPO)), lineno, match.group(0), match.group("frag")))
+
+    md_roots = [REPO / "tortoise", WEBSITE / "apps" / "dashboard" / "public" / "skills"]
+    for root in md_roots:
+        if not root.is_dir():
+            continue
+        for md in sorted(root.rglob("*.md")):
+            for lineno, line in enumerate(md.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                for link in _MD_LINK.finditer(line):
+                    match = _OWN_URL.search(link.group("url"))
+                    if match:
+                        found.append((str(md.relative_to(REPO)), lineno, match.group(0), match.group("frag")))
+
+    return found
+
+
+def test_emitted_own_site_fragments_resolve_to_a_declared_id():
+    targets = own_site_targets()
+    assert targets, "extraction found nothing — the guard is blind, not green"
+
+    dead: list[str] = []
+    unmapped: list[str] = []
+    for site, lineno, url, frag in targets:
+        path = "/" + _OWN_URL.search(url).group("path")
+        page = resolve(path)
+        if page is None:
+            unmapped.append(f"{site}:{lineno}  {url}  — path not in PATH_TO_PAGE")
+            continue
+        if frag not in page_ids(page):
+            dead.append(f"{site}:{lineno}  {url}  — {page} declares no id={frag!r}")
+
+    assert not unmapped, "own-site path serving an unknown page:\n" + "\n".join(unmapped)
+    assert not dead, "fragment link that lands at the top of the page:\n" + "\n".join(dead)
+
+
+def test_same_page_fragments_resolve():
+    dead: list[str] = []
+    pages = sorted(WEBSITE.glob("*.html"))
+    assert pages, "no pages found under website/"
+    for page in pages:
+        html = page.read_text(encoding="utf-8", errors="replace")
+        declared = page_ids(page.name)
+        for lineno, line in enumerate(html.splitlines(), 1):
+            for match in _SAME_PAGE.finditer(line):
+                frag = match.group("frag")
+                if frag not in declared:
+                    dead.append(f"{page.name}:{lineno}  href=#{frag}")
+    assert not dead, "same-page fragment with no such id:\n" + "\n".join(dead)
