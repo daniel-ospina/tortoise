@@ -31,9 +31,7 @@ WHAT IT READS (and why each shape is here):
     ``/*``) is skipped, which is what keeps the #4392 comment — the one that
     quotes the dead ``product.html#pricing`` link it removed — from being read
     back as live. A JSX block-comment CONTINUATION line is not skipped (it
-    begins with the URL, not with a marker), and such a line is excluded today
-    only because a bare URL carries no quote for ``_JS_STR`` to read; a quoted
-    URL in that position would be read as live (false RED, declared below).
+    begins with the URL, not with a marker); that is declared in RESIDUALS.
   * markdown under ``tortoise/`` and ``website/apps/dashboard/public/skills/``
     — ``[text](url#frag)`` links and ``<url#frag>`` autolinks, which are how
     the onboarding copies carry ``#chatgpt``.
@@ -84,10 +82,21 @@ than it is:
     link this scan reads, and ``.json`` is not a scan root. It names a live
     fragment; nothing here would notice if it stopped resolving. Declared, not
     fixed: accepting a scheme-less URL would read every prose mention as a link.
+  * a JSX BLOCK-COMMENT continuation line that begins with the URL (the shape in
+    ``main.jsx``'s #4392 note) is not skipped — only a line that BEGINS with
+    ``//``, ``*`` or ``/*`` is. Such a line is excluded today only because a bare
+    URL carries no quote for ``_JS_STR`` to read, so a QUOTED URL in that
+    position would be read as live: a false RED, never a false pass.
+  * a ROOT-RELATIVE href carrying a fragment (``href="/docs#appeal"`` — the
+    site's dominant link style, used by ``website/docs.html:127``) is NOT read:
+    ``_OWN_URL`` needs an own host and ``_SAME_PAGE`` needs ``href="#``. No page
+    carries one today. Closing it means resolving a bare path against the
+    company host as the base, which is a table this file does not have.
 """
 from __future__ import annotations
 
 import ast
+import functools
 import re
 import sys
 from pathlib import Path
@@ -142,6 +151,7 @@ PATH_TO_PAGE = {
     "/tortoise/investors": "investors.html",
     "/design-partners-intro": "design-partners-intro.html",
     "/tortoise/design-partners-intro": "design-partners-intro.html",
+    "/tortoise-for-product-teams": "tortoise-for-product-teams.html",
     "/dpa": "dpa.html",
 }
 
@@ -261,6 +271,11 @@ def resolve(host: str, path: str) -> str | None:
     # FALSE RED on a working link. It applies to EVERY host, not just the
     # retired one, which is why it is here rather than inside the branch below.
     path = path.rstrip("/") or "/"
+    if path == "/index.html":
+        # `_redirects` 301s `/index.html` to the ROOT, and which page that is
+        # depends on the HOST — so it is normalised here rather than given a row
+        # that would be right for one host and a false green for the other.
+        path = "/"
     if host in TORTOISE_HOSTS:
         # `_middleware.ts`: the retired host's ROOT lands on the product prefix, and
         # so does every `PRODUCT_PAGES` member (`:593`, `:627`). The legal, contact
@@ -273,17 +288,21 @@ def resolve(host: str, path: str) -> str | None:
     return PATH_TO_PAGE.get(path)
 
 
+@functools.lru_cache(maxsize=1)
 def own_site_targets() -> list[tuple[str, int, str, str]]:
-    """``(site, line, url, fragment)`` for every own-site fragment URL we emit."""
+    """``(site, line, url, fragment)`` for every own-site fragment URL we emit.
+
+    Cached: the walk is the expensive half and two tests read the same tree.
+    """
     found: list[tuple[str, int, str, str]] = []
 
     for py in sorted(REPO.glob("tortoise/**/*.py")):
         source = py.read_text(encoding="utf-8", errors="replace")
         if not any(h in source for h in OWN_HOSTS):
-            # `ast.parse` over every module in the package costs ~18 s on its own
-            # (measured), and this file packs at the map's flat 2.0 s default.
-            # A file that cannot contain an own-host URL is not parsed at all, so
-            # the weight the map books is not a fiction.
+            # A file that cannot contain an own-host URL is not parsed at all: the
+            # walk is the expensive half, and skipping it keeps the cost closest to
+            # the flat weight the map books (which `ci_timing.py` replaces from the
+            # first push-to-main junit sweep — a local figure is not a reading).
             continue
         tree = ast.parse(source, filename=str(py))
         docstrings = set()
@@ -391,7 +410,8 @@ def test_the_population_did_not_silently_shrink():
         "own-site fragment URL(s) left the scanned population — the guard is now "
         "blind to them, so its green run says nothing about them:\n"
         + "\n".join(f"  {site}  {url}" for site, url in missing)
-        + "\nIf the link is genuinely gone, delete its row here in the same commit."
+        + "\nIf the link moved, update its row here in the same commit; if it is "
+        "genuinely gone, delete the row — the point is that neither happens quietly."
     )
 
 
@@ -413,9 +433,14 @@ def test_same_page_fragments_resolve():
     # extractor stops matching (a typo in the pattern, a reformat to single
     # quotes), every list here is empty and this half is VACUOUSLY green. The
     # count is the anti-vacuity floor — the same rule the emitted-URL half
-    # applies with `assert targets`.
+    # applies with `assert targets`. ⛔ A count cannot tell a BLIND extractor from
+    # a legitimate consolidation of links: BOTH lower it. If the live population
+    # genuinely shrank, the fix is to lower this floor in the same commit, saying
+    # which links left; if it did not, the extractor is broken.
     assert matches >= EXPECTED_SAME_PAGE_MATCHES, (
         f"the same-page extractor read {matches} href(s), expected at least "
-        f"{EXPECTED_SAME_PAGE_MATCHES} — it is BLIND, not green"
+        f"{EXPECTED_SAME_PAGE_MATCHES}. Either it is BLIND (repair it) or the site "
+        "legitimately dropped that many same-page anchors (lower the floor in the "
+        "same commit and say which). A count cannot tell those apart."
     )
     assert not dead, "same-page fragment with no such id:\n" + "\n".join(dead)
