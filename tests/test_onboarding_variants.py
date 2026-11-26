@@ -3579,8 +3579,8 @@ def test_3232_generic_restart_lines_are_exact():
     # then-55-row table (cycle 8) removing the comma split changed no row, but on
     # the current table it moved THIRTEEN rows (measured at this head by replacing
     # `[c.strip() for c in post_sentence.split(",")]` with
-    # `[post_sentence.strip()]` → 13 failed, 574 passed). ⛔ It is load-bearing in
-    # BOTH directions, and the six RED rows are NOT all one shape:
+    # `[post_sentence.strip()]` → 13 failed, 583 passed at `366635ccf`). ⛔ It is
+    # load-bearing in BOTH directions, and the six RED rows are NOT all one shape:
     # SIX declared-RED rows are LOST (a false PASS):
     #   1. `… and then, but first confirm the tools are actually there, run …`
     #   2. `… after confirming the config is right, [but first confirm the tools
@@ -3594,7 +3594,7 @@ def test_3232_generic_restart_lines_are_exact():
     #      then run a query.` ⛔ NOT a merged introducer, and the reason it needs
     #      the split is different: it is form (d)'s CLAUSE-FINAL `$` anchor, which
     #      stops seeing `first` once the comma no longer separates the clause
-    #      (§the row's own comment, and `test_3232_the_and_then_half_reds_for_the_
+    #      (the row's own comment; `test_3232_the_and_then_half_reds_for_the_
     #      first_anchor_not_by_accident` pins that mechanism). Rows 1-5 are
     #      merged-introducer shapes; row 6 is not. The previous wording said
     #      "FIVE / all five are merged-introducer shapes", which was true at
