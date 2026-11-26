@@ -72,6 +72,22 @@ test('#4915: the DOM lane runs with the primary suite, and collects every DOM fi
         `${file} was NOT collected by the DOM runner — vitest's \`include\` (vite.config.js) no longer `
         + `selects it, so its assertions are not running. Collected: ${collected.join(', ') || '(none)'}`)
     }
+    // ⛔ A FILE THAT WAS COLLECTED BUT REPORTED ZERO ROWS. `collected.includes(file)`
+    // is satisfied by a file whose worker died at IMPORT time: vitest still writes the
+    // file into `testResults`, just with `assertionResults: []`, so the `pending` leg
+    // has no rows to name and the partition is tautologically balanced (the reported
+    // total never learned about the lost tests). MEASURED: `SIGKILL` after the import
+    // block of `notificationPanel.dom.test.jsx` left this guard GREEN on
+    // `{total 14, passed 14, success true}` with that file at 0 rows — a false PASS on
+    // the leg that gates this PR. Names must be joined by ROWS, not assumed.
+    const rowsPerFile = Object.fromEntries((report.testResults ?? [])
+      .map((r) => [basename(r.name ?? ''), (r.assertionResults ?? []).length]))
+    for (const file of domTestFiles) {
+      assert.ok((rowsPerFile[file] ?? 0) > 0,
+        `${file} was COLLECTED but reported 0 test rows — its worker died at `
+        + 'import/collection time, so every assertion in it was lost while the '
+        + 'report still looked successful')
+    }
     assert.deepEqual(failures, [], `DOM test failures:\n${failures.join('\n')}\n`
       + `--- stdout ---\n${childOutput(run.stdout)}`)
     assert.equal(report.numFailedTests ?? 0, 0,
