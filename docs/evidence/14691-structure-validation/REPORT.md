@@ -3,10 +3,11 @@
 **Answer, one sentence: yes to the inventory, no to the wiring.** Every product, feature, team,
 role, person, component and customer in this corpus survives extraction under a sensible type and
 the product→feature tree is built correctly — but a reader cannot describe how the business is
-*connected*, because all six ownership edges are stored **inverted**, team membership and role
-assignment arrive as the meaning-free `related` predicate, **team→role containment does not exist at
-all**, and **no MCP door reports a structural edge's direction** — so the inversion is invisible to
-any agent reading the graph the way the product tells it to.
+*connected*, because all six ownership edges are stored **inverted** (and the product's own ownership
+door then answers `[]`), team membership and role assignment arrive as the meaning-free `related`
+predicate, **team→role containment does not exist at all**, and **no MCP door reports a structural
+edge's direction** — so the inversion is invisible to any agent reading the graph the way the product
+tells it to.
 
 | | |
 |---|---|
@@ -164,6 +165,12 @@ service is not source code. Measured extras in the type axis (precision, all tra
 | person → role (`related`) | **4/4** | n/a — same | ⚠️ |
 | **team → role** | **0** | — | ❌ **the class does not exist** |
 | thing → owner (`ownedBy`) | **4/4** (6 rows) | **0/6 — every row INVERTED** | ❌ |
+
+**One line that counts it.** Of the **22 asymmetric structural rows** this run wrote (`hasPart` is
+symmetric and `related` has no direction), **7 assert what the corpus says and 15 assert the reverse**
+— **13 distinct pairs**, because 6 `ownedBy` rows are only 4 pairs. Seven of the twenty correctly
+aimed rows are all `dependsOn`; the other thirteen are `ownedBy` (6 rows), `managedBy` (2) and
+`produces` (7).
 | dependent → dependency (`dependsOn`) | **7/7** | **7/7** | ✅ |
 | team → component (`produces`) | 7/7 | **0/7 — every row INVERTED** | ❌ |
 | customer → product | 2/2 | carried only as `related` — the `transacts` rows were **dropped** | ⚠️ |
@@ -187,6 +194,14 @@ service is not source code. Measured extras in the type axis (precision, all tra
    case an owner would query first. The writer passes the model's endpoints through unchanged
    (`relation_write.py` calls `sdk.link_entities(edge.predicate, edge.src_id, edge.dst_id)` with no
    re-ordering, and holds no `ownedBy`-specific branch); nothing canonicalises to the declared sense.
+
+   **The product's own ownership door proves it from the graph side.** `tortoise_get_entity(id,
+   type="governance")` dispatches to `sdk._get_owned_entities`, whose query is
+   `MATCH (s:Subject)<-[:ownedBy]-(e)` (`tortoise/sdk.py:62739-62758`) — the **declared**
+   orientation. Asked about all four owners the corpus names, it returns **`[]` for every one**
+   (`out/readback.json` → `link_witness.*.governance_owned_by`), on a graph holding six `ownedBy`
+   rows. So the inversion is not a convention violation a reader could notice — **it makes ownership
+   unreadable through the one door the product provides for it.** Finding **D6**.
 
 2. **`produces` is inverted by the same mechanism, in the opposite direction.** §8 puts `produces` at
    `<-` — *"the TARGET brought the source into existence"* — so `A --produces--> B` asserts that **B
@@ -302,13 +317,14 @@ Every one of these was measured through MCP; none was worked around.
 | **D2** | does `expand_relationships` report an entity's STRUCTURAL edges? | **No — it returns `[]` for a node that has edges, so a connected entity reads as ISOLATED.** | Lumen Core: 1 row (its `IMPL` to `control-room customers`), 19 real neighbours. Amara Osei / Platform team / event-bus: **0 rows** each, while `explore_connections` sees 6 / 10 / 10. The read covers `IMPL|NAND|hasPart` only (`entity_reads.py:551-559`) — and `hasPart` only where it is an operator/point edge. |
 | **D3** | does the full-scan door accept the **bare** kind the packs declare? | **No — a bare kind returns an EMPTY list with no error, while the namespaced spelling returns rows.** | `search_knowledge(kind="product", entity_type="object")` → `[]`; `kind="product-strategy:product"` → 2 rows. Same for `team`/`core:team`. A caller who reads `objectKinds: [product]` in a manifest and asks for it is told *"there is nothing"* — an answer, not a refusal (AX: a surface must not answer where it cannot know). |
 | **D4** | does `graph_overview(section="topics", entity_id=…)` resolve an entity that two other doors resolve? | **No — `{"error": "Entity … not found"}` for every node asked about.** | Lumen Core, Amara Osei, Platform team, event-bus — all four resolve through `get_entity` and walk through `explore_connections`. |
+| **D6** | does the product's **ownership** door return what a person owns? | **No — `[]` for all four owners**, on a graph holding 6 `ownedBy` rows. | `tortoise_get_entity(id, type="governance")` → `_get_owned_entities` reads `MATCH (s:Subject)<-[:ownedBy]-(e)` (`sdk.py:62739-62758`), the declared orientation; the written rows point the other way, so nothing points *into* a Subject. |
 | **D5** | can a structure element be resolved by NAME? | **Not reliably** — `explore_connections(query=…)` resolves names to **Points**, and one component's stored name carries a welded collective noun (`ingest-gateway` → `ingest-gateway component`, from the sentence *"owns the ingest-gateway component"*). | `out/readback.json` → `unresolved_elements`, `elements[].walk_root_kind` (empty on 5/5 retrieval walks). |
 
-**Two of these compound into the finding that matters most.** D1 (no direction on read) + D2 (the
-expand door silent about structural edges) mean **an agent cannot discover the `ownedBy` inversion
-through the product**. It must read the write receipt, or query REST behind a door it has no MCP
-route to. That is precisely how #14606's inversion survived its own read-back: the graph was wrong and
-the reads said "nothing to see".
+**Three of these compound into the finding that matters most.** D1 (no direction on read) + D2/D4
+(the expand door silent about structural edges) + D6 (the ownership door answering nothing) mean **an
+agent cannot discover the `ownedBy` inversion through the product**. Every read it is offered says
+either "no edges" or "not found". That is precisely how #14606's inversion survived its own
+read-back: the graph was wrong and the reads said "nothing to see".
 
 ---
 
@@ -344,22 +360,38 @@ backwards, and unreadable in either direction through MCP. *Which team a role be
 
 ---
 
-## 7. Independent corroboration (a second lane, measured on this graph)
+## 7. Independent corroboration (a second lane, on the same worktree)
 
 While this run was being assembled, a **second lane** independently probed the same graph over MCP and
-left its measurement at `out/t6-independent-verification.json` (its producer is `/tmp/t6_probe2.py` +
-`/tmp/t6_probe4.py`, **not** committed — so the file is queued evidence, not reproducible from this
-bundle; kept verbatim rather than deleted). It lands on the same numbers from a depth-2 subgraph read:
+committed its own probe and write-up into this bundle:
 
-* the same 5 `hasPart`, 7 `dependsOn` rows and the same `ownedBy` rows with `src = person, dst = thing`;
-* the same `dev:code` typing for all seven components, the same duplicate `mid-market utilities` /
-  `mid-market utilities segment` nodes, and the same extra `dev:architectureDoc` + `agent-ops:rule` nodes;
-* the same `expand_relationships` silence on structural edges (`Amara Osei: []`, `Lumen Core: 1 row`);
-* `graph_overview(topic=…)` answering `Entity … not found` for every node — D4/Finding 5 above.
+| path | what it is |
+|---|---|
+| `verify_independent.py` | its probe — depth-2 `tortoise_recall(mode="subgraph")` per declared name, endpoint types and edge directions read from the returned `{nodes, edges}`, every id in the ingest receipt resolved with `tortoise_get_entity` |
+| `out/t6-independent-verification.json` | its raw measurement |
+| `VERIFICATION-independent.md` | its write-up (**not** this report — the primary record) |
+| `out/t6-quote-audit.json` | its quote-fidelity audit |
 
-Two independent reads, one result. ⚠️ It also means **two lanes were writing into one evidence
-directory on this worktree** — recorded here rather than tidied away, because a lane that deletes a
-peer's artifact destroys the only copy of an independent measurement.
+It reaches the same numbers from a different read: the same 5 `hasPart`, 7 `dependsOn` and 6
+`ownedBy` rows; the same `dev:code` typing for all seven components; the same duplicate
+`mid-market utilities` / `mid-market utilities segment` nodes; the same `expand_relationships`
+silence on structural edges; `tortoise_list_topics` answering `Entity … not found` for nodes two
+other doors resolve; and the same quote audit (**11 verbatim / 27 paraphrase / 12 not in the
+corpus**). Its count of inverted pairs — **13** — is the number this report's A2 line derives
+independently.
+
+**Its strongest finding was not in my first cut, and I re-measured it before adopting it**: the
+`type="governance"` ownership door returns `[]` for every owner (§3/A2, D6). That claim cited
+`sdk.py:62739` and I read the source, then asked the door in this bundle's own readback — four owners,
+four empty answers — rather than take the finding on trust.
+
+⚠️ **Two lanes were writing into one evidence directory and one git branch at the same time.** Its
+commits (`8bfd61a`…`4732c77`) include my working tree — the peer committed my files as they stood,
+then deferred to `REPORT.md` as the primary record when it found it. **Nothing was discarded** (the
+rule that a lane adopts rather than resets uncommitted work applies to a peer's files too), and this
+section exists because a lane that deletes a peer's artifact destroys the only copy of an independent
+measurement. It is also the process fact worth carrying back: the pre-dispatch collision check passed
+(`CLAIM: unclaimed for T6`, no branch, no WIP) and still two lanes converged on one worktree.
 
 ---
 
@@ -376,6 +408,10 @@ peer's artifact destroys the only copy of an independent measurement.
 | `out/readback.json` | verbatim MCP replies (784 KB): scans, 32 element walks, endpoint reads, link witness, probes | `run_readback.py` |
 | `out/t6-score.json` | the five assertions with their numbers, evidence rows and verdicts | `score_t6.py` |
 | `out/tool-surface.json` | the live MCP surface (39 tools) with each tool's own `inputSchema` | `run_readback.py` |
+| `verify_independent.py` | a second lane's independent MCP probe (depth-2 subgraph reads) | **not this bundle's producer** — §7 |
+| `VERIFICATION-independent.md` | that lane's write-up — not the primary record | **not this bundle's producer** — §7 |
+| `out/t6-independent-verification.json` | its raw measurement | **not this bundle's producer** — §7 |
+| `out/t6-quote-audit.json` | its quote-fidelity audit (11 verbatim / 27 paraphrase / 12 not in corpus) | **not this bundle's producer** — §7 |
 | `out/t6-independent-verification.json` | a second lane's independent probe of the same graph (§7) | **not this bundle's producer** — see §7 |
 | `out/events.jsonl` (**not committed**) | the SDK event log, scratch, reproducible via `run.sh` | `run_ingest.py` |
 

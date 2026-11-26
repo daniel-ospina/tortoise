@@ -390,6 +390,9 @@ async def run() -> int:
         report["link_witness"] = {}
         for element_kind, name in (("product", "Lumen Core"),
                                    ("person", "Amara Osei"),
+                                   ("person", "Dana Whitlock"),
+                                   ("person", "Tomas Ferreira"),
+                                   ("person", "Jonas Bauer"),
                                    ("team", "Platform team"),
                                    ("component", "event-bus")):
             hit = resolved.get(_norm(name))
@@ -402,16 +405,26 @@ async def run() -> int:
                                    {"section": "topics", "entity_id": eid})
             walk_r = await _call(client, "tortoise_explore_connections",
                                  {"node_id": eid, "hops": 1})
+            # The OWNERSHIP door: `type="governance"` dispatches to
+            # `tortoise_get_governance` → `sdk._get_owned_entities`, which reads
+            # `MATCH (s:Subject)<-[:ownedBy]-(e)` (sdk.py:62739-62758) — the
+            # DECLARED orientation. If the writer points the other way, this door
+            # answers `[]` on a graph that holds ownership rows, which is the one
+            # read that can witness the inversion directly.
+            governance_r = await _call(client, "tortoise_get_entity",
+                                       {"id": eid, "type": "governance"})
             report["link_witness"][name] = {
                 "id": eid, "kind": hit["kind"],
                 "expand_relationships": expand_r,
                 "graph_overview_topics": topics_r,
+                "governance_owned_by": governance_r,
                 "explore_neighbour_count": len(
                     connected_rows(walk_r.get("reply"))),
             }
             print(f"\n=== link witness {name}: expand="
                   f"{len(rows(expand_r.get('reply')))} row(s), topics="
-                  f"{json.dumps(topics_r.get('reply'), default=str)[:120]}, "
+                  f"{json.dumps(topics_r.get('reply'), default=str)[:100]}, "
+                  f"governance(owned)={json.dumps(governance_r.get('reply'), default=str)[:100]}, "
                   f"explore neighbours={report['link_witness'][name]['explore_neighbour_count']} ===")
 
         # ── (e) the product's own integrity view ────────────────────────
