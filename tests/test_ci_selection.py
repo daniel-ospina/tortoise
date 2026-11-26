@@ -10248,7 +10248,7 @@ _H_14544_PARTITIVE = r"(?:of\s+(?:the|these|those|them|which)\s+)?"
 _H_14544_OBJECT_ADVERBS = r"(?:directly|actually|ever|really|even|still|then)\s+"
 _H_14544_NEGATED_ACTOR_CHANGE_RE = re.compile(
     r"(?:#14544|that\s+cut|the\s+cut)" + _H_14544_SAME_CLAUSE + r"{0,400}?" + _H_14544_NEGATION
-    + _H_14544_SAME_CLAUSE + r"{0,80}?" + _H_14544_CHANGE_VERB + r"[a-z]{0,6}\s+"
+    + _H_14544_SAME_CLAUSE + r"{0,80}?" + r"(?<!un)" + _H_14544_CHANGE_VERB + r"[a-z]{0,6}\s+"
     + r"(?:" + _H_14544_OBJECT_DETERMINERS + r"|" + _H_14544_OBJECT_ADVERBS + r"){0,3}"
     + _H_14544_PARTITIVE
     # ⛔ THE ROW NOUN MUST BE THE HEAD, not a premodifier of a different head (#14623 review round 11,
@@ -10287,7 +10287,10 @@ _H_14544_ROW_NEGATION = (
     r"|was\s+not|wasn['\u2019]?t|is\s+not|isn['\u2019]?t|were\s+not|weren['\u2019]?t)")
 _H_14544_NEGATED_ROW_CHANGE_RE = re.compile(
     r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[\s\S]{0,20}?" + _H_14544_ROW_NEGATION
-    + r"[\s\S]{0,40}?" + _H_14544_CHANGE_VERB,
+    # ⛔ `(?<!un)` — the ADJECTIVE is not the verb: "the `durations` row was never UNTOUCHED by
+    # `#14544`" is TRUE (it is the paragraph's own correction) and `untouched` contains `touch`, so
+    # without this the row arm read it as the claim (#14623 review round 15, P3).
+    + r"[\s\S]{0,40}?(?<!un)" + _H_14544_CHANGE_VERB,
     re.IGNORECASE)
 #: …and the ADJECTIVE forms of the same claim, which reverse the word order and so reach neither
 #: arm above: `<row|weight> … untouched / unchanged / left alone … `#14544``, and the transposed
@@ -10378,11 +10381,16 @@ _H_14544_ROW_ADJECTIVAL_RE = re.compile(
     # (F4) on the TRUE "the `durations` entry … is unchanged SINCE `#14544`" — a temporal relation
     # asserts the opposite of "that cut did not change it", so only the agent preposition is graded.
     r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,80}?"
-    r"(?:un(?:touched|changed|altered|affected|modified|edited|shifted|moved|rewritten|re-read))"
+    # ⛔ NOT a NEGATED adjective: "the `durations` row was NEVER untouched by `#14544`" is TRUE and
+    # was refused as the claim (#14623 review round 15, P3).
+    r"(?<!not )(?<!never )un(?:touched|changed|altered|affected|modified|edited|shifted|moved|rewritten|re-read)"
     r"[^,;.!?]{0,40}?\bby\s+(?:`?#14544|that\s+cut|the\s+cut)"
     r"(?!\s*\w)"
-    r"|(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,80}?"
-    r"left\s+(?:alone|un\w+)\s+by\s+(?:`?#14544|that\s+cut|the\s+cut)(?!\s*\w)"
+    # ⛔ NOT a NEGATED adjective: "the `durations` row was NOT left alone by `#14544`" is the
+    # paragraph's own CORRECTION and was refused as the claim (#14623 review round 15, P3).
+    r"|(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)"
+    r"[^,;.!?]{0,80}?(?<!not )(?<!never )left\s+(?:alone|un\w+)"
+    r"\s+by\s+(?:`?#14544|that\s+cut|the\s+cut)(?!\s*\w)"
     # ⛔ …AND THE ATTRIBUTION FORM, where the agent arrives after a comma as an ascription rather than
     # as the `by`-agent: "the `durations` row is unchanged, as that cut's own note records" states the
     # claim, while the temporal "unchanged since" does not. Measured GREEN at #14623 review round 8.
@@ -10399,8 +10407,16 @@ _H_14544_ROW_ADJECTIVAL_RE = re.compile(
 #: arm above (measured GREEN, #14623 review round 8, F2). Graded by the same three parts: a
 #: negation word, a change verb, and the cut named in the clause.
 _H_14544_IMPERSONAL_NEGATION_RE = re.compile(
-    r"\bnothing\b[^,;.!?]{0,80}?" + _H_14544_CHANGE_VERB
-    + r"[^,;.!?]{0,80}?(?:#14544|that\s+cut|the\s+cut)",
+    # ⛔ THE OBJECT IS READ here too (#14623 review round 15, P3): without it the arm refused the
+    # paragraph's own TRUE claims — "Nothing about that `eval` registration changed in `#14544`." and
+    # "Nothing about the bin changed in `#14544`." — which is the false-block class the ACTIVE arm
+    # was widened to avoid.
+    r"\bnothing\b[^,;.!?]{0,80}?(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)"
+    r"[^,;.!?]{0,60}?" + _H_14544_CHANGE_VERB
+    + r"[^,;.!?]{0,60}?(?:#14544|that\s+cut|the\s+cut)"
+    + r"|(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,60}?\bnothing\b"
+    r"[^,;.!?]{0,60}?" + _H_14544_CHANGE_VERB
+    + r"[^,;.!?]{0,60}?(?:#14544|that\s+cut|the\s+cut)",
     re.IGNORECASE)
 #: ⛔ THE DECLARED RESIDUAL, in the artifact rather than implied — filed as #14715 with six measured
 #: reproductions. This family reads clause structure off PUNCTUATION plus a subordinator list, which
@@ -10446,6 +10462,12 @@ _H_14544_INVERTED_RE = re.compile(
     # beside the true claim at #14623 review round 8, F1: the inverse ban read five spellings and not
     # the one a fold reaches for first when it wants the row exempt again.
     r"|not\s+the\s+ONLY\s+half|row\s+half\s+is\s+the\s+exempt|exempts\s+the\s+row"
+    # ⛔ AND THE AFFIRMATIVE FORMS OF THE SPELLINGS THE PINS NOW ACCEPT (#14623 review round 15, P2):
+    # widening the positive pin to three spellings without widening this ban left `The exempt half is
+    # the row.`, `The row alone is the only half exempt.` and the conclusion's `forecloses|rules out|
+    # excludes` shipping CLEAN — the very keep-the-true-sentence-add-its-inverse shape this ban is for.
+    r"|exempt\s+half\s+is\s+the\s+row|row\s+alone\s+is\s+the\s+(?:only\s+)?half"
+    r"|paragraph\s+(?:forecloses|rules\s+out|excludes)\b"
     # ⛔ AND THE NEGATION AFTER THE PINNED SPAN: `_H_14544_SCOPE_RE` stops at `half`, so "the
     # REGISTRATION is the ONLY half that is NOT exempt" satisfied it while stating the inverse
     # (#14623 review round 12, F1). Comma-tolerant, because one spelling crosses a comma.
@@ -10696,6 +10718,11 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "Neither half is excluded.",
             "The REGISTRATION is not the ONLY half exempt.",
             "The ROW half is the exempt one.",
+            "The exempt half is the row.",
+            "The row alone is the only half exempt.",
+            "a cause this paragraph forecloses.",
+            "a cause this paragraph rules out.",
+            "a cause this paragraph excludes.",
             "This paragraph exempts the row too.",
             "On the record's own numbers this paragraph DOES exclude it."):
         assert _H_14544_INVERTED_RE.search(inverse), (
@@ -10733,11 +10760,14 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # arm certifies `that row was never touched by `#14544`` as CLEAN (measured at `148ab7c1`, when
     # this comment already claimed "both orders"). The two orders are separate alternatives
     # above, and each is asserted here rather than assumed.
-    # ⛔ AND THE NOUN AND DISTANCE BOUNDS ARE FIXTURES, not prose promises: the ACTIVE arm reads a
-    # cut-to-verb distance of 400 characters, the PASSIVE row-to-verb one 20 (and needs the cut in
-    # the sentence), and the pronoun form is scoped by subject rather than by distance. Widening
-    # past those is NOT claimed — the residual is declared above, and a phrase guard that claimed
-    # it would be false one noun later.
+    # ⛔ AND THE NOUN AND DISTANCE BOUNDS ARE FIXTURES, not prose promises, and they are stated as the
+    # constants actually implement them (#14623 review round 15, P3 — the previous line named a single
+    # span per arm and understated both): the ACTIVE arm allows 400 characters from the cut to the
+    # NEGATION and a further 80 from it to the change verb, so its cut-to-verb span is 482; the
+    # PASSIVE arm allows 20 from the row to the negation plus 40 to the verb (60), and needs the cut
+    # named in the sentence at all. The pronoun form is scoped by SUBJECT rather than by distance.
+    # Widening past those is NOT claimed — the residual is declared above, and a phrase guard that
+    # claimed it would be false one noun later.
     for paraphrase in (
             "`#14544` never touched that row",
             "`#14544`'s cut did not touch the row",
@@ -10855,6 +10885,11 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "`#14544`'s cut changed none of the shard minutes.",
             "`#14544` touched none of the bins.",
             "The `durations` row is unchanged as the cut landed.",
+            # …and the paragraph's own CORRECTION forms: a negated adjective is TRUE
+            "The `durations` row was not left alone by `#14544`.",
+            "The `durations` row was never untouched by `#14544`.",
+            "Nothing about that `eval` registration changed in `#14544`.",
+            "Nothing about the bin changed in `#14544`.",
             "another row's weight was retimed; the retime does not touch the shard layout, and "
             "`#14544`'s cut is separate",
             # ⛔ ONE CLAUSE AT A TIME: both statements are TRUE and the sentence pairs them, so an
