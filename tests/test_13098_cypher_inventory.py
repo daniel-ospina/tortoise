@@ -1301,6 +1301,19 @@ def test_a_plain_directory_destination_is_NOT_refused_by_the_metadata_guard(
     outside = tmp_path / "plain"
     outside.mkdir()
     target = outside / "doc.md"
+    # ⛔ THE PERMIT HAS TWO HALVES AND ONLY ONE OF THEM IS STUBBED, so the other is
+    # ASSERTED rather than read from whatever filesystem the suite happens to run on
+    # (#14625 review, round 3, P3): the stub below names git's answer, while
+    # `plainly_outside` ALSO asks the real filesystem whether any ancestor carries git
+    # metadata — and an ambient `tmp_path` under such a directory would make this arm
+    # pass or fail for a reason it does not name. The premise is that it carries none.
+    assert not any(
+        census._looks_like_git_metadata(parent)
+        for parent in (outside, *outside.parents)
+    ), (
+        "the premise: this arm proves the PLAIN-directory permit, so no ancestor of "
+        "tmp_path may look like git metadata — the suite is running under a tree that "
+        "does, and the permit below would be graded for the wrong reason")
 
     def _not_a_repo(*_a, **_k):
         return subprocess.CompletedProcess(
