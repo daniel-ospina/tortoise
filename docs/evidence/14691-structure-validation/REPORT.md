@@ -645,6 +645,39 @@ mutation, and each arm names that mutation:
 | the printed audited-overlap list | `test_the_audited_overlap_list_is_the_audit_artifact` | `0.636` → `0.875` (both real rows) |
 | a bare integer read as "a commit sha" | the `_PROSE_ALLOWED` sha pattern | `1234567 sources, 9876543 nodes` in §6 |
 
+### 8.7 What the round after that closed (the fifth-cycle step, swept end to end)
+
+The same reviewer's next pass re-measured §8.6's claims and found two of the twelve
+still open, plus six new free paths — all twelve are now closed, and each is
+pinned by an arm that reds on its own mutation:
+
+- **plain-text / `list[str]` error replies (P1, was open).** The producer's own
+  failure text — `["Error: timeout while expanding relationships"]` — is not JSON,
+  so `is_error_reply` returned `False` and the door read as ANSWERED-EMPTY: all
+  seven witness replies replaced with that shape left 73 passed, the artifact
+  re-derived byte-identically, and **D4 was published from calls that never
+  answered**. `is_error_reply` now matches failure text in a bare string and in an
+  all-string row list, and the suite's `_measured()` DELEGATES to it instead of
+  re-deciding the question with a narrower rule of its own.
+- **`readback.json.resolved` (P3, was open).** 35 entries → 1 left 73 passed. Every
+  element the artifact resolved must still resolve to the id the element carries;
+  the two names in `unresolved_elements` must NOT resolve (that is D2's finding).
+- the corroboration table's **verdict and Agree columns** (`✅ agree` →
+  `❌ DISAGREE`, `PASS half — 5/5` → `FAIL — 0/5`): pinned to the artifact's totals,
+  and the Agree cell derived per row — A4 is the one row that must **not** agree,
+  because the peer probe ran no traceability check.
+- the peer document's **Graph under test** row → pinned to `t6-score.json.graph`,
+  and `live-v5` (the production graph this bundle must never touch) refused.
+- `out/tool-surface.json` **schema attribution** — rotating `(params, required)`
+  between tools preserves every shape and both populations (256/30), so a digest
+  over the name→schema mapping is what reds; the shapes alone did not.
+- the peer artifact's **`*_listed` booleans** (`tortoise_recall_listed`,
+  `tortoise_get_governance_listed`) → derived from membership in
+  `out/tool-surface.json`; flipping them to `True` would delete the product finding
+  that both tools EXECUTE while the surface advertises neither.
+- the witness rows' **`mechanism`** (`IMPL` → `hasPart`) → rows must stay epistemic,
+  and exactly six of seven witnesses must still be isolated (D4).
+
 The generic coverage arm (`test_no_FIGURE_in_the_two_documents_is_free`) is a
 **floor, not a substitute for a pin**: it proves a number is carried by some
 artifact, never that it belongs to the field quoting it — which is why six of the
