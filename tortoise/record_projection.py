@@ -9048,8 +9048,9 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
         # tenant-GUC read-back, a bypassing role, the cutover guard), so a class
         # test would fold a broken role into "check the producer".
         # ⚠️ A schema that is NOT ON DISK is the opposite case and is called out
-        # BELOW: `table_columns()` runs inside the plan build, so it is stamped
-        # like any other plan-build refusal and its remedy is a redeploy.
+        # ABOVE, in `PLAN_BUILD_PHASE_ATTR`'s own note: `table_columns()` runs
+        # inside the plan build, so it is stamped like any other plan-build
+        # refusal and its remedy is a REDEPLOY.
         #
         # The marker is an ATTRIBUTE rather than a re-raise, deliberately: the
         # concrete class carries meaning its own callers depend on
