@@ -1893,8 +1893,13 @@ def _inversion_form(pattern: str) -> re.Pattern[str]:
 # one to add. Only `always` carries rows; `often` is declared in the row-less
 # list (measured: removing it alone flips 0 rows), so nothing here is an
 # undeclared arm.
+# ⛔ `never`/`ever` WERE CLAIMED AND WERE NOT MEMBERS. The note above says the
+# frequency family ("often/never/ever") is added; the literal carried `often`
+# and `always` only, so `Don't ever restart your client until …` stayed GREEN
+# while its bare twin is a declared-RED row (#14679 review cycle 51, measured).
+# The claim is now the literal.
 _ADVERBS = (r"(?:\w+ly|very|so|too|quite|rather|first|already|just|also"
-            r"|now|still|always|often)")
+            r"|now|still|always|often|never|ever)")
 # ⛔ THE PRE-CUE VERB LIST, ONE DEFINITION — form (f) spelled it twice and a
 # THIRD copy sits inside the shared `_CONFIRM_PREDICATE`, which is how the same
 # hole opened four times (#14679 review rounds 3-6). Every arm of form (f) reads
@@ -2397,11 +2402,16 @@ _INVERSION_FORMS = (
         # (#14679 review cycle 47, measured): this copy reads `verif(?:y|ies|ied)`
         # and appends `\w*`, while the constant enumerates morphology and carries
         # `verifying`. The two coincide on every spelling (`verif(?:y|ies|ied)\w*`
-        # matches `verifying`), and this copy is if anything the WIDER of the two
-        # (`confirm\w*` also matches `confirmation`), which is why the difference
-        # is left as a comment rather than "fixed" by interpolating the constant:
-        # interpolating it would NARROW the skip and silently re-red shapes it
-        # currently tolerates. Read the MEASUREMENT, not the claim of parity.
+        # matches `verifying`). ⛔ NEITHER "SAME CLASS" NOR "WIDER" IS TRUE, and
+        # both were stated here (#14679 review cycle 51, measured): `_CONFIRM_PREDICATE`
+        # ALSO carries the observation stems `see|saw|seen|look|list`, which this
+        # copy MUST omit — the first lookahead below is exactly that observation
+        # class, and adding them here would make every `if you see the tools …`
+        # row red, i.e. the opposite of the maintenance direction a parity note
+        # invites. So this copy is the NARROWER one by design, and interpolating
+        # the constant is not a tidy-up: it would add six observation verbs to the
+        # predicate lookahead and flip declared-GREEN symptom rows to RED. The
+        # divergence is load-bearing; read the MEASUREMENT, not a claim of parity.
         r"(?!.*?\b(?:confirm|check|verif(?:y|ies|ied)|ensur(?:e|es|ed|ing)"
         r"|mak(?:e|es|ing)\s+(?:sure|certain)|made\s+(?:sure|certain)"
         r"|be\s+(?:sure|certain)|validat(?:e|es|ed|ing))\w*\b"
@@ -2772,7 +2782,14 @@ _CONFIG_PREP_RE = re.compile(
 #     RED    … and the tools are actually there       (control)
 #     GREEN  … and the tools are temporarily there    (measured)
 _PRESENCE_ADVERB = (r"(?:\w+ly|actually|all|both|really|definitely|plainly|truly"
-                    r"|clearly|visibly|indeed|still|already|now)")
+                    # ⛔ THE CLOSED REMAINDER IS `_ABSENCE_ADVERB_RUN`'S, and it was
+                    # not: that constant carries `just|also|first|very|so|too|quite|
+                    # rather|yet|longer` and this one carried none of them, so an
+                    # unlisted adverb made the conjunct read file-side and exempted the
+                    # clause — `… and the tools are also there` GREEN while `all there`
+                    # is RED (#14679 review cycle 51, measured). One run, one literal.
+                    r"|clearly|visibly|indeed|still|already|now|just|also|first|very"
+                    r"|so|too|quite|rather|yet|longer)")
 
 _SESSION_AND_CONJUNCT_RE = re.compile(
     r"\band\b[^\n]*?\b(?:" + _PRESENCE_ADVERB + r"\s+there"
@@ -2888,7 +2905,7 @@ _STATEMENT_BREAK_RE = re.compile(
     # `**bold**` and `*emphasis*` inside their clause.
     r"|(?<=\s)>\s+"
     r"|(?<=\s)(?:\(\d{1,2}\)|\d{1,2}[.)])\s+"
-    r"|\.\s+(?=[A-Z\"'`(\[*_>])"
+    r"|\.\s+(?=[A-Z\"'\u201c\u201d\u2018\u2019`(\[*_>])"
     r")")
 
 # ⛔ A NEGATED *OBSERVATION* IS A SYMPTOM CONDITION, A NEGATED *INSTRUCTION* IS NOT.
@@ -3162,7 +3179,17 @@ _NEGATED_CUE_LEAD_RE = re.compile(
     # …and the spelled-out forms of the same modals, which involve no contraction:
     r"|\b(?:will|shall|are)\s+not(?:\s+to)?"
     r"|\b(?:had|'d|\u2019d)\s+better\s+not"
-    r"|\bcannot)\s*$", re.IGNORECASE)
+    r"|\bcannot)"
+    # ⛔ AN ADVERB BEFORE THE CUE. `_ADVERBS` exists for exactly this defect and
+    # every other arm takes it (form (f), form (a), `_ABSENCE_ADVERB_RUN`,
+    # `_SEQUENCER_FRAGMENT_RE`) — this one did not, so ONE inserted adverb
+    # re-opened a declared-RED row (#14679 review cycle 51, measured):
+    #
+    #     RED    Don't restart your client until you have confirmed the tools …
+    #     GREEN  Don't ever restart your client until you have confirmed …
+    #
+    # …and `You shouldn't ever/immediately/simply …`, `Don't just/now …` likewise.
+    r"(?:\s+(?:" + _ADVERBS + r"))*\s*$", re.IGNORECASE)
 # ⛔ `unless` IS `until`, SPELLED DIFFERENTLY — and it was in NEITHER this set
 # nor form (a)'s or (e)'s, so the whole negated-cue arm was unreachable for the
 # most idiomatic English spelling of "not … until":
@@ -3210,7 +3237,32 @@ _ADVERSATIVE_LEAD_RE = re.compile(r"^(?:but|however|though|although|yet)\b", re.
 # the bracket/brace glyphs the clause strip set (`_PRE_CUE_PREFIX`) already
 # has, or `[then]` / `{then}` stayed RED while `**then**` was GREEN.
 _DECORATION_RE = re.compile(
-    r"(?<![A-Za-z0-9])[*_`>\[\]{}|]|[*_`>\[\]{}|](?![A-Za-z0-9])")
+    # ⛔ TYPOGRAPHIC QUOTES ARE DECORATION TOO, and they were not. GFM does no
+    # smart-punctuation substitution (its extensions are tables / task lists /
+    # strikethrough / autolinks), so a `“` in a `.md` source reaches the reader
+    # unchanged — and this repo's own docs use them. A pre-cue imperative wrapped
+    # in them was never graded (#14679 review cycle 51, measured):
+    #
+    #     RED    "Confirm the tools are actually there." Restart your client, …
+    #     GREEN  “Confirm the tools are actually there.” Restart your client, …
+    #
+    # The file's doctrine is that GLYPH VARIANTS ARE THE SAME PUNCTUATION (which
+    # is why `–`, `-`, `…` and `:` were each added); this is that doctrine one
+    # glyph over. `«»` and `‘’` are the same class.
+    # ⛔ …BUT NOT THE GLYPHS OF THE DOCS' OWN `tortoise_*` TOKEN. The right-hand
+    # alternation fires whenever the character is not FOLLOWED by a word
+    # character, and in `tortoise_*` the `_` is followed by `*` — so the strip
+    # rewrote the doc's own object to `tortoise`, which `_TOOLS_OBJECT` cannot
+    # match, and form (f) went blind (#14679 review cycle 51, measured):
+    #
+    #     RED    Confirm the tools show up in the list, then restart your client.
+    #     GREEN  Confirm `tortoise_*` shows up in the client's MCP/tool list, …
+    #
+    # The token is graded by every OTHER form (their post-cue twins are RED);
+    # only the arm that strips decoration lost it. Both the `_` AND the `*`
+    # must be spared, so the guard is on BOTH sides.
+    r"(?<![A-Za-z0-9])(?<!tortoise)(?<!tortoise_)[*_`>\[\]{}|“”‘’«»]"
+    r"|(?<!tortoise)(?<!tortoise_)[*_`>\[\]{}|“”‘’«»](?![A-Za-z0-9])")
 
 
 def _confirmation_scopes_the_config(clause: str) -> bool:
@@ -6256,10 +6308,12 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "then run a query.", False),
     ("The first step is to confirm the tools are actually there. Restart your "
      "client, then run a query.", False),
-    # ⛔ CYCLE 50 — DECLARED RESIDUAL (2): a pre-restart MARKET PHRASE THAT
+    # ⛔ CYCLE 50 — DECLARED RESIDUAL (2): a pre-restart MARKER PHRASE THAT
     # CARRIES ITS OWN COMMA. Post-cue clauses are split on `,` before grading, so
-    # `but before that, confirm …` becomes three clauses (`but` / `before that` /
-    # `confirm the tools …`) and the marker never meets the predicate it orders.
+    # `but before that, confirm …` becomes TWO clauses (`but before that` /
+    # `confirm the tools …`) — this said "three", which the code does not do, and
+    # a count is a measurement (#14679 review cycle 51) — and the marker never
+    # meets the predicate it orders.
     # The comma-less twin `but first confirm …` IS RED. Declared rather than
     # fixed because the remedy is merging clauses across commas — the
     # `_and_half_opens_its_own_clause` problem one conjunction over, whose own
@@ -6268,6 +6322,47 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "there.", False),
     ("Restart your client, but before doing so, confirm the tools are actually "
      "there.", False),
+    # ⛔ CYCLE 51 — three P1s and one P2, each a one-glyph/one-word edit of a
+    # declared-RED row.
+    #
+    # 51a. TYPOGRAPHIC QUOTES. GFM does no smart-punctuation substitution, so a
+    #      `“` in a source file reaches the reader unchanged and this repo's docs
+    #      use them. The decoration strip and the full-stop lookahead carried
+    #      ASCII quotes only, so a quoted imperative was never graded.
+    ("\u201cConfirm the tools are actually there.\u201d Restart your client, then "
+     "run a query.", True),
+    # 51b. THE DOCS' OWN `tortoise_*` TOKEN. The decoration strip removed the `_`
+    #      (followed by `*`, a non-word char) and then the `*`, rewriting the
+    #      object to `tortoise` — which `_TOOLS_OBJECT` cannot match, so form (f)
+    #      went blind on the very token `docs/quickstart-cloud.md:135` uses. Every
+    #      other form graded it (their post-cue twins are RED).
+    ("Confirm `tortoise_*` shows up in the client's MCP/tool list, then restart "
+     "your client.", True),
+    # 51c. ONE ADVERB BEFORE THE CUE. `_ADVERBS` exists for this defect and every
+    #      other arm takes it; the negated-cue lead had no slot for it, and
+    #      `never`/`ever` were not members of `_ADVERBS` at all despite its
+    #      comment claiming the frequency family had been added.
+    ("Don't ever restart your client until you have confirmed the tools are "
+     "actually there.", True),
+    # 51d. `_PRESENCE_ADVERB`'s closed remainder is now `_ABSENCE_ADVERB_RUN`'s,
+    #      so an unlisted adverb no longer reads the conjunct as file-side.
+    ("Restart your client after confirming the config lists the tools and the "
+     "tools are also there, then confirm the tools are actually there.", True),
+    # ⛔ CYCLE 51 — DECLARED RESIDUAL: DISPLACED NEGATION (`but not until`). The
+    # deferring connective is consulted only inside the `cue_is_negated` branch,
+    # and that branch requires the negation to ABUT the cue in the PRE-cue text.
+    # Here the negation sits AFTER the cue, and no form owns a bare `until`/
+    # `before` + confirmation post-cue:
+    #
+    #     RED    Don't restart your client until you have confirmed the tools …
+    #     GREEN  Restart your client, but not until you have confirmed …   (measured)
+    #
+    # Declared rather than fixed because the remedy is a new POST-cue negated-
+    # deferral form, and every post-cue addition in this file's history has cost
+    # a false RED on forward copy (`Restart your client; once the tools are
+    # listed, run …` and its colon/dash twins are the recorded example). Pinned.
+    ("Restart your client, but not until you have confirmed the tools are "
+     "actually there.", False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
