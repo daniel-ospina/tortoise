@@ -1728,7 +1728,18 @@ _DOC_PARTICIPLE = r"(?:listed|shown|available|described|documented)"
 # uniqueness (CEUR-WS Vol-1845 paper 5; BUCLD 50) — both are definite references
 # to the doc. The NOUN is what decides the class, so the arm is composed from
 # `_DOC_NOUN` and covers the whole 25-noun family the arm above was widened for.
-_DOC_LOCATIVE = r"(?:in|on)\s+(?:this|the)\s+" + _DOC_NOUN
+# ⛔ A POSSESSIVE IS THE SAME DETERMINER CLASS, and the line below used to admit
+# only `this|the` while its own block claimed "the determiner is NOT a gate on the
+# class". Measured at #14679's review of `019ac6ff4b1e`: `Confirm the tools are
+# described in YOUR guide, then restart your client.` was RED (`in our
+# documentation` likewise) while `in the guide` is GREEN — a FALSE RED on real
+# copy, which is the direction that gets a pin deleted (#3429). Widening it flips
+# that shape to GREEN on the pre-fix tree.
+# ⛔ NOT PINNED BY A ROW, and that is stated rather than implied: at THIS head some
+# other arm also lets the shape through, so removing the possessives flips no row.
+# Redundancy is the safe direction for an ALLOW-list term — it can only remove a
+# false red — and the measurement above is what justifies carrying it at all.
+_DOC_LOCATIVE = r"(?:in|on)\s+(?:this|the|your|our|its|their)\s+" + _DOC_NOUN
 # `here|there` stay the ONLY difference between this set and the STRICT one (see
 # the copula note below): every other member is unambiguously documentary.
 _DOC_PLACE = (r"(?:above|below|earlier|later|here|there|" + _DOC_LOCATIVE + r")")
@@ -1908,6 +1919,13 @@ _PRE_CUE_ONLY = _inversion_form(
     r"(?:(?:first(?:ly)?|also|just)\s*,?\s+)?"
     r"(?:(?:you\s+)?(?:must|should|need\s+to|have\s+to|can|could|will)\s+"
     r"|be\s+sure\s+to\s+|make\s+sure\s+to\s+)?"
+    # ⛔ THE ADVERB SLOT SITS ON **EITHER SIDE** OF THE MODAL — form (a) already
+    # solved this (`(?:_ADVERBS)\s+)*` both sides) and (f) was the outlier, so
+    # moving one word defeated the whole pre-cue half again:
+    # `And you should first confirm the tools are actually there. Restart …` and
+    # its conjunction-free twin measured GREEN while `You must confirm …` is RED
+    # (#14679 review at `019ac6ff4b1e`).
+    r"(?:(?:first(?:ly)?|also|just)\s*,?\s+)?"
     r"(?:"
     # (f.1) `list` takes the tools THEMSELVES as its object, so there is no
     # document it could be pointing at and no predicate to require:
@@ -2041,12 +2059,16 @@ _MODAL_TO_VERB = (
 _ADVERBS = (r"(?:\w+ly|very|so|too|quite|rather|first|already|just|also"
             r"|now|still)")
 # ⛔ `rather` IS AN ALLOW-LIST MEMBER, and it is DECLARED here rather than
-# dropped as dead weight: mutating it out flips 0 of 528 rows (measured), but
+# dropped as dead weight: mutating it out flips 0 of 545 rows (measured), but
 # removing an allow-list adverb does not close a hole — it risks a future FALSE
 # RED on copy this pin has simply never seen (`… after you have rather confirmed`
-# is not a sentence a doc ships). Same standing as `page` in `_DOC_NOUN`: the
-# 0-row measurement is recorded so the next auditor can tell it from an arm that
-# does load (#14679 review at `1dedd33da07e`).
+# is not a sentence a doc ships). ⛔ IT IS NOT `page`'s STANDING ANY MORE: this
+# comment used to cite `page`'s 0-row measurement as the precedent, and `page` now
+# flips 1 row (`Confirm the tools are shown on the page, then restart your
+# client.`), so the precedent is stale — `page` is a PINNED allow-list term, and
+# `rather` is the declared-0 one. A citation to another arm's measurement rots the
+# moment that arm gains a row; cite the rule, not the neighbour (#14679 review at
+# `019ac6ff4b1e`).
 
 _PRE_CUE_PREFIX = " \t,.;:—–-…('\"`*>#_[]{}"
 
@@ -2176,7 +2198,17 @@ _INVERSION_FORMS = (
         # confirming` / `after you complete confirming` measured GREEN while
         # `after you have finished confirming` is a declared-RED row — the same
         # one-inflection class as `firstly` (#14679 review at `5ee54138490e`).
-        r"(?:(?:done|finished|finish(?:es)?|through|completed|complete(?:s)?)\s+)?"
+        # ⛔ THE COMPLETIVE'S OWN PARTICLE IS NOT AN OBJECT: `done WITH confirming`
+        # is `done confirming`. The slot's rationale for refusing words between the
+        # completive and the predicate is "a completive over an UNRELATED object",
+        # and `with` is the completive's particle — one inserted word was defeating
+        # the slot this very comment extends (#14679 review at `019ac6ff4b1e`,
+        # measured: `after you are done with confirming the tools …` GREEN while
+        # its `done confirming` twin is a declared-RED row). Forward copy that
+        # names an object (`… done with the config and confirm the tools …`)
+        # stays GREEN, because the predicate must still follow.
+        r"(?:(?:done|finished|finish(?:es)?|through|completed|complete(?:s)?)"
+        r"(?:\s+with)?\s+)?"
         # ⛔ `whenever` IS `when` AND `as soon as` IS `once`, and both were GREEN
         # twins of declared-RED rows (`Restart your client whenever the tools are
         # actually there.` vs the declared-RED `when` row — by the same rule:
@@ -2194,7 +2226,17 @@ _INVERSION_FORMS = (
         # confirming` / `after you complete confirming` measured GREEN while
         # `after you have finished confirming` is a declared-RED row — the same
         # one-inflection class as `firstly` (#14679 review at `5ee54138490e`).
-        r"(?:(?:done|finished|finish(?:es)?|through|completed|complete(?:s)?)\s+)?"
+        # ⛔ THE COMPLETIVE'S OWN PARTICLE IS NOT AN OBJECT: `done WITH confirming`
+        # is `done confirming`. The slot's rationale for refusing words between the
+        # completive and the predicate is "a completive over an UNRELATED object",
+        # and `with` is the completive's particle — one inserted word was defeating
+        # the slot this very comment extends (#14679 review at `019ac6ff4b1e`,
+        # measured: `after you are done with confirming the tools …` GREEN while
+        # its `done confirming` twin is a declared-RED row). Forward copy that
+        # names an object (`… done with the config and confirm the tools …`)
+        # stays GREEN, because the predicate must still follow.
+        r"(?:(?:done|finished|finish(?:es)?|through|completed|complete(?:s)?)"
+        r"(?:\s+with)?\s+)?"
         # ⛔ THE OBSERVATION GATE CARRIES THE PROGRESSIVE, and it did not until the
         # `'re` subject arm made it REACHABLE: the spelling was `see(?:s)?|saw|seen`
         # — no `seeing` — while its siblings on this line do carry it
@@ -2218,8 +2260,14 @@ _INVERSION_FORMS = (
         # `Restart your client if you have looked in the panel and made sure the
         # tools are actually there.` was GREEN while its `confirmed` twin is a
         # declared-RED row. Same list as `_CONFIRM_PREDICATE` — a copy that drifts
-        # is how the first three of these opened.
-        r"(?!.*?\b(?:confirm|check|verif(?:y|ies|ied)|ensur(?:e|es|ed)"
+        # is how the first three of these opened, and this copy STILL drifted one
+        # morphology short after the first widening: it read `ensur(?:e|es|ed)`
+        # while the constant reads `ensur(?:e|es|ed|ing)`, so
+        # `Restart your client if you are looking in the panel and ensuring the
+        # tools are actually there.` stayed GREEN while its `checking` control was
+        # RED (#14679 review at `019ac6ff4b1e`). The two lists are now identical —
+        # read them side by side, not as a memory.
+        r"(?!.*?\b(?:confirm|check|verif(?:y|ies|ied)|ensur(?:e|es|ed|ing)"
         r"|mak(?:e|es|ing)\s+(?:sure|certain)|made\s+(?:sure|certain)"
         r"|be\s+(?:sure|certain)|validat(?:e|es|ed|ing))\w*\b"
         # ⛔ THE GUARD READS THE GRADED OBJECT, not its own copy of it. It spelled
@@ -2374,7 +2422,7 @@ _INVERSION_FORMS = (
         # and `once` for this purpose and were GREEN twins of declared-RED rows
         # (14 rows for `when`→`whenever`, 40 for `once`→`whenever`).
         # ⛔ `following`/`upon` are deliberately NOT here, and the measurement is
-        # why: mutating them out flips 0 of 528 rows, and the presence shapes they
+        # why: mutating them out flips 0 of 545 rows, and the presence shapes they
         # would cover are FORWARD copy anyway ("Restart your client upon the tools
         # being listed" = after they are listed). Form (a) is where they load —
         # that is the CONFIRMATION shape (`upon confirming the tools …`), which is
@@ -2398,7 +2446,7 @@ _INVERSION_FORMS = (
         # object widening just closed.
         # ⛔ `visible` is NOT here: after the object, the copula arm `are|is`
         # already grades "the tools ARE visible", and the bare "the tools visible"
-        # is ungrammatical — mutating it out flips 0 of 528 rows and no
+        # is ungrammatical — mutating it out flips 0 of 545 rows and no
         # well-formed row can depend on it (#14679 review at `1dedd33da07e`,
         # measured). Declared rather than silently carried as an arm.
         r"(?:are|is|appear|appears|show|shows|exist|exists|load|loads"
@@ -3577,9 +3625,11 @@ def test_3232_generic_restart_lines_are_exact():
     # OWN clause ("changing" is not one) — NOT because of the COMMA split.
     # ⛔ THAT SECOND HALF WAS TRUE WHEN WRITTEN AND IS NOW FALSE, measured: on the
     # then-55-row table (cycle 8) removing the comma split changed no row, but on
-    # the current table it moved THIRTEEN rows (measured at this head by replacing
-    # `[c.strip() for c in post_sentence.split(",")]` with
-    # `[post_sentence.strip()]` → 13 failed, 583 passed at `366635ccf`). ⛔ It is
+    # the current table it moved TWELVE rows (6 RED→GREEN and 6 GREEN→RED,
+    # measured at this head by replacing `[c.strip() for c in post_sentence.split(",")]`
+    # with `[post_sentence.strip()]` → 13 failed, 583 passed at `366635ccf`; the
+    # thirteenth failure is `test_3232_the_and_then_half_reds_for_the_first_anchor_
+    # not_by_accident`, a test over those rows, not a row). ⛔ It is
     # load-bearing in BOTH directions, and the six RED rows are NOT all one shape:
     # SIX declared-RED rows are LOST (a false PASS):
     #   1. `… and then, but first confirm the tools are actually there, run …`
@@ -5271,7 +5321,22 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      False),
     # (7) the FOURTH copy of the confirmation closure — the observation gate —
     #     was the one the widening missed, so the "looked … and made sure" shape
-    #     still shipped GREEN.
+    #     still shipped GREEN. It then drifted ONE MORPHOLOGY further (no `ing`),
+    #     which is why the row below uses the progressive the gate fires on.
+    ("Restart your client if you are looking in the panel and ensuring the "
+     "tools are actually there.", True),
+    # (11) the completive's own particle is not an object, the adverb slot sits on
+    #      EITHER side of the modal, and a possessive is the same determiner class.
+    ("Restart your client after you are done with confirming the tools are "
+     "actually there.", True),
+    ("You should first confirm the tools are actually there. Restart your "
+     "client, then run a query.", True),
+    ("And you should first confirm the tools are actually there. Restart your "
+     "client, then run a query.", True),
+    ("Confirm the tools are described in your guide, then restart your client.",
+     False),
+    ("Confirm the tools are described in our documentation, then restart your "
+     "client.", False),
     ("Restart your client if you have looked in the panel and made sure the "
      "tools are actually there.", True),
     ("Restart your client if you have looked in the panel and validated the "
