@@ -1263,56 +1263,55 @@ def _boundary_is_unaskable(boundary: Path) -> bool:
     legitimately answers `--show-toplevel` with a directory that is NOT an ancestor of this
     boundary — the destination is simply not in that work tree, so there is nothing here to
     protect and `origin/main` permits. Only an answer that is a strict ANCESTOR means "git
-    walked up and answered as the repository above". And a healthy repository whose metadata
-    declares no work tree (`core.bare=true`) makes `--show-toplevel` ERROR, which is not the
-    same fact as disowning the directory: the gitdir is the fallback question, and it names
-    this boundary.
+    walked up and answered as the repository above".
+
+    ⛔ AND A BOUNDARY WHOSE METADATA DECLARES NO WORK TREE (`core.bare=true` on a worktree
+    `.git`) STAYS REFUSED — a KNOWN, DISCLOSED OVER-BLOCK, not a claim of coverage
+    (#14741 review, P2, measured). `--show-toplevel` ERRORS for it, and the obvious second
+    question does not answer it: `--absolute-git-dir` returns `<b>/.git`,
+    `<common>/worktrees/<n>`, `<super>/.git/modules/<n>` or an external gitdir for the four
+    pointer forms — NEVER the boundary — so a fallback comparing it with the boundary
+    cannot permit anything. That fallback was written here and removed after review
+    measured it dead (deleting it left the suite green); the shape is therefore refused
+    fail-closed exactly as it was before this round, which is the safe direction, and it
+    is recorded as a residual rather than half-fixed.
     """
     has_pointer = os.path.lexists(boundary / ".git")
     boundary_real = os.path.realpath(boundary)
-    # ⛔ TWO QUESTIONS, AND THE SECOND ONLY WHERE THE FIRST CANNOT ANSWER (#14741 review,
-    # P3, measured). A `.git`-pointer boundary is asked for its WORK TREE root, because
-    # that is the repository whose index the probe reads. `--show-toplevel` ERRORS for a
-    # healthy repository whose metadata declares no work tree (`core.bare=true`), and that
-    # is not the same fact as "git disowned this directory" — so the gitdir is the
-    # fallback question, never a verdict of its own.
-    questions = (
-        ("--show-toplevel", "--absolute-git-dir")
-        if has_pointer
-        else ("--absolute-git-dir",)
-    )
-    for question in questions:
-        try:
-            resolved = subprocess.run(
-                ["git", "rev-parse", question],
-                cwd=boundary, capture_output=True, text=True,
-                encoding="utf-8", errors="surrogateescape",
-                env=_git_env(), timeout=_GIT_PROBE_TIMEOUT_S,
-            )
-        except (subprocess.TimeoutExpired, OSError):
-            return True
-        if resolved.returncode != 0:
-            continue
-        answer = resolved.stdout.strip()
-        if not answer:
-            continue
-        answer_real = os.path.realpath(answer)
-        if answer_real == boundary_real:
-            return False
-        if question == "--show-toplevel":
-            # ⛔ ANSWERED AS THE REPOSITORY ABOVE IS THE DAMAGE. git walks UP when it will
-            # not accept the entry at this directory, so a damaged `.git` answers with an
-            # ENCLOSING work tree root — a strict ANCESTOR of this boundary, i.e. a
-            # repository with a different index. That answer is a could-not-run for THIS
-            # boundary, and every other answer from this question is a healthy work tree
-            # that is ELSEWHERE (`core.worktree`): the destination is not in THAT work tree,
-            # so there is nothing for this guard to protect — `origin/main` permits, and
-            # refusing here would be an over-block on a healthy repository.
-            return Path(boundary_real).is_relative_to(Path(answer_real))
-        # The gitdir form answered with a gitdir that is not this directory: git resolved
-        # this metadata-in-place boundary to something else (the repository ABOVE it).
+    # ⛔ THE QUESTION IS WHICH REPOSITORY GIT RESOLVED, AND THE ANSWER'S SHAPE IS THE
+    # VERDICT (#14741 review, P2/P3, measured). The pointer form asks for its WORK TREE
+    # root, because that is the repository whose index the probe reads; the
+    # metadata-in-place form asks for the gitdir, because a bare gitdir has no work tree.
+    question = "--show-toplevel" if has_pointer else "--absolute-git-dir"
+    try:
+        resolved = subprocess.run(
+            ["git", "rev-parse", question],
+            cwd=boundary, capture_output=True, text=True,
+            encoding="utf-8", errors="surrogateescape",
+            env=_git_env(), timeout=_GIT_PROBE_TIMEOUT_S,
+        )
+    except (subprocess.TimeoutExpired, OSError):
         return True
-    # Every question failed: git answered nothing, so this boundary cannot be asked.
+    if resolved.returncode != 0:
+        return True
+    answer = resolved.stdout.strip()
+    if not answer:
+        return True
+    answer_real = os.path.realpath(answer)
+    if answer_real == boundary_real:
+        return False
+    if has_pointer:
+        # ⛔ ANSWERED AS THE REPOSITORY ABOVE IS THE DAMAGE. git walks UP when it will not
+        # accept the entry at this directory, so a damaged `.git` answers with an ENCLOSING
+        # work tree root — a strict ANCESTOR of this boundary, i.e. a repository with a
+        # different index. That answer is a could-not-run for THIS boundary. Every other
+        # answer from this question is a healthy work tree that is ELSEWHERE
+        # (`core.worktree`): the destination is not in THAT work tree, so there is nothing
+        # for this guard to protect — `origin/main` permits, and refusing it would be an
+        # over-block on a healthy repository.
+        return Path(boundary_real).is_relative_to(Path(answer_real))
+    # The gitdir form answered with a gitdir that is not this directory: git resolved this
+    # metadata-in-place boundary to something else (the repository ABOVE it).
     return True
 
 
@@ -1432,14 +1431,18 @@ def _destination_probes(
         # fail-closed choice for bytes at risk; this over-block class is narrowed, not
         # closed.
         # ⛔ AND THE FLOOR'S ONE REMAINING SKIP SHAPE WAS MEASURED UNREACHABLE THROUGH
-        # `--render` (#14741 review, P3, REFUTED at the call site): an index-less HEALTHY
-        # bare gitdir is dropped from the walk here, which leaves only the destination's
-        # nearest existing ancestor to be asked — but a destination under a gitdir is
-        # REFUSED EARLIER by the GIT METADATA guard (`main()`, "refusing to render over GIT
-        # METADATA"), which resolves the boundary as metadata whatever this floor decides.
-        # Measured: `--render sub/bare.git/docs/K.md` answers 2 with or without the index
-        # term. The remaining reach is a DAMAGED gitdir with no index, which no term can
-        # separate from the lookalike — recorded as a residual, not fixed here.
+        # `--render` (#14741 review, P3, REFUTED at the call site — and the REFUTATION'S
+        # OWN FIRST DRAFT named the wrong guard, corrected here after measurement): an
+        # index-less HEALTHY bare gitdir is dropped from the walk here, but the destination
+        # is still asked — `add(probe_dir, …)` below is UNCONDITIONAL, so the probe set is
+        # IDENTICAL with and without this term, and what refuses the HEAD-named path is the
+        # tracked probe's `_path_in_HEAD` half (`refusing to render over a TRACKED path …
+        # this path IS in HEAD even though the index does not list it`), which runs BEFORE
+        # the metadata probe. The GIT METADATA guard is the BACKSTOP (measured to fire for
+        # a destination under the gitdir that HEAD does NOT name). Both measured: `--render
+        # sub/bare.git/docs/K.md` answers 2 with AND without the index term. The remaining
+        # reach is a DAMAGED gitdir with no index, which no term can separate from the
+        # lookalike — recorded as a residual, not fixed here.
         if not (os.path.lexists(boundary / ".git")
                 or (_looks_like_git_metadata(boundary)
                     and (boundary / "index").exists())):
