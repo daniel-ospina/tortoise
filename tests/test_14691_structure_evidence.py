@@ -237,8 +237,14 @@ def test_a4_declared_structure_is_traceable_and_relations_are_co_stated():
     # the two untraceable names the bundle carries are KNOWLEDGE-LAYER objects,
     # not structure elements — A4's scope is stated by its own counts, so a
     # reader never has to guess which population the PASS covers.
-    assert a4["untraceable_counts"]["all_entity_names"] >= 0
-    assert a4["untraceable_counts"]["structural_kinds"] == 0
+    # ⛔ THE VALUE, not `>= 0` (#14691 review, 3rd cycle, F3): `len()` is never
+    # negative, so the old arm was satisfied by 0, 2 and 1e9 alike — it recorded
+    # nothing in a file whose docstring promises each test names the mutation
+    # that reds it. Pinning the measured 2 means the count this bundle STATES can
+    # no longer drift (a new knowledge-layer object moving it to 3 is exactly the
+    # drift the neighbouring `structural_kinds == 0` arm cannot see).
+    assert a4["untraceable_counts"]["all_entity_names"] == 2, (
+        a4["untraceable_counts"], a4["untraceable_entities"])
     # the CLAIM layer is reported separately and is NOT clean — pinning it keeps
     # a future reader from reading A4's PASS as covering the quotes.
     claim = _score()["claim_layer"]
@@ -328,6 +334,42 @@ def _report_line(pattern: str) -> str:
     return ""
 
 
+def _report_paragraph(pattern: str) -> str:
+    """The whole markdown paragraph whose FIRST line matches `pattern`, joined.
+
+    A paragraph is where a claim lives: the A2 tally states its numerator on one
+    wrapped line and its denominator on the next, so a line-scoped read returns a
+    sentence fragment and grades half a claim.
+    """
+    lines = _report().splitlines()
+    for start, line in enumerate(lines):
+        if re.search(pattern, line):
+            block = []
+            for nxt in lines[start:]:
+                if not nxt.strip():
+                    break
+                block.append(nxt)
+            return " ".join(block)
+    return ""
+
+
+_UNITS = ("zero", "one", "two", "three", "four", "five", "six", "seven",
+          "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen",
+          "fifteen", "sixteen", "seventeen", "eighteen", "nineteen")
+_TENS = ("", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy",
+         "eighty", "ninety")
+
+
+def _spell(n: int) -> str:
+    """`n` as an English word (0-99) — the form prose uses when it counts."""
+    if n < len(_UNITS):
+        return _UNITS[n]
+    if n < 100:
+        tens, unit = divmod(n, 10)
+        return _TENS[tens] if unit == 0 else f"{_TENS[tens]}-{_UNITS[unit]}"
+    return str(n)
+
+
 def test_report_headline_numbers_are_the_artifacts_numbers():
     """Reds if REPORT.md keeps a number the receipts no longer support.
 
@@ -366,6 +408,53 @@ def test_report_headline_numbers_are_the_artifacts_numbers():
     depends = _report_line(r"^\| dependent → dependency \(`dependsOn`\)")
     assert depends, "REPORT.md has no dependsOn row"
     assert "7/7" in depends, depends
+
+    # (b2) the A2 TALLY paragraph — the run's own arithmetic, pinned against the
+    # receipt that emits it (#14691 review, 3rd cycle, F2). The paragraph once said
+    # "seven of the TWENTY correctly aimed rows … the other THIRTEEN", mixing rows
+    # (22) with pairs (13) in the very sentence that warns they are different units,
+    # and no arm above could see it: `0/6` and `7/7` are table rows, not this
+    # paragraph. Each number here is read out of `A2_edges.totals`, so a future
+    # edit to the prose reds rather than shipping a figure its own artifact refutes.
+    totals = score["A2_edges"]["totals"]
+    correct = totals["asymmetric_rows_correct"]
+    inverted = totals["asymmetric_rows_inverted"]
+    pairs = totals["asymmetric_pairs_inverted"]
+    rows = correct + inverted
+    tally = _report_paragraph(r"^\*\*One line that counts it\.\*\*")
+    assert tally, "REPORT.md has no A2 tally paragraph"
+    assert f"the **{rows} asymmetric structural rows**" in tally, tally
+    assert (f"**{correct} assert what the corpus says and {inverted} assert the "
+            f"reverse**") in tally, tally
+    assert f"**{pairs} distinct pairs**" in tally, tally
+    # the three inverted classes the paragraph enumerates must SUM to the inverted
+    # rows — the arithmetic that caught the mixed units.
+    enumerated = [int(a or b) for a, b in
+                  re.findall(r"\((\d+) rows?\)|\((\d+)\)", tally)]
+    assert sum(enumerated) == inverted, (tally, enumerated)
+    # ⛔ AND THE SPELLED FORMS — the observed defect was a WORD contradicting the
+    # digits beside it. The pin is TARGETED, not a set-membership sweep, because
+    # "thirteen" is a number this artifact legitimately emits (13 distinct pairs):
+    # a sweep allows it and stays green over exactly the sentence it was written
+    # for (measured — the mutant `the other thirteen` passed a sweep arm). So pin
+    # the phrase itself.
+    other = re.search(r"the other ([a-z]+(?:-[a-z]+)?)", tally)
+    assert other, tally
+    assert other.group(1) == _spell(inverted), (
+        f"the A2 tally says 'the other {other.group(1)}' while the artifact's "
+        f"inverted row count is {inverted} ('{_spell(inverted)}') — the paragraph "
+        f"mixed rows with distinct pairs in the sentence that warns they differ")
+    # ...and no OTHER spelled count may contradict the artifact either.
+    allowed = {_spell(v) for v in (correct, inverted, pairs, rows)}
+    mentioned = set(re.findall(
+        r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+        r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
+        r"twenty(?:-[a-z]+)?|thirty(?:-[a-z]+)?)\b",
+        tally.split(".", 1)[-1].lower()))
+    assert mentioned <= allowed, (
+        f"the A2 tally names a count its own artifact does not support: "
+        f"{sorted(mentioned - allowed)} (artifact: rows={rows}, correct={correct}, "
+        f"inverted={inverted}, distinct pairs={pairs})")
 
     # (c) the corpus's turn count — 30, which the fixture, the receipt and
     # VERIFICATION-independent.md all state; the report said 32 once.
@@ -460,3 +549,55 @@ def test_the_isolation_premise_is_recorded_as_an_EMPTY_graph():
     before = _receipt()["empty_before"]
     assert {k: v for k, v in before["taxonomy"].items() if v} == {}, before["taxonomy"]
     assert (before.get("structure") or {}).get("total") == 0, before.get("structure")
+
+
+# ── the pin must actually RUN on the diff it guards ──────────────────────
+def test_a_bundle_only_diff_selects_this_suite():
+    """#14691 review (3rd cycle) F1: the guard must run on ITS OWN SUBJECT.
+
+    This file's subject is the committed bundle — `out/*.json`, `REPORT.md`, the
+    corpus, the scorers. `docs/` is a flat `NON_PYTHON_PREFIXES` entry, so before
+    the `CORE_ALSO` row every one of those diffs took the docs-only early return:
+    MEASURED on the pre-fix manifest,
+    `select(['docs/evidence/14691-structure-validation/out/t6-score.json'],
+    'pull_request')` -> `surfaces: []`, and the same for `REPORT.md`,
+    `score_t6.py`, `run_readback.py` and `corpus/structure-corpus.json`. The 13
+    falsifiers therefore ran when someone edited the TEST and NEVER when someone
+    edited the artifacts they pin — so a PR that hand-rewrote the score artifact
+    or restated a headline number shipped with the guard absent.
+
+    ⛔ THE SUBJECT IS A PREFIX, and the assertion walks EVERY file the bundle
+    commits rather than one representative: a new artifact added to the bundle is
+    the same class again, and a single-file pin would let it in silently.
+    """
+    from tools import ci_selection
+
+    manifest = ci_selection.load_manifest()
+    subjects = sorted(
+        p.relative_to(REPO).as_posix() for p in BUNDLE.rglob("*")
+        if p.is_file() and ".git" not in p.parts)
+    # non-vacuity: the walk must actually find the bundle's committed files
+    assert {"docs/evidence/14691-structure-validation/REPORT.md",
+            "docs/evidence/14691-structure-validation/out/t6-score.json",
+            "docs/evidence/14691-structure-validation/corpus/structure-corpus.json",
+            } <= set(subjects), subjects
+    blind = []
+    for path in subjects:
+        selection = ci_selection.select([path], "pull_request", manifest)
+        files = selection.get("test_files")
+        selected = files == "ALL" or "test_14691_structure_evidence.py" in (files or [])
+        if "core" not in (selection.get("surfaces") or []) or not selected:
+            blind.append((path, selection.get("surfaces")))
+    assert not blind, (
+        "a diff to the bundle no longer selects its own pin, so the guard is "
+        f"absent on the one change class it exists for: {blind}. The `CORE_ALSO` "
+        "row in `tools/ci_selection.py` was dropped (a `SOURCE_PATTERNS['core']` "
+        "row cannot replace it — `core` is skipped by both `_selection_relevant` "
+        "and the match loop)")
+
+    # ... and the row must stay a CLAIM about this bundle, not about `docs/`
+    # (a widening nobody would see in the assertion above).
+    for sibling in ("docs/evidence/14606-decision-validation/REPORT.md",
+                    "docs/evidence/14691-structure-validation-extra/x.json"):
+        assert ci_selection.select([sibling], "pull_request", manifest)["surfaces"] == [], (
+            f"the T6 `CORE_ALSO` row widened to a sibling bundle: {sibling}")
