@@ -9162,6 +9162,14 @@ _EMISSION_CLAUSE_RE = re.compile(
     r"(?: shards?)? at (?P<est>\d+\.\d) s \((?P<names>[a-z][a-z,\s\u2013\u2014-]*)\)")
 _EMISSION_CEIL_RE = re.compile(
     r"`ceil\((?P<est>\d+\.\d)/60 x (?P<headroom>\d+(?:\.\d+)?)\)` = (?P<minutes>\d+) m")
+#: The STATED HEADROOM RATIO that sits in the same sentence — `(1680 / 827.6 = 2.0300)`. ⛔ It is a
+#: FOURTH claim in that sentence and it was graded by NOTHING (#14623 review round 29, P3): mutating
+#: `2.0300` to `2.0400` left every `fast_shards`/emission/manifest/integrity arm GREEN (measured, 36
+#: passed). Read here so the ratio is DERIVED like its neighbours rather than asserted once by hand.
+#: Absence is legal (the block's doctrine is GRADED-OR-ABSENT — deleting the parenthetical drops the
+#: claim without falsifying it); a PRESENT ratio must be the one the code computes.
+_EMISSION_RATIO_RE = re.compile(
+    r"\((?P<window>\d+)\s*/\s*(?P<est>\d+\.\d+)\s*=\s*(?P<ratio>\d+\.\d+)\)")
 _EMISSION_RANGE_RE = re.compile(r"(?P<lo>[a-z])\s*[\u2013\u2014-]\s*(?P<hi>[a-z])")
 #: A shard-figure sentence the CLAUSE parser above cannot read: a seconds figure
 #: immediately followed by a shard-name list opener. `_EMISSION_CLAUSE_RE` needs one
@@ -9374,6 +9382,17 @@ _ROW_CLAIM_CARRY_RE = re.compile(
     #: — that is the fixture's job, not this alternation's.
     r"(?:(?:an?\s+)?(?:explicit\s+)?`?(?P<value>\d+(?:\.\d+)?)(?:\s*s)?`?\s+`?durations`?\s+"
     r"(?:rows?|entr(?:y|ies))"
+    # ⛔ THE VALUE AFTER THE NOUN. This note's own sentence states the graded PROPERTY as "names a
+    # file as carrying a `durations` row of THIS value" — the post-noun order — and the alternation
+    # above required the opposite one, so a TRUE rewrite of the live sentence
+    # ("… carry an explicit `durations` row of `2.0`") matched NOTHING. ⛔ THE FAILURE MODE IS A
+    # DESTRUCTIVE FALSE BLOCK, not a harmless red: `positive` empties, the non-vacuity assert
+    # reports the block as naming no file, and the obvious repair — silencing that assert — removes
+    # the ONLY grading of the four positive row claims (#14623 review round 29, P2; the same class as
+    # `explicit` at round 24 and the unit at rounds 5/6, this being the last of the three free
+    # choices in the value phrase). Pinned by a fixture below, so narrowing this branch REDs.
+    r"|(?:an?\s+)?(?:explicit\s+)?`?durations`?\s+(?:rows?|entr(?:y|ies))\s+(?:of|at)\s+"
+    r"`?(?P<value_after>\d+(?:\.\d+)?)(?:\s*s)?`?"
     r"|no\s+(?:`?durations`?\s+)?(?:rows?|entr(?:y|ies)))",
     re.IGNORECASE,
 )
@@ -9435,10 +9454,14 @@ def _carry_row_claims_in(unquoted: str) -> tuple[dict[str, set[float]], set[str]
     for claim in _ROW_CLAIM_CARRY_RE.finditer(unquoted):
         names = {m.group("file")
                  for m in _ROW_CLAIM_PATH_IN_LIST_RE.finditer(claim.group("names"))}
-        if claim.group("value") is None:
+        # ⛔ EITHER group may carry the value: `value` is the value-BEFORE-noun branch and
+        # `value_after` the value-AFTER-noun one. Python's `re` cannot give two branches one group
+        # name, so the caller resolves them here rather than the pattern losing a legal spelling.
+        stated_value = claim.group("value") or claim.group("value_after")
+        if stated_value is None:
             negative |= names
         else:
-            stated = float(claim.group("value"))
+            stated = float(stated_value)
             for name in names:
                 positive.setdefault(name, set()).add(stated)
     return positive, negative
@@ -9828,6 +9851,29 @@ def _emission_block_claims(
         f"`ci_selection.WATCHDOG_HEADROOM` = {cs.WATCHDOG_HEADROOM:g} — the `ceil(...)` operand "
         "no longer states the code's own multiplier, so the figures beside it are not the ones "
         "anything computes. Update the sentence, or the constant moved and the block is stale.")
+    # ⛔ THE STATED HEADROOM RATIO, checked against the code rather than trusted. The window is the
+    # emitted budget (`minutes x 60`) and the quotient is `ci_selection.watchdog_headroom`, so a
+    # block stating the right figure against the wrong estimate — or a hand-typed ratio that drifted
+    # — reds here instead of reading as verified. Tolerance is half the stated precision, so the
+    # block may round to as many places as it likes without the arm owning a spelling.
+    ceil_by_est = {float(e): int(m) for e, _h, m in ceil_matches}
+    for window_str, ratio_est_str, ratio_str in _EMISSION_RATIO_RE.findall(header):
+        ratio_est = float(ratio_est_str)
+        assert ratio_est in ceil_by_est, (
+            f"the block states a headroom ratio for {ratio_est} s, which no `ceil(...)` clause in "
+            "the same block derives — the ratio is arithmetic on a budget nothing states, so it is "
+            "checked against nothing. Re-derive it beside the emission that produced it.")
+        minutes = ceil_by_est[ratio_est]
+        assert int(window_str) == minutes * 60, (
+            f"the block states the headroom window as {window_str} s, but the emitted budget beside "
+            f"it is {minutes} m = {minutes * 60} s — the numerator is not the budget it divides.")
+        expected = cs.watchdog_headroom(ratio_est, minutes)
+        decimals = len(ratio_str.split(".")[1])
+        assert abs(float(ratio_str) - expected) <= 0.5 * 10 ** (-decimals), (
+            f"the block states the headroom ratio as `{window_str} / {ratio_est_str} = {ratio_str}`, "
+            f"but `ci_selection.watchdog_headroom({ratio_est_str}, {minutes})` is {expected:.6f} "
+            f"(={expected:.{decimals}f}) — the figure beside the emission is not the one the code "
+            "computes, so it will read as verified while it rots. Re-emit it with the verb.")
     if not groups:
         return None
     est_str, _headroom, minutes_str = ceil_matches[0]
@@ -10615,96 +10661,117 @@ _H_14544_INVERTED_RE = re.compile(
 #: graded by `_h_14544_row_exempted` below, which reads the STRUCTURE of a sentence — is the row the
 #: subject of an exemption, or the complement of an additive marker — rather than a list of spellings
 #: of it. The non-vacuity loops beside the arm drive that function directly, in both directions.
-#: THE ROW-EXEMPTION CLASS, graded STRUCTURALLY instead of by a list of conjunctions (#14623 round 28).
-#: The paragraph's false reading is that the `durations` ROW is exempt as well as the REGISTRATION,
-#: and English says that two ways, both of them GRAMMATICAL rather than lexical:
-#:   * the row (or that weight, in EITHER order) is the SUBJECT of an exemption predicate; and
-#:   * the row (or its weight, in EITHER order — `the row's weight` / `the weight of the row`) is the
-#:     COMPLEMENT of an additive marker — `so is` / `as is` /
-#:     `as well as` / `likewise` / `along with` / an elliptical `…, and the row is too`.
-#: ⛔ THREE THINGS THIS IS DELIBERATELY NOT, each one a defect a review measured in the round before:
-#:   * NOT a list of whole phrases. Round 26 pinned `so is` to `the row`, so ONE inserted word
-#:     (`as is the durations row`) defeated it; here the noun phrase is a pattern and the marker is
-#:     only constrained where grammar makes it meaningful.
-#:   * NOT the row-as-SUBJECT test alone. The elliptical `X is exempt, and the row is too` states the
-#:     same claim with no predicate after the row at all, so the subject branch cannot see it — and
-#:     deleting the alternative that used to catch it turned a false reading GREEN (#14623 round 28,
-#:     P1). The additive branches therefore require the sentence to ASSERT an exemption (see below).
-#:   * NOT a bare row-and-`exempt` co-occurrence test. The live block's scope sentence SHARES a
-#:     sentence with `that row's WEIGHT is \`#14544\`'s own edit`, so co-occurrence would refuse the
-#:     block it exists to certify.
-#: ⛔ THE ROW IS SINGULAR, AND THAT BOUNDARY IS LOAD-BEARING: `row\b` cannot reach `rows`, which this
-#: block uses constantly ("the rows below", "the rows above") as the ordinary plural of its own
-#: subject. Without it, TRUE prose ("as well as the rows") was refused end-to-end (#14623 round 28,
-#: P1) — the same class of defect as a false pass.
-#: ⛔ AND AN ADDITIVE MARKER ALONE IS NOT A CLAIM. `along with the row's measured weight` is a TRUE
-#: statement of fact in this very block (`durations_floors` pins a value ALONGSIDE a row's weight) and
-#: carries no exemption; so the additive branches fire only in a sentence that asserts one.
-#: ⛔ WHAT THIS DOES NOT COVER, stated rather than implied: a row exemption spelled with NO exemption
-#: predicate and NO additive marker ("the row keeps its exemption") is not read; a NEGATED
-#: exemption is tolerated on purpose (`the row is NOT exempt` is TRUE prose); and an ANAPHORIC
-#: weight names no row at all (`as is the weight it carries`, `as is its weight`), so the noun phrase
-#: is required to name one. All three are residuals of reading grammar with a regex, named here so a
-#: later round widens knowingly.
-_H_14544_ROW_NOUN = (r"(?:(?:the|that|this|its|a|durations)\s+(?:\w+\s+){0,2})?"
-                     r"row\b(?:['\u2019]s)?(?:\s+weight\b)?")
+#: THE ROW-EXEMPTION CLASS, graded STRUCTURALLY (#14623 rounds 27-29).
+#: The paragraph's false reading is that the `durations` ROW is exempt as well as the REGISTRATION.
+#: English says that two ways, and both are GRAMMATICAL:
+#:   * the row (or its weight, in EITHER order — `the row's weight` / `the weight of the row`) is
+#:     the SUBJECT of an exemption predicate; and
+#:   * the row is the COMPLEMENT of an additive marker — `so is` / `as is` / `as well as` /
+#:     `likewise` / `along with` / an elliptical `…, and the row is too`.
+#: ⛔ FIVE ROUNDS OF HISTORY, AND WHAT THEY TAUGHT — read this before widening ANY of it. Rounds 26
+#: to 30 each enumerated a class of words and each bought one gap by opening another:
+#:   26  enumerated conjunctions               -> `as is the durations row` (ONE inserted adjective)
+#:                                             escaped, and `row is too` FALSE-BLOCKED ordinary English
+#:   27  enumerated the copula+adverb run      -> the elliptical `…, and the row is too` went GREEN
+#:                                             (its fixture was deleted with the alternative), and the
+#:                                             row noun lost its boundary so `rows` was refused
+#:   28  turned it into a function             -> the adverb run was STILL an enumerated six-item list,
+#:                                             so `the row is equally exempt` escaped
+#:   29  THIS revision                          -> see the three rules below
+#:   30  graded the noun phrase's SECOND ORDER -> the phrase was `the row's weight` and the additive
+#:                                             branch anchored the noun AT its marker, so the reverse
+#:                                             `as is the weight of the row` went GREEN in five
+#:                                             spellings (`_H_14544_ROW_NOUN`'s prefix stops one
+#:                                             word short of `row` there); the ORDER of a noun
+#:                                             phrase is as open a class as an adverb list
+#: ⛔ RULE 1 — NEVER ENUMERATE AN OPEN LEXICAL CLASS; do enumerate a CLOSED grammatical one. Adverbs
+#: are open: no list of six covers `equally` / `similarly` / `therefore` / `fully` / `just as`. The
+#: COPULA is closed: every English spelling of "the row is exempt" passes through a form of be,
+#: remain or stay, so `_H_14544_COPULA` is exhaustive in a way an adverb list never can be. The words
+#: BETWEEN copula and `exempt` are therefore graded as a RUN of tokens, not a membership test.
+#: ⛔ RULE 2 — PRECEDENCE OVER STRUCTURE: an explicit NEGATION anywhere in the sentence means the
+#: sentence does not affirmatively state the row's exemption, so it is tolerated. That is what keeps
+#: `The row is NOT exempt.`, `No \`durations\` row is exempt from being a packing cause.` and
+#: `The \`durations\` row is exempt from nothing.` GREEN — all TRUE, all of them refused by round 28's
+#: predicate, which had no negation carve-out at all and only tolerated the first by accident (the
+#: bare `not` happened to fall outside its adverb list).
+#: ⛔ RULE 3 — `too` MUST END ITS SENTENCE. `too` has three readings here: the ELLIPSIS (`…, and the
+#: row is too.` — the false claim), the INTENSIFIER (`the row is too specific to summarise` — TRUE
+#: prose about a row), and the APPOSITIVE (`that row, too, is a packing cause` — TRUE, and the block
+#: says exactly this). Only the ellipsis ends a sentence; the other two continue past `too`. A
+#: lookahead admitting `,` conflates the appositive with the ellipsis, which round 28 did.
+#: ⛔ AND WHAT THIS DOES NOT COVER, stated rather than implied (the previous list named two residuals
+#: and was wrong on one of them, so this one names the shapes it cannot read):
+#:   * an exemption spelled with NO exemption word and NO additive marker (`the row keeps its
+#:     exemption`) — no regex reads a synonym it was not given;
+#:   * an additive marker whose exemption sits MORE than one sentence earlier;
+#:   * a NEGATION in a sentence that nonetheless affirms the row's exemption (`No one disputes that
+#:     the row is also exempt`) — Rule 2 is a precedence choice, not a parser;
+#:   * an ANAPHORIC weight that names no row at all (`as is the weight it carries`, `as is its
+#:     weight`) — the noun phrase is required to NAME one, in either order (round 30).
+_H_14544_COPULA = r"(?:is|are|was|were|stays|remains|stayed|remained)"
+#: The row, and the names this family uses for the SAME row. ``the `durations` ENTRY`` is an
+#: accepted TRUE rewording elsewhere in this block (`_H_14544_ROW_PROVENANCE_RE`), so a ban that
+#: read only `row` left the false claim reachable by renaming its subject (measured round 29).
+_H_14544_ROW_NOUN = (r"(?:(?:the|that|this|its|a|no|durations)\s+(?:\w+\s+){0,2})?"
+                     r"(?:row\b(?:['\u2019]s)?(?:\s+weight\b)?"
+                     r"|`durations`\s+entry)")
 #: ⛔ THE SAME NOUN PHRASE IN THE REVERSE ORDER — `the weight of the row`, `the weight carried by
 #: that row`, `the weight on the row` — which `_H_14544_ROW_NOUN` cannot reach: its determiner
 #: prefix allows two words before `row`, and this order puts three there (`the weight of the`).
-#: ⛔ MEASURED FAIL-OPEN, and it is exactly the round-26 lesson one level down: the additive branches
-#: anchor the noun phrase AT THE MARKER, so `The REGISTRATION is the ONLY half exempt, as is the
-#: weight of the row.` shipped GREEN through the arm that exists to refuse that reading (#14623 round
-#: 30 — reproduced end-to-end through `_h_14544_banned_claim`; the same sentence's SUBJECT form was
-#: caught, which is what made the hole invisible: `.search` finds `the row is exempt` inside the
-#: possessive order but not inside this one). The order is not a spelling — this paragraph's own
-#: subject is `that row's WEIGHT`, so `the weight of the row` is the natural way to write it.
+#: ⛔ MEASURED FAIL-OPEN AT ROUND 29's OWN HEAD, and it is round 26's lesson one level down: the
+#: additive branch anchors the noun phrase AT THE MARKER, so `The REGISTRATION is the ONLY half
+#: exempt, as is the weight of the row.` shipped GREEN through `_h_14544_banned_claim` — the arm
+#: that exists to refuse exactly that reading — in FIVE additive spellings (`as is` / `likewise` /
+#: `as well as` / `along with` / `so is`). The SUBJECT branch caught it, which is what hid the hole:
+#: `.search` finds `the row is exempt` INSIDE `the weight of the row …`, so only the anchored
+#: spellings escaped. The order is not a spelling — this paragraph's own subject is `that row's
+#: WEIGHT`, so `the weight of the row` is the natural way to write it (#14623 round 30).
 _H_14544_ROW_WEIGHT_REVERSE = (
     r"(?:the|that|this)\s+(?:\w+\s+){0,2}weight\s+"
     r"(?:of|on|in|carried\s+by|from|belonging\s+to)\s+"
     r"(?:the|that|this)\s+(?:\w+\s+){0,2}row\b")
 #: Either order of the row noun, LONGEST FIRST so a failure names the weight phrase rather than the
-#: `the row` inside it. Used by every branch below — the reverse order is not a spelling of the
+#: `the row` inside it. Used by EVERY branch below — the reverse order is not a spelling of the
 #: subject test alone.
 _H_14544_ROW_NOUN_ANY = r"(?:" + _H_14544_ROW_WEIGHT_REVERSE + r"|" + _H_14544_ROW_NOUN + r")"
-#: The two attested copulas sets. `was`/`were` are not padding: this block describes a PAST commit
-#: ("the fold that took the row"), so past tense is an attested spelling of the same claim.
-_H_14544_COPULA = r"(?:is|are|was|were|stays|remains|stayed|remained)"
-_H_14544_EXEMPT_AFTER_COPULA = (r"\s+" + _H_14544_COPULA + r"\s+"
-                                r"(?:also\s+|still\s+|now\s+|likewise\s+|thereby\s+|too\s+)?exempt\b")
-_H_14544_ROW_EXEMPTED_RE = re.compile(
-    # (a) the row / its weight as the SUBJECT of an exemption predicate (never across a negation)
-    _H_14544_ROW_NOUN_ANY + _H_14544_EXEMPT_AFTER_COPULA, re.IGNORECASE)
-#: (b) the row as the COMPLEMENT of an additive marker. Applied inside `_h_14544_row_exempted`, and
-#: only to a sentence that already asserts an exemption, for the two reasons in the comment above.
+#: Rule 1: the run between copula and `exempt` is graded as tokens, never as a list of members.
+#: ⛔ NOT `_H_14544_ROW_SUBJECT_RE` — that name is TAKEN (`:10309`, the anaphor check's row-subject
+#: guard), and reusing it here silently re-pointed that check at this narrower pattern: the retired
+#: `neither of which` sentence stopped being read and the non-vacuity pin beside the arm REDed. A
+#: name collision between two unrelated guards is invisible at the definition site and only shows up
+#: as a guard that no longer fires.
+_H_14544_ROW_EXEMPT_SUBJECT_RE = re.compile(
+    _H_14544_ROW_NOUN_ANY + r"\s+" + _H_14544_COPULA + r"\s+(?:\w+\s+){0,3}exempt", re.IGNORECASE)
+#: Rule 3: `too` is clause-terminal only when it ENDS the sentence — `[.!?]` or end of string.
 _H_14544_ROW_ADDITIVE_RE = re.compile(
     r"(?:so|as)\s+(?:too\s+)?" + _H_14544_COPULA + r"\s+" + _H_14544_ROW_NOUN_ANY
-    # a marker that names the row without restating the predicate it modifies
     + r"|(?:as\s+well\s+as|likewise|along\s+with)\s+" + _H_14544_ROW_NOUN_ANY
-    # the ELLIPTICAL form: `X is exempt, and the row is too`. ⛔ `too` must END its clause: as an
-    # INTENSIFIER it takes an adjective (`the row is too specific to summarise`), which is ordinary
-    # English about a row and states no exemption — refusing it was the round-27 false block
-    # returning through a new door (#14623 round 28). The clause-terminal requirement separates the
-    # two readings: `…and the row is too.` ends its sentence, `…is too specific` does not.
-    + r"|" + _H_14544_ROW_NOUN_ANY + r"\s*(?:" + _H_14544_COPULA + r")?\s*,?\s*too(?=\s*(?:[,;:.!?)\]]|$))",
+    + r"|" + _H_14544_ROW_NOUN_ANY + r"\s*(?:" + _H_14544_COPULA + r")?\s*,?\s*too\s*(?:[.!?]|$)",
     re.IGNORECASE)
+#: Rule 2. `n't` is listed because a contraction negates as surely as `not` does.
+_H_14544_NEGATION_RE = re.compile(
+    r"\b(?:no|not|never|none|nothing|neither|nor)\b|n['\u2019]t\b", re.IGNORECASE)
 
 
-def _h_14544_row_exempted(sentence: str) -> str | None:
+def _h_14544_row_exempted(sentence: str, previous: str = "") -> str | None:
     """The row-exemption phrase in ONE sentence, or None.
 
-    A function rather than a single regex because the additive branches are CONDITIONAL on the same
-    sentence asserting an exemption — a condition a regex would have to encode as a lookahead, which
-    is the kind of cleverness that reads as correct and grades nothing. Both branches return the
-    matched text so a failure names the phrase it found.
+    A function rather than one regex because the branches are CONDITIONAL — on a negation (Rule 2)
+    and, for the additive markers, on the block asserting an exemption at all — and encoding
+    conditionals as lookaheads is the kind of cleverness that reads as correct and grades nothing.
+    `previous` is the preceding sentence: the block states the exemption once and then reads
+    `So is the row.`, which is one sentence away from the word it depends on.
     """
-    m = _H_14544_ROW_EXEMPTED_RE.search(sentence)
+    if _H_14544_NEGATION_RE.search(sentence):
+        return None
+    m = _H_14544_ROW_EXEMPT_SUBJECT_RE.search(sentence)
     if m:
         return m.group(0)
-    if not re.search(r"exempt\b", sentence, re.IGNORECASE):
+    if not re.search(r"exempt", sentence + " " + previous, re.IGNORECASE):
         return None
     m = _H_14544_ROW_ADDITIVE_RE.search(sentence)
     return m.group(0) if m else None
-
 
 
 def _h_14544_banned_claim(block: str) -> str | None:
@@ -10715,7 +10782,8 @@ def _h_14544_banned_claim(block: str) -> str | None:
     be false one edit later (measured — `49a6dd89`'s comment claimed a distance the regex did not
     read, and #14623 round 5 shipped a false sentence GREEN through the same gap).
     """
-    for sentence in _H_14544_SENTENCES_RE.split(block):
+    sentences = _H_14544_SENTENCES_RE.split(block)
+    for index, sentence in enumerate(sentences):
         # ⛔ AND THE ACTOR, not only the subject: `weight` is in the subject set because the row
         # carries one, so requiring the subject alone refused a TRUE sentence about two shard
         # figures — "the weight of shard a and the weight of shard b are 827.2 s and 827.3 s,
@@ -10744,7 +10812,9 @@ def _h_14544_banned_claim(block: str) -> str | None:
         # sentence that asserts one. Sentence-scoped on purpose — the live paragraph's scope claim
         # SHARES a sentence with `that row's WEIGHT is \`#14544\`'s own edit`, so a whole-block
         # row-and-exempt co-occurrence test would refuse the very prose this arm certifies.
-        if _h_14544_row_exempted(sentence):
+        # `previous` is the sentence before: the block states the exemption once and then reads
+        # `So is the row.`, and the additive markers are one sentence away from the word they modify.
+        if _h_14544_row_exempted(sentence, sentences[index - 1] if index else ""):
             return sentence.strip()
     return None
 
@@ -10835,9 +10905,9 @@ _H_14544_ROW_PROVENANCE_RE = re.compile(
 #: NOTHING (#14623 round 29), i.e. four TRUE rewordings reding the arm inside structures 1-5 with a
 #: diagnostic asserting the paragraph named no scope at all. The plural forms (`are` / `were`) are
 #: unreachable for the singular `REGISTRATION` in TRUE prose; they are kept because one set for both
-#: arms cannot drift, and EVERY copula in it is driven POSITIVELY as a fixture below, with `was` —
-#: the past form this block's subject matter makes reachable — driven against the NEGATED claim as
-#: well, so the widening is graded in both directions and not only positively.
+#: arms cannot drift, and EVERY copula in it is driven POSITIVELY as a fixture below, with the two
+#: the PAST tense makes reachable (`was` / `were`) driven against the inverse as well — a negated
+#: claim and the plural half-swap — so the widening is graded in both directions, not just one.
 #: ⛔ ONE RESIDUAL SHAPE INSIDE THE STRUCTURES IS REFUSED, and it is named here because the sentence
 #: above would otherwise imply that anything built from these five skeletons passes: the exemption
 #: predicate may be spelled as a RELATIVE CLAUSE in the PREDICATE (`The REGISTRATION is the half
@@ -10981,33 +11051,49 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # possessive twin of `so is`, the one-inserted-word defeat of a phrase pinned to `the row`, and
     # the bare additive. Non-vacuity in BOTH directions, since the property replaced an enumeration
     # that produced a false PASS *and* a false BLOCK.
+    #: ⛔ EVERY GUARD IN `_h_14544_row_exempted` HAS A FIXTURE HERE, because a guard no fixture
+    #: drives can be deleted with the arm GREEN — measured at round 29, where loosening the
+    #: clause-terminal `too` lookahead left the arm passing. The two lists are laid out so each
+    #: block names the rule it drives (the rules are stated on the constants above).
     for row_exemption in (
+            # the row as the SUBJECT of an exemption
+            "The row is exempt",
+            "The REGISTRATION half is exempt, and the row is too",
+            "The REGISTRATION is exempt; the row is likewise exempt",
+            "The REGISTRATION alone is exempt; the row's weight is exempt too",
+            # ⛔ RULE 1 (round 29, P1): an ADVERB between copula and `exempt` is not a membership
+            # test. Each of these was GREEN end-to-end when the run was a six-item list.
+            "The REGISTRATION is exempt; the row is equally exempt",
+            "The REGISTRATION is exempt; the row is therefore exempt",
+            "The REGISTRATION is exempt; the row is similarly exempt",
+            "The REGISTRATION is exempt; the row is fully exempt",
+            "The REGISTRATION is exempt; the row is every bit exempt",
+            "The REGISTRATION is exempt; the row is just as exempt",
+            # other attested copulas — this block describes a PAST commit, and `stays`/`remains` are
+            # the same claim in the present, so the copula set is exhaustive where an adverb list is not
+            "The REGISTRATION was exempt, and so was the row",
+            "The REGISTRATION remains exempt; the row stays exempt",
+            # ⛔ THE ADDITIVE MARKERS, including the ELLIPTICAL form (round 27's fail-open): the
+            # false reading with NO predicate after the row at all.
             "The REGISTRATION is exempt, and so is the row",
             "The REGISTRATION is exempt as well as the row",
+            "The row is exempt as well as the REGISTRATION",
             "The REGISTRATION alone is exempt, as is the row's weight",
             "The REGISTRATION alone is exempt, as is the durations row",
-            "The REGISTRATION alone is exempt; the row's weight is exempt too",
-            "The REGISTRATION is exempt; the row is likewise exempt",
             "The REGISTRATION is exempt; so is the ROW half",
-            # ⛔ THE ELLIPTICAL FORM — the false reading with NO predicate after the row. Round 27
-            # deleted the alternative that caught it and replaced it with a predicate-only test, so
-            # this spelling went GREEN end-to-end (#14623 round 28, P1). Pinned here so deleting the
-            # additive branch again REDs at pattern level as well as in the live block.
-            "The REGISTRATION is exempt, and the row is too",
-            "The REGISTRATION half is exempt, and the row is too",
-            "The REGISTRATION is exempt, and the row's weight is too",
-            # ⛔ ONE INSERTED WORD / ONE OTHER COPULA — the exact escapes measured at round 28.
             "The REGISTRATION alone is exempt, and so too is the row",
-            "The REGISTRATION was exempt, and so was the row",
-            "The REGISTRATION remains exempt; so are the row's durations entries",
-            # ⛔ THE REVERSE ORDER of the SAME noun phrase (#14623 round 30): the additive branches
-            # anchored the noun phrase at the marker, so moving `weight` in front of `row` emptied
-            # every one of them while the possessive order stayed caught. MEASURED against the
-            # pre-fix predicate, the FIVE additive spellings below were GREEN (each returned `None`)
-            # and the sentence shipped CLEAN end-to-end through `_h_14544_banned_claim`; the SUBJECT
-            # and ELLIPTICAL spellings were already caught, because `.search` finds `the row is
-            # exempt` / `the row is too` INSIDE `the weight of the row …` — they are kept as the
-            # controls that keep the two branches from drifting apart again.
+            "The REGISTRATION is exempt; so are the row's durations entries",
+            # ⛔ THE ROW'S OTHER NAME (round 29, P3): the block accepts ``the `durations` ENTRY`` as
+            # this row, so a ban that read only `row` left the false claim reachable by renaming it.
+            "The REGISTRATION is exempt; so is the `durations` entry",
+            "The REGISTRATION is exempt, and the `durations` entry is too",
+            # ⛔ THE REVERSE ORDER OF THE SAME NOUN PHRASE (#14623 round 30, measured at round 29's
+            # head): the additive branch anchors the noun phrase AT the marker, and
+            # `_H_14544_ROW_NOUN`'s determiner prefix stops one word short of `row` when `weight`
+            # leads — so FIVE additive spellings returned `None` and the sentence shipped CLEAN
+            # end-to-end through `_h_14544_banned_claim`. The SUBJECT and ELLIPTICAL spellings were
+            # already caught (`.search` finds `the row is exempt` / `the row is too` inside them)
+            # and are kept as the controls that stop the two orders drifting apart again.
             "The REGISTRATION is exempt, as is the weight of the row",
             "The REGISTRATION is exempt, likewise the weight of that row",
             "The REGISTRATION is exempt, as well as the weight carried by the row",
@@ -11018,44 +11104,69 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
         assert _h_14544_row_exempted(row_exemption) is not None, (
             f"the row-exemption predicate no longer reads {row_exemption!r}, so a paragraph that "
             "exempts the `durations` row as well as the REGISTRATION passes every pin above — "
-            "re-point `_H_14544_ROW_EXEMPTED_RE` / `_H_14544_ROW_ADDITIVE_RE`")
+            "re-point `_H_14544_ROW_EXEMPT_SUBJECT_RE` / `_H_14544_ROW_ADDITIVE_RE`")
     for not_a_row_exemption in (
             # The TRUE half of the claim, spelled every way the pins accept.
             "The REGISTRATION is the ONLY half exempt",
             "Only the REGISTRATION half is exempt",
             "The exempt half is the REGISTRATION, not the row.",
-            # ⛔ ORDINARY ENGLISH that names the row and is not about exemption at all — the FALSE
-            # BLOCK the enumerated ban shipped ("row is too" with no predicate) must not come back.
-            "The row is too specific to summarise at this altitude.",
-            "The row is also what restores `durations` coverage above the 90% floor.",
-            # ⛔ AND A NEGATED EXEMPTION, which states the TRUE reading.
+            # ⛔ RULE 2 (round 29, P2): an explicit NEGATION is tolerated. Round 28's predicate had
+            # no carve-out at all — `no`, `nothing`, `from nothing` were all REFUSED as TRUE prose,
+            # including the paragraph's own thesis restated negatively.
             "The row is NOT exempt.",
+            "The row is not exempt from being a packing cause.",
+            "No `durations` row is exempt from being a packing cause.",
+            "No row is exempt.",
+            "The `durations` row is exempt from nothing.",
+            "A marker naming the row is not a claim that it is exempt.",
+            # ⛔ RULE 3 (round 29, P2): `too` as an INTENSIFIER takes an adjective — TRUE prose about
+            # a row. The `: The row is too specific` case below is the one that DRIVES the
+            # clause-terminal lookahead: it contains `exempt` in the same sentence, so the additive
+            # branch really runs and only the lookahead stops it. Loosening the lookahead to `too\b`
+            # REDs on it — pinning the mechanism the comment credits.
+            "The row is too specific to summarise at this altitude.",
+            "The REGISTRATION is the ONLY half exempt: The row is too specific to summarise at "
+            "this altitude.",
+            "The row is also what restores `durations` coverage above the 90% floor.",
+            # ⛔ AND THE APPOSITIVE `too`, which is TRUE and which the block states: a lookahead
+            # admitting `,` conflates it with the ellipsis.
+            "The REGISTRATION is the ONLY half exempt; that row, too, is a packing cause.",
+            "The REGISTRATION is the ONLY half exempt; the row's weight, too, is the bin's input.",
+            "The REGISTRATION is the ONLY half exempt, and that row's weight, too, is `#14544`'s "
+            "own edit.",
+            # ⛔ THE PLURAL `rows` — this block's ordinary word for its own subject. Round 27's noun
+            # had no trailing boundary and REFUSED these end-to-end.
+            "The paragraph names the registrations as well as the rows.",
+            "The paragraph lists the rows it describes.",
+            # ⛔ AN ADDITIVE MARKER WITH NO EXEMPTION — this block's own statement of fact:
+            # `durations_floors` pins a declared value ALONGSIDE a row's weight.
+            "`durations_floors` pins a declared value along with the row's measured weight.",
             # ⛔ AND THE LIVE BLOCK'S OWN SHAPE: the scope claim sharing a sentence with the row's
             # PROVENANCE clause. This is the case a whole-block co-occurrence test refuses.
             "The REGISTRATION is the ONLY half exempt: the bin is held by the "
             "`tests/test_dod_5090_probe.py` row in `durations`, and that row WEIGHT is `#14544` "
-            "own edit.",
-            # ⛔ THE PLURAL `rows` — the block's own ordinary plural of its own subject ("the rows
-            # below", "the rows above"). Round 27's noun had no trailing boundary, so this TRUE
-            # sentence was REFUSED end-to-end (#14623 round 28, P1): a false block, the mirror
-            # defect of the false pass this predicate exists to stop.
-            # ⛔ AND THE REVERSE ORDER MUST NOT HAVE BECOME A FALSE BLOCK: a sentence that names the
-            # weight and states NO exemption, or negates it, is TRUE prose about the row this block
-            # discusses — the shape the widening is allowed to READ but never to refuse.
+            # ⛔ THE WEIGHT WORD ORDER THAT IS NOT A CLAIM — the reverse order must be READ without
+            # becoming a FALSE BLOCK: a sentence that names the weight and states no exemption, or
+            # negates it, is TRUE prose about this block's own subject.
             "The weight of the row is 90.0 s.",
             "The weight of the row is not exempt.",
             "The weight of the row was re-read by the cut.",
-            "The paragraph names the registrations as well as the rows.",
-            "The paragraph lists the rows it describes.",
-            "A marker naming the row is not a claim that it is exempt.",
-            # ⛔ AN ADDITIVE MARKER WITH NO EXEMPTION IN THE SENTENCE — a TRUE statement of fact in
-            # this block: `durations_floors` pins a declared value ALONGSIDE a row's weight, which
-            # says nothing about exemption. Refused end-to-end at round 27 (#14623 round 28, P2).
-            "`durations_floors` pins a declared value along with the row's measured weight."):
+            "own edit."):
         assert _h_14544_row_exempted(not_a_row_exemption) is None, (
             f"the row-exemption predicate refuses TRUE prose ({not_a_row_exemption!r}) — that is "
             "the false block it replaced an enumeration to stop, and it reds the live block itself "
             "in the last case")
+    # ⛔ AND THE ONE-SENTENCE-APART FORM, which needs `previous`: the block states the exemption once
+    # and then reads `So is the row.`  Without the argument the additive marker has no exemption to
+    # attach to, so this spelling was GREEN (round 29, P3).
+    for carried, implied in (("The REGISTRATION is exempt", "So is the row."),
+                             ("The REGISTRATION is exempt", "The row is too.")):
+        assert _h_14544_row_exempted(implied, carried) is not None, (
+            f"the additive markers only read an exemption stated in the SAME sentence, so "
+            f"{implied!r} after {carried!r} goes GREEN — pass the preceding sentence in")
+    assert _h_14544_row_exempted("So is the row.", "The bin is held by that row in `durations`") is None, (
+        "carrying the previous sentence must not manufacture an exemption that was never stated — "
+        "a sentence about the row with no `exempt` in it cannot license `So is the row.`")
     assert _H_14544_INVERTED_RE.search(
         "both halves of this paragraph are graded by an arm each") is None, (
         "the inverted-claim pattern refuses the bare token pair with no exempt predicate near it, "
@@ -11661,6 +11772,32 @@ def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
             f"the `carry` matcher does not read {claim!r}, so a TRUE rewording of the block reds "
             "this arm and the diagnostic blames the matcher — the adjective was a spelling lock "
             f"(#14623 review round 24, P3): {adjective_positive!r}")
+    # ⛔ THE VALUE AFTER THE NOUN — the fourth and last free choice in the value phrase, and the one
+    # the alternation still locked (#14623 review round 29, P2). The note above states the graded
+    # PROPERTY as "names a file as carrying a `durations` row of THIS value", so the post-noun order
+    # is the spelling the note itself uses; the branch required value-BEFORE-noun, so this TRUE
+    # rewrite matched nothing. ⛔ The damage is destructive rather than a bare red: `positive` empties,
+    # the non-vacuity assertion fires with "names no file", and silencing it removes the only
+    # grading of the four positive row claims — so the fixture, not the live sentence, is what keeps
+    # the branch from being re-narrowed.
+    for claim in ("carry an explicit `durations` row of `2.0`",
+                  "carry a `durations` row of 2.0",
+                  "carries an explicit `durations` entry of `2.0`",
+                  "carry an explicit `durations` row at `2.0`"):
+        post_noun_positive, _ = _carry_row_claims(
+            f"`tests/test_carry_planted_first.py` {claim}")
+        assert post_noun_positive == {"test_carry_planted_first.py": {2.0}}, (
+            f"the `carry` matcher does not read the value AFTER the noun ({claim!r}), so a TRUE "
+            "rewording of the block reds this arm and the diagnostic blames the matcher — the "
+            f"fourth spelling lock in the value phrase (#14623 review round 29, P2): {post_noun_positive!r}")
+    # …and it keeps the POLARITY: a post-noun row whose value moved must still red.
+    post_noun_positive, _ = _carry_row_claims(
+        "`tests/test_carry_planted_first.py` carry a `durations` row of 2.0")
+    assert _carry_row_claim_violations(
+        post_noun_positive, set(), {"test_carry_planted_first.py": 3.1})[0] == [
+            ("test_carry_planted_first.py", [2.0], 3.1)], (
+        "the post-noun branch read a file but lost the weight it states, so a `durations` row that "
+        "moved while the sentence still claimed the old value would pass GREEN")
     # …and making the adjective optional must not have dropped the VALUE the claim carries: the row
     # whose weight moved under a sentence still stating the old one has to red, or the loosening
     # traded a false block for a false PASS.
