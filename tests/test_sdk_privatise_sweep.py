@@ -1179,6 +1179,36 @@ def test_the_seen_update_deletion_is_attributed_to_the_commit_that_made_it():
             "not for one sha")
 
 
+def test_the_branch_containment_arm_reads_branches_only(monkeypatch):
+    """A GitHub MERGE ref is not a branch — the arm below must not read one as one.
+
+    `git branch -r --contains` lists every ref under `refs/remotes/`, so on a
+    self-hosted runner whose workspace carries a previous job's
+    `refs/remotes/pull/<n>/merge` it answered "a remote branch contains it" about a
+    MERGE ref — the red that reached THIS head (run 45556103584 / job 139014092267,
+    `pull/14108/merge`), on a claim that was true.
+
+    The REFSPEC is the assertion: the arm must ask git only for this repo's branch
+    namespace, and `origin/HEAD` (a symbolic alias for a branch listed beside it)
+    must not be counted as a second branch.
+    """
+    seen: dict[str, tuple[str, ...]] = {}
+
+    def _fake_git(*args: str) -> str:
+        seen["args"] = args
+        return ("refs/remotes/origin/HEAD\n"
+                "refs/remotes/origin/fix/13450-ep-position-axis\n")
+
+    monkeypatch.setattr(sys.modules[__name__], "_git", _fake_git)
+    found = _origin_branches_containing(RESIDUE_ABBREV)
+    assert "refs/remotes/origin/" in seen["args"], (
+        "the arm must restrict git to this repo's BRANCH namespace; a bare "
+        "`branch -r --contains` also lists `refs/remotes/pull/*` merge refs")
+    assert seen["args"][0] == "for-each-ref"
+    assert found == {"refs/remotes/origin/fix/13450-ep-position-axis"}, (
+        f"expected origin branches only (no alias, no merge ref), got {found}")
+
+
 def test_the_history_clause_premises_hold_in_this_clone():
     """The REPO-STATE half of finding 3 — the premises the prose arm below is graded against.
 

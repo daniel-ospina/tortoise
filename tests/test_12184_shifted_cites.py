@@ -92,6 +92,7 @@ _INDEX = "docs/00_index.md"
 _SE = "tortoise/search_engine.py"
 _CP = "tortoise/cache_projection.py"
 _SDK = "tortoise/sdk.py"
+_LIVE = "tortoise/live.py"
 #: `#14087` review round 7: `00_index.md`'s entity-verdict row points at this file's `:43` in the
 #: PRESENT tense ("the bullet is `entity_verdict.py:43`"), so the address is head-relative.
 _EV = "tortoise/entity_verdict.py"
@@ -117,20 +118,40 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `:Document`; `grep -nF 'D10: a document is a ``:Source``, not a'` returns the line ABOVE the
     # `:Document` one, which is how the +35-instead-of-+36 arithmetic was introduced and never caught).
     # Pinned by CONTENT on the line that carries `:Document`, so the next re-measure by that phrase reds.
-    (_SUBSTRATE, 'tortoise/sdk.py:37958', _SDK, 37958, "``:Document`` node)."),
-    (_SUBSTRATE, '`:38000` in `_file_human_approval`', _SDK, 38000, "``:Document`` node)."),
+    (_SUBSTRATE, 'tortoise/sdk.py:37983', _SDK, 37983, "``:Document`` node)."),
+    (_SUBSTRATE, '`:38025` in `_file_human_approval`', _SDK, 38025, "``:Document`` node)."),
+    # ⛔ The SAME sentence pair carries a SECOND number that nothing graded: §5's `:38024` (since fixed
+    # to `:38025`) was the `:Source` line above the second `:Document` line, so the pair was one high on
+    # one side while every neighbouring row stayed green — the file's own "green pins over a wrong
+    # sentence" shape. The row below grades the pair AS A PAIR (its token spans both the owner and the
+    # number), because two unpinned mentions in one sentence is how the first one survived review.
+    (_SUBSTRATE, "`_file_human_approval`'s `:38025`", _SDK, 38025, "``:Document`` node)."),
+    # ⛔ And §5's #11928 move names `tortoise/live.py` with NO row at all, which is how the cites drifted
+    # +58 past a re-point that was correct when it was written (`:1313,1323` -> `:1371,1381`).
+    (_SUBSTRATE, 'tortoise/live.py:1371', _LIVE, 1371, "``epistemic_disjunction``. A ``:Document``/``:Source`` kind read through"),
+    # ⚠️ AND THE SECOND HALF GETS ITS OWN ROW. Two cites in one sentence is how the `:38024` defect
+    # survived: one number graded, its neighbour read by nothing. Here the document ALSO names the two
+    # lines separately (the clearest prose for a reader), and each half is pinned on its own line so a
+    # later re-point of `:1381` alone reds on the row that grades it, not on a neighbour's.
+    (_SUBSTRATE, '`:1381`', _LIVE, 1381, ":data:`KIND_PROPERTIES` for the scope and for what a ``:Document``/"),
+    # ⛔ The same parenthesis makes a NEGATIVE claim about two `sdk.py` addresses ("neither naming
+    # `:Document`") and both were stale by +357 / +148 while the sentence asserted they had been
+    # "re-measured at this head" (`:37126` -> `:37483`, `:37366` -> `:37514`). A negative claim is not
+    # weaker than a positive one: a reader sent to the wrong line cannot check it at all.
+    (_SUBSTRATE, '`sdk.py:37483` is a', _SDK, 37483, "`[a, a, b]` was answered with the `[a, b, b]` operator"),
+    (_SUBSTRATE, '`:37514`', _SDK, 37514, 'conds.append("o.label IS NULL")'),
     # ⛔ Review cycle 2 (P1): these were RE-POINTED and left with no content pin, so a one-line
     # regression shipped green — MEASURED by mutating each destination by one line and watching the
     # whole suite stay at `31 passed`. A re-point nobody grades is the `#13854` class this file exists for.
-    (_INDEX, 'sdk.py:22197', _SDK, 22197, '"stats": _capture_stats_with_step_witness('),
-    (_SUBSTRATE, 'opening `:37938`', _SDK, 37938, "def record_decision(self, approver_id: str, artifact_id: str,"),
+    (_INDEX, 'sdk.py:22203', _SDK, 22203, '"stats": _capture_stats_with_step_witness('),
+    (_SUBSTRATE, 'opening `:37963`', _SDK, 37963, "def record_decision(self, approver_id: str, artifact_id: str,"),
     # ⛔ ADOPTED at the `origin/main` rebase (`#14416`'s fold): `main` added this row for the `:Source`
     # line BETWEEN the two `opening` defs, after a merge resurrected the `+21`-era siblings
     # (`(opening :37548` = a kwarg line) while the two graded headlines stayed right — green pins over
     # a wrong sentence (`#14038` review, cycle 2). It grades a SURVIVING document, so this cut keeps
     # it: only the `_AUDIT` rows go. Re-verified by content at the rebased head, not carried.
-    (_SUBSTRATE, '`:37957` is the `:Source` line', _SDK, 37957, "D10: a document is a ``:Source``, not a"),
-    (_SUBSTRATE, 'opening `:37978`', _SDK, 37978, "def _file_human_approval(self, approver_id: str, artifact_id: str,"),
+    (_SUBSTRATE, '`:37982` is the `:Source` line', _SDK, 37982, "D10: a document is a ``:Source``, not a"),
+    (_SUBSTRATE, 'opening `:38003`', _SDK, 38003, "def _file_human_approval(self, approver_id: str, artifact_id: str,"),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2945", _SE, 2945, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2787", _SE, 2787, "def recency_tie_clause"),
@@ -156,9 +177,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # tokens and still hold. They are the SAME `sdk.py` pair `00_index.md` and
     # `ENTITY-VERDICT-BANDS.md` each cite, plus the merge call below it; re-resolved at this head
     # before being restored, not assumed.
-    ("docs/00_index.md", '`sdk.py:28705` at this head', _SDK, 28705, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
-    ("docs/architecture/ENTITY-VERDICT-BANDS.md", '(`sdk.py:28705`), so any non-NULL', _SDK, 28705, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
-    ("docs/architecture/ENTITY-VERDICT-BANDS.md", 'called at `sdk.py:29069`', _SDK, 29069, "result = apply_entity_merge("),
+    ("docs/00_index.md", '`sdk.py:28711` at this head', _SDK, 28711, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
+    ("docs/architecture/ENTITY-VERDICT-BANDS.md", '(`sdk.py:28711`), so any non-NULL', _SDK, 28711, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
+    ("docs/architecture/ENTITY-VERDICT-BANDS.md", 'called at `sdk.py:29075`', _SDK, 29075, "result = apply_entity_merge("),
     # --- docs/plans/2026-09-25-4997-vector-index-parity.md — the reader table cites
     # `hosted_backup.py:2732` for `_index_has_is_operator()`, and that document had NO pin at all,
     # so nothing would have reddened the next rotation of it. ⛔ RE-DERIVED BY CONTENT at the
@@ -276,8 +297,13 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # Two of the eighteen are re-worded at the rebase (`(opening `:37815`` -> `opening `:37815``, and
     # likewise `:37855`) with STRICTER fragments, so their coverage grew and none was dropped.
     # Add a row when a real correction touches an unpinned site, and update this count in the same commit.
-    assert len(_PINS) == 21, (
-        f"_PINS carries {len(_PINS)} rows, not 21 — a re-pointed cite was added or dropped without "
+    # 21 -> 26 on #14671: five corrections landed on cites that had NO row at all — §5's
+    # `tortoise/live.py:1371,1381` (the #11928 move), §5's second `:Document` number in the same
+    # sentence pair (`:38024` -> `:38025`), and the pair of negative-claim addresses in the same
+    # parenthesis (`:37126` -> `:37483`, `:37366` -> `:37514`). All four were green-by-absence; a
+    # re-point that touched them could not red anything, which is the uncovered-claim class this file refuses.
+    assert len(_PINS) == 26, (
+        f"_PINS carries {len(_PINS)} rows, not 26 — a re-pointed cite was added or dropped without "
         "this count. Every re-point a branch writes must carry a content pin."
     )
 
@@ -347,7 +373,11 @@ def test_the_dedup_filter_is_one_address_in_both_documents_that_promise_it() -> 
 
 #: Every address a TOKEN names, as `(first, last)` spans. One span per match, never the hull of
 #: a token's numbers — see `_token_spans`.
-_TOKEN_SPAN = re.compile(r":(\d+)(?:-(\d+))?")
+#: ⛔ The first group is a COMMA LIST (`:1371,1381`, `:36687,36718` — the shape these documents
+#: actually write for a two-line cite), not a single number. Reading only the number after the
+#: colon made a comma token name ONE address, so its second line could be re-pointed while the row
+#: stayed green — the false PASS the `/`-form control below refuses, one spelling further out.
+_TOKEN_SPAN = re.compile(r":(\d+(?:,\d+)*)(?:-(\d+))?")
 
 
 def _token_spans(token: str) -> list[tuple[int, int]]:
@@ -357,18 +387,25 @@ def _token_spans(token: str) -> list[tuple[int, int]]:
     unrelated addresses (`:58603`/`:58605`) names two lines, NOT the line between them. Taking
     `min..max` over every number turned such a token into a range, so the arm accepted the `58604`
     the token never mentions — the exact false PASS this arm exists to refuse, one indirection
-    further out. Measured at this head: 0 of the surviving rows carries more than one address, so
-    no row's verdict moves; only the door the next row could have walked through is closed.
+    further out.
+
+    A COMMA list is two addresses for that same reason (`:1371,1381`), and each member gets its own
+    span; a `-END` suffix ranges only the LAST member (`:1371,1381-1390` = one line + one range).
+    Reading just the first member was a live hole, not a hypothetical: `#14671`'s fix first had to
+    write the two `live.py` cites as SEPARATE mentions of the arm — a workaround, now unnecessary
+    and no longer needed by any row, because the arm reads the form the documents write.
 
     ⛔ RESTORED (round 4, P1) after the test-bureaucracy cut dropped it with the deleted
     document's apparatus. It grades `_PINS`, which SURVIVES: the subject is the pin table, not
     the census. Only its `_MAIN_SET_MISSED` leg is gone, because that table died with the
     document it described.
     """
-    return [
-        (int(match.group(1)), int(match.group(2) or match.group(1)))
-        for match in _TOKEN_SPAN.finditer(token)
-    ]
+    spans: list[tuple[int, int]] = []
+    for match in _TOKEN_SPAN.finditer(token):
+        members = [int(n) for n in match.group(1).split(",")]
+        spans.extend((n, n) for n in members[:-1])
+        spans.append((members[-1], int(match.group(2) or members[-1])))
+    return spans
 
 
 def _rows_outside_their_token(rows) -> list[str]:
@@ -435,8 +472,8 @@ def test_every_pinned_token_occurs_exactly_once_in_its_document() -> None:
     This is the surviving half of `_TOKEN_OCCURRENCES` (round 4, P1). That table carried per-token
     counts AND a `declared == pinned` set equality; the set equality is subsumed by `_PINS`, but the
     COUNT was not, and the anti-shrink arm cannot express it: a row deleted and another added inside
-    the same document set satisfies both `docs == {six}` and `len(_PINS) == 21`. Measured at this head:
-    all 21 tokens occur exactly once, so the invariant is green and load-bearing rather than
+    the same document set satisfies both `docs == {six}` and `len(_PINS) == 26`. Measured at this head:
+    all 26 tokens occur exactly once, so the invariant is green and load-bearing rather than
     aspirational.
 
     ⛔ DERIVED, not transcribed: no count is written down here, because a transcribed count is the
@@ -497,6 +534,20 @@ def test_a_token_naming_two_addresses_does_not_vouch_for_the_hull_between_them()
         assert not _rows_outside_their_token((row,)), (
             f"{named} is an address the token names, so it must pass"
         )
+    # ⛔ The COMMA spelling — the shape these documents actually write (`:1371,1381`,
+    # `:36687,36718`) — was the SAME false PASS until `#14671`: `:(\d+)` read only the FIRST number,
+    # so a comma token named one address and its second line could be re-pointed with no row grading
+    # it. That is why this PR's own fix first had to split its two cites in PROSE; the arm now reads
+    # the form, so the split is a readability choice rather than a requirement.
+    # MEASURED non-vacuous: the `comma` row below IS a problem on the pre-fix regex ("names 1371, but
+    # it GRADES line 1381") and is silent on this one; the hull between the members is still refused.
+    comma = (_SUBSTRATE, "`:1371,1381`", "tortoise/live.py", 1381,
+             ":data:`KIND_PROPERTIES` for the scope")
+    assert not _rows_outside_their_token((comma,)), (
+        "a comma token names BOTH addresses, so grading the second must pass"
+    )
+    hull = (comma[0], comma[1], comma[2], 1376, comma[4])
+    assert _rows_outside_their_token((hull,)), "the comma form must still refuse the hull"
 
 
 def test_a_row_whose_token_names_no_address_is_reported_not_skipped() -> None:
