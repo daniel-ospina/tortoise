@@ -130,6 +130,25 @@ function Badge({ count, warn }) {
   )
 }
 
+/**
+ * ⛔ THE DISCRIMINATORS BELONG IN EVERY ACTION'S NAME, NOT ONLY THE OPEN ONE.
+ *
+ * `<button>Dismiss</button>` takes its accessible name from its visible text, so a
+ * ledger of N rows announced "Dismiss" N times with nothing saying which
+ * notification it would dismiss — the same defect the open control was fixed for
+ * one row above, just on the controls beside it. Measured on two same-identity
+ * rows: both dismissed as "Dismiss", both snoozed as "Snooze for Suspicious
+ * activity" (the count and the age are what differ, exactly as for `Details`).
+ *
+ * One builder, so a later action cannot quietly be added without one.
+ */
+function actionName(action, entry) {
+  if (!entry) return action
+  const count = entry.countLabel ? ` ${entry.countLabel}` : ''
+  const age = entry.ageLabel ? ` — ${entry.ageLabel}` : ''
+  return `${action}: ${entry.label}${count}${age}`
+}
+
 function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
   return (
     <li className={`notif-row${entry.isIncident ? ' notif-row-incident' : ''}`}>
@@ -147,7 +166,7 @@ function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
         // "Details: Suspicious activity". An AT user could not tell which episode
         // they were opening, which is the failure this row key exists to prevent
         // for sighted readers (review finding). The count and the age are what differ.
-        aria-label={`${DETAIL_ACTION}: ${entry.label}${entry.countLabel ? ` ${entry.countLabel}` : ''}${entry.ageLabel ? ` — ${entry.ageLabel}` : ''}`}
+        aria-label={actionName(DETAIL_ACTION, entry)}
       >
         <span className="notif-line">
           <strong>{entry.label}</strong>
@@ -178,7 +197,7 @@ function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
       </button>
       <div className="notif-actions">
         <select
-          aria-label={`${SNOOZE_SELECT_LABEL} ${entry.label}`}
+          aria-label={actionName(SNOOZE_SELECT_LABEL, entry)}
           className="notif-snooze"
           value=""
           onChange={(e) => {
@@ -224,7 +243,12 @@ function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
               <option key={p.id} value={p.id}>{p.label}</option>
             ))}
         </select>
-        <button type="button" className="ghost small" onClick={() => onDismiss(entry)}>
+        <button
+          type="button"
+          className="ghost small"
+          aria-label={actionName(DISMISS, entry)}
+          onClick={() => onDismiss(entry)}
+        >
           {DISMISS}
         </button>
       </div>
@@ -323,7 +347,12 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
         {/* Only the dismissal is offered here. A snoozed row has no detail entry
             (the snoozed list offers Unsnooze directly), so an Unsnooze branch was
             unreachable code wearing a test-shaped disguise — review finding. */}
-        <button type="button" className="ghost small" onClick={() => onDismiss(detail.entry)}>
+        <button
+          type="button"
+          className="ghost small"
+          aria-label={actionName(DISMISS, detail.entry)}
+          onClick={() => onDismiss(detail.entry)}
+        >
           {DISMISS}
         </button>
         {/* Org-wide dismissal — owner/admin only, because the route 403s everyone
@@ -758,7 +787,15 @@ export function NotificationBell({
           if (e.key === 'Escape' && open) closePanel()
         }}
         aria-expanded={open}
-        aria-controls={panelId}
+        // ⛔ ONLY WHILE IT RESOLVES. `aria-controls` is an ID reference list, and
+        // the panel is unmounted while closed (`{open ? … : null}` below), so an
+        // unconditional reference dangles in the state the bell is in almost all
+        // of the time — invalid, and it told an AT the trigger controls something
+        // that is not there. APG's disclosure pattern lists `aria-controls` as
+        // OPTIONAL, so dropping it while closed is conformant and behaviour-free.
+        // The previous pin clicked the bell BEFORE reading the attribute, so it
+        // could only ever observe the valid state (review finding).
+        aria-controls={open ? panelId : undefined}
         aria-label={bellLabel}
         title={bellLabel}
       >
@@ -899,6 +936,7 @@ export function NotificationBell({
                           <button
                             type="button"
                             className="ghost small"
+                            aria-label={actionName(UNSNOOZE, entry)}
                             onClick={() => handleUnsnooze(entry.key)}
                           >
                             {UNSNOOZE}
@@ -929,6 +967,7 @@ export function NotificationBell({
                           <button
                             type="button"
                             className="ghost small"
+                            aria-label={actionName(RESTORE, entry)}
                             onClick={() => handleRestore(entry)}
                           >
                             {RESTORE}

@@ -749,6 +749,15 @@ test('#14686: a row we could not classify says so, and does not claim to be an a
 test('#14686: the trigger declares what it controls', () => {
   const { container } = renderBell({ alerts: [alert()] })
   const control = bell(container)
+  // ⛔ FIRST, WHILE CLOSED. `aria-controls` is an ID reference list and the panel
+  // is UNMOUNTED while closed, so an unconditional `aria-controls={panelId}`
+  // dangles in the state the bell is in almost all of the time — it told an AT the
+  // trigger controls an element that does not exist. The pin used to click the
+  // bell BEFORE reading the attribute, so it could only ever observe the valid
+  // state and the defect was unobservable (review finding).
+  assert.equal(control.getAttribute('aria-expanded'), 'false')
+  assert.equal(control.getAttribute('aria-controls'), null,
+    'a CLOSED bell must not reference a panel that is not rendered')
   fireEvent.click(control)
   const panelEl = panel(container)
   assert.ok(panelEl.id, 'the panel needs an id for aria-controls to point at')
@@ -1674,6 +1683,37 @@ test('#14686: a team switch on a MOUNTED bell drops the previous Organization\'s
   const saved = JSON.parse(storage.map.get(storageKey({ userId: USER, orgId: 'org-2' })))
   assert.equal(Object.keys(saved.dismissed).length, 1,
     'the write belongs to the Organization on screen')
+})
+
+test('#14694: every ROW ACTION is named with its own row\'s discriminators', () => {
+  // The open control was fixed for this class (`Details: …`), and its sibling
+  // actions were not: `<button>{DISMISS}</button>` takes its accessible name from
+  // the visible text, so two rows announced "Dismiss" twice and the snooze
+  // selects "Snooze for Suspicious activity" twice — an AT user could not tell
+  // which notification each one would act on (review finding). The discriminator
+  // is the count and the age, which is exactly what differs.
+  const { newer, older } = sameWording()
+  const { container } = renderBell({ alerts: [newer, older] })
+  fireEvent.click(bell(container))
+  const perRow = [...container.querySelectorAll('.notif-list .notif-row')].map((row) => [
+    row.querySelector('.notif-open').getAttribute('aria-label'),
+    row.querySelector('.notif-snooze').getAttribute('aria-label'),
+    [...row.querySelectorAll('.notif-actions button')]
+      .map((b) => b.getAttribute('aria-label')),
+  ])
+  assert.equal(perRow.length, 2)
+  const flat = perRow.flat(2)
+  assert.equal(flat.length, 6, 'two rows, three named actions each')
+  assert.equal(new Set(flat).size, flat.length,
+    'no two controls may share an accessible name')
+  // …and the discriminator is a real one, not a repeat of the label: each of the
+  // SIX names is distinct, and each non-open action carries the count or the age.
+  for (const [open, snooze, dismiss] of perRow) {
+    assert.match(open, /×[0-9]+|min ago|just now/)
+    assert.match(snooze, /×[0-9]+|min ago|just now/)
+    assert.equal(dismiss.length, 1)
+    assert.match(dismiss[0], /×[0-9]+|min ago|just now/)
+  }
 })
 
 test('#14686: two same-identity rows have DISTINCT accessible names', () => {
