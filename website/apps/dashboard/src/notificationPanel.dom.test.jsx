@@ -2231,11 +2231,22 @@ test('#14694: EVERY group disclosure states its expanded STATE, not only its lab
 
   // Every disclosure, collapsed: state exposed, and NO dangling IDREF while the
   // region it would name is unmounted.
+  // ⛔ `region` ALONE CANNOT IDENTIFY A MUTED GROUP: all three muted lists carry
+  // the same `notif-list notif-list-muted` class (`notificationPanel.jsx:1030/1066/1118`),
+  // so a trigger whose `aria-controls` was cross-wired to a SIBLING group's list
+  // satisfied this loop for as long as that sibling happened to be mounted — and
+  // the message on the assertion below claimed a region-identity check it did not
+  // perform (#14694 round-10 P3). `content` is a sentence ONLY this group's rows
+  // render, so the matcher survives the three lists sharing a class: the older
+  // row's own label, and the control/sentence that exists in exactly one bucket.
+  // `UNSNOOZE` is the prefix of BOTH snooze-release labels (`UNSNOOZE` for an
+  // incident row, `UNSNOOZE_GROUP` for an activity one), so this does not depend on
+  // which of the two the fixture's register produces.
   const groups = [
-    { label: /Older than/, hide: /Hide older/, region: '.notif-list', kind: 'the MAIN list' },
-    { label: /Snoozed \(/, hide: /Hide snoozed/, region: '.notif-list-muted', kind: 'the snoozed list' },
-    { label: /Dismissed \(/, hide: /Hide dismissed/, region: '.notif-list-muted', kind: 'the dismissed list' },
-    { label: /Acknowledged for everyone/, hide: /Hide acknowledged/, region: '.notif-list-muted', kind: 'the acked list' },
+    { label: /Older than/, hide: /Hide older/, region: '.notif-list', kind: 'the MAIN list', content: 'older, please' },
+    { label: /Snoozed \(/, hide: /Hide snoozed/, region: '.notif-list-muted', kind: 'the snoozed list', content: UNSNOOZE },
+    { label: /Dismissed \(/, hide: /Hide dismissed/, region: '.notif-list-muted', kind: 'the dismissed list', content: RESTORE },
+    { label: /Acknowledged for everyone/, hide: /Hide acknowledged/, region: '.notif-list-muted', kind: 'the acked list', content: ACKED_NOTE },
   ]
   for (const g of groups) {
     const collapsed = toggle(g.label)
@@ -2260,5 +2271,9 @@ test('#14694: EVERY group disclosure states its expanded STATE, not only its lab
     const region = [...container.querySelectorAll('[id]')].find((n) => n.id === controlledId)
     assert.ok(region, `aria-controls on the ${g.kind} trigger must name an element that exists`)
     assert.ok(region.matches(g.region), `it must name ${g.region}, not some other node`)
+    // The identity check the class cannot make: the region it names must hold THIS
+    // group's row. Without it, `aria-controls` pointed at a mounted sibling passed.
+    assert.ok(region.textContent.includes(g.content),
+      `it must name the region holding the ${g.kind}, not a sibling group`)
   }
 })
