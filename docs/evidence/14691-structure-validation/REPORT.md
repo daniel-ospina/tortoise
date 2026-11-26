@@ -807,6 +807,25 @@ the other three findings, each byte-neutral and `--check`-green:
   cited lines must mention `ownedBy`, and `owners_asked`/`rows_returned` must be the
   witnesses that actually answered nothing.
 
+### 8.13 What the eleventh round closed (the sentence, not only the citation)
+
+The round-10 arm verified the cited FILE; the reviewer measured that it never
+verified the CLAIM sentence, and filed four survivors — each byte-neutral:
+
+- **D1's prose predicate list** — `IMPL|NAND|hasPart` → `IMPL|NAND|ownedBy` in the
+  sentence itself, which then contradicts the code it cites, D4's `code_path` and
+  REPORT §4. The token set in the prose must now be the same three.
+- **D1's `the_read_that_can` route** — a route the product does not serve was free.
+  The route must be spelled by some module under `tortoise/`.
+- **D3's `namespaced_returned`** — counts the probes never produced (and could
+  exceed the graph's edge total). Each count must be positive and the total bounded
+  by the graph the artifact reports.
+- **D6's citation** — satisfied by any range that merely mentioned `ownedBy`; the
+  range must now DEFINE `_get_owned_entities`.
+- **D5's "for every node asked about"** — a quantifier with no population beside it
+  is unfalsifiable, so a claim about "every" now requires a non-empty node
+  population in the evidence.
+
 The generic coverage arm (`test_no_FIGURE_in_the_two_documents_is_free`) is a
 **floor, not a substitute for a pin**: it proves a number is carried by some
 artifact, never that it belongs to the field quoting it — which is why six of the

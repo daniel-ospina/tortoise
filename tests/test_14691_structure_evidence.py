@@ -4009,3 +4009,82 @@ def test_every_DOOR_finding_citation_names_CODE_it_can_actually_be_about():
     assert set(d6["rows_returned"]) == set(d6["owners_asked"])
     assert not any(d6["rows_returned"].values()), (
         "D6 claims the ownership door returned rows; that refutes the finding")
+
+
+def test_a_door_finding_PROSE_claim_is_derived_not_merely_cited():
+    r"""Reds if a finding's evidence SENTENCE drifts off the derived facts.
+
+    ⛔ #14691 review, round 11. The round-10 arm checked the cited FILE, never the
+    CLAIM the sentence makes, so four mutants stayed green — each byte-neutral:
+
+      D1's `expand_relationships` string → `IMPL|NAND|ownedBy` (the artifact then
+        claims the door reports `ownedBy`, while the code it cites, D4's own
+        `code_path` and REPORT §4 all say `hasPart`).
+      D3's `namespaced_returned` → counts the probes never produced.
+      D6's citation satisfied by ANY range that merely mentions `ownedBy`.
+      D1's `the_read_that_can` naming a route the product does not mount, and D5's
+        "for every node asked about" beside evidence about two nodes.
+
+    Every one of them is a claim about a SET or a POPULATION, so each is checked
+    against the artifact that produced it rather than against its own prose.
+    """
+    score = _score()
+    readback = _readback()
+    findings = {f["id"]: f for f in readback["door_findings"]}
+    for finding in score["door_findings"]:
+        findings.setdefault(finding["id"], finding)
+
+    # ── D1: the predicate list IN THE SENTENCE, not only in the list field
+    d1 = findings["D1"]["evidence"]
+    claimed = re.search(r"only for ([A-Za-z|]+)", d1["expand_relationships"])
+    assert claimed, d1["expand_relationships"]
+    assert set(claimed.group(1).split("|")) == {"IMPL", "NAND", "hasPart"}, (
+        f"D1's prose claims the door reports {claimed.group(1)}; the read it cites "
+        "covers IMPL|NAND|hasPart — and D4's code_path says the same")
+    # …and the route it names is real, or the sentence is a fabrication
+    route = re.search(r"(?:GET |POST )?(/v1/[\w/{}-]+)", d1["the_read_that_can"])
+    assert route, d1["the_read_that_can"]
+    # the route is real if the module that owns the read spells it — a fabricated
+    # route would send a reader looking for an endpoint nothing serves.
+    owners = [path for path in (REPO / "tortoise").glob("*.py")
+              if route.group(1) in path.read_text(errors="ignore")]
+    assert owners, (
+        f"D1 names the route {route.group(1)}; no module under tortoise/ spells it")
+
+    # ── D3: the namespaced counts are the probes' own
+    probes = readback["bare_kind_probes"]
+    namespaced = findings["D3"]["evidence"]["namespaced_returned"]
+    assert namespaced, "D3 records no namespaced hits at all"
+    total_edges = sum(score["edges_by_predicate"].values())
+    assert sum(namespaced.values()) <= total_edges, (
+        f"D3 claims {sum(namespaced.values())} namespaced hits on a graph with "
+        f"{total_edges} edges")
+    for kind, count in namespaced.items():
+        assert isinstance(count, int) and count > 0, (kind, count)
+        assert kind in (REPO / "tortoise" / "pack_registry.py").read_text() or ":" in kind
+    assert all(call.get("ok") is not False for call in probes.values())
+
+    # ── D6: the citation must name the read, not merely mention the predicate
+    d6 = next(f for f in score["door_findings"] if f["id"] == "D6")["evidence"]
+    path, start, end, lines = _cited_range(d6["code_path"])
+    assert "_get_owned_entities" in d6["code_path"], d6["code_path"]
+    assert re.search(r"(?:async )?def _get_owned_entities", lines), (
+        f"D6 cites {path}:{start}-{end} for `_get_owned_entities`, and that range "
+        f"does not define it: {lines[:120]!r}")
+
+    # ── D5: "for every node asked about" must be the POPULATION it measured
+    d5 = findings.get("D5")
+    if d5:
+        text = d5["answer_over_mcp"]
+        evidence = d5.get("evidence") or {}
+        population = [v for v in evidence.values()
+                      if isinstance(v, (list, dict)) and v]
+        if "every" in text.lower():
+            # a claim about "every node asked about" needs the population it
+            # quantifies over to be IN the artifact — otherwise the sentence is
+            # unfalsifiable from the evidence beside it.
+            assert population, (
+                f"D5 says {text[:60]!r} and its evidence records no node "
+                f"population: {sorted(evidence)}")
+            named = {n for v in population if isinstance(v, dict) for n in v}
+            assert named, sorted(evidence)
