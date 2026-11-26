@@ -92,9 +92,8 @@ def occupancy(before) -> dict:
                 found[path] = f"{len(node)} rows"
         elif isinstance(node, bool):
             return                  # a flag (connected/clean), not a population
-        elif isinstance(node, (int, float)):
-            if node and path not in _NOT_CONTENT:
-                found[path] = node
+        elif isinstance(node, (int, float)) and node and path not in _NOT_CONTENT:
+            found[path] = node
 
     walk(before, "")
     return found
