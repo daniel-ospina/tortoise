@@ -1346,6 +1346,12 @@ tr.graph-delete-arm td { background: rgba(248, 113, 113, 0.06); }
   border: 1px solid var(--border, #334155); color: var(--text-dim, #94a3b8);
 }
 .notif-message { display: block; font-size: 12px; color: var(--text-dim, #94a3b8); line-height: 1.5; }
+/* A MUTED row puts its message INSIDE `.notif-snoozed-text`, between the label and
+   the state note whose text starts with `' · '` (`mutedMessageOf`). The block above is
+   right for the MAIN list, where the message sits under the label — but inside that
+   inline text it forced a break on both sides and stranded the separator at the start
+   of a line, in the three lists that most need to read cleanly (#14694 review P3). */
+.notif-list-muted .notif-message { display: inline; }
 .notif-actions { display: flex; flex-direction: column; gap: 4px; flex: none; }
 .notif-snooze {
   background: var(--surface, #0f172a); color: var(--text, #e2e8f0);
