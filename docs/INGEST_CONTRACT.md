@@ -513,7 +513,7 @@ sub = sdk.recall_subgraph("01J8…", depth=2, completeness="core")
 # → {"nodes": […], "edges": […], "stats": {"node_count": …, "edge_count": …}}
 ```
 
-MCP: `tortoise_recall(seed=<id or topic>, depth=2, completeness="core")`.
+MCP: `tortoise_check_confidence(recall=True, seed=<id or topic>, depth=2, completeness="core")`.
 
 **Query points by kind / property:**
 
@@ -525,7 +525,7 @@ sdk.query(kind=None, status="draft")         # everything still gated
 MCP: `tortoise_query(kind="statement")` — ⚠️ **bounded**: the structural read returns at most
 `limit` rows (default 100), so it is NOT "all statement points" on a graph larger than one page.
 Walk `tortoise_query(kind="statement", offset=N, limit=100)` until `hasMore` is false for the whole
-population; `sdk.query(kind)` remains the unbounded SDK accessor. `tortoise_search(q="…")`.
+population; `sdk.query(kind)` remains the unbounded SDK accessor. `tortoise_search_knowledge(query="…")`.
 
 **Audit what a bundle added:** `batch_id` round-trips through the whole
 bundle's artifacts — see [§16](#16-batch_id--audit). **planned:** a batch

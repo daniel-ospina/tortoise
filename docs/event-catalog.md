@@ -324,7 +324,7 @@ purge watermark (any cursor below it is expired → 410).
 | Surface | Endpoint / tool | Notes |
 |---|---|---|
 | REST | `GET /v1/events?after=<cursor>&types=a,b&limit=N` | Team-scoped via auth; 400 malformed/unknown type; 410 expired; **503** degraded feed (the detail names the stage, the refusal and the remedy) |
-| MCP | `tortoise_events_poll(after, types, limit)` | `readOnly`; stdio + HTTP; maintenance purge gated by interval; a degraded feed returns a named `error`, never an empty `[]` |
+| MCP | `tortoise_poll_events(after, types, limit)` | `readOnly`; stdio + HTTP; maintenance purge gated by interval; a degraded feed returns a named `error`, never an empty `[]` |
 
 Related: `tortoise_retract_point` (MCP) / `TortoiseSDK.retract_point` — the
 tombstone-retraction write that emits `PointRetracted`.
