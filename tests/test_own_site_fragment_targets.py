@@ -15,17 +15,24 @@ halves we already have in the tree: the hrefs our sources EMIT, and the ids our
 pages DECLARE. That is what this file does, statically, with no network.
 
 WHAT IT READS (and why each shape is here):
-  * ``website/*.html`` — same-page ``href="#frag"`` links, resolved against the
-    page's own declared ids.
+  * ``website/*.html`` — every ``href`` naming an own host, in BOTH spellings:
+    the same-page ``href="#frag"`` form (resolved against the page's own
+    declared ids by ``test_same_page_fragments_resolve``) and the absolute
+    ``https://premiselabs.co/tortoise#pricing-section`` form, which is how the
+    terms and FAQ pages link the pricing table.
   * ``tortoise/**/*.py`` — string LITERALS that are code, not docstrings (an
     AST walk, so a URL quoted in prose is not mistaken for one we emit). The
     ``appeal_url()`` default is exactly this shape.
-  * ``website/apps/dashboard/src/**/*.{js,jsx,ts,tsx}`` — ``href="…"`` /
-    ``href={'…'}`` / ``href={`…`}`` attributes only, so a URL quoted in a
-    comment about a past defect is not read back as a live one.
+  * ``website/apps/dashboard/src/**/*.{js,jsx,ts,tsx}`` — every quoted own-host
+    URL on a code line, not only the ones spellable inside a ``href=``
+    attribute: ``href={COMPARE_PLANS_URL}`` takes its URL from a ``const``
+    elsewhere in the module, so an href-only read cannot see the link that most
+    often moves. Comment lines are skipped, so a URL quoted in prose about a
+    past defect (the #4392 comment that quotes the dead
+    ``product.html#pricing`` link it removed) is not read back as live.
   * markdown under ``tortoise/`` and ``website/apps/dashboard/public/skills/``
-    — ``[text](url#frag)`` links, which is how the onboarding copies carry
-    ``#chatgpt``.
+    — ``[text](url#frag)`` links and ``<url#frag>`` autolinks, which are how
+    the onboarding copies carry ``#chatgpt``.
 
 RESOLUTION. ``website/_redirects`` + ``website/functions/_middleware.ts`` decide
 which file serves a path (``/tortoise`` → ``product.html``, ``/docs`` and
@@ -50,8 +57,6 @@ import ast
 import re
 import sys
 from pathlib import Path
-
-import pytest
 
 TESTS_DIR = Path(__file__).resolve().parent
 REPO = TESTS_DIR.parent
@@ -90,13 +95,15 @@ PATH_TO_PAGE = {
     "/dpa": "dpa.html",
 }
 
+_OWN_HOSTS = "|".join(re.escape(h) for h in OWN_HOSTS)
+
 _OWN_URL = re.compile(
-    r"https?://(?:%s)/(?P<path>[^\"'\s)>`#]*)#(?P<frag>[^\"'\s)>`#]+)"
-    % "|".join(re.escape(h) for h in OWN_HOSTS)
+    rf"https?://(?:{_OWN_HOSTS})/(?P<path>[^\"'\s)>`#]*)#(?P<frag>[^\"'\s)>`#]+)"
 )
 _HREF_ATTR = re.compile(r"""href=(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|\{(?P<expr>[^}]*)\})""")
 _JS_STR = re.compile(r"""["'`](?P<url>[^"'`]*#[^"'`]*)["'`]""")
 _MD_LINK = re.compile(r"\]\((?P<url>https?://[^)\s#]+#[^)\s]+)\)")
+_MD_AUTOLINK = re.compile(r"<(?P<url>https?://[^>\s#]+#[^>\s]+)>")
 _SAME_PAGE = re.compile(r"""href="#(?P<frag>[^"]+)\"""")
 
 _PAGE_ID_CACHE: dict[str, set[str]] = {}
@@ -114,16 +121,17 @@ def page_ids(name: str) -> set[str]:
 
 
 def resolve(path: str) -> str | None:
-    """The page file serving ``path``, or None when the path is one we must learn."""
-    if path in PATH_TO_PAGE:
-        return PATH_TO_PAGE[path]
-    for candidate in (path.lstrip("/") + ".html",):
-        if (WEBSITE / candidate).is_file():
-            return candidate
-    tail = path.rstrip("/").rsplit("/", 1)[-1]
-    if tail and (WEBSITE / f"{tail}.html").is_file():
-        return f"{tail}.html"
-    return None
+    """The page file serving ``path``, or None when the path is one we must learn.
+
+    The table is the ONLY answer, deliberately. Derived fallbacks (`path +
+    ".html"`, then the path's last segment) were removed: they answer a
+    different question — "is there a page of that name?" — so a link to
+    `/anything/contact#contact` resolved to `contact.html` and passed an id
+    check against a page the wrong path consulted, on a path the deploy 404s.
+    An unmapped path is `None`, and the caller FAILS naming it, which is what
+    makes adding a page force this table to be taught.
+    """
+    return PATH_TO_PAGE.get(path)
 
 
 def own_site_targets() -> list[tuple[str, int, str, str]]:
@@ -159,16 +167,20 @@ def own_site_targets() -> list[tuple[str, int, str, str]]:
                 # we emit; reading it back would demand an id for a URL nobody
                 # renders any more.
                 continue
+            for literal in _JS_STR.finditer(line):
+                match = _OWN_URL.search(literal.group("url"))
+                if match:
+                    found.append((str(js.relative_to(REPO)), lineno, match.group(0), match.group("frag")))
+
+    for page in sorted(WEBSITE.glob("*.html")):
+        for lineno, line in enumerate(page.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
             for attr in _HREF_ATTR.finditer(line):
                 literal = attr.group("dq") or attr.group("sq")
-                if literal is not None:
-                    candidates = [literal]
-                else:
-                    candidates = [m.group("url") for m in _JS_STR.finditer(attr.group("expr"))]
-                for url in candidates:
-                    match = _OWN_URL.search(url)
-                    if match:
-                        found.append((str(js.relative_to(REPO)), lineno, match.group(0), match.group("frag")))
+                if literal is None:
+                    continue
+                match = _OWN_URL.search(literal)
+                if match:
+                    found.append((str(page.relative_to(REPO)), lineno, match.group(0), match.group("frag")))
 
     md_roots = [REPO / "tortoise", WEBSITE / "apps" / "dashboard" / "public" / "skills"]
     for root in md_roots:
@@ -176,7 +188,7 @@ def own_site_targets() -> list[tuple[str, int, str, str]]:
             continue
         for md in sorted(root.rglob("*.md")):
             for lineno, line in enumerate(md.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                for link in _MD_LINK.finditer(line):
+                for link in (*_MD_LINK.finditer(line), *_MD_AUTOLINK.finditer(line)):
                     match = _OWN_URL.search(link.group("url"))
                     if match:
                         found.append((str(md.relative_to(REPO)), lineno, match.group(0), match.group("frag")))

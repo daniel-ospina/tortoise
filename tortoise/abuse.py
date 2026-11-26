@@ -505,13 +505,11 @@ def appeal_url() -> str:
     ``/docs`` is a permanent SAME-HOST 301 onto the docs page's terminal address
     ``/tortoise/docs`` (#11763; measured live 2026-11-12 — 301, then 200, one
     redirect, both on the company origin). Emitting the terminal path here would
-    make it 0 hops, and that is deliberately NOT done in this PR: this function's
-    DESTINATION is #11939's decision (`/docs#appeal` with the section written, or
-    `/contact`), so flipping the path now would decide half of a question that
-    issue may answer by moving the link somewhere else entirely. #12049 re-points
-    the pasted onboarding copies and explicitly does NOT touch this function
-    (its item 4) — so do not read this comment as "someone else will";
-    #11939 is the owner of where this link goes, and it is OPEN.
+    make it 0 hops; that is a SEPARATE question from the destination and is not
+    changed here — #11939 settled the DESTINATION (`/docs#appeal` with the
+    section written, rather than `/contact`) and left this URL alone. #12049
+    re-points the pasted onboarding copies and explicitly does NOT touch this
+    function (its item 4) — so do not read this comment as "someone else will".
     ⛔ An earlier revision of THIS docstring left a `#12049 and not #11764`
     paragraph here, arguing the pasted-onboarding re-point would have no owner
     without #12049. That fact is true but it is about `onboarding/SKILL.md`, not
@@ -525,10 +523,15 @@ def appeal_url() -> str:
     #11939 asked for — "add the section" rather than "point somewhere else",
     because the sentence a suspended org reads already promises an appeal, not a
     contact form). The section is guarded from regressing quietly:
-    ``tests/test_own_site_fragment_targets.py`` compares every fragment URL our
-    sources emit against the ids our pages declare, so deleting that id turns
-    the suite red instead of turning this link into a silent no-op (a fragment
-    is resolved by the browser, never sent to the server — no fetch can see it).
+    ``tests/test_own_site_fragment_targets.py`` resolves the fragment URLs our
+    sources emit — Python string literals (an AST walk, so prose is not read as
+    a link), ``href``s in ``website/*.html`` and in the dashboard sources, and
+    markdown links and autolinks — against the ids our pages declare, so
+    deleting that id turns the suite red instead of turning this link into a
+    silent no-op (a fragment is resolved by the browser, never sent to the
+    server — no fetch can see it). An id the page renders at runtime
+    (``setAttribute`` / ``id={…}``) is invisible to that static read, which the
+    guard's own docstring declares.
     """
     return os.environ.get(
         "TORTOISE_ABUSE_APPEAL_URL",
