@@ -426,11 +426,17 @@ the RECEIPT's row count, `4` is the pair count both reads land on); the same `de
 silence on structural edges; `tortoise_list_topics` answering `Entity … not found` for nodes two
 other doors resolve; and the same quote audit — whose own buckets are 11 verbatim / 27 paraphrase /
 12 `not_in_corpus`, i.e. the same **12** below the single-sentence band — which this report's
-TURN-scope decider then narrows to **11 verbatim / 27 paraphrase / 9 unstated in any turn**
-(`claim_layer`; see §3/A4). ⛔ **The 9 is THIS report's count, not a field of that audit**: the audit
-measures the SENTENCE-scope population (12), the decider measures the TURN, and `9` is what the turn
-leaves of the 12. The audit's buckets sum to its own `quotes_total` (11 + 27 + 12 = 50); a trio of
-11 / 27 / 9 does not, which is how this sentence read before it was corrected. Its count of inverted
+TURN-scope decider splits into **11 verbatim / 27 paraphrase / 9 unstated in any turn** plus the
+**3** faithful multi-fact summaries of the corpus the single-sentence rule cannot see
+(`claim_layer.summary_in_one_turn`; see §3/A4). ⛔ **The 9 is THIS report's count, not a field of
+that audit.** The audit measures the SENTENCE-scope population (12); the decider measures the TURN
+and splits that same 12 into 3 the corpus does state and 9 it does not, so the two reads describe
+one population at two scopes rather than agreeing on a number by coincidence. The decider's four
+buckets partition its `quotes_total` (11 + 27 + 3 + 9 = 50) and the audit's three partition its own
+(11 + 27 + 12 = 50); ⛔ **an earlier revision of this sentence named 11 / 27 / 9 as *the audit's*
+buckets**, which is the defect this paragraph now fixes — the ATTRIBUTION was wrong, not the
+arithmetic, and a reader comparing sums alone would have learnt the wrong lesson from it. Its count
+of inverted
 pairs — **13** — is the number this report's A2 line derives independently.
 
 **Its strongest finding was not in my first cut, and I re-measured it before adopting it**: the
