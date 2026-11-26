@@ -57,8 +57,9 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `c1c8df1a` folded in, carrying
-# `#14548`'s residue RATCHET (`tests/test_sdk_privatise_sweep.py`, `core`, 28.0 s — the ONE
+# reader of the prose can see. On THIS tree — the `origin/main` `bbef0b88` fold, which carries
+# everything the `c1c8df1a` fold brought: `#14548`'s residue RATCHET
+# (`tests/test_sdk_privatise_sweep.py`, `core`, 28.0 s — the ONE
 # non-flat weight in this list), `#14560`'s operator-vector row, `#14565`'s reaper-schedule row,
 # `#14574`'s drift-reporter row, `#14552`'s point-vector-keys row, `#14592`'s operating-model
 # evidence row, `#14597`'s expansion-fusion row and `#14607`'s two `core` rows
@@ -67,6 +68,12 @@ version: 1
 # `ceil(827.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
 # (1680 / 827.6 ≈ 2.0300), so the two agree by construction rather than by a hand re-read.
+# ⛔ THE PARENT NAMED IN THAT CLAUSE IS THIS HEAD'S FOLD, not the `c1c8df1a` one the figure was
+# first read at (#14587 review P3): the `bbef0b88` fold re-derived the partition and the figure was
+# re-pointed WITHOUT the parent id, which left this clause (827.6, one bin) disagreeing with the
+# fifth-fold paragraph below (827.4/827.5, two bins, "at that head") over one and the same tree.
+# The rows listed are the `c1c8df1a` fold's because that is where they landed; the EMISSION is this
+# fold's, because the packer is greedy and one added row re-packs every bin.
 # ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
 # `main`'s own partition must be re-derived on `main`, never read out of this sentence.
 # ⛔ A POOL CENSUS IS NOT A LIVE CLAIM, and stating it as one is how this block went stale twice.
