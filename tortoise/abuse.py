@@ -2285,10 +2285,14 @@ class AbuseEngine:
         that comparison, so a tier we cannot read (or a 0 allowance) keeps the
         shipped absolute level rather than disabling detection.
         """
-        base = _int_env("TORTOISE_ABUSE_POINT_THRESHOLD", 500)
+        base = self.point_threshold_base()
         if not org_id:
             return base
         return max(base, self.point_tier_floor(org_id))
+
+    def point_threshold_base(self) -> int:
+        """The configured ABSOLUTE level — the floor of the tier comparison."""
+        return _int_env("TORTOISE_ABUSE_POINT_THRESHOLD", 500)
 
     def point_tier_floor(self, org_id: str) -> int:
         """#14687: ``ratio * the org's ops_allowance``, cached per org.
@@ -2439,17 +2443,16 @@ class AbuseEngine:
                                     created_at=now)
         except Exception:
             logger.debug("abuse record_point_create failed for %s", org_id)
-        r1 = self._evaluate(org_id, EVENT_POINT_CREATE,
-                            self.point_threshold(org_id), self.point_window_s(),
-                            now,
+        level = self.point_threshold(org_id)
+        r1 = self._evaluate(org_id, EVENT_POINT_CREATE, level,
+                            self.point_window_s(), now,
                             # #14687: whether the LEVEL is a real limit (the tier
                             # floor contributed) is a fact the alert has to state,
                             # because the "higher limit" route is only true when
-                            # it is.
-                            tier_relative=(self.point_threshold(org_id)
-                                           > _int_env(
-                                               "TORTOISE_ABUSE_POINT_THRESHOLD",
-                                               500)))
+                            # it is. Computed from the ONE level this evaluation
+                            # uses, so the recorded fact and the compared level
+                            # cannot disagree.
+                            tier_relative=level > self.point_threshold_base())
         r2 = self._evaluate(org_id, EVENT_KEY_CREATE,
                             self.key_threshold(), self.key_window_s(), now)
         # #5425: neither branch can return "suspend" any more — the engine has
