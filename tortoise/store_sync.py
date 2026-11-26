@@ -447,7 +447,9 @@ def run_sweep(
 #: `postCapture` keeps no headers, its own rule forbids matching prose, and although
 #: the in-flight 409's body carries a machine-readable `code` (#14700), nothing in
 #: this module CONSULTS one — `capture_spool.capacity_refusal` is
-#: `_parsed_refusal_code`'s only caller, and only for the 429. So the benign
+#: `_parsed_refusal_code`'s only caller, and only for a CAPACITY refusal (the
+#: `429`, or a body naming `capture_capacity_saturated` — its trigger is the
+#: status, and the code only names it). So the benign
 #: in-flight duplicate (`_CAPTURE_SESSION_IN_FLIGHT_DETAIL`, now the `message` of a
 #: typed body, carrying `Retry-After`) AND "Session recording is disabled for this
 #: team" — an org policy the user CAN reverse and which never clears by retrying —
