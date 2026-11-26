@@ -11350,8 +11350,12 @@ def test_the_row_list_alone_reaches_every_item_it_names():
         f"the row list spells {shorthands} by ISSUE with no path beside them, so the block's "
         "\"every row item above is therefore spelled with its path beside the word\" is false and "
         "no matcher can reach the files those labels mean — spell the path in the list")
-    # …and the checker REFUSES the pre-fix list, so half 2 is not decoration: this is the block's
-    # own text before `94ecd6b607be` fixed it.
+    # …and the checker REFUSES the pre-fix list, so half 2 is not decoration: this is that block's
+    # pre-fix list ABRIDGED to the three issue-only items `94ecd6b607be` fixed. ⛔ The elision is
+    # MARKED rather than silent, in this PR of all places: the full pre-fix text also named
+    # `tests/test_14592_operating_model_evidence.py`'s row, both `#14415` rows and the RATCHET, and
+    # a fixture that drops them while calling itself "the block's own text" would be a false
+    # provenance claim — the shorthand half reads none of the dropped items, so they are omitted.
     pre_fix = (
         "A ROW is an entry in `durations` — among the files named above, `#14597`'s "
         "`tests/test_expansion_fusion_14344.py` row, `#14560`'s, `#14565`'s, `#14552`'s, "

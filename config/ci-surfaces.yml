@@ -52,12 +52,13 @@ version: 1
 # attributed to the wrong landing, so a figure here would be a carried number under an attribution
 # that does not hold. The figures live in the commits that measured them; what is kept is the
 # direction, which is what justifies the number: the 2026-11-16 sweep packed the eleven shards to
-# 23 m, `#12926`'s own `10.0 s` row moved that to 24 m, a later landing moved it to 25 m, and the
+# 23 m, `#12926`'s own row moved that to 24 m, a later landing moved it to 25 m, and the
 # 2026-11-23 sweep took it to the 28 m this block grades.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `c3b21056d08a` folded in, carrying
+# reader of the prose can see. On THIS tree — `origin/main` `bdd2738c50929` folded in (the fold this
+# head carries; the rows below landed across it and the folds before it), carrying
 # `#14597`'s expansion fusion over the residue RATCHET
 # (`tests/test_expansion_fusion_14344.py`, `core`, carrying a `durations` row),
 # `#14415`'s `tests/test_14219_batch_ingest.py` row and `tests/test_14219_batches_api.py` row,
@@ -67,7 +68,9 @@ version: 1
 # (`tests/test_fly_secret_declaration_report.py`), `#14592`'s
 # `tests/test_14592_operating_model_evidence.py` row and `tests/test_14592_read_parity.py` row
 # (`core` on BOTH, plus `eval` on the first and `api` on the second — and the first is also a
-# `tier1` member — but ONE `fast_pool()` entry, because the pool is a SET), `#14607`'s registrations
+# `tier1` member, so that ONE FILE reaches the pool through three registrations yet contributes a
+# SINGLE `fast_pool()` entry, because the pool is a SET — the two files are two members, packed into
+# different shards), `#14607`'s registrations
 # (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), and `#14671`'s
 # `tests/test_13450_ep_position_axis_participation.py` row in `durations` — `core`-registered —
 # the verb packs the pool into two est_seconds readings: seven shards at 827.2 s
@@ -168,8 +171,8 @@ version: 1
 # `tests/test_dod_5090_probe.py` from the `core` surface: dropping that REGISTRATION cannot move a
 # bin, because the file's pool entry comes from the `eval` registration ALONE (as the sentence above
 # says), and `#14544` left that `eval` registration alone. The REGISTRATION is the ONLY half
-# exempt: the bin is held by the `tests/test_dod_5090_probe.py` row in `durations`, and that row IS
-# `#14544`'s own edit — the commit that took the file off `core` re-read the same file's weight after
+# exempt: the bin is held by the `tests/test_dod_5090_probe.py` row in `durations`, and that row's
+# WEIGHT is `#14544`'s own edit — the commit that took the file off `core` re-read the same file's weight after
 # cutting its cases (its note on the row records exactly that) — so a packing change attributed to
 # that row is a cause this paragraph does NOT exclude, and the row's WEIGHT is that cut's re-read
 # rather than the default (the ROW itself predates it — `#10465` introduced it, and this cut
