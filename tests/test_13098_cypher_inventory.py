@@ -3013,6 +3013,59 @@ def test_a_DAMAGED_bare_gitdir_boundary_cannot_permit_what_it_tracks(
         "wrong repository")
 
 
+def test_a_directory_that_only_LOOKS_like_git_metadata_still_RENDERS(tmp_path, monkeypatch):
+    """…and the COUNTERWEIGHT: the metadata heuristic must not refuse a plain directory.
+
+    ⛔ ASKABILITY REFUSES A HEURISTIC HIT, SO THE HEURISTIC NEEDS A FLOOR (#14741 review,
+    cycle 3, P2, measured). `_looks_like_git_metadata` is "one distinctive marker plus
+    any second", and the cycle-3 fix refuses a boundary that git will not resolve to
+    itself. Without a further term a plain project directory holding `objects/`,
+    `refs/` and `config/` (no `.git`, not a repository, no index) became an UNASKABLE
+    boundary and `--render` into it answered 2 where `origin/main` answered 0 — a NEW
+    over-block, attributable to that fix. A gitdir's tracking lives in its INDEX, so a
+    metadata-in-place boundary is one that HOLDS an index: with one, a disowned gitdir
+    may hold this very path and only it can be asked (the fail-open the same round
+    closes); without one there is no tracked entry for this guard to protect, and git
+    refuses to call the directory a repository either way — so no test separates it from
+    the lookalike, and the fail-closed side is reserved for the shape with bytes to lose.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    lookalike = repo / "data" / "objects"
+    (lookalike / "refs").mkdir(parents=True)
+    (lookalike / "config").write_text("[core]\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # PREMISE 1 — the heuristic DOES fire on it, so this arm grades the floor and not a
+    # directory the boundary walk would have skipped anyway.
+    assert census._looks_like_git_metadata(lookalike), (
+        "the premise: the lookalike must trip `_looks_like_git_metadata`, or the arm is "
+        "vacuous")
+    assert not (lookalike / ".git").exists(), "the premise: there is no `.git` name"
+    # PREMISE 2 — and it holds NO index, which is what makes it safe to skip.
+    assert not (lookalike / "index").exists(), (
+        "the premise: the lookalike must hold no index; an index is the marker that "
+        "makes a metadata-in-place boundary refuse rather than skip")
+    # PREMISE 3 — and git does not resolve it to itself, so the askability test would
+    # refuse it if it were treated as a boundary at all.
+    resolved = subprocess.run(
+        ["git", "rev-parse", "--absolute-git-dir"], cwd=lookalike,
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    assert Path(resolved.stdout.strip()).resolve() != lookalike.resolve(), (
+        "the premise: git must not resolve the lookalike to itself; got "
+        f"{resolved.stdout!r}")
+    rc = census.main(["--render", "data/objects/OUT.md"])
+    assert rc == 0, (
+        f"a directory that merely LOOKS like git metadata must not block a render, got "
+        f"{rc} — `origin/main` answered 0 for this shape")
+    out = lookalike / "OUT.md"
+    assert out.exists() and out.stat().st_size > 0, "the render wrote nothing"
+
+
 def test_the_tracking_probe_still_PERMITS_both_honest_answers(tmp_path, monkeypatch):
     """…and the fail-closed arm above does not over-block either honest permit.
 
@@ -5348,6 +5401,10 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # from the enclosing repository and `--render` replaced its indexed bytes at
         # rc 0. This is the only arm that pins the non-`.git` form.
         "test_a_DAMAGED_bare_gitdir_boundary_cannot_permit_what_it_tracks",
+        # ⛔ AND ITS FLOOR (#14741 review, cycle 3): an index-less directory that merely
+        # trips the metadata heuristic must still render. Without this arm the fix's own
+        # over-block (rc 2 where `origin/main` answered 0) is invisible.
+        "test_a_directory_that_only_LOOKS_like_git_metadata_still_RENDERS",
     }
     # ⛔ AND THE SET'S OWN SIZE — the direction `missing` structurally cannot see.
     # `missing` reds for a NAME that no longer resolves; it stays GREEN for a member
@@ -5370,7 +5427,10 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # there), so the same dangling-`.git` damage AT ROOT, nested in a repository,
     # overwrote ROOT's committed bytes at rc 0 (#14741 review, cycle 3, P2, measured).
     # The code path is closed; this arm is what reds if ROOT is exempted again.
-    assert len(split_arms) == 60, (
+    # ⛔ AND ITS OVER-BLOCK FLOOR TAKES IT 60 -> 61: refusing a heuristic hit made a plain
+    # `objects/`+`refs/` directory unaskable and turned a legitimate render into rc 2
+    # (#14741 review, cycle 4, P2, measured against `origin/main`).
+    assert len(split_arms) == 61, (
         f"expected EXACTLY 60 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
@@ -5380,7 +5440,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 59` reds a name PRUNED from the literal and `missing` reds a
+    # `len(split_arms) == 60` reds a name PRUNED from the literal and `missing` reds a
     # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
@@ -5451,8 +5511,10 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # ⛔ AND ROOT'S OWN ASKABILITY TAKES IT 118 -> 119 (`split_arms` 59 -> 60): the
     # arm that pins ROOT as a boundary the unaskability test reaches — the one provider
     # the `stop = ROOT` walk exempted by construction (#14741 review, cycle 3, P2).
-    assert len(test_functions) == 119, (
-        f"expected EXACTLY 119 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
+    # ⛔ AND THE OVER-BLOCK COUNTERWEIGHT TAKES IT 119 -> 120 (`split_arms` 60 -> 61).
+    assert len(test_functions) == 120, (
+        f"expected EXACTLY 120 test functions in this module; got "
+        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
 

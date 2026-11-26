@@ -1367,8 +1367,25 @@ def _destination_probes(
         chain.append(cursor)
         cursor = cursor.parent
     for boundary in reversed(chain):
+        # ⛔ AND A METADATA-IN-PLACE BOUNDARY MUST HOLD AN INDEX, or a directory that
+        # merely LOOKS like git metadata is refused for no reason (#14741 review, cycle
+        # 3, P2, measured). `_looks_like_git_metadata` is a HEURISTIC - one distinctive
+        # marker plus any second - and the askability test below refuses a heuristic hit
+        # that git will not resolve to itself. Without this term a plain project
+        # directory holding `objects/`, `refs/` and `config/` (no `.git`, not a
+        # repository) became an unaskable boundary, and `--render` into it answered 2
+        # where `origin/main` answered 0 - a NEW over-block, attributable to this round.
+        # This guard exists to stop a write over content a repository TRACKS, and a
+        # gitdir's tracking lives in its INDEX: a damaged gitdir whose index survives may
+        # hold this path and only it can be asked (the fail-open this round closes); one
+        # whose index is gone holds no tracked entry this guard could protect, and git
+        # itself refuses to call the directory a repository either way, so there is no
+        # test that separates it from the lookalike. Requiring the index picks the
+        # fail-CLOSED side for the shape that has bytes to lose and leaves the heuristic
+        # from over-blocking a directory that has none.
         if not (os.path.lexists(boundary / ".git")
-                or _looks_like_git_metadata(boundary)):
+                or (_looks_like_git_metadata(boundary)
+                    and (boundary / "index").exists())):
             continue
         # ⛔ A BOUNDARY GIT WILL NOT RESOLVE TO ITSELF IS ASKED ABOUT SOMEBODY ELSE
         # (#14741 review, cycle 2, P1, measured). `lexists` correctly makes it a BOUNDARY
@@ -1425,8 +1442,9 @@ def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
             # the damage.
             print(
                 f"render: could not probe {label} for tracking: git does not resolve\n"
-                "that directory as a repository of its own, so it answers as the\n"
-                "repository ABOVE it — and that repository does not hold this path.",
+                "that directory as a repository of its own, even though it carries a git\n"
+                "index, so it answers as the repository ABOVE it — and that repository\n"
+                "does not hold this path.",
                 file=sys.stderr,
             )
             return 2
