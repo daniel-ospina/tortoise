@@ -3415,7 +3415,8 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # statements rather than being re-pointed at neighbouring code — and the split is `+28` below
     # `update_knowledge` and `**+0**` above it (`23117` unmoved), which is the consistency check on
     # the measurement and not its input: `git diff --numstat c1c8df1a -- tortoise/sdk.py` is
-    # `28  0`, a pure insertion BELOW `update_knowledge` — this PR's own `#14582` block.
+    # `28  0` in ONE hunk (`@@ -51573,0 +51574,28 @@`), a pure insertion BELOW `update_knowledge` —
+    # this PR's own `#14582` block.
     # ⛔ The un-supersede arm's start text still occurs TWICE at this merged head (`56682`, the
     # admission arm this row pins, and `56721`, the hint-message condition — a string expression,
     # not an arm), so the row keeps being located by its `continue` terminator (`56691`) and never
