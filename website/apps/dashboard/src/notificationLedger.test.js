@@ -273,6 +273,35 @@ test('#14694 P1: a snooze on an INCIDENT does not cover a NEWER one', () => {
   assert.equal(earlierLedger.snoozed.length, 0)
 })
 
+test('#14694: no surface suppresses on the RAW snooze deadline, and none denies the gate', () => {
+  // ⛔ THE STRUCTURAL HALF OF THE P1 ABOVE. That test proves `buildLedger` is
+  // gated; this one proves nothing ELSE can reintroduce the bare-deadline shape
+  // the finding cited (`snoozedUntil` is the raw record, documented as such).
+  // `notificationPanel.jsx` renders the ledger's rows, so a suppression check
+  // there would be a second, ungated decision path over the same store — exactly
+  // how the pre-fix tree stayed broken after the first fix landed in the render.
+  // Matched on a CALL, not a mention, so a comment naming the function (several
+  // do, to explain the hazard) does not trip it.
+  const here = dirname(fileURLToPath(import.meta.url))
+  const panel = readFileSync(join(here, 'notificationPanel.jsx'), 'utf8')
+  assert.doesNotMatch(
+    panel, /\bsnoozedUntil\s*\(/,
+    'suppression goes through effectiveSnoozedUntil — a bare deadline here is '
+    + 'the ungated shape #14694\'s P1 was filed against',
+  )
+
+  // `main.jsx` cannot be imported, so a claim it carries can only be pinned as
+  // SOURCE TEXT — the same treatment its badge title gets. `4d74b557` corrected
+  // one copy of the "no incident gate" card and the file kept a second, which is
+  // the ordinary way a corrected claim survives: one site, not every site.
+  const main = readFileSync(join(here, 'main.jsx'), 'utf8')
+  assert.doesNotMatch(
+    main, /a bounded personal snooze does not need one/,
+    'the incident gate exists (`effectiveSnoozedUntil`) — do not re-assert that a '
+    + 'snooze needs none; a 1w snooze on a constant-sentence incident hid a NEW one',
+  )
+})
+
 test('#14694 P1: a store written BEFORE the anchor existed is bounded, not trusted', () => {
   // A blob with `snoozed` and no `snoozedAt` has nothing saying which row was
   // snoozed. The bound clamps to the gap after THIS row's own newest measurement.

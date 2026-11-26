@@ -6640,12 +6640,19 @@ function claimIntentInFlight() {
     // in the header — before this change the feed only fed a panel that rendered
     // on the overview tab. Without this reset the bell reports the PREVIOUS
     // Organization's unresolved count, lists its episodes, and lets a decision
-    // taken on one be written under the other's key: `snoozedUntil` has no
-    // incident gate by design (a bounded personal snooze does not need one), and
-    // an activity row's message can be shared across rules — a `read_velocity`
-    // row names only the scope, and a `flag` row's message repeated across rules
-    // until #14702 put the measured numbers in it — so snoozing a stale org-A row
-    // could hide org B's own rows for the period (review finding F2).
+    // taken on one be written under the other's ledger key. The snooze's incident
+    // gate (`effectiveSnoozedUntil`) bounds the damage but does NOT make a stale
+    // read safe: an activity row's message can be shared across rules — a
+    // `read_velocity` row names only the scope, and a `flag` row's message
+    // repeated across rules until #14702 put the measured numbers in it — and an
+    // ACTIVITY snooze keeps the whole period by design, so snoozing a stale org-A
+    // row could hide org B's own rows for the period (review finding F2).
+    //
+    // ⚠️ THIS CARD USED TO SAY THE SNOOZE HAD NO INCIDENT GATE BY DESIGN. That is
+    // false since #14694's read-side bound landed in `effectiveSnoozedUntil`: an
+    // incident that HAPPENS after the snoozed instant re-opens, mirroring
+    // `abuse.py::_episode_acknowledged`. The reset never depended on the gate
+    // being absent — it is about which Organization the FEED describes.
     setAlerts([])
     setAlertsSaturated(false)
     setAlertsUnavailable(false)
