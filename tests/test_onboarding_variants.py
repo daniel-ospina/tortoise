@@ -1802,12 +1802,17 @@ _INVERSION_FORMS = (
     #     tool-observation CONDITION is expressly not an inversion here. An
     #     unfiltered `\w+ly` reddened `only` / `barely` / `rarely` / `mostly` /
     #     `lately` copy that was GREEN at the previous head (each measured).
-    #     ⛔ AND THE EXCLUSION IS SCOPED TO `if` ALONE, because under
-    #     `after|once|when` the CONNECTIVE already fixes the order and no adverb
+    #     ⛔ AND THE EXCLUSION IS SCOPED TO THE CONDITIONAL CONNECTIVES (`if|when`),
+    #     because there the adverb changes the sense of the CONDITION; under
+    #     `after|once` the connective itself already fixes the order and no adverb
     #     can undo it. A blanket exclusion made the whole form give up instead of
     #     skipping one word, so "after you have only recently confirmed the tools
     #     are actually there" went GREEN — a declared-RED shape lost to a
-    #     one-word insertion (measured, six shapes).
+    #     one-word insertion (measured). Scoping it to `if` ALONE was then too
+    #     narrow in the other direction, and measurably so: `when` introduces a
+    #     condition exactly as `if` does, so the `when` twin of a declared-GREEN
+    #     symptom row was refused ("Restart your client when you only see the tools
+    #     after a second restart.", measured).
     #     ⛔ A HYPHENATED PREDICATE IS THE SAME PREDICATE: "double-checked" was
     #     GREEN while "checked" is a declared RED row (measured).
     #     ⛔ AND A DOC CROSS-REFERENCE IS NOT A PRESENCE CHECK, the rule form (f)
@@ -1828,15 +1833,16 @@ _INVERSION_FORMS = (
     #     around a comma, which is a different (and much wider) rewrite than
     #     this pin claims.
     _inversion_form(
-        r"\b(?:(?:after|once|when)\s+"
+        r"\b(?:(?:after|once)\s+"
         r"(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
         r"(?:(?:\w+ly|first|already|just|also)\s+)*"
-        r"|if\s+(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
+        r"|(?:if|when)\s+(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
         r"(?:(?!(?:only|barely|rarely|mostly|lately|merely|simply|hardly)\b)"
         r"(?:\w+ly|first|already|just|also)\s+)*)"
         r"(?:\w+-)?"
         + _CONFIRM_PREDICATE
-        + r"[^\n]*?\btools\b(?!\s+(?:section|reference|table|guide|docs?|page)\b)"
+        + r"[^\n]*?\btools\b(?!\s+(?:section|reference|table|guide|docs?|page"
+        r"|overview|summary|readme|appendix)\b)"
     ),
     # (b) a participle that places the confirmation before the restart:
     #     "Restart your client, having first confirmed the tools are there".
@@ -1903,7 +1909,7 @@ _INVERSION_FORMS = (
     #     is dead weight, and it was).
     _inversion_form(
         r"\bonce\s+(?:[A-Za-z0-9_`*.-]+\s+){0,2}?tools\s+"
-        r"(?:are|appear|show|exist|load|listed|visible)\b"
+        r"(?:all\s+|both\s+)?(?:are|appear|show|exist|load|listed|visible)\b"
     ),
     _PRE_CUE_ONLY,
 )
@@ -1930,9 +1936,16 @@ _CONFIG_PREP_RE = re.compile(
     # RUNNING session's tools excused by a parenthetical aside. The noun must
     # follow its preposition directly, through at most a determiner/possessor and
     # an optional owner ("in your client settings"), which is the shape the arm
-    # exists for.
+    # exists for. ⛔ BOTH halves of that were too narrow and were measured RED on
+    # this repo's OWN register: the owner admitted only `client|harness|mcp`, so a
+    # per-client noun ("in your Cursor settings", "in your Claude Code settings")
+    # was refused even though `docs/quickstart-cloud.md` is organised per named
+    # client; and the noun admitted only `config|settings`, so `.mcp.json` — the
+    # spelling `_CONFIG_NOUN_RE`'s own comment records as the false RED this arm
+    # exists to prevent — was refused here while `config` was exempted.
     r"|\b(?:in|from|inside|per|under)\s+(?:your\s+|the\s+|its\s+)?"
-    r"(?:client\s+|harness\s+|mcp\s+)?(?:config|settings)\b",
+    r"(?:(?:client|harness|mcp)\s+|[A-Z][\w.-]*(?:\s+Code)?\s+)?"
+    r"(?:[`'\"]?)(?:config|settings|\.mcp\.json)\b",
     re.IGNORECASE)
 # ⛔ AN INSTALLATION-SIDE STATE IS A FILE-SIDE FACT, NOT A SESSION ONE. The
 # config-scope escape keys on NOUNS (`config|settings|installer`), so it could
@@ -2334,9 +2347,14 @@ def test_3232_generic_restart_lines_are_exact():
     # #3429's lesson (pin the ORDER, not one reword) survives. "Restart your
     # client after changing the config, then confirm the tools …" stays GREEN
     # because form (a) requires the confirmation predicate in the connective's
-    # OWN clause ("changing" is not one) — NOT because of the COMMA split
-    # (measured: removing the comma split changes no row; it is the STATEMENT
-    # break that rows like "… Once the tools are listed, run …" depend on).
+    # OWN clause ("changing" is not one) — NOT because of the COMMA split.
+    # ⛔ THAT SECOND HALF WAS TRUE WHEN WRITTEN AND IS NOW FALSE, measured: on the
+    # then-55-row table (cycle 8) removing the comma split changed no row, but on
+    # the current table it loses FOUR declared-RED rows — all of them
+    # merged-introducer shapes added by cycles 18-21 (`… and then, but first
+    # confirm …` and its bold/paren twins, plus the config-conjunction row). They
+    # live in a LATER comma-delimited fragment, so the split is what puts them in
+    # front of the forms. The split is LOAD-BEARING; do not delete it.
     #
     # What the graded set IS and IS NOT (#14679's reviews measured both):
     # - It is the SIX forms in `_INVERSION_FORMS`, each observed GREEN before
@@ -2600,6 +2618,13 @@ def test_3232_generic_restart_lines_are_exact():
     ("Restart your client if you have rarely seen the tools appear at all.",
      False),
     ("Restart your client if you have barely seen the tools appear.", False),
+    # …and the exclusion belongs on the CONDITIONAL connectives, not on `if`
+    # alone: `when` introduces a condition exactly as `if` does, so the `when`
+    # twin of the row above was refused when the arm named only `if` (measured):
+    ("Restart your client when you only see the tools after a second restart.",
+     False),
+    ("Restart your client when you have rarely seen the tools appear at all.",
+     False),
     # …and the exclusion is scoped to `if`: under `after|once|when` the connective
     # already fixes the order, so a blanket exclusion lost these (both were RED):
     ("Restart your client after you have only recently confirmed the tools are "
@@ -2619,6 +2644,27 @@ def test_3232_generic_restart_lines_are_exact():
     ("Restart your client after you have carefully checked the tools section.",
      False),
     ("Restart your client after you have checked the tools reference.", False),
+    # …and the doc-noun set must be the SAME on both sides of the cue: form (f)
+    # carries nine nouns, form (a) carried six, so the identical clause flipped
+    # verdict across the cue for these four (each RED post-cue, GREEN pre-cue):
+    ("Restart your client after checking the tools overview for the full list.",
+     False),
+    ("Restart your client after checking the tools summary.", False),
+    ("Restart your client after checking the tools readme.", False),
+    ("Restart your client after checking the tools appendix.", False),
+    # a file-side noun is the same noun in either spelling, and the OWNER may be a
+    # named client — this repo's quickstart is organised per named client, so
+    # `config` GREEN / `.mcp.json` RED and `client settings` GREEN / `Cursor
+    # settings` RED were both false blocks (all four measured GREEN now):
+    ("Restart your client after checking the tools are listed in `.mcp.json`.",
+     False),
+    ("Restart your client after checking the tools are listed in your Cursor "
+     "settings.", False),
+    ("Restart your client after checking the tools are listed in your Claude "
+     "Code settings.", False),
+    # a quantifier between the object and its verb is the same claim, and form
+    # (e)'s copula arm already admitted it (measured GREEN before):
+    ("Restart your client once the tools all appear.", True),
     # a leading ellipsis hides the adversative unless it is stripped like every
     # other glyph (both were GREEN):
     ("Restart your client … but first confirm the tools are actually there.",
