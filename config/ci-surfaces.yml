@@ -166,16 +166,19 @@ version: 1
 # minute agrees either way.
 # ⛔ THIS BLOCK ARRIVES SPLICED, REPEATEDLY, and that is mechanical rather than mysterious:
 # `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
-# derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. FIVE folds of
-# this PR have arrived that way — the `4b2fba3e8a` merge, the `c1c8df1a` and `bbef0b88` rebases, and
-# this merge with `ff10fb32`, each recording its own copies in the paragraphs above — and in every
-# case NEITHER copy described the tree it landed on. No side is picked on any of them: both copies
-# are DELETED and the graded clause above is a re-derivation with `--emit-push-matrix` on the merged
-# tree. ⛔ This fold's copy also carried a LIVE pool census and a one-bin emission, which is why the
-# emission, census and splice arms all reddened at once — the first splice in this PR's history that
-# a check caught rather than a reviewer reading the block. ⛔ No census figure is stated here,
-# and none is stated anywhere outside the fence: a count of that pool measures ONE tree, so it is
-# HISTORY bound to the sha it was read at (the fenced span above) or it is not stated at all. Each
+# derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. THIS PR HAS
+# BEEN SPLICED MORE THAN ONCE and no count is written here — an ordinal is a remembered number that
+# rots: the `4b2fba3e8a` merge, the `c1c8df1a` and `bbef0b88` rebases and this merge with
+# `ff10fb32` are the ones the paragraphs above narrate, earlier de-splices live on this branch's own
+# commits (`git log`), and in every case NEITHER copy described the tree it landed on. No side is
+# picked on any of them: both copies are DELETED and the graded clause above is a re-derivation with
+# `--emit-push-matrix` on the merged tree. ⛔ This fold's copy also carried a LIVE pool census and a
+# one-bin emission, which is why the emission, census and splice arms all reddened at once — the
+# first splice in this PR's history that a check caught rather than a reviewer reading the block.
+# ⛔ No census figure is stated here AS A CLAIM: a count of that pool measures ONE tree, so it is
+# HISTORY bound to the sha it was read at (the fenced span above) or it is not stated at all — the
+# only census-shaped digits elsewhere in this block are the SPELLINGS-IT-CANNOT-SEE list above,
+# which names a spelling rather than asserting a reading. Each
 # fold's emission figures live on the commit that measured them (`git log`), which is where a
 # spliced copy belongs.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
