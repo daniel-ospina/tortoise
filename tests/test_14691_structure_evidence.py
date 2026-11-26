@@ -27,6 +27,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 BUNDLE = REPO / "docs" / "evidence" / "14691-structure-validation"
 
@@ -702,6 +704,15 @@ def test_the_name_variance_retry_drops_a_KIND_WORD_not_the_FIRST_word():
         "a name whose last word is not a declared kind word must be untouched — "
         "dropping it is truncation, not un-welding")
     assert module._unweld("Lumen Field") == "Lumen Field"
+    # ⛔ AND IT REFUSES A DECLARED NAME THAT *ENDS* IN ITS KIND WORD (#14723
+    # review, round 10, P1). Every declared team is `<Something> team`, so a
+    # kind-word test ALONE truncated a legitimate name to a bare common noun:
+    # `Customer team` → `Customer`, which the corpus says on its own.
+    assert module._unweld("Customer team") == "Customer team", (
+        "un-welding truncated a DECLARED name to a bare common noun")
+    assert module._unweld("Platform team") == "Platform team"
+    assert module._unweld("Product team") == "Product team"
+    assert module._unweld("Account Executive") == "Account Executive"
     module.EDGES.append({
         "doc": "doc-01", "predicate": "dependsOn", "write_path": "test_mutant",
         "src_id": "mutant-src", "dst_id": "mutant-dst",
@@ -714,6 +725,149 @@ def test_the_name_variance_retry_drops_a_KIND_WORD_not_the_FIRST_word():
         "document is still graded stated — the retry is a truncation")
     assert mutated["passes_relations"] is False
     assert mutated["passes"] is False
+    # …and the TEAM-shaped mutant is the one the review measured: the corpus
+    # never relates either feature to the Customer team, so each row must be
+    # reported as un-co-stated rather than granted by `Customer team → Customer`.
+    module.EDGES.extend([
+        {"doc": "doc-02", "predicate": "managedBy",
+         "write_path": "test_mutant",
+         "src_id": "mutant-team-1", "dst_id": "mutant-team-1-dst",
+         "src": "Grid Map", "dst": "Customer team",
+         "src_kind": "dev:code", "dst_kind": "core:team"},
+        {"doc": "doc-02", "predicate": "managedBy",
+         "write_path": "test_mutant",
+         "src_id": "mutant-team-2", "dst_id": "mutant-team-2-dst",
+         "src": "Asset Register", "dst": "Customer team",
+         "src_kind": "dev:code", "dst_kind": "core:team"},
+    ])
+    team_mutant = module.a4_invention()
+    flagged = {(e["src"], e["dst"])
+               for e in team_mutant["relations_not_co_stated"]}
+    assert flagged >= {("Grid Map", "Customer team"),
+                       ("Asset Register", "Customer team")}, (
+        "a fabricated edge to a DECLARED team cleared A4 on the un-weld retry")
+    assert team_mutant["passes_relations"] is False
+
+
+def test_the_kind_word_table_is_DERIVED_from_the_declared_groups():
+    r"""Reds if `_KIND_WORDS` goes back to being hand-typed prose.
+
+    ⛔ #14723 review, round 10, P3: the comment claimed the set was "derived from
+    `_declared_structure`, never a hand-typed list" while the code was a literal
+    tuple — and a naive derivation does NOT reproduce it (`people` → `person`,
+    `customerSegments` → `customer segment` are not reachable by singularising a
+    key), so the false claim was load-bearing for the P1's reasoning. The
+    morphology table is now explicit, the set is READ FROM IT, and a declared
+    group with no kind word raises instead of leaving a silent gap.
+    """
+    module = _load_score_module()
+    assert set(module._KIND_OF_GROUP) == module._DECLARED_GROUPS, (
+        module._DECLARED_GROUPS, set(module._KIND_OF_GROUP))
+    assert module._KIND_WORDS == {module._squash(kind)
+                                  for kind in module._KIND_OF_GROUP.values()}, (
+        "the kind-word set is not the derivation of the table it claims to be")
+    assert module._KIND_WORDS, module._KIND_WORDS
+    with pytest.raises(ValueError, match="no kind word"):
+        module._kind_words({**module.DECL, "initiatives": ["Growth"]})
+
+
+def test_the_summary_truncation_flag_is_the_ONE_the_consumer_reads():
+    r"""Reds if the summary cap sets a flag name nothing reads.
+
+    ⛔ #14723 review, round 10, P2: `quotes` initialises
+    `summary_examples_truncated`, but the setter derived
+    `f"{bucket}_examples_truncated"` and the bucket is `summary_in_one_turn` — so a
+    capped summary sample set `summary_in_one_turn_examples_truncated` while the
+    consumer was told the sample was COMPLETE. Invisible on this corpus (3
+    summaries), so the cap is FORCED here: at `CAP = 0` every list truncates and
+    the flag the artifact declares must be the one that fires.
+    """
+    module = _load_score_module()
+    original = module.CAP
+    module.CAP = 0
+    try:
+        quotes = module.a4_invention()["quotes"]
+    finally:
+        module.CAP = original
+    assert quotes["summary_examples_truncated"] is True, (
+        "the cap bit but the flag the artifact declares stayed False — the "
+        "setter writes a name nothing reads")
+    assert "summary_in_one_turn_examples_truncated" not in quotes, (
+        "the setter invented a second flag name instead of declaring the one "
+        "the consumer reads")
+    assert quotes["paraphrase_examples_truncated"] is True
+    assert quotes["invented_examples_truncated"] is True
+
+
+def test_the_turn_support_SCOPE_is_recorded_beside_each_row():
+    r"""Reds if `supported_outside_own_doc` stops being measurable.
+
+    ⛔ #14723 review, round 10, P2: the decider searches EVERY corpus turn while a
+    row records the `doc` it was attributed to, so a row supported only by another
+    document read as "supported by its own turn". MEASURED: exactly one row does
+    this — doc-04's `Enterprise renewals, owned by Jonas Bauer…`, 0.571 inside
+    doc-04 and 0.714 corpus-wide on a doc-02 turn — and the artifact could not say
+    so. Doc-scoping the decider would re-grade a fact the business DOES state as
+    invented, so the scope is kept and RECORDED instead: the count, the sample,
+    and every row's own-doc figure.
+    """
+    quotes = _score()["A4_no_invention"]["quotes"]
+    # the artifact is a CLAIM: it must be what the scorer derives from the receipt
+    derived = _load_score_module().a4_invention()["quotes"]
+    assert (quotes["supported_outside_own_doc"]
+            == derived["supported_outside_own_doc"]), (
+        "the committed count is not the derivation's", quotes, derived)
+    assert (quotes["supported_outside_own_doc_examples"]
+            == derived["supported_outside_own_doc_examples"]), (
+        "the committed sample is not the derivation's")
+    rows = quotes["supported_outside_own_doc_examples"]
+    assert quotes["supported_outside_own_doc"] == len(rows) == 1, (
+        quotes["supported_outside_own_doc"], len(rows))
+    row = rows[0]
+    assert (row["doc"], row["best_own_doc_turn_overlap"]) == ("doc-04", 0.571)
+    assert row["best_turn_overlap"] == 0.714, row
+    assert "Enterprise renewals" in row["quote"], row["quote"]
+    # the count is a POPULATION, not the length of a capped sample: both are
+    # recorded, and the flag says whether the sample is complete
+    assert len(rows) <= quotes["supported_outside_own_doc"], quotes
+    assert quotes["supported_outside_own_doc_examples_truncated"] is False
+    # every SUPPORTED row carries its own-doc figure, and only the one row needs
+    # a different document to clear the band
+    for bucket in ("paraphrase_examples", "summary_examples"):
+        for entry in quotes[bucket]:
+            assert "best_own_doc_turn_overlap" in entry, (bucket, entry)
+            if (entry["doc"], entry["quote"]) == (row["doc"], row["quote"]):
+                continue
+            assert entry["best_own_doc_turn_overlap"] >= 0.6, (bucket, entry)
+
+
+def test_a_finding_that_cannot_be_derived_is_RECORDED_as_WITHHELD():
+    r"""Reds if D6 can vanish from `door_findings` with nothing saying why.
+
+    ⛔ #14723 review, round 10, P3: D6 is emitted only when `len(asked_owners) >=
+    2`, so with `DECL["people"] = []` it disappeared — `['D1','D2','D3','D4','D6',
+    'D5']` → `['D1','D2','D3','D4','D5']` — and nothing recorded that the bundle's
+    headline ownership finding had been withdrawn rather than never asked. A2
+    states its own unasked population; the findings list now states its withheld
+    ones the same way.
+    """
+    module = _load_score_module()
+    assert _score()["withheld_findings"] == [], (
+        "a committed run withheld a finding; the artifact must say which")
+    original = module.DECL["people"]
+    module.DECL["people"] = []
+    try:
+        ids = [f["id"] for f in module._door_findings()]
+        withheld = module._withheld_findings()
+    finally:
+        module.DECL["people"] = original
+    assert "D6" not in ids, ids
+    assert [w["id"] for w in withheld] == ["D6"], withheld
+    assert "population" in withheld[0]["reason"], withheld[0]
+    assert withheld[0]["witnesses_answering_empty"], (
+        "the door DID answer empty — the finding is withheld for lack of a "
+        "populated question, not for lack of an answer")
+    assert withheld[0]["declared_people"] == [], withheld[0]
 
 
 def test_the_name_variance_rows_are_RECORDED_and_LOAD_BEARING():

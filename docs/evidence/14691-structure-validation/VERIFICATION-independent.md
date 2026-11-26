@@ -113,7 +113,10 @@ population that falls below the band when support is looked for in ONE SENTENCE.
 multi-fact summary cannot clear that band — `Three teams exist: Platform (engineering), Product
 (product management), and Customer (commercial).` scores 0.30 against any single sentence and 0.80
 against its own turn — so **3 of the 12 are things the corpus does say** (doc-02's three teams,
-doc-03's seven-component architecture, doc-04's enterprise-renewals row). The primary record
+doc-03's seven-component architecture, doc-04's enterprise-renewals row). The third of those does
+**not** clear the band inside its own document (0.571 in doc-04, 0.714 on a doc-02 turn): the band is
+corpus-wide by design, and `t6-score.json`'s `claim_layer.supported_outside_own_doc` (**1**) plus its
+per-row `best_own_doc_turn_overlap` are what now say so rather than leaving it to be inferred. The primary record
 (`REPORT.md` §3/A4, `t6-score.json` `claim_layer.invented`) now decides the bucket on the TURN and
 carries **9** invented; the sentence-scope `12` is kept here because it is what this audit measured,
 and it is **not** the invented count.

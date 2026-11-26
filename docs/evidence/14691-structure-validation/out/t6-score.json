@@ -1246,6 +1246,7 @@
           "quote": "**Lumen Core**, the energy-operations platform that control-room customers run",
           "best_sentence_overlap": 0.636,
           "best_turn_overlap": 0.636,
+          "best_own_doc_turn_overlap": 0.636,
           "point": "Lumen Core is the energy-operations platform that control-room customers run."
         },
         {
@@ -1253,6 +1254,7 @@
           "quote": "**Lumen Field**, the mobile product their field crews run",
           "best_sentence_overlap": 0.875,
           "best_turn_overlap": 0.875,
+          "best_own_doc_turn_overlap": 0.875,
           "point": "Lumen Field is the mobile product that field crews run."
         },
         {
@@ -1260,6 +1262,7 @@
           "quote": "Lumen Core carries three features \u2014 Grid Map (network topology view), Outage Alerts (notifies operators when a feeder trips), and Load Forecast (predicts demand per substation).",
           "best_sentence_overlap": 0.958,
           "best_turn_overlap": 0.958,
+          "best_own_doc_turn_overlap": 0.958,
           "point": "Lumen Core carries three features: Grid Map, Outage Alerts, and Load Forecast."
         },
         {
@@ -1267,6 +1270,7 @@
           "quote": "Grid Map (network topology view)",
           "best_sentence_overlap": 1.0,
           "best_turn_overlap": 1.0,
+          "best_own_doc_turn_overlap": 1.0,
           "point": "Grid Map is the network topology view feature of Lumen Core."
         },
         {
@@ -1274,6 +1278,7 @@
           "quote": "Outage Alerts (notifies operators when a feeder trips)",
           "best_sentence_overlap": 1.0,
           "best_turn_overlap": 1.0,
+          "best_own_doc_turn_overlap": 1.0,
           "point": "Outage Alerts notifies operators when a feeder trips."
         },
         {
@@ -1281,6 +1286,7 @@
           "quote": "Load Forecast (predicts demand per substation)",
           "best_sentence_overlap": 1.0,
           "best_turn_overlap": 1.0,
+          "best_own_doc_turn_overlap": 1.0,
           "point": "Load Forecast predicts demand per substation."
         },
         {
@@ -1288,6 +1294,7 @@
           "quote": "Lumen Field carries two \u2014 Crew Dispatch (assigns crews to open jobs) and Asset Register (records pole and transformer inventory).",
           "best_sentence_overlap": 0.941,
           "best_turn_overlap": 0.941,
+          "best_own_doc_turn_overlap": 0.941,
           "point": "Lumen Field carries two features: Crew Dispatch and Asset Register."
         },
         {
@@ -1295,6 +1302,7 @@
           "quote": "Crew Dispatch (assigns crews to open jobs)",
           "best_sentence_overlap": 1.0,
           "best_turn_overlap": 1.0,
+          "best_own_doc_turn_overlap": 1.0,
           "point": "Crew Dispatch assigns crews to open jobs."
         },
         {
@@ -1302,6 +1310,7 @@
           "quote": "Asset Register (records pole and transformer inventory)",
           "best_sentence_overlap": 1.0,
           "best_turn_overlap": 1.0,
+          "best_own_doc_turn_overlap": 1.0,
           "point": "Asset Register records pole and transformer inventory."
         },
         {
@@ -1309,6 +1318,7 @@
           "quote": "Dana Whitlock as Staff Engineer ... on Platform",
           "best_sentence_overlap": 1.0,
           "best_turn_overlap": 1.0,
+          "best_own_doc_turn_overlap": 1.0,
           "point": "Dana Whitlock is the Staff Engineer on the Platform team"
         }
       ],
@@ -1318,6 +1328,7 @@
           "quote": "The session confirmed there is no shared feature surface between the two: every feature belongs to exactly one product.",
           "best_sentence_overlap": 0.357,
           "best_turn_overlap": 0.357,
+          "best_own_doc_turn_overlap": 0.357,
           "point": "There is no shared feature surface between Lumen Core and Lumen Field: every feature belongs to exactly one product."
         },
         {
@@ -1325,6 +1336,7 @@
           "quote": "the two products are distinct delivery surfaces serving distinct users (operators vs.\n\nfield crews), not a single platform with a mobile skin.",
           "best_sentence_overlap": 0.222,
           "best_turn_overlap": 0.389,
+          "best_own_doc_turn_overlap": 0.389,
           "point": "Lumen Core and Lumen Field are distinct delivery surfaces serving distinct users (operators vs. field crews), not a single platform with a m"
         },
         {
@@ -1332,6 +1344,7 @@
           "quote": "Any future proposal to share or duplicate a feature across the boundary would be a change to this baseline, not a continuation of it.",
           "best_sentence_overlap": 0.2,
           "best_turn_overlap": 0.267,
+          "best_own_doc_turn_overlap": 0.267,
           "point": "Any future proposal to share or duplicate a feature across the Lumen Core / Lumen Field boundary would be a change to this baseline, not a c"
         },
         {
@@ -1339,6 +1352,7 @@
           "quote": "ownership is a responsibility claim, so future questions of \"who decides / who is answerable\" route to these named owners rather than to whoever happens to be working on the item.",
           "best_sentence_overlap": 0.211,
           "best_turn_overlap": 0.211,
+          "best_own_doc_turn_overlap": 0.211,
           "point": "Ownership is a responsibility claim, so questions of who decides or who is answerable route to the named owners rather than to whoever happe"
         },
         {
@@ -1346,6 +1360,7 @@
           "quote": "fact-store availability is not a local concern but a root dependency for telemetry ingestion and signal computation alike",
           "best_sentence_overlap": 0.312,
           "best_turn_overlap": 0.312,
+          "best_own_doc_turn_overlap": 0.312,
           "point": "Fact-store availability is not a local concern but a root dependency for telemetry ingestion and signal computation alike"
         },
         {
@@ -1353,6 +1368,7 @@
           "quote": "which tempers any future decision to treat fact-store resilience as a lower-priority item than the components visibly closer to operators",
           "best_sentence_overlap": 0.167,
           "best_turn_overlap": 0.222,
+          "best_own_doc_turn_overlap": 0.222,
           "point": "Fact-store resilience should not be treated as a lower-priority item than the components visibly closer to operators"
         },
         {
@@ -1360,6 +1376,7 @@
           "quote": "the segment is the planning unit, which supports treating it as the durable commercial frame",
           "best_sentence_overlap": 0.3,
           "best_turn_overlap": 0.4,
+          "best_own_doc_turn_overlap": 0.4,
           "point": "The segment being the planning unit supports treating it as the durable commercial frame."
         },
         {
@@ -1367,6 +1384,7 @@
           "quote": "per-customer renewal negotiation tempers how much segment-level uniformity we can assume",
           "best_sentence_overlap": 0.333,
           "best_turn_overlap": 0.333,
+          "best_own_doc_turn_overlap": 0.333,
           "point": "Per-customer renewal negotiation tempers how much segment-level uniformity we can assume."
         },
         {
@@ -1374,6 +1392,7 @@
           "quote": "these are now recorded as the durable structure \u2014 who builds what, who reviews what, and how the products reach customers \u2014 rather than left implicit",
           "best_sentence_overlap": 0.25,
           "best_turn_overlap": 0.25,
+          "best_own_doc_turn_overlap": 0.25,
           "point": "The component-to-team structure and customer delivery chain are recorded as durable structure rather than left implicit"
         }
       ],
@@ -1383,6 +1402,7 @@
           "quote": "Three teams exist: Platform (engineering), Product (product management), and Customer (commercial).",
           "best_sentence_overlap": 0.3,
           "best_turn_overlap": 0.8,
+          "best_own_doc_turn_overlap": 0.8,
           "point": "Three teams exist: Platform (engineering), Product (product management), and Customer (commercial)"
         },
         {
@@ -1390,6 +1410,7 @@
           "quote": "We recorded the system architecture as a seven-component dependency graph: ingest-gateway (meter telemetry intake), event-bus (internal events), fact-store (time-series facts), signal-engine (outage s",
           "best_sentence_overlap": 0.4,
           "best_turn_overlap": 0.76,
+          "best_own_doc_turn_overlap": 0.76,
           "point": "The system architecture is a seven-component dependency graph: ingest-gateway, event-bus, fact-store, signal-engine, web-dashboard, auth-ser"
         },
         {
@@ -1397,9 +1418,22 @@
           "quote": "Enterprise renewals, owned by Jonas Bauer (Account Executive)",
           "best_sentence_overlap": 0.571,
           "best_turn_overlap": 0.714,
+          "best_own_doc_turn_overlap": 0.571,
           "point": "Enterprise renewals are owned by Jonas Bauer, Account Executive."
         }
       ],
+      "supported_outside_own_doc": 1,
+      "supported_outside_own_doc_examples": [
+        {
+          "doc": "doc-04",
+          "quote": "Enterprise renewals, owned by Jonas Bauer (Account Executive)",
+          "best_sentence_overlap": 0.571,
+          "best_turn_overlap": 0.714,
+          "best_own_doc_turn_overlap": 0.571,
+          "point": "Enterprise renewals are owned by Jonas Bauer, Account Executive."
+        }
+      ],
+      "supported_outside_own_doc_examples_truncated": false,
       "bands": {
         "below_0_5": 11,
         "from_0_5_to_0_6": 1,
@@ -1457,6 +1491,7 @@
         "quote": "The session confirmed there is no shared feature surface between the two: every feature belongs to exactly one product.",
         "best_sentence_overlap": 0.357,
         "best_turn_overlap": 0.357,
+        "best_own_doc_turn_overlap": 0.357,
         "point": "There is no shared feature surface between Lumen Core and Lumen Field: every feature belongs to exactly one product."
       },
       {
@@ -1464,6 +1499,7 @@
         "quote": "the two products are distinct delivery surfaces serving distinct users (operators vs.\n\nfield crews), not a single platform with a mobile skin.",
         "best_sentence_overlap": 0.222,
         "best_turn_overlap": 0.389,
+        "best_own_doc_turn_overlap": 0.389,
         "point": "Lumen Core and Lumen Field are distinct delivery surfaces serving distinct users (operators vs. field crews), not a single platform with a m"
       },
       {
@@ -1471,6 +1507,7 @@
         "quote": "Any future proposal to share or duplicate a feature across the boundary would be a change to this baseline, not a continuation of it.",
         "best_sentence_overlap": 0.2,
         "best_turn_overlap": 0.267,
+        "best_own_doc_turn_overlap": 0.267,
         "point": "Any future proposal to share or duplicate a feature across the Lumen Core / Lumen Field boundary would be a change to this baseline, not a c"
       },
       {
@@ -1478,6 +1515,7 @@
         "quote": "ownership is a responsibility claim, so future questions of \"who decides / who is answerable\" route to these named owners rather than to whoever happens to be working on the item.",
         "best_sentence_overlap": 0.211,
         "best_turn_overlap": 0.211,
+        "best_own_doc_turn_overlap": 0.211,
         "point": "Ownership is a responsibility claim, so questions of who decides or who is answerable route to the named owners rather than to whoever happe"
       },
       {
@@ -1485,6 +1523,7 @@
         "quote": "fact-store availability is not a local concern but a root dependency for telemetry ingestion and signal computation alike",
         "best_sentence_overlap": 0.312,
         "best_turn_overlap": 0.312,
+        "best_own_doc_turn_overlap": 0.312,
         "point": "Fact-store availability is not a local concern but a root dependency for telemetry ingestion and signal computation alike"
       },
       {
@@ -1492,6 +1531,7 @@
         "quote": "which tempers any future decision to treat fact-store resilience as a lower-priority item than the components visibly closer to operators",
         "best_sentence_overlap": 0.167,
         "best_turn_overlap": 0.222,
+        "best_own_doc_turn_overlap": 0.222,
         "point": "Fact-store resilience should not be treated as a lower-priority item than the components visibly closer to operators"
       }
     ],
@@ -1814,6 +1854,7 @@
       }
     }
   ],
+  "withheld_findings": [],
   "extraction_tokens": {
     "calls": 19,
     "prompt_tokens": 130804,
