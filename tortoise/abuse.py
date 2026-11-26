@@ -344,9 +344,11 @@ def _ratio_env(name: str, default: float) -> float:
 #:   FAILURE when a floor is known (it reuses it rather than lowering the level).
 #: * an UPGRADE leaves a stale LOWER floor, so the level is merely applied late and
 #:   errs toward ALERTING.
-#: * a read failure with NO known floor answers ``0`` — the configured absolute
-#:   level. That LOWERS the level (a pro org drops from 25 000 to 500) and errs
-#:   toward alerting too. Deliberate: it is the shipped, more sensitive rule, and
+#: * a read failure with NO known floor answers ``0``, which is the ABSENCE of a
+#:   floor rather than the level itself — ``point_threshold``'s ``max(base, …)``
+#:   then keeps the configured absolute level. That LOWERS it (a pro org drops
+#:   from 25 000 to 500) and errs toward alerting too. Deliberate: it is the
+#:   shipped, more sensitive rule, and
 #:   ``tests/test_abuse.py`` pins it as "fail toward the SENSITIVE level on a COLD
 #:   START". Of the two READ-FAILURE cases, only the with-a-known-floor one errs
 #:   toward silence — a DOWNGRADE silences with no failure at all.
@@ -2403,9 +2405,12 @@ class AbuseEngine:
         failed), and the answer is remembered for ``_TIER_FLOOR_FAIL_TTL_S`` so
         the outage does not cost one blocking read per capture.
 
-        With no known floor at all (a cold start into a failing store) the answer
-        is 0 — the configured absolute level, which is the shipped, more
-        sensitive rule and the same one this org had before the tier term existed.
+        With no known floor at all (a cold start into a failing store) the FLOOR
+        is ``0``, which the caller's ``max(base, …)`` resolves to the configured
+        absolute level — the shipped, more sensitive rule and the same one this
+        org had before the tier term existed. ⛔ ``0`` is not that level; a reader
+        that compared this method's return against the level would get the wrong
+        answer.
         """
         now = time.monotonic()
         with self._tier_lock:
