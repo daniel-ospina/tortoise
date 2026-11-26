@@ -47,9 +47,9 @@ shapes a user can actually have: it renamed a `reflect-hook.ts` DIRECTORY to
 renamed `index.ts` inside a foreign checkout, and it unlinked the legacy
 producer symlink *before* the copies — the zero-producer window the installer
 defers for a measured reason (`ENOSPC` on a fresh home). Each was a silent
-non-fix, reported by nothing. A snippet that must reproduce six refusal
-conditions will drift again; the installer is the surface with the tests, so it
-is the one that ships.
+non-fix, reported by nothing. A snippet that must reproduce the installer's
+refusal conditions will drift again; the installer is the surface with the
+tests, so it is the one that ships.
 
 Pi auto-discovers `~/.pi/agent/extensions/*.ts` on the next start. Installing
 the extensions *is* the opt-in — there is deliberately no `autoCapture`-style
@@ -280,9 +280,12 @@ from this section is the false claim, not a stale measurement.
   still loads, and the second producer's taken-name collision). Every OTHER
   refusal the installer has is UNMIRRORED, so `hooks status`/`doctor` can still
   name a verb that refuses for them: a symlinked preservation target, a
-  manifest-declared or unreadable-`package.json` directory, and an existing
-  `index.ts.disabled`/`index.js.disabled`. The list is deliberately not
-  counted — a count is what drifted before. The mirror is the one thing that
+  manifest-declared or unreadable-`package.json` directory, an existing
+  `index.ts.disabled`/`index.js.disabled`, a still-loadable RETIRED name for the
+  second producer (a suffixed link to a directory, which refuses on every
+  re-run), and a manifest-declared directory at the second producer's name. The
+  list is deliberately not counted — a count is what drifted before — and it is
+  the full set, so a reader does not mistake it for coverage. The mirror is the one thing that
   drifts; that is its documented hazard, not a new one, and
   `test_pi_legacy_obstacle_matches_the_installers_own_refusal` pins the shape it
   covers.

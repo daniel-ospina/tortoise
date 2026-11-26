@@ -2133,11 +2133,16 @@ def _disable_pi_second_producer(
         # finding 3).
         planned = _retire_pi_entry(active, dry_run=True)
         if planned:
+            # ⛔ THIS ARM ONLY EVER RUNS UNDER `--dry-run` (the real run's refusal
+            # is the `_retire_pi_entry` error below), so it must not read as the
+            # past-tense receipt: the same install wrote nothing and carries
+            # `changed_artifacts=()`. `seam_state` exists for exactly this and was
+            # skipped here (#14342 round 11, finding 1).
             return False, [], (
-                f"the capture seam is installed, but the second capture producer "
-                f"could not be disabled ({active}): {planned}. TWO producers are "
-                "registered, so every session is captured twice until one of them "
-                "is removed.")
+                f"{seam_state}, but the second capture producer could not be "
+                f"disabled ({active}): {planned}. TWO producers would stay "
+                f"registered, so every session would be captured twice until "
+                f"one of them is removed.")
         if active.is_symlink() and active.is_dir():
             # The real run renames the LINK to `retired` and THEN asserts on
             # it; a suffixed link to a directory is still resolved through
@@ -2512,16 +2517,23 @@ def _install_pi(
                          else legacy_disabled)
             planned = _retire_pi_entry(plan_path, dry_run=True)
             if planned:
+                # ⛔ THIS ARM IS A PREVIEW: nothing was written, and on the
+                # fresh-directory shape the path just evaluated is `legacy` —
+                # `legacy_disabled` does not exist yet, so naming it would tell
+                # the operator to move a directory that is not there. Mode-blind
+                # wording was round 10's finding 4, one arm over
+                # (#14342 round 11, finding 2).
                 return InstallResult(harness, changed=changed,
                                      actions=tuple(actions),
                                      changed_artifacts=_written(), error=(
                                          f"the legacy capture extension at "
-                                         f"{legacy_disabled} could not be "
-                                         f"retired ({planned}), so both "
-                                         f"producers stay registered. Move "
-                                         f"{legacy_disabled} out of the "
-                                         f"extensions directory by hand and "
-                                         f"re-run."))
+                                         f"{plan_path} could not be retired "
+                                         f"({planned}), so both producers would "
+                                         f"stay registered and a real run would "
+                                         f"refuse the same way. Nothing was "
+                                         f"written (a dry run). Move "
+                                         f"{plan_path} out of the extensions "
+                                         f"directory by hand and re-run."))
             actions.append(
                 f"[dry-run] would retire the entry point inside "
                 f"{legacy_disabled} (Pi still loads it)")

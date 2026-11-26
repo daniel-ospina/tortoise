@@ -7383,6 +7383,15 @@ def test_pi_dry_run_refuses_a_preserved_entry_on_the_legacy_directory_shape(home
     assert not dry.ok, (
         f"the dry run previewed success for a shape the real run refuses: {dry.actions}")
     assert "already exists" in (dry.error or ""), dry.error
+    # The receipt is a PREVIEW: subjunctive, no claim of a write, and it names
+    # the path it actually evaluated (the source — the destination does not
+    # exist yet) so the operator is not told to move a directory that is not
+    # there (#14342 round 11, finding 2).
+    error = dry.error or ""
+    assert "Nothing was written" in error, error
+    assert str(legacy) in error, error
+    assert str(ext_dir / capture_install.PI_DISABLED_DIRNAME) not in error, error
+    assert dry.changed_artifacts == (), dry.changed_artifacts
     assert (legacy / "index.ts").exists(), "a dry run retired the entry point"
     assert (legacy / "index.ts.disabled").read_text() == "// PRESERVED\n"
 
@@ -7475,3 +7484,34 @@ def test_pi_dry_run_receipt_does_not_claim_a_write(home):
     assert dry.changed_artifacts == (), dry.changed_artifacts
     assert not (ext_dir / capture_install.PI_EXTENSION_NAME).exists(), (
         "a dry run wrote the seam")
+
+
+def test_pi_dry_run_second_producer_refusal_is_subjunctive(home):
+    """The preview-only refusal arm must not read as the past-tense receipt.
+
+    `_disable_pi_second_producer`'s `planned` arm runs ONLY under `--dry-run`,
+    yet it used the real run's sentence ("the capture seam is installed … TWO
+    producers ARE registered") on an install that wrote nothing
+    (#14342 round 11, finding 1).
+
+    Mutation: use the real-run sentence in that arm — this row REDs on both
+    claims while `changed_artifacts` stays empty.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "index.ts").write_text("// live producer\n")
+    # `_retire_pi_entry` refuses this shape: the preserved entry already exists.
+    (producer / "index.ts.disabled").write_text("// PRESERVED\n")
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert not dry.ok, dry.actions
+    error = dry.error or ""
+    assert "WOULD be in place" in error, error
+    assert "capture seam is installed" not in error, (
+        f"a dry run used the real-run receipt: {error!r}")
+    assert "would stay registered" in error, error
+    assert dry.changed_artifacts == (), dry.changed_artifacts
+    assert not (ext_dir / capture_install.PI_EXTENSION_NAME).exists()
