@@ -198,7 +198,14 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
     ? ackError.message
     : ''
   return (
-    <div className="notif-detail" aria-label={DETAIL_TITLE}>
+    // `role="group"` is NOT decoration: a bare `<div>` has implicit `role=generic`,
+    // which is on WAI-ARIA 1.2's *Name prohibited* list (§5.2.8.6), so the
+    // `aria-label` beside it would be ignored by every user agent and the view
+    // would have no accessible name at all. This is the same construct the panel
+    // itself already uses (`.notif-panel`, `role="group"` + `aria-label`), and it
+    // is what makes the name real rather than merely present in the DOM
+    // (review finding F4).
+    <div className="notif-detail" role="group" aria-label={DETAIL_TITLE}>
       <button type="button" className="ghost small notif-back" onClick={onBack}>
         ← {DETAIL_BACK}
       </button>
@@ -467,6 +474,15 @@ export function NotificationBell({
   ]
   const detailEntry = detailKey ? everyEntry.find((e) => e.rowKey === detailKey) || null : null
   const detailAlert = detailEntry ? detailEntry.alert : null
+  // A refusal that names an episode NO LONGER IN THE FEED. The parent re-reads
+  // `/v1/team/alerts` on every refusal (`main.jsx` acknowledgeAlert), so a 404 —
+  // "that alert is no longer in the feed" — resolves `detailEntry` to null and
+  // unmounts `DetailView`, which was the only place the sentence rendered: the
+  // panel silently reverted to the bare ledger and the reader was told nothing.
+  // That is exactly the unactionable outcome this change exists to remove, so
+  // the ledger branch states it too — the message outlives the row it is about
+  // (review finding F1).
+  const ackNote = ackError && !detailAlert ? ackError.message : ''
 
   // The badge counts UNRESOLVED notifications (not unread ones), and the label says
   // so. This is a deliberate departure from the usual "unread" bell: nothing here
@@ -548,6 +564,13 @@ export function NotificationBell({
             />
           ) : (
             <>
+              {/* A refusal outlives the row it is about: the feed re-read that
+                  follows a 404 drops the episode, so `DetailView` — the only place
+                  this sentence used to render — unmounts under the reader. Stated
+                  here it is still on screen after the read that caused it. */}
+              {ackNote ? (
+                <p className="error small notif-note" role="alert">{ackNote}</p>
+              ) : null}
               {/* The three "we cannot see everything" facts, stated where the
                   reader is, never as "no notifications" (which is a claim about
                   the Organization's state that a failed read cannot support). */}

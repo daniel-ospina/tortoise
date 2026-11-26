@@ -631,9 +631,14 @@ test('#14686: clicking a notification opens its detail, and says when no detail 
 
   const detail = container.querySelector('.notif-detail')
   assert.ok(detail, 'the detail view must open')
-  // The title is the view's ACCESSIBLE NAME (`DETAIL_TITLE` reaches the DOM only
-  // as an `aria-label`). The old assertion here was satisfied by the fixture's own
-  // message text and so could not red when the title was removed.
+  // The accessible name must be REAL, not merely present. A bare `<div>` has
+  // implicit `role=generic`, which WAI-ARIA 1.2 puts on its *Name prohibited* list
+  // (§5.2.8.6) — user agents ignore an `aria-label` on it, so the assertion this
+  // replaces (`aria-label` is the view's ACCESSIBLE NAME) pinned a string that had
+  // no effect. `role="group"` names it for real, and it is the same construct the
+  // panel already uses (review finding F4).
+  assert.equal(detail.getAttribute('role'), 'group',
+    'a nameable role is required: `generic` prohibits author naming')
   assert.equal(detail.getAttribute('aria-label'), DETAIL_TITLE)
   assert.match(detail.querySelector('h3').textContent, /Suspicious activity/)
   // The recorded facts are shown…
@@ -755,6 +760,50 @@ test('#14686: a refused acknowledgement renders in the detail view, not silently
   fireEvent.click(bell(container))
   fireEvent.click(container.querySelector('.notif-open'))
   assert.match(container.textContent, /Only an owner or admin can acknowledge an alert\./)
+})
+
+test('#14686: a refusal stays readable after the feed re-read drops its row', () => {
+  // The PRODUCTION path, which the static-prop test above cannot reach: the parent
+  // (`main.jsx` acknowledgeAlert) sets the refusal and then RE-READS the feed. A
+  // 404 means the episode is gone, so the re-read drops the row — `detailEntry`
+  // resolves to null and `DetailView`, the only place the sentence rendered,
+  // unmounts. The reader saw the panel silently revert to the bare ledger: the
+  // exact unactionable outcome this change exists to remove (review finding F1).
+  const row = alert({ message: 'gone on the re-read' })
+  function Harness() {
+    const [alerts, setAlerts] = React.useState([row])
+    const [ackError, setAckError] = React.useState(null)
+    return (
+      <NotificationBell
+        alerts={alerts}
+        userId={USER}
+        orgId={ORG}
+        canAcknowledge
+        ackError={ackError}
+        onAcknowledge={() => {
+          setAckError({
+            episode: row.episode,
+            message: 'That alert is no longer in the feed — reload to refresh.',
+          })
+          setAlerts([]) // the re-read: the episode is no longer in the feed
+        }}
+        now={NOW}
+        storage={fakeStorage()}
+      />
+    )
+  }
+  const { container } = render(<Harness />)
+  fireEvent.click(bell(container))
+  fireEvent.click(container.querySelector('.notif-open'))
+  fireEvent.click([...container.querySelectorAll('.notif-detail-actions button')]
+    .find((b) => /Acknowledge for everyone/.test(b.textContent)))
+
+  assert.equal(container.querySelector('.notif-detail'), null,
+    'precondition: the re-read drops the row, so the detail cannot stay mounted')
+  const note = [...container.querySelectorAll('.notif-note')]
+    .find((p) => /no longer in the feed/.test(p.textContent))
+  assert.ok(note, 'the refusal must survive the read that made its row unresolvable')
+  assert.equal(note.getAttribute('role'), 'alert', 'and it must be announced, not just drawn')
 })
 
 // ── 6. The feed's "we could not look" facts survive the move ────────────────

@@ -338,8 +338,68 @@ test('#14686: the alerts no longer render as blocks inside the dashboard content
   const mainAt = main.indexOf('<main>', headerAt)
   const bellAt = main.indexOf('<NotificationBell')
   assert.ok(headerAt !== -1 && mainAt !== -1 && bellAt !== -1, 'the three anchors must exist')
+  // `bellAt < mainAt` ALONE IS NOT THE CLAIM, and it was green for the defect:
+  // the header closes immediately before `<main>` (main.jsx), so a bell placed
+  // BETWEEN `</header>` and `<main>` satisfies both orderings while rendering as
+  // page-flow content directly above the dashboard — a milder form of exactly
+  // what #14686 exists to remove. The binder is the CLOSING TAG (review F3).
+  const headerCloseAt = main.indexOf('</header>', headerAt)
+  assert.ok(headerCloseAt !== -1, 'the dashboard header must close before <main>')
+  assert.ok(headerCloseAt < mainAt, 'the header must close before <main>')
   assert.ok(bellAt > headerAt, 'the bell must be inside the header block')
+  assert.ok(bellAt < headerCloseAt,
+    'the bell must be INSIDE header.dash-header — between </header> and <main> is page-flow content')
   assert.ok(bellAt < mainAt, 'the bell must be BEFORE <main> — never in the page content')
+})
+
+// ── The team-scoped feed (main.jsx) ────────────────────────────────────────
+//
+// The bell is ALWAYS MOUNTED in the header now, so the alerts state stopped being
+// a panel that only rendered on the overview tab and became a header control that
+// speaks for whichever Organization is current. `switchTeam` resets a long,
+// deliberate list of team-scoped state and did not touch this one (review finding
+// F2), which let the bell report org A's unresolved count under org B and let a
+// snooze taken on org A's flag row hide org B's own flag rows.
+//
+// `switchTeam` lives inside `App`, so — like the ack path above — this is a SOURCE
+// PIN, bounded by the function's OWN closing brace at its declared indent.
+const SWITCH_DECL = 'async function switchTeam'
+const switchTeamPath = (main = readFileSync(join(here, 'main.jsx'), 'utf8')) => {
+  const start = main.indexOf(SWITCH_DECL)
+  assert.ok(start !== -1, 'switchTeam must exist in main.jsx')
+  const close = '\n  }'
+  const end = main.indexOf(close, start)
+  assert.ok(end !== -1,
+    'switchTeam must stay a two-space-indented declaration so its closing brace '
+    + 'bounds the slice')
+  return main.slice(start, end + close.length)
+}
+
+test('#14686: a team switch drops the previous Organization\'s alerts', () => {
+  const body = switchTeamPath()
+  // All THREE feed facts reset: rows, the cut-scan flag and the failed-read flag
+  // each render a different claim on the closed bell, so leaving any of them set
+  // reports the previous Organization's state.
+  assert.match(body, /setAlerts\(\[\]\)/,
+    'the previous Organization\'s rows must not survive a switch')
+  assert.match(body, /setAlertsSaturated\(false\)/, 'nor its cut-scan flag')
+  assert.match(body, /setAlertsUnavailable\(false\)/, 'nor its failed-read flag')
+  assert.match(body, /loadAlerts\(orgId\)/,
+    'and the NEW Organization must be read — an empty bell is not a correct one')
+})
+
+test('#14686: an in-flight alerts read cannot land on the wrong Organization', () => {
+  // The reset above is only sound if a read started before the switch cannot
+  // resolve after it: `loadAlerts` has no other org guard, so without this one a
+  // slow org-A response overwrites org-B state — the same contamination, just
+  // harder to see.
+  const main = readFileSync(join(here, 'main.jsx'), 'utf8')
+  const start = main.indexOf('async function loadAlerts')
+  assert.ok(start !== -1, 'loadAlerts must exist in main.jsx')
+  const end = main.indexOf('\n  }', start)
+  const body = main.slice(start, end)
+  assert.match(body, /if \(orgIdRef\.current !== tid\) return/,
+    'a response for an Organization that is no longer current must be discarded')
 })
 
 // ── The durable write path (main.jsx) ───────────────────────────────────────

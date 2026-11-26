@@ -5452,6 +5452,12 @@ function claimIntentInFlight() {
         // regress silently (a mutant that dropped `unavailable` survived the
         // whole dashboard suite).
         const feed = feedStateOf(await res.json())
+        // #14686: an Organization switch can invalidate this read while it is in
+        // flight. The bell is ALWAYS MOUNTED in the header, so writing a previous
+        // org's feed here would list its rows — and let a snooze/dismissal
+        // written against them land in the NEW org's key. Same guard discipline
+        // as the members/graphs loaders.
+        if (orgIdRef.current !== tid) return
         setAlerts(feed.alerts)
         setAlertsSaturated(feed.saturated)
         setAlertsUnavailable(feed.unavailable)
@@ -6541,6 +6547,19 @@ function claimIntentInFlight() {
     setError('')
     setCurrentOrgId(orgId)
     orgIdRef.current = orgId
+    // #14686: the alerts feed is TEAM-scoped, and the bell is now ALWAYS MOUNTED
+    // in the header — before this change the feed only fed a panel that rendered
+    // on the overview tab. Without this reset the bell reports the PREVIOUS
+    // Organization's unresolved count, lists its episodes, and lets a decision
+    // taken on one be written under the other's key: `snoozedUntil` has no
+    // incident gate by design (a bounded personal snooze does not need one), and
+    // a flag row's message is a constant every flag rule shares — so snoozing a
+    // stale org-A flag row would hide org B's own flag rows for the period
+    // (review finding F2).
+    setAlerts([])
+    setAlertsSaturated(false)
+    setAlertsUnavailable(false)
+    loadAlerts(orgId)
     // #1893 (code-review P1): onboarding state is TEAM-scoped — the switch
     // must re-hydrate the NEW team's persisted scope, never the old team's.
     // The stale flag blocks the hydration effect until refreshOnboarding
