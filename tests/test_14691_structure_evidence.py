@@ -1504,9 +1504,10 @@ def test_the_reports_number_TABLES_are_the_artifacts_tables():
         "the receipt's written relations do not sum to the scorer's edge_count: "
         f"{written_total} vs {score['edge_count']}")
 
-    # §2 — the post-write overview block, quoted from the receipt
-    cells = ", ".join(f'"{k}": {v}' for k, v in after["taxonomy"].items())
-    cell(r'^"taxonomy":', f'"taxonomy":  {{{cells}}}', "§2's post-write taxonomy")
+    # §2 — the post-write overview block, quoted from the receipt. The taxonomy
+    # LINE itself is owned by `test_the_remaining_prose_figures_are_the_artifacts_figures`
+    # (the parallel lane's arm, kept rather than duplicated); the three cells below
+    # are this table's and had no pin.
     cell(r'^"structure":',
          f'"operators": {after["structure"]["operators"]}, '
          f'"total": {after["structure"]["total"]}', "§2's post-write structure")
