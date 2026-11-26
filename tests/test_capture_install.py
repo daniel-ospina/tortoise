@@ -871,10 +871,10 @@ def test_pi_install_retires_a_legacy_directory_an_older_install_renamed(home):
     assert not (ext_dir / capture_install.LEGACY_PI_DIRNAME).exists(), (
         "fixture defect: this must be the UPGRADE shape, where the original "
         "name is already gone")
-    assert _registered_producers(ext_dir) == [
+    assert set(_registered_producers(ext_dir)) == {
         capture_install.PI_SECOND_PRODUCER_NAME,
         f"{capture_install.PI_DISABLED_DIRNAME}/index.ts",
-    ], (
+    }, (
         "fixture defect: this is the two-producer state the guard exists to "
         f"remove — got {_registered_producers(ext_dir)}")
 
@@ -2107,8 +2107,15 @@ def test_install_refuses_when_the_index_entry_is_a_directory(home):
     producers, measured on the first run, on a re-run, and on the legacy rename
     path too. One word, and the forbidden direction.
 
-    Mutation: `.exists()` -> `.is_file()` at the index test — this row REDs, and
-    so does `test_oracle_counts_an_index_entry_that_is_a_directory`.
+    ⛔ AND THIS ROW DOES NOT SEE THAT MUTANT (#14695 review, MEASURED): its
+    fixture is suffix-named SYMLINKS, which the predicate answers with the
+    CONSERVATIVE rule above the index loop, so mutating the predicate's index
+    test to `.is_file()` left this row GREEN. The rows that RED on it are
+    `test_a_legacy_index_entry_that_is_a_directory_IS_retired` and
+    `test_dry_run_and_real_run_agree_when_the_index_entry_is_a_directory`, both
+    of which build a real, non-suffixed directory — the only shape that reaches
+    the loop. This row's own property is the conservative answer per name plus
+    the install refusing, and it keeps pinning those.
     """
     ext_dir = home / ".pi" / "agent" / "extensions"
     ext_dir.mkdir(parents=True)
@@ -2128,10 +2135,29 @@ def test_install_refuses_when_the_index_entry_is_a_directory(home):
 
 
 def test_oracle_counts_an_index_entry_that_is_a_directory(home):
-    """The oracle transcribes the same rule, so it had the same `.is_file()`
-    (#14342 round 22, finding 1) — which is why no row could see the class.
+    """The oracle counts a suffix-named symlink to a directory carrying a
+    nested `index.ts` DIRECTORY, by the CONSERVATIVE rule — the same arm the
+    predicate takes on that shape.
 
-    Mutation: `.exists()` -> `.is_file()` in the oracle — REDs.
+    ⛔ IT USED TO CLAIM THE ORACLE'S `.exists()` INDEX TEST AND COULD NOT SEE IT
+    (#14695 review). A suffix-named symlink is answered by the conservative arm
+    (`entry.is_symlink() and suffix_ok` -> non-empty target => `name/*`) BEFORE
+    the index loop, so `.exists()` -> `.is_file()` in the oracle left this row
+    GREEN — measured, not reasoned. Its assertion could not fail either: `assert
+    got == [...] or got` is truthy for ANY non-empty list, so the comparison was
+    dead weight while its prose read as a strict equality. Both are fixed: the
+    value is PINNED, and the mutation named below is the arm this shape
+    actually reaches.
+
+    Mutation: drop the conservative arm from `_registered_producers` — the
+    oracle falls through to the index loop and answers
+    `reflect-hook.ts/index.ts` instead of `reflect-hook.ts/*`, so the pin REDs.
+
+    The oracle's `exists`-not-`is_file` index test IS real and IS guarded — by
+    `test_oracle_counts_a_legacy_index_entry_that_is_a_directory`, whose fixture
+    is a real non-suffixed directory (the only shape that reaches the loop).
+    MEASURED: with the oracle's index test mutated to `.is_file()`, that row
+    REDs and this one stays green, which is why the attribution moved there.
     """
     ext_dir = home / ".pi" / "agent" / "extensions"
     ext_dir.mkdir(parents=True)
@@ -2142,11 +2168,10 @@ def test_oracle_counts_an_index_entry_that_is_a_directory(home):
         target, target_is_directory=True)
 
     got = _registered_producers(ext_dir)
-    assert got == [f"{capture_install.PI_SECOND_PRODUCER_NAME}/*"] or got, (
-        got)
-    assert got, (
-        "a directory named index.ts IS a producer Pi registers; the oracle "
-        "must not count nothing")
+    assert got == [f"{capture_install.PI_SECOND_PRODUCER_NAME}/*"], (
+        "a suffix-named symlink to a non-empty directory is counted by the "
+        "conservative rule; an `index.ts` answer means the oracle fell through "
+        f"to the index loop — got {got}")
 
 
 def test_dry_run_does_not_claim_a_mechanism_on_an_unreadable_target(home):

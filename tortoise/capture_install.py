@@ -1378,6 +1378,16 @@ def legacy_extension_obstacle(harness: str,
     A symlinked legacy entry is deliberately NOT a collision: the installer
     unlinks it (the checkout it points at is untouched) and never reaches the
     refusal, so calling it one would withhold a command that works.
+
+    ⛔ THIS DOCSTRING IS NOT A COMPLETENESS CLAIM (#14695 review). It mirrors the
+    refusals listed above and NOT every arm the installer has: a
+    manifest-declared directory producer with no retired name yet, and an
+    UNREADABLE-``package.json`` directory, both refuse while this returns ``""``.
+    Those are disclosed, with their shapes, in ``tortoise/pi-hooks/README.md``
+    under "Residuals this guard does NOT close" — read that list (or re-derive
+    from the arms below) before quoting this predicate as full coverage; a
+    hand-maintained count is exactly what drifted it the three times rounds
+    20/24/25 fixed.
     """
     if harness != "pi":
         return ""
