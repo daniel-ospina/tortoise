@@ -788,15 +788,27 @@ def _superseded_below_successor(ann: list[dict], *,
     alternative (refusing to cross the belief tier) would leave the defect open
     for exactly the claims that carry the most evidence.
 
-    CHAINS, CYCLES AND THE MOVE BUDGET. ``A <- B <- C <- D`` (A replaced by B,
-    …) must resolve to ``D, C, B, A``. The bound that is a PROOF is a budget on
-    MOVES, not on passes: every move strictly increases a row's index, so one
-    row can move at most ``n-1`` times and the whole list at most ``n·(n-1)``.
-    The first version counted PASSES (``n`` of them, one move each) and was
-    measured wrong at four links — a ``k``-link chain needs ``k·(k-1)/2`` moves,
-    so it came out ``B, A, D, C``, leaving B above C. A CYCLE in the data (X
-    replaced by Y and Y by X) has no valid order at all; the budget simply runs
-    out and a deterministic order is returned rather than looping.
+    CHAINS ARE RESOLVED BY DEPTH, IN ONE WALK. ``A <- B <- C <- D`` (A replaced
+    by B, …) must resolve to ``D, C, B, A``. Each row's DEPTH is its number of
+    links to a terminal successor (``D``=0, ``C``=1, ``B``=2, ``A``=3), and the
+    rows are placed shallowest-first, so a row is placed only after its own
+    successor has reached its final position. That is one placement per row —
+    ``O(n²)`` including the re-indexing — and it has no pass budget to get
+    wrong: the first version counted PASSES (``n`` of them, one move each) and
+    was measured wrong at four links (a ``k``-link chain needs moves in
+    decreasing depth order, not ``k`` passes — it came out ``B, A, D, C``,
+    leaving B above C), and the second bounded MOVES at ``n·(n-1)`` with an
+    ``O(n²)`` re-index per pass, i.e. ``O(n³)`` in moves and ``O(n⁴)``
+    overall — measured at 10.2 s for a 160-row pool and 146 s at 320, against
+    the 10 s wait bound #3834 pins. Depth placement makes both the cost and the
+    termination obvious.
+
+    A CYCLE in the data (X replaced by Y and Y by X — only raw/imported data
+    can write one: ``supersede_point`` refuses a terminal endpoint, #2498) has
+    NO valid order, so cycle members keep their positions and are not moved; a
+    row that merely feeds the cycle is still placed below it. That is stated
+    rather than left to a budget running out: an expensive pass that in the end
+    changes nothing is the shape that made this quadratic-to-the-fourth.
 
     ``page_limit`` — the caller's page size, when it knows it. A replacement
     that will NOT be served must not drag the replaced row out of the page
@@ -808,44 +820,106 @@ def _superseded_below_successor(ann: list[dict], *,
     n = len(ann)
     if n < 2:
         return ann
+    # An id-to-index map is only usable when it is INJECTIVE. Every row with no
+    # ``id``/``node_id`` collapses onto ``""``, and two rows can share an id; in
+    # either case a positional move would take a DIFFERENT row than the one
+    # just inspected — duplicating one and silently dropping another (measured:
+    # three rows in, one of two id-less rows lost and the other doubled). Such
+    # rows are therefore not addressable and the constraint does not apply.
+    ids = [_row_id(r) for r in ann]
+    counts: dict[str, int] = {}
+    for rid in ids:
+        counts[rid] = counts.get(rid, 0) + 1
+    where = {rid: i for i, rid in enumerate(ids)
+             if rid and counts[rid] == 1}
+    succ_of: list[str | None] = []
+    for row, rid in zip(ann, ids, strict=True):
+        succ = row.get("superseded_by")
+        succ_id = str(succ.get("id")) if isinstance(succ, dict) and succ.get("id") else None
+        # Nothing this pass can hold the row below: no successor, a successor
+        # that is not in this result set, an unaddressable row, or a row that
+        # names ITSELF (without this guard the move below would pop a row and
+        # then look for the very id it just removed — a ``StopIteration`` that
+        # propagates out of ``rerank`` and fails the whole state read).
+        if (succ_id is None or succ_id == rid
+                or rid not in where or succ_id not in where):
+            succ_of.append(None)
+            continue
+        succ_of.append(succ_id)
+    by_depth: dict[int, list[int]] = {}
+    for k, d in enumerate(_successor_depths(succ_of, where)):
+        if succ_of[k] is not None:
+            by_depth.setdefault(d, []).append(k)
+    if not by_depth:
+        return ann
     order = list(ann)
-    budget = n * (n - 1) or 1
-    while budget > 0:
-        # An id-to-index map is only usable when it is INJECTIVE. Every row with
-        # no ``id``/``node_id`` collapses onto ``""``, and two rows can share an
-        # id; in either case ``order.pop(index[id])`` would remove a DIFFERENT
-        # row than the one just inspected — duplicating one and silently
-        # dropping another (measured: three rows in, one of two id-less rows
-        # lost and the other doubled). Such rows are therefore not indexable and
-        # the constraint simply does not apply to them.
-        ids = [_row_id(r) for r in order]
-        index = {rid: i for i, rid in enumerate(ids)
-                 if rid and ids.count(rid) == 1}
-        moved = False
-        for row in order:
-            succ = row.get("superseded_by")
-            succ_id = succ.get("id") if isinstance(succ, dict) else None
-            if not succ_id or succ_id == _row_id(row):
-                continue
-            here = index.get(_row_id(row))
-            there = index.get(str(succ_id))
-            if here is None or there is None or here > there:
-                continue                     # absent, or already correctly ranked
+    for depth in sorted(by_depth):
+        for k in by_depth[depth]:
+            # Re-locate BOTH rows by id on every placement: a previous move in
+            # this level shifted positions, and a dict comparison would land on
+            # a twin row with identical content (never on the addressable set).
+            now = [_row_id(r) for r in order]
+            here = now.index(ids[k])
+            there = now.index(succ_of[k])
+            if here > there:
+                continue                     # already correctly ranked
             if page_limit is not None and there >= page_limit:
                 continue                     # the successor is not served: see above
-            # Re-locate the successor by ID after the pop (indices shifted), and
-            # insert by POSITION — never `list.index(row)`, which compares dicts
-            # by value and would land on a twin row with identical content.
-            order.pop(here)
-            target = next(i for i, r in enumerate(order)
-                          if _row_id(r) == str(succ_id))
-            order.insert(target + 1, row)
-            moved = True
-            budget -= 1
-            break                            # indices are stale; re-index
-        if not moved:
-            break
+            row = order.pop(here)
+            order.insert([_row_id(r) for r in order].index(succ_of[k]) + 1, row)
     return order
+
+
+def _successor_depths(succ_of: list[str | None],
+                      where: dict[str, int]) -> list[int]:
+    """Links from each row to a terminal successor — one walk per chain.
+
+    ``A <- B <- C`` gives ``{C: 0, B: 1, A: 2}``. The walk is iterative and each
+    row is visited once, so the whole thing is ``O(n)``; the placement pass in
+    :func:`_superseded_below_successor` then needs one move per row, never
+    ``n·(n-1)`` passes.
+
+    A row in a CYCLE gets depth 0 (it is not placed) and a row that merely
+    feeds the cycle still gets the chain depth that leads into it, so it is
+    still held below the row it names.
+    """
+    n = len(succ_of)
+    depth = [0] * n
+    resolved = [False] * n
+    for start in range(n):
+        if resolved[start]:
+            continue
+        path: list[int] = []
+        on_path: dict[int, int] = {}
+        i = start
+        base = 0
+        while True:
+            if resolved[i]:
+                base = depth[i]
+                break
+            seen_at = on_path.get(i)
+            if seen_at is not None:
+                for j in path[seen_at:]:     # the cycle itself: unresolvable
+                    resolved[j] = True       # depth stays 0 ⇒ never moved
+                path = path[:seen_at]
+                base = 0
+                break
+            sid = succ_of[i]
+            if sid is None:
+                # A TERMINAL successor: depth 0 (it is never moved itself) and
+                # NOT part of the chain being counted below it.
+                depth[i] = 0
+                resolved[i] = True
+                base = 0
+                break
+            on_path[i] = len(path)
+            path.append(i)
+            i = where[sid]
+        for j in reversed(path):
+            base += 1
+            depth[j] = base
+            resolved[j] = True
+    return depth
 
 
 def _row_id(row: dict) -> str:

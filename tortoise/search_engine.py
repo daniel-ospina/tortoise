@@ -2031,7 +2031,11 @@ class SearchResult:
     # reader that must skip non-current Points). Additive in ``to_dict``
     # (emitted only when true), so live hits stay byte-identical.
     outdated: bool = False
-    superseded_by: dict | None = None  # {id, content_snippet, created_at} | None
+    # #14721 (R3): `superseded_at` (the OLD row's `validTo` — when it stopped
+    # being current) and `source` (the successor's `sessionId` — which document
+    # the correction came from) are additive, PRESENT-ONLY keys on this block;
+    # `fetch_point_epistemic_state` is the single producer that fills them.
+    superseded_by: dict | None = None  # {id, content_snippet, created_at, superseded_at?, source?} | None
     supersedes: list[dict] = field(default_factory=list)  # [{id, content_snippet, created_at}]
     # E6 (#1538) D5/D7: promoted validity-window fields — additive, emitted
     # only when present (undated points ⇒ empty string, no marker). Written
@@ -7649,8 +7653,20 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
 
     Returns {pid: {status, superseded_by, supersedes, subject}} where:
       status         — n.status (live/superseded/deprecated/retracted/draft)
-      superseded_by  — {id, content_snippet, created_at} of the newest superseding
-                       claim (incoming CORRECTS) or None
+      superseded_by  — {id, content_snippet, created_at, superseded_at?, source?}
+                       of the newest superseding claim (incoming CORRECTS) or
+                       None. ``superseded_at`` is the OLD row's ``validTo`` —
+                       the bound ``supersede_point`` closes, i.e. the instant
+                       this row stopped being current (#14721 R3); ``source``
+                       is the successor's ``sessionId`` — the document the
+                       correction came from. BOTH ARE PRESENT-ONLY: an undated
+                       window or an unsourced successor emits no key, so the
+                       legacy ``{id, content_snippet, created_at}`` shape is
+                       byte-identical where the information is absent. On a
+                       row corrected more than once, ``superseded_at`` is the
+                       FIRST time it stopped being valid while ``created_at``
+                       is the NEWEST successor's creation — each field is
+                       what its name says, not a pair.
       supersedes     — [{id, content_snippet, created_at}] of replaced claims
                        (outgoing CORRECTS)
       subject        — {id, name, kind} from the point's OWN aboutSubject edge, or

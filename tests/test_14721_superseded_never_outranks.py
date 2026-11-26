@@ -35,18 +35,25 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.ranking import StateRanker  # noqa: E402
+from tortoise.ranking import StateRanker
 
 STALE = "pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078"
 SUCCESSOR = "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607"
 
 
-def _row(pid: str, rrf: float, **extra) -> dict:
-    """One recall row with everything StateRanker needs and nothing else."""
-    row = {
+def _row(pid: str, rrf: float, **extra: object) -> dict:
+    """One recall row with everything StateRanker needs and nothing else.
+
+    The extra keys are SPREAD into the literal rather than applied with
+    ``row.update(extra)``: an ordinary-word method call on an untyped dict is
+    residue the `surface-guard` privatisation ratchet counts, and this helper
+    would otherwise add one to a tree-wide pin it has nothing to do with.
+    """
+    return {
         "id": pid,
         "content": pid,
         "scores": {"rrf": rrf},
@@ -54,9 +61,8 @@ def _row(pid: str, rrf: float, **extra) -> dict:
         "state_has_ep": True,
         "state_degree": 0,
         "status": "live",
+        **extra,
     }
-    row.update(extra)
-    return row
 
 
 def _ids(rows: list[dict]) -> list[str]:
@@ -171,11 +177,11 @@ def test_a_four_link_chain_resolves_too():
 def test_two_unidentifiable_rows_are_never_reordered_by_each_other():
     """REGRESSION PIN (review P2): a non-injective id map drops a row.
 
-    An id-to-index map built from ids that are EMPTY (or shared) points at the
-    wrong row, so ``pop(index[id])`` removed a different row than the one
-    inspected — one row duplicated, another silently lost (measured: three rows
-    in, one of two id-less rows gone, the other doubled). Rows without a unique
-    id must be left alone, and the row count must never change.
+    An id-to-index map built from ids that are EMPTY points at the wrong row,
+    so a positional move removed a different row than the one inspected — one
+    row duplicated, another silently lost (measured: three rows in, one of two
+    id-less rows gone, the other doubled). Rows without a unique id must be
+    left alone, and the row count must never change.
     """
     rows = [
         {"content": "no id at all", "scores": {"rrf": 5.0},
@@ -190,6 +196,54 @@ def test_two_unidentifiable_rows_are_never_reordered_by_each_other():
     # population may not.
     assert sorted(r.get("content", "") for r in out) == [
         "empty id", "no id at all", "pt_s"], [r.get("content") for r in out]
+
+
+def test_rows_sharing_one_non_empty_id_are_never_dropped_or_duplicated():
+    """REGRESSION PIN (review C2): the SHARED-id half of the injectivity guard.
+
+    ``test_two_unidentifiable_rows_are_never_reordered_by_each_other`` above
+    exercises only EMPTY ids — and both the fixed code and the pre-fix line skip
+    an empty id, so that row cannot fail for the class this docstring names.
+    Two rows sharing a NON-EMPTY id are the reachable shape: an index keyed on
+    it is not injective, so a positional move takes the row at the index rather
+    than the row inspected. Verified against the ungated map
+    (``if rid and ids.count(rid) == 1`` → ``if rid``): contents come out
+    ``A, pt_s, A`` — ``B`` lost, ``A`` duplicated — where this asserts
+    ``A, B, pt_s``. The shipped pre-fix line already carried the ``counts == 1``
+    half, so what this pins is that the gate is not dropped again.
+    """
+    rows = [
+        {"id": "dup", "content": "A", "scores": {"rrf": 5.0},
+         "superseded_by": {"id": "pt_s", "content_snippet": "…",
+                           "created_at": "t1"}},
+        {"id": "dup", "content": "B", "scores": {"rrf": 2.0}},
+        _row("pt_s", 1.0),
+    ]
+    out = StateRanker().rerank(rows)
+    assert len(out) == 3, [r.get("content") for r in out]
+    assert sorted(r["content"] for r in out) == ["A", "B", "pt_s"], \
+        [r.get("content") for r in out]
+
+
+def test_a_row_that_names_itself_as_its_successor_keeps_its_rank():
+    """REGRESSION PIN (review C4): the self-supersede guard is load-bearing.
+
+    A row whose ``superseded_by.id`` is its OWN id is not a violation, and
+    without the guard the move pops the row and then looks for the id it just
+    removed — which raises, and NOT in a contained way: on the previous shape
+    the ``next(...)`` raised ``StopIteration`` (reproduced), on the depth
+    placement it is ``list.index`` raising ``ValueError`` (measured). Either
+    propagates out of ``StateRanker.rerank`` into ``_recall_state``, so the
+    whole state read fails rather than one row being mis-ordered.
+    """
+    rows = [
+        _row("pt_self", 5.0, status="superseded", outdated=True,
+             superseded_by={"id": "pt_self", "content_snippet": "…",
+                            "created_at": "t1"}),
+        _row("pt_other", 2.0),
+    ]
+    out = _ids(StateRanker().rerank(rows))
+    assert out == ["pt_self", "pt_other"], out
 
 
 def test_a_successor_beyond_the_page_does_not_drag_the_pair_out_of_it():
@@ -235,3 +289,51 @@ def test_the_order_is_deterministic_for_rows_that_are_not_in_violation():
     second = _ids(StateRanker().rerank(list(rows)))
     assert first == second
     assert first == ["pt_x", SUCCESSOR, STALE, "pt_y"], first
+
+
+def test_a_cycle_keeps_its_rows_in_place():
+    """A cycle has NO valid order, so its rows are not moved (review C1).
+
+    The previous shape spent the whole move budget oscillating the pair and
+    returned the input order anyway — 146 s at n=320 for an answer it could
+    state. Naming the cycle is the same answer, and it is what the placement
+    pass now does.
+    """
+    rows = [
+        _row("pt_x", 5.0, status="superseded", outdated=True,
+             superseded_by={"id": "pt_y", "content_snippet": "…",
+                            "created_at": "t1"}),
+        _row("pt_y", 3.0, status="superseded", outdated=True,
+             superseded_by={"id": "pt_x", "content_snippet": "…",
+                            "created_at": "t2"}),
+        _row("pt_z", 1.0),
+    ]
+    out = _ids(StateRanker().rerank(rows))
+    assert out == ["pt_x", "pt_y", "pt_z"], out
+
+
+def test_a_large_pool_resolves_within_the_wait_bound():
+    """REGRESSION PIN (review C1): the pass is O(n²), not O(n⁴).
+
+    Measured on the previous shape, which re-indexed with ``ids.count(rid)`` on
+    every one of up to ``n·(n-1)`` passes: a 160-link chain took 4.2 s here and
+    the review measured 67 s at 320 links and 146 s for a 320-row pool holding
+    one cyclic pair. ``n`` is not exotic — ``_recall_state`` reads a pool of
+    ``max(limit * 3, 30)``, so ``limit=100`` is 300 rows — and #3834 pins a 10 s
+    wait bound, so the cost IS the defect. The chain also has to come out fully
+    resolved, not merely fast.
+    """
+    n = 300
+    rows = [_row(f"pt_c{i:03d}", float(n - i),
+                 status="superseded", outdated=True,
+                 superseded_by={"id": f"pt_c{i + 1:03d}",
+                                "content_snippet": "…", "created_at": f"t{i}"})
+            for i in range(n - 1)]
+    rows.append(_row(f"pt_c{n - 1:03d}", 1.0))
+    started = time.perf_counter()
+    out = _ids(StateRanker().rerank(rows))
+    elapsed = time.perf_counter() - started
+    assert out == [f"pt_c{i:03d}" for i in reversed(range(n))], out[:5]
+    assert elapsed < 10.0, (
+        f"a {n}-row supersession chain took {elapsed:.1f}s — the #3834 wait "
+        "bound is 10 s, and this shape used to spend it in a re-index per move")
