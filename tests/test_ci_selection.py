@@ -10182,7 +10182,8 @@ _H_14544_EXEMPTION_OPEN_RE = re.compile(r"The one cause this paragraph does NOT 
 _H_14544_SENTENCES_RE = re.compile(r"(?<=[.!?])\s+")
 _H_14544_ANAPHOR_RE = re.compile(r"neither\s+of\s+which", re.IGNORECASE)
 #: The subjects that make a sentence a claim about THIS row: the cut, and the row / weight it carries.
-_H_14544_ROW_SUBJECT_RE = re.compile(r"#14544|`durations`|\brow\b|\bweight\b", re.IGNORECASE)
+_H_14544_ROW_SUBJECT_RE = re.compile(
+    r"#14544|`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b", re.IGNORECASE)
 #: …and the ACTOR, which the PASSIVE form needs in the same sentence or it grades unrelated prose.
 _H_14544_ACTOR_RE = re.compile(r"#14544|that\s+cut|the\s+cut", re.IGNORECASE)
 _H_14544_NEGATION = (
@@ -10196,11 +10197,17 @@ _H_14544_NEGATED_ACTOR_CHANGE_RE = re.compile(
     r"(?:#14544|that\s+cut|the\s+cut)[\s\S]{0,400}?" + _H_14544_NEGATION
     + r"[\s\S]{0,80}?" + _H_14544_CHANGE_VERB,
     re.IGNORECASE)
-#: PASSIVE order: the row or the weight FIRST, then a negation, then the change verb. The caller
-#: also requires `_H_14544_ACTOR_RE` in the SENTENCE (so a true sentence about another actor — the
-#: reaper, a retime — is not this claim), which is the same guard the peer arm put on its BE verb.
+#: PASSIVE order: the row or the weight FIRST, then a negation, then the change verb. Two guards —
+#: the caller also requires `_H_14544_ACTOR_RE` in the SENTENCE, and the negation here is restricted
+#: to the PAST/PERFECT/`BE` forms — so the two TRUE sentences the round-5 review measured as false
+#: blocks are NOT this claim: "the row was not touched by the reaper" (no cut in the sentence) and
+#: "the row does not touch the shard layout, and `#14544`'s cut is separate" (present ACTIVE: the
+#: row is the agent, not the thing said to be unchanged). Both are fixtures below.
+_H_14544_ROW_NEGATION = (
+    r"(?:\bnever\b|did\s+not|didn['\u2019]?t|has\s+not|hasn['\u2019]?t|had\s+not"
+    r"|was\s+not|wasn['\u2019]?t|is\s+not|isn['\u2019]?t|were\s+not|weren['\u2019]?t)")
 _H_14544_NEGATED_ROW_CHANGE_RE = re.compile(
-    r"(?:`durations`|\brow\b|\bweight\b)[\s\S]{0,20}?" + _H_14544_NEGATION
+    r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[\s\S]{0,20}?" + _H_14544_ROW_NEGATION
     + r"[\s\S]{0,40}?" + _H_14544_CHANGE_VERB,
     re.IGNORECASE)
 #: The required claims stated the OTHER way round, beside the true one — measured GREEN at
@@ -10424,6 +10431,10 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "`#14544` never rewrote the weight of that row.",
             "The weight never moved when that cut landed.",
             "`#14544` did not at any single point touch that row.",
+            # the PEER round-3 shapes: the same claim with a PLURAL noun and with the block's own
+            # `durations entry` spelling — the noun alternation is a fixture, not a promise.
+            "the rows were never touched by `#14544`",
+            "the `durations` entries were not touched by `#14544`",
             # NOT honest prose, though it reads like it: it asserts the row's weight `was never
             # re-read` in the same sentence that names the cut which DID re-read it — the claim is
             # false, and refusing it is the guard working (the alternative, dropping the row-first
@@ -10438,6 +10449,10 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # paragraph's own TRUE statements, are not this claim. Without these the arm is a false block.
     for honest in (
             "the row was not touched by the reaper",
+            # present ACTIVE: the row is the AGENT, not the thing said to be unchanged — the shape
+            # that makes a blanket "row … not … touch" rule a false block (peer round 3, graded
+            # here so the restricted negation list cannot silently widen back).
+            "the row does not touch the shard layout, and `#14544`'s cut is separate",
             "another row's weight was retimed; the retime does not touch the shard layout, and "
             "`#14544`'s cut is separate",
             "`#14544`'s removal of the file from the `core` surface cannot move a bin"):
