@@ -1307,8 +1307,26 @@ def test_the_over_typed_table_matches_the_paragraph_that_describes_it():
 
     # (e) the band figure the report quotes, from the persisted histogram
     bands = _score()["claim_layer"]["bands"]
-    assert (f"**{bands['below_0_5']} fall below 0.5**") in " ".join(_report().split()), (
+    flat = " ".join(_report().split())
+    assert (f"**{bands['below_0_5']} fall below 0.5**") in flat, (
         f"the report's below-0.5 figure is not the artifact's ({bands['below_0_5']})")
+    # ⛔ THE REST OF THAT SENTENCE, NOT JUST ITS LAST NUMBER (#14691, 11th review).
+    # Three of its four figures were still free, and both surviving mutants were
+    # numbers that appear SOMEWHERE in an artifact — which is exactly why a
+    # "is this number supported anywhere" sweep cannot see them:
+    #   `**12** at < 0.6` -> `**14**`   (12 is `quotes['invented']`; §7's pinned
+    #                                    breakdown in the SAME document then
+    #                                    refutes the sentence)
+    #   `11 / 1 / 27`     -> `11 / 2 / 26`   (a false histogram, in the sentence
+    #                                    whose stated purpose is to read it)
+    quotes_for_bands = _score()["A4_no_invention"]["quotes"]
+    assert f"**{quotes_for_bands['invented']}** at `< 0.6`" in flat, (
+        "the report's below-0.6 total is not `invented` "
+        f"({quotes_for_bands['invented']})")
+    triple = f"{bands['below_0_5']} / {bands['from_0_5_to_0_6']} / {bands['at_or_above_0_6']}"
+    assert f"`{triple}`" in flat, (
+        f"the report's band histogram is not the artifact's ({triple}) — a false "
+        "triple in the sentence that exists to read it")
     # the histogram covers the NON-VERBATIM population (a verbatim quote never
     # reaches `best_overlap`), so its total is `total - verbatim`, not `total`
     quotes = _score()["A4_no_invention"]["quotes"]
