@@ -5863,6 +5863,31 @@ def _ground_selector_matches(simple: str, element: GroundElement | None) -> bool
 #: CSS lets you spell it. Each alias is exactly true of the first/last child the
 #: markup declares, so accepting them grades BEHAVIOUR, not spelling (#14683
 #: independent review: `:nth-child(1)` was a fail-open).
+def _selector_is_exactly_evaluable(part: str, side: str) -> bool:
+    """True when every qualifier in `part` is one this reader EVALUATES.
+
+    ⛔ The asymmetry again, one level down (#14683 review cycle 6, measured).
+    `_ground_selector_matches` strips attribute selectors and pseudo-classes
+    out of the child compound, so a rule that matches the EMPTY SET was
+    credited as the ground's centring home:
+
+        .beat > :first-child:hover { margin-top: auto }   (all 14 shipped rules removed)
+
+    reader `[]`, rendered 375x812: hero `margin-top 0px`, top 80 — the same
+    fields as the pair-removed CONTROL the same reader REDs. `:not(.doc-grid)`
+    (which EXCLUDES the ground) and `.doc-grid[data-nope]` behaved the same.
+
+    Because a qualifier NARROWS the matched set, "I cannot evaluate it" is
+    only fail-closed on the ENABLING side: an `auto` behind one is not
+    credited (see `_beat_ground_margin_candidates`), while a DISABLING value
+    behind one is still collected — which keeps the recorded decision that a
+    `:hover`-qualified reset REDs.
+    """
+    aliases = "|".join(_SIDE_PSEUDO_ALIASES[side])
+    stripped = re.sub(rf":(?:{aliases})(?![\w-])", "", part, count=1)
+    return "[" not in stripped and ":" not in stripped
+
+
 _SIDE_PSEUDO_ALIASES = {
     "first-child": ("first-child", r"nth-child\(1\)", "first-of-type"),
     "last-child": ("last-child", r"nth-last-child\(1\)", "last-of-type"),
@@ -6229,7 +6254,7 @@ def _beat_ground_margin_candidates(
                     continue
                 value, important = declaration
                 candidate_height, candidate_floor = height, floor
-                if unmodelled:
+                if unmodelled or not _selector_is_exactly_evaluable(part, side):
                     if value.strip().lower() == "auto":
                         # An ENABLING declaration this reader cannot prove fires
                         # must not certify the centring (#14683 review cycle 2,
@@ -6883,6 +6908,40 @@ class TestShortViewportCentringIsGradedPerBlock:
         assert _short_viewport_centring_problems(page) == [], (
             "a centring pair in a WIDER max-height block was false-RED: the "
             "block fires wherever the hatch does, so the mechanism is intact")
+
+    def test_an_enabling_value_behind_an_unevaluable_qualifier_is_not_credited(self):
+        """Mutant: the whole pair respelled behind `:hover` — it matches nothing.
+
+        `_ground_selector_matches` strips attribute selectors and pseudo-classes,
+        so a rule matching the EMPTY SET was credited as the ground's centring
+        home. Measured: with all fourteen shipped rules replaced by
+        `.beat > :first-child:hover { margin-top: auto }`, the reader returned
+        `[]` and the page rendered `margin-top 0px` — the same fields as the
+        pair-removed control the same reader REDs. `:not(.doc-grid)` (which
+        EXCLUDES the ground) and `.doc-grid[data-nope]` behaved the same
+        (#14683 review cycle 6, P2).
+
+        The asymmetry is kept one level down: an ENABLING value behind such a
+        qualifier is not credited, while a DISABLING one is still collected —
+        which is what keeps the recorded decision that a `:hover`-qualified
+        reset REDs. Both directions are asserted below.
+        """
+        for enabling in (
+            ".beat > :first-child:hover { margin-top: auto; }\n"
+            "    .beat > :last-child:hover { margin-bottom: auto; }",
+            "#beat-hero > :first-child:not(.doc-grid) { margin-top: auto; }",
+            "#beat-hero > .doc-grid[data-nope]:first-child { margin-top: auto; }",
+        ):
+            page = self._page(hatch=self.ALIGNED_HATCH, extra=f"    {enabling}")
+            assert _short_viewport_centring_problems(page), (
+                f"{enabling!r} matches no element this reader can evaluate, so "
+                "it cannot certify the centring")
+        disabled = self._page(
+            hatch=self.CENTRED_HATCH,
+            extra="    #beat-hero > :first-child:hover { margin-top: 0; }")
+        assert _short_viewport_centring_problems(disabled), (
+            "a `:hover`-qualified RESET was dropped: a disabling value behind "
+            "an unevaluable qualifier must still be collected")
 
     def test_a_descendant_subject_is_not_the_ground(self):
         """Mutant: `#beat-hero > .doc-grid .doc-copy { margin-top: auto }`.
