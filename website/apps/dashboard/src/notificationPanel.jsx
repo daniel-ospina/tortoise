@@ -58,6 +58,7 @@ import {
   DISMISSED_TOGGLE,
   LEDGER_ALL_CLEAR,
   LEDGER_EMPTY,
+  LEDGER_PENDING,
   OLDER_HIDE,
   OLDER_TOGGLE,
   PANEL_TITLE,
@@ -317,6 +318,17 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
  *  * `alerts` — the `/v1/team/alerts` episode feed, newest first (unchanged shape);
  *  * `scanSaturated` / `unavailable` — the feed's two "we may not have seen
  *    everything" facts, carried through rather than dropped by the move;
+ *  * `feedLoaded` — whether the read that backs `alerts` has SETTLED. A FOURTH
+ *    fact, and the only one a caller can omit and still be honest, because it
+ *    defaults to `false`: the panel then says it is still checking instead of
+ *    printing `LEDGER_EMPTY` ("You have no notifications."), which is a claim
+ *    about the Organization's state that an unread feed cannot support. The two
+ *    callers that must pass `true` are the real ones — `main.jsx` tracks it on
+ *    the read it already owns; every test that asserts an empty/all-clear line
+ *    passes a SETTLED feed explicitly, so the conflation cannot come back "for
+ *    free" through a harness default. Defaulting to `true` here would make the
+ *    false all-clear the silent path again, which is the defect this prop exists
+ *    to close;
  *  * `userId` / `orgId` — the identity the local ledger is keyed by;
  *  * `canAcknowledge` + `onAcknowledge` — the owner/admin org-wide dismissal;
  *  * `ackPending` (episode) / `ackError` ({episode, orgId, label, message}) —
@@ -335,6 +347,7 @@ export function NotificationBell({
   alerts = [],
   scanSaturated = false,
   unavailable = false,
+  feedLoaded = false,
   userId = '',
   orgId = '',
   canAcknowledge = false,
@@ -675,7 +688,9 @@ export function NotificationBell({
               ) : null}
               {!unavailable && !scanSaturated && count === 0 ? (
                 <p className="dim small notif-note">
-                  {!alerts.length ? LEDGER_EMPTY : LEDGER_ALL_CLEAR}
+                  {feedLoaded
+                    ? (!alerts.length ? LEDGER_EMPTY : LEDGER_ALL_CLEAR)
+                    : LEDGER_PENDING}
                 </p>
               ) : null}
               {/* Two different failures, two different sentences: the store is

@@ -673,6 +673,18 @@ export function detailOf(alert, now = new Date()) {
 export const BELL_LABEL = 'Notifications'
 export const PANEL_TITLE = 'Notifications'
 export const LEDGER_EMPTY = 'You have no notifications.'
+//: The feed has not been READ yet. A FOURTH state beside rows / cut-scan /
+//: failed-read, and the only one that had no sentence: `LEDGER_EMPTY` is a claim
+//: about the Organization's state, which only a COMPLETED read can support. The
+//: window is real, not theoretical — `main.jsx` renders the authed chrome BEFORE
+//: `loadAlerts` settles (#1567: "render the app chrome NOW and let the mint +
+//: loads hydrate"), and a team switch clears the feed and then reads it
+//: (`switchTeam`: `setAlerts([])` -> async `loadAlerts(orgId)`), while the bell is
+//: always mounted and clickable. So this renders where the panel used to print
+//: the all-clear over a feed nothing had measured — the same false pass
+//: `ALERTS_UNAVAILABLE` exists to prevent, arriving through the one door no flag
+//: was wired to.
+export const LEDGER_PENDING = 'Checking for notifications…'
 //: Every actionable row is put away — by acknowledgement, dismissal or a snooze.
 //: A snoozed row is NOT acknowledged or dismissed, so the earlier wording ("has
 //: been acknowledged or dismissed") printed an affirmative beside its own

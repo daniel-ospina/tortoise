@@ -3181,6 +3181,18 @@ function claimIntentInFlight() {
   // all-clear on the one screen whose job is not to hide incidents (round-23
   // review finding).
   const [alertsUnavailable, setAlertsUnavailable] = React.useState(false)
+  // #14694: whether the read that backs `alerts` has SETTLED. A fourth fact beside
+  // rows / cut-scan / failed-read, and the one the panel had no input for: without
+  // it a `[]` feed that nothing had read yet was indistinguishable from a read that
+  // came back empty, so the open panel printed "You have no notifications." over an
+  // unmeasured Organization. Two real windows, both pre-existing: the chrome renders
+  // BEFORE `loadAlerts` settles (`setAuthed(true)` then fire-and-forget, #1567), and
+  // `switchTeam` clears the feed and then reads it asynchronously. Starts `false`
+  // because nothing has been read at first paint; every settle arm below sets it,
+  // including the failure arms — a FAILED read is a settled one (`unavailable`
+  // carries which kind), while a read DISCARDED by the staleness guard is not, so
+  // those returns deliberately leave it alone for the next Organization's own read.
+  const [alertsLoaded, setAlertsLoaded] = React.useState(false)
   // #10156: the pending episode + the per-episode error. ONE row is disabled at
   // a time via `ackPending`, but that is a UI convention, NOT a single-flight
   // lock: clicking two rows starts two writes, and the first to finish clears
@@ -5502,6 +5514,7 @@ function claimIntentInFlight() {
         setAlerts(feed.alerts)
         setAlertsSaturated(feed.saturated)
         setAlertsUnavailable(feed.unavailable)
+        setAlertsLoaded(true)
       } else {
         // A non-2xx is a FAILED read, not an empty feed. The SAME staleness guard
         // applies here as on the success branch: stamping A's failed read onto B's
@@ -5510,6 +5523,7 @@ function claimIntentInFlight() {
         // Same guard as the success branch.
         if (orgIdRef.current !== orgAtCall) return
         setAlertsUnavailable(true)
+        setAlertsLoaded(true)
       }
     } catch {
       // Best-effort — alert history never blocks the dashboard — but the panel
@@ -5517,6 +5531,7 @@ function claimIntentInFlight() {
       // arms above: the read may have started before an Organization switch.
       if (orgIdRef.current !== orgAtCall) return
       setAlertsUnavailable(true)
+      setAlertsLoaded(true)
     }
   }
 
@@ -6620,6 +6635,7 @@ function claimIntentInFlight() {
     setAlerts([])
     setAlertsSaturated(false)
     setAlertsUnavailable(false)
+    setAlertsLoaded(false)
     loadAlerts(orgId)
     // #14686 (review finding, P3): `ackError` is cleared only when the NEXT
     // acknowledgement starts, and the panel renders it in the ledger branch
@@ -6713,6 +6729,7 @@ function claimIntentInFlight() {
           setAlerts([])
           setAlertsSaturated(false)
           setAlertsUnavailable(false)
+          setAlertsLoaded(false)
           loadAlerts(prevOrgId)
           setTeam(null)
           setStaleFired(false) // #1858: the revert re-attaches the previous team — clear the latch so the restored team's skeleton gets a fresh floor (team is already null here, so the reset effect won't fire)
@@ -10838,6 +10855,7 @@ function claimIntentInFlight() {
           alerts={alerts}
           scanSaturated={alertsSaturated}
           unavailable={alertsUnavailable}
+          feedLoaded={alertsLoaded}
           userId={sessionMetaRef.current?.id || sessionMetaRef.current?.email || ''}
           orgId={currentOrgId || ''}
           canAcknowledge={isOwnerAdmin}

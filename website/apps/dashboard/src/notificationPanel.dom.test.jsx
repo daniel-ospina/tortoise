@@ -45,6 +45,7 @@ import {
   DETAIL_UNDISPLAYABLE,
   DISMISSED_LOCAL_NOTE,
   LEDGER_ALL_CLEAR,
+  LEDGER_PENDING,
   OLDER_HIDE,
   OLDER_TOGGLE,
   SAVE_FAILED,
@@ -103,6 +104,11 @@ function renderBell(props = {}) {
         alerts={props.alerts || []}
         scanSaturated={props.scanSaturated || false}
         unavailable={props.unavailable || false}
+        // #14694: the harness's callers test a panel over a feed that HAS been
+        // read, so they get a settled one — but the quiet-Organization case
+        // states it explicitly below, because `[]` alone is exactly the
+        // conflation this prop exists to separate.
+        feedLoaded={'feedLoaded' in props ? props.feedLoaded : true}
         userId={USER}
         orgId={props.orgId || ORG}
         canAcknowledge={props.canAcknowledge || false}
@@ -1141,9 +1147,44 @@ test('#14686: a cut scan is not "you have no notifications" either', () => {
 })
 
 test('#14686: an ordinary quiet Organization does get the plain empty line', () => {
-  const { container } = renderBell({ alerts: [] })
+  // `feedLoaded` is stated, not inherited: an empty feed is only "no
+  // notifications" once the read backing it has SETTLED.
+  const { container } = renderBell({ alerts: [], feedLoaded: true })
   fireEvent.click(bell(container))
   assert.match(container.textContent, /You have no notifications\./)
+})
+
+test('#14694: an UNREAD feed is never "you have no notifications"', () => {
+  // The fourth state, and the one that had no sentence. `main.jsx` renders the
+  // chrome before `loadAlerts` settles and `switchTeam` clears the feed then
+  // reads it, so `[]` with no flags is a REAL state with nothing measured — the
+  // panel must not translate it into an all-clear about the Organization.
+  const { container } = renderBell({ alerts: [], feedLoaded: false })
+  fireEvent.click(bell(container))
+  assert.ok(container.textContent.includes(LEDGER_PENDING),
+    'an unread feed says it is still checking')
+  assert.ok(!container.textContent.includes('You have no notifications.'),
+    'and never asserts a state nothing has measured')
+})
+
+test('#14694: the unread arm is distinct from every other empty-state sentence', () => {
+  // Four empty states, four sentences — a caller that wires the wrong flag must
+  // be distinguishable from one that wired the right one.
+  const unread = renderBell({ alerts: [], feedLoaded: false })
+  fireEvent.click(bell(unread.container))
+  assert.ok(!unread.container.textContent.includes(ALERTS_UNAVAILABLE))
+  assert.ok(!unread.container.textContent.includes(SCAN_SATURATED_EMPTY))
+  assert.ok(!unread.container.textContent.includes(LEDGER_ALL_CLEAR))
+})
+
+test('#14694: a settled feed still reports the all-clear once every row is put away', () => {
+  // Guards the other direction of the same prop: `feedLoaded` must not suppress
+  // `LEDGER_ALL_CLEAR`, which is a SUPPORTED claim once rows are in hand.
+  const { container } = renderBell({ alerts: [alert({ message: 'only row' })], feedLoaded: true })
+  fireEvent.click(bell(container))
+  fireEvent.change(container.querySelector('.notif-snooze'), { target: { value: '1h' } })
+  assert.ok(container.textContent.includes(LEDGER_ALL_CLEAR),
+    `expected the all-clear; got: ${container.textContent}`)
 })
 
 test('#14686: a failed read is visible on the CLOSED bell, not only inside the panel', () => {
