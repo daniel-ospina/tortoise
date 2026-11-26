@@ -433,9 +433,12 @@ export function snoozedUntil(state, episode, now = new Date()) {
  *  instant is not covered (`if e_last > acked_through: continue`), so it
  *  re-opens. It is NOT the window test's forward gap: testing `delta <= gap` here
  *  instead kept a suspension that fired 40 minutes after the snooze hidden, which
- *  is the exact direction that docstring calls the worse failure. The snooze
- *  therefore covers the row the reader snoozed (same instant) and anything at or
- *  before it — never a suspension that fires afterwards.
+ *  is the exact direction that docstring calls the worse failure. That gate ALONE
+ *  would cover the row the reader snoozed and anything at or before it; here it is
+ *  applied TOGETHER with the window half (the commented branch below), which
+ *  narrows coverage to the one row whose own newest measurement is the snoozed
+ *  instant — never a suspension that fires afterwards, and never an earlier bout
+ *  that merely shares the decision key.
  *
  *  An ACTIVITY row keeps the whole period, and its RESIDUAL is stated rather than
  *  denied. Its key is the identity too (`type|surface:…`), so a snooze taken on
@@ -472,10 +475,18 @@ export function effectiveSnoozedUntil(state, entry, now = new Date()) {
     // every EARLIER bout". Applying only `atMs <= anchor` therefore covered every
     // earlier episode sharing the decision key: measured, a never-acknowledged
     // suspension 5 days BEFORE the snoozed one moved into "Snoozed" and out of
-    // the badge while `/v1/team/alerts` still reported it current. With both
-    // halves intersected — the episode's window overlapping the snoozed row, AND
-    // nothing happening after it — the only covered rows are the one the reader
-    // snoozed and anything its own episode still spans.
+    // the badge while `/v1/team/alerts` still reported it current.
+    //
+    // ⛔ THE TWO HALVES INTERSECT TO `entry.atMs === anchor` EXACTLY. This comment
+    // used to say they covered "the one the reader snoozed and anything its own
+    // episode still spans", which is false: `overlaps` contributes
+    // `anchor <= atMs`, the gate contributes `atMs <= anchor`, so a row STRICTLY
+    // before the anchor is never covered — that refusal is the fix's whole point,
+    // and a maintainer aligning the code to the old sentence (i.e. keeping the
+    // gate alone) reintroduces the P2 `4c24fa8` closed. The episode clause
+    // (`episodeStart <= anchor`) can only refuse a row whose episode STARTED
+    // after the snoozed instant; it cannot widen coverage past the single row
+    // whose own newest measurement IS the snoozed instant.
     const episodeStart = firstMsOf(entry.alert) || atMs
     const overlaps = anchor <= atMs && episodeStart <= anchor
     return overlaps && atMs <= anchor ? until : 0

@@ -273,6 +273,51 @@ test('#14694 P1: a snooze on an INCIDENT does not cover a NEWER one', () => {
   assert.equal(earlierLedger.snoozed.length, 0)
 })
 
+test('#14694: the incident bound covers the row IN HAND, not every earlier row of its key', () => {
+  // ⛔ THE EXACT BOUNDARY the `effectiveSnoozedUntil` docstring used to
+  // misdescribe ("anything its own episode still spans"). The two halves
+  // intersect to `entry.atMs === anchor`: the window half contributes
+  // `anchor <= atMs`, the incident gate contributes `atMs <= anchor`. So the ONE
+  // covered row is the row whose own newest measurement is the snoozed instant;
+  // a bout one millisecond earlier is a different bout and must stay visible.
+  // A maintainer aligning the CODE to the old sentence (the gate alone,
+  // `atMs <= anchor`) reintroduces the P2 `4c24fa8` closed — and this arm reds on
+  // exactly that edit, which is why the boundary is pinned to the millisecond.
+  const take = (over = {}) => alert({
+    type: 'suspend',
+    label: 'Organization suspended',
+    message: 'Organization suspended by an operator',
+    ...over,
+    first_at: over.first_at || over.at,
+  })
+  const snoozed = take({ at: new Date(NOW.getTime() - 25 * HOUR).toISOString() })
+  const state = snooze(emptyState(), entryKeyOf(snoozed), periodMs('1w'), NOW, snoozed)
+
+  // One millisecond EARLIER, same constant sentence → same decision key, a
+  // different fact. The gate alone would fold it into "Snoozed".
+  const justBefore = take({
+    at: new Date(new Date(snoozed.at).getTime() - 1).toISOString(),
+    episode: 'suspend||1ms-earlier',
+  })
+  assert.equal(entryKeyOf(justBefore), entryKeyOf(snoozed), 'the shared key is the premise')
+  const beforeLedger = buildLedger({ alerts: [justBefore], state, now: NOW })
+  assert.equal(beforeLedger.unresolved, 1,
+    'a bout that happened BEFORE the snoozed instant is not what the reader snoozed')
+  assert.equal(beforeLedger.snoozed.length, 0)
+
+  // …and the positive half: an episode that STARTED before the snoozed instant
+  // but whose newest measurement IS it is the row in hand, so it stays covered
+  // and stays listed (reversible). The episode clause can only ever REFUSE.
+  const spanning = take({
+    first_at: new Date(NOW.getTime() - 30 * HOUR).toISOString(),
+    at: snoozed.at,
+    episode: 'suspend||spanning',
+  })
+  const spanningLedger = buildLedger({ alerts: [spanning], state, now: NOW })
+  assert.equal(spanningLedger.unresolved, 0, 'the row in hand stays snoozed')
+  assert.equal(spanningLedger.snoozed.length, 1, 'and stays listed, so it can be un-snoozed')
+})
+
 test('#14694: no surface suppresses on the RAW snooze deadline, and none denies the gate', () => {
   // ⛔ THE STRUCTURAL HALF OF THE P1 ABOVE. That test proves `buildLedger` is
   // gated; this one proves nothing ELSE can reintroduce the bare-deadline shape
