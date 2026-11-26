@@ -1742,7 +1742,7 @@ _CONFIRM_PREDICATE = (
 # ⛔ The plural branch is listed FIRST and covers `tools list` on its own; the
 # second branch exists only for the singular head, and `list` is deliberately
 # not a `_DOC_NOUN` ("the tools list" is the session's own list, not a page).
-_TOOLS_OBJECT = r"(?:\btools\b|\btool\s+list\b)"
+_TOOLS_OBJECT = r"(?:\btools\b|\btool\s+lists?\b)"
 # …and the compiled form, for the ONE site that must LOCATE the object rather
 # than match it in sequence: `_confirmation_scopes_the_config` needs its offset
 # to decide which side of the object a config noun sits on. Built from the same
@@ -1774,7 +1774,7 @@ _PRE_CUE_ONLY = _inversion_form(
     # exists to catch: "First confirm the tools are actually there. Restart …"
     # was GREEN (measured) while its unadorned twin was RED, and so was
     # "Please first confirm …" — one inserted word defeated the whole form.
-    r"^(?:please\s+)?(?:(?:first|also|just)\s*,?\s+)?"
+    r"^(?:please\s+)?(?:(?:first(?:ly)?|also|just)\s*,?\s+)?"
     r"(?:"
     # (f.1) `list` takes the tools THEMSELVES as its object, so there is no
     # document it could be pointing at and no predicate to require:
@@ -1806,7 +1806,13 @@ _PRE_CUE_ONLY = _inversion_form(
     # list" (18 of 24 probed), each one a refusal of correct copy — the failure
     # mode that gets a pin deleted (#3429). A noun list cannot be completed; a
     # predicate list can, because a presence claim has a closed vocabulary.
-    r"(?:confirm|check|verify|see|look|ensure)\w*\b[^\n]*?" + _TOOLS_OBJECT
+    # ⛔ A HYPHENATED PREDICATE IS THE SAME PREDICATE. `double-check` / `re-verify`
+    # are the docs' own register and this verb list admitted only the bare form,
+    # so "Please double-check the tools are actually there. Restart …" was GREEN
+    # while its `check` twin is a declared RED row — the same lesson form (a)
+    # already carries as `(?:\w+-)?` (#14679 review cycle 29, measured).
+    r"(?:\w+-)?(?:confirm|check|verify|see|look|ensure)\w*\b[^\n]*?"
+    + _TOOLS_OBJECT
     # …and a documentation noun immediately after `tools` is not a presence
     # claim even when a copula follows it ("Ensure the tools table is up to
     # date" — the one shape the predicate arm alone would still refuse). The
@@ -1933,7 +1939,23 @@ _INVERSION_FORMS = (
     #     client first and confirm the tools …" is the forward reading of the
     #     same words.
     _inversion_form(
-        r"^(?:but|however|though|yet)\b[^\n]*?\b(?:first|beforehand)\b[^\n]*?"
+        r"^(?:but|however|though|although|yet)\b"
+        # ⛔ `firstly` IS `first`. The closed marker list admitted only the bare
+        # adverb, so a one-word inflection defeated FOUR of the seven forms at
+        # once — a `first`→`firstly` substitution on every declared-RED row that
+        # contains `first` flipped 26 of 32 GREEN (#14679 review cycle 29,
+        # measured). The same lesson form (a)'s `\w+ly` slot already carries
+        # ("a closed four-word list only re-opened the hole for `previously` /"
+        # "`recently` / `thoroughly`"), applied to the marker itself.
+        # `although` is `though` for the same reason, one synonym over.
+        r"[^\n]*?\b(?:first(?:ly)?|beforehand|in\s+advance)\b"
+        # …and an intervening IMPERATIVE that is not the confirmation must not
+        # carry the match through to a later `confirm the tools`: a `then`
+        # between the marker and the predicate means the reader is told to do
+        # something ELSE first ("but first save your work, then confirm the
+        # tools"), which is the forward order (#14679 review cycle 29, measured
+        # — the comma-less twin was a false RED).
+        r"(?:(?!\bthen\b)[^\n])*?"
         + _CONFIRM_PREDICATE
         + r"[^\n]*?" + _TOOLS_OBJECT + _NOT_A_DOC
     ),
@@ -1952,14 +1974,19 @@ _INVERSION_FORMS = (
     #     one-word change (measured; its adversative twin below still reds).
     _inversion_form(
         _CONFIRM_PREDICATE + r"[^\n]*?" + _TOOLS_OBJECT + _NOT_A_DOC + r"[^\n]*?"
-        r"(?:\b(?:beforehand|before restarting|before you restart)\b"
-        r"|\bfirst\b(?=[\s.,;:!?)\]}\"'`*_—–…]*$))"
+        r"(?:\b(?:beforehand|before restarting|before you restart"
+        # `in advance` is `beforehand` one synonym over, and form (c) already
+        # admits it; leaving it out here kept "… though you should confirm the
+        # tools are actually there in advance" GREEN while its `beforehand`
+        # twin is a declared RED row (#14679 review cycle 29, measured).
+        r"|in\s+advance)\b"
+        r"|\bfirst(?:ly)?\b(?=[\s.,;:!?)\]}\"'`*_—–…]*$))"
     ),
     # (d′) `already` DOES carry an order claim — but only where an adversative,
     #     not the adverb, is what asserts it ("… but confirm the tools are
     #     already there" = confirm first). Measured GREEN before this form.
     _inversion_form(
-        r"^(?:but|however|though|yet)\b[^\n]*?" + _CONFIRM_PREDICATE
+        r"^(?:but|however|though|although|yet)\b[^\n]*?" + _CONFIRM_PREDICATE
         + r"[^\n]*?" + _TOOLS_OBJECT + _NOT_A_DOC + r"[^\n]*?\balready\b"
     ),
     # (e) the restart conditioned on the tools ALREADY being present:
@@ -1987,8 +2014,23 @@ _INVERSION_FORMS = (
     #     The leading `only` needs no arm of its own — `re.search` finds `once …`
     #     after it — so none is written (an optional prefix no row can depend on
     #     is dead weight, and it was).
+    #     ⛔ THE CONNECTIVE IS NOT ONLY `once`. `after` and `when` state the SAME
+    #     condition, so one word bypassed this form and 20+ declared rows:
+    #     "Restart your client after the tools are listed" was GREEN while
+    #     "… once the tools are listed" is a declared RED row, and the `when` /
+    #     `after` twins of the singular row this PR adds were GREEN too (#14679
+    #     review cycle 29, measured). The false-RED risk is the same as `once`'s
+    #     and is already carried by the two skips applied before every form: an
+    #     INSTALL-side state (`… after the tools are installed`) is file-side and
+    #     exempt via `_confirmation_scopes_the_config` — which is why the object
+    #     lookup there had to admit the singular too. A negated observation
+    #     (`… if you see no tools`) is exempt via `_negated_observation_only`.
+    #     `if` is deliberately NOT here: it is form (a)'s connective, and adding
+    #     it would grade "… if you cannot see the tools", a remedy with the
+    #     restart first (measured false RED on form (a)'s wider first cut).
     _inversion_form(
-        r"\bonce\s+(?:[A-Za-z0-9_`*.-]+\s+){0,2}?" + _TOOLS_OBJECT + r"\s+"
+        r"\b(?:once|when|after)\s+(?:[A-Za-z0-9_`*.-]+\s+){0,2}?"
+        + _TOOLS_OBJECT + r"\s+"
         # ⛔ `is` is REACHABLE again, and required: it was dropped as "an arm no
         # row could depend on" because a plural `tools\s+` can never be followed
         # by a singular copula. With the singular `tool list` object graded that
@@ -2200,7 +2242,7 @@ _SEQUENCER_TAIL_RE = re.compile(
 # are actually there" must not be swallowed by the forward skip (measured — the
 # glued-introducer merge above turned exactly that RED into a GREEN before this
 # guard existed).
-_ADVERSATIVE_LEAD_RE = re.compile(r"^(?:but|however|though|yet)\b", re.IGNORECASE)
+_ADVERSATIVE_LEAD_RE = re.compile(r"^(?:but|however|though|although|yet)\b", re.IGNORECASE)
 
 # Markdown/quoting decoration, for comparing a clause against a structural regex
 # that anchors on its own punctuation. Replaced by a SPACE, never deleted: `_`
@@ -3439,6 +3481,63 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # (measured, and that is why this row is the `if` one).
     ("Restart your client if you looked in the panel and confirmed the tool "
      "list is complete.", True),
+    # ── CYCLE 29 (#14679's review at `7bf9f944`): eight measured defects, each a
+    # row below. Six are the "one word defeats a closed list" class this pin is
+    # made of; the first two are corrections to the singular widening itself.
+    #
+    # (P1) `_confirmation_scopes_the_config` looked up the LITERAL `tools`, so
+    # the whole file-side exemption was unreachable for the singular object one
+    # commit after the object was widened — five declared-GREEN classes went RED.
+    # The object lookup now uses `_TOOLS_OBJECT`; these are its twins (the first
+    # is pinned above, from the peer commit that fixed the same defect):
+    ("Restart your client after checking the tool list is listed in your "
+     "client settings.", False),
+    ("Restart your client once the tool list is installed.", False),
+    ("Restart your client after the tools are installed.", False),
+    ("Restart your client when the tools are configured.", False),
+    # …and the conjunction rule still fires through the singular object:
+    ("Restart your client after confirming the config is right and the tool "
+     "list is actually there.", True),
+    # (P2) `firstly` is `first`: a one-word inflection defeated four forms and
+    # flipped 26 of 32 declared-RED rows GREEN (measured).
+    ("Restart your client, but firstly confirm the tools are actually there.",
+     True),
+    ("Restart your client, confirm the tools are actually there firstly.", True),
+    ("Please firstly confirm the tools are actually there. Restart your client, "
+     "then confirm the tools are actually there.", True),
+    # (P2) form (e) was `once`-anchored, so one word bypassed 20+ declared rows —
+    # including the singular ones the previous commit added:
+    ("Restart your client only after the tools are actually there.", True),
+    ("Restart your client only when the tool list is complete.", True),
+    ("Restart your client after the tools are listed.", True),
+    # (P2) form (c)'s span ran through an intervening IMPERATIVE to a later
+    # confirmation, so removing a comma turned forward copy RED:
+    ("Restart your client, but first save your work, then confirm the tools "
+     "are actually there.", False),
+    ("Restart your client but first save your work then confirm the tools are "
+     "actually there.", False),
+    ("Restart your client (but first save your work) and then confirm the tools "
+     "are actually there.", False),
+    # (P3) a hyphenated predicate is the same predicate — the lesson form (a)
+    # already carries, applied to the form where an imperative takes it most:
+    ("Please double-check the tools are actually there. Restart your client, "
+     "then confirm the tools are actually there.", True),
+    # (P3) the adversative / pre-restart vocabularies were closed one synonym
+    # short on both sides (`though`→`although`, `beforehand`→`in advance`):
+    ("Restart your client, although beforehand you confirmed the tools are "
+     "actually there.", True),
+    ("Restart your client, though you should confirm the tools are actually "
+     "there in advance.", True),
+    # (P3) `tool lists` — the plural of the docs' own spelling — defeated it:
+    ("Restart your client after confirming the tool lists are complete.", True),
+    # (P3) two arms added by the previous commit that NO row pinned (mutating
+    # each flipped 0 of 274 rows): form (f.1)'s own object arm (its added row is
+    # satisfied by (f.2), one arm over), and form (e)'s singular verbs.
+    ("Please list the tool list from the panel. Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("Restart your client only once the tool list appears.", True),
+    ("Restart your client only once the tool list exists.", True),
+    ("Restart your client only once the tool list loads.", True),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
