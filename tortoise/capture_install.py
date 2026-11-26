@@ -1414,6 +1414,26 @@ def legacy_extension_obstacle(harness: str,
             return (f"a second copy of the second capture producer is "
                     f"registered at {other_name} — move it out of the "
                     f"extensions directory")
+    # ⛔ THE RETIRED NAME IS GUARD STATE, NOT A BY-PRODUCT OF THIS RUN —
+    # mirrored here (#14342 round 24, finding 2). The installer re-reads
+    # `retired` on EVERY run and refuses when Pi still loads it (:2367), guard
+    # state that does not depend on `active` existing. The mirror's arm was
+    # gated on `lexists(active)`, so on a box that carries ONLY the retired
+    # name it was SILENT while `tortoise install pi` refused. MEASURED on the
+    # shape this repo's own removed dashboard snippet produced (it renamed a
+    # `reflect-hook.ts` DIRECTORY to `reflect-hook.ts.disabled`): the installer
+    # answers ok=False ("every session is captured twice") and this predicate
+    # answered ''. A hint that stays silent about a verb that refuses is the
+    # drift this predicate exists to stop.
+    if _pi_entry_is_loadable(retired):
+        if _pi_loadability_is_guessed(retired):
+            return (f"a disabled copy of the second capture producer at "
+                    f"{PI_SECOND_PRODUCER_DISABLED_NAME} could not be "
+                    f"VERIFIED — it may still register; move it out of the "
+                    f"extensions directory")
+        return (f"the disabled copy of the second capture producer at "
+                f"{PI_SECOND_PRODUCER_DISABLED_NAME} is still an extension Pi "
+                f"loads — move it out of the extensions directory")
     if (os.path.lexists(active) and os.path.lexists(retired)
             and _pi_entry_is_loadable(active)):
         live = _sha256_file(active) if active.is_file() else None
@@ -2313,7 +2333,13 @@ def _disable_pi_second_producer(
     call site cannot silently regain the wrong sentence (#14342 round 14).
     """
     active = ext_dir / PI_SECOND_PRODUCER_NAME
-    retired = active.with_name(f"{PI_SECOND_PRODUCER_NAME}.disabled")
+    # ⛔ ONE FACT, ONE DERIVATION (#14342 round 24, finding 1). This was an
+    # f-string re-derivation of a name that already has a constant, which the
+    # mirror reads (:1398). Two derivations drift: change the constant and the
+    # installer keeps renaming to the OLD name while `legacy_extension_obstacle`
+    # reports a collision at a path that no longer exists — a phantom "move one
+    # aside" on a converged box.
+    retired = ext_dir / PI_SECOND_PRODUCER_DISABLED_NAME
     # ⛔ THE RECEIPT MUST NOT CLAIM A WRITE THIS RUN DID NOT MAKE. Every refusal
     # below runs AFTER `_install_pi` handled the seam, so the same InstallResult
     # may carry `actions=('installed …')` and
@@ -2405,9 +2431,11 @@ def _disable_pi_second_producer(
             return False, [], (
                 f"cannot disable the second capture producer {active}: "
                 f"{retired} exists and is not a regular file (a symlink or a "
-                "directory). Renaming or removing either could destroy the "
-                f"only copy, so it was not modified. {seam_state} — move one "
-                "aside by hand.")
+                "directory), so it is not a preservation copy this installer "
+                "can verify — a link here may resolve to the live producer "
+                "itself, and renaming or removing either could destroy the "
+                f"only copy. It was not modified. {seam_state} — move one "
+                "aside by hand; this refuses on every re-run until you do.")
         live_digest = _sha256_file(active) if active.is_file() else None
         retired_digest = _sha256_file(retired)
         if live_digest is None or retired_digest is None:

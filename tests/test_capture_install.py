@@ -2452,6 +2452,68 @@ def test_legacy_obstacle_mirrors_the_js_producer_refusal(home):
         "the predicate and the installer disagree")
 
 
+def test_legacy_obstacle_names_a_still_loadable_retired_name_with_no_live_producer(
+        home):
+    """The retired name is GUARD STATE, not a by-product of this run (#14342
+    round 24, finding 2).
+
+    The installer re-reads ``retired`` on EVERY run and refuses whenever Pi
+    still loads it. The mirror's arm was gated on ``lexists(active)``, so a box
+    that carries ONLY the retired name — the exact shape this repo's REMOVED
+    dashboard snippet produced, since it renamed a ``reflect-hook.ts``
+    DIRECTORY to a name Pi still resolves — got a refusing installer and a
+    SILENT hint. ``hooks status`` said nothing about a command that refuses.
+
+    MEASURED before the fix: ``install_capture`` → ``ok=False`` ("every session
+    is captured twice"), ``legacy_extension_obstacle`` → ``''``.
+
+    Mutation: re-gate the mirror's retired arm on ``lexists(active)`` — this row
+    REDs on the disagreement.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.mkdir()
+    # A suffixed DIRECTORY is still resolved through `resolveExtensionEntries`,
+    # so Pi loads it under any name — the retired name does not retire it.
+    (retired / "index.ts").write_text("export default function () {}\\n")
+    assert not (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).exists(), (
+        "this row is about the shape with NO live producer")
+
+    obstacle = capture_install.legacy_extension_obstacle("pi", ext_dir)
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, (
+        "the installer no longer refuses this shape, so this row pins nothing")
+    assert obstacle, (
+        "a refusing box reported no obstacle — the hint is silent over a verb "
+        f"that refuses ({res.error!r})")
+    assert capture_install.PI_SECOND_PRODUCER_DISABLED_NAME in obstacle, obstacle
+
+
+def test_legacy_obstacle_stays_silent_on_a_converged_retired_name(home):
+    """The new retired-name arm must not OVER-fire (#14342 round 24, finding 2).
+
+    A converged box carries ``reflect-hook.ts.disabled`` as a plain FILE — the
+    name ``isExtensionFile`` rejects (it ends ``.disabled``, not ``.ts``/``.js``)
+    — so it is guard state, not a producer, and naming it would withhold a
+    command that works.
+
+    Mutation: drop the ``_pi_entry_is_loadable`` test from the mirror arm (refuse
+    on any ``retired`` that exists) — this row REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.write_text("// the retired producer, preserved\n")
+
+    obstacle = capture_install.legacy_extension_obstacle("pi", ext_dir)
+    assert obstacle == "", (
+        f"a converged box reported an obstacle: {obstacle!r}")
+    assert install_capture("pi", home=home).ok, (
+        "the predicate is silent but the installer refuses — they disagree")
+
+
 def test_registered_producers_helper_models_the_manifest_branch(home):
     """The TEST ORACLE must model the same rule the module does, including
     ``resolveExtensionEntries``' manifest branch (#14342 round 17, finding 3).
