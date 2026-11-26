@@ -1702,7 +1702,10 @@ def _cue_start(text: str) -> int:
 # this. Two forms carried different, shorter lists, so `… checked the tools
 # overview` was GREEN in one and RED in the other, and forms (b)/(c)/(d) had no
 # exclusion at all (each measured). The rule is defined once here and appended to
-# every form's object, so it cannot drift again.
+# every form's object — with ONE deliberate exception, form (e), whose own
+# comment gives the reason: `listed` is in its presence predicate, which is what
+# grades "the tools listed above appear", so exempting doc phrases there would
+# delete the row that grades them.
 # ⛔ THE WHOLE DOCUMENTED FAMILY, not just the two words the comments happened to
 # use. `documentation` — the very word these comments name the category with —
 # was MISSING, so "after checking the tools documentation" was RED while its
@@ -1753,8 +1756,14 @@ _PRE_CUE_ONLY = _inversion_form(
     # (f.1) `list` takes the tools THEMSELVES as its object, so there is no
     # document it could be pointing at and no predicate to require:
     # "Please list the tools you see" is an instruction about the session.
-    r"list\w*\s+(?:the\s+|all\s+|your\s+)?tools\b"
-    r"|"
+    # ⛔ THE OBJECT SLOT MUST SURVIVE THE REPO'S OWN SPELLING. The determiner was
+    # pinned to `the|all|your` immediately before `tools`, so the quickstart's
+    # `\`tortoise_*\` tools` defeated it: "Please list the `tortoise_*` tools you
+    # see" was GREEN while its plain twin is a declared RED row (measured) — the
+    # same one-inserted-word defect the adverb slot above records as fixed.
+    r"list\w*\s+(?:the\s+|all\s+|your\s+)?(?:[\w`*_.\u2019-]+\s+){0,2}?tools\b"
+    + _NOT_A_DOC
+    + r"|"
     # (f.2) every other verb: the object must be a PRESENCE PREDICATE on
     # `tools` — "the tools ARE actually there", "the tools appear", "the tools
     # list IS complete". ⛔ THE PREDICATE IS THE MECHANISM, not a decoration: a
@@ -2094,9 +2103,16 @@ _STATEMENT_BREAK_RE = re.compile(
 # rule draws is verb-class, so the complementizer reading escaped it: "… but
 # first see that no tools are missing" is a pre-restart demand and was GREEN
 # (measured) while its `confirm` twin is a declared-RED row.
+# ⛔ THE NEGATION MUST BE THE VERB'S OWN OBJECT, NOT ONE FOUND FURTHER ALONG.
+# `[^\n]*?` let the match START at the graded claim's own observation-verb
+# predicate (`see|saw|seen` are in `_CONFIRM_PREDICATE`) and run ACROSS the claim
+# to the appended phrase's `no errors`, so truncating at the match start deleted
+# the claim itself: "after you saw the tools are actually there, and see no
+# errors in the log" was GREEN while its tail-less twin is a declared RED row
+# (measured, forms (a)/(b)/(c)). The object is now adjacent to the verb.
 _OBSERVATION_NEGATION_RE = re.compile(
-    r"\b(?:see|saw|seen|seeing|notice[sd]?|noticing)\b(?!\s+that\b)[^\n]*?"
-    r"\b(?:no|none|zero|nothing)\b", re.IGNORECASE)
+    r"\b(?:see|saw|seen|seeing|notice[sd]?|noticing)\b(?!\s+that\b)\s+"
+    r"(?:any\s+|a\s+)?\b(?:no|none|zero|nothing)\b", re.IGNORECASE)
 
 
 def _negated_observation_only(clause: str) -> bool:
@@ -3089,6 +3105,14 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "confirm the tools are actually there.", True),
     ("Please list the tools you see. Restart your client, then confirm the "
      "tools are actually there.", True),
+    # …and the SAME instruction in the repo's own spelling of the list — one
+    # inserted token defeated the object slot (measured):
+    ("Please list the `tortoise_*` tools you see. Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("Please list the MCP tools you see. Restart your client, then confirm "
+     "the tools are actually there.", True),
+    ("Please list all the `tortoise_*` tools you see. Restart your client, "
+     "then confirm the tools are actually there.", True),
     # ── form (f)'s LEADING-ADVERB arm, and the decorations that hide a pre-cue
     # imperative from the `^` anchor. Every row above was GREEN before the cut
     # that made it RED (measured), and each mechanism below flips its own rows
@@ -3130,6 +3154,12 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "confirm the tools are actually there.", False),
     ("Check the tools reference for the full tool list. Restart your client, "
      "then confirm the tools are actually there.", False),
+    # …and the `list` verb must exclude a doc object the same way `check` does,
+    # or the two forms disagree on the same sentence (measured):
+    ("List the tools reference for the full tool list. Restart your client, "
+     "then confirm the tools are actually there.", False),
+    ("List the tools documentation. Restart your client, then confirm the "
+     "tools are actually there.", False),
     ("Ensure the tools table is up to date. Restart your client, then confirm "
      "the tools are actually there.", False),
     ("See the tools guide on MCP. Restart your client, then confirm the tools "
@@ -3272,6 +3302,16 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "errors.", True),
     ("Restart your client only once the tools are actually there and see no "
      "errors.", True),
+    # ── …and the negation must be the VERB'S OWN OBJECT: an observation verb
+    # that is part of the graded claim (`saw`/`seen`/`see the tools are actually
+    # there`) must not let the match run ACROSS the claim to a later `no …`,
+    # which deleted the claim and disarmed (a)/(b)/(c) (measured):
+    ("Restart your client after you saw the tools are actually there, and see "
+     "no errors in the log.", True),
+    ("Restart your client, having seen the tools are actually there and "
+     "noticed no errors.", True),
+    ("Restart your client, but first see the tools are actually there and see "
+     "no errors.", True),
     # ── …while a clause whose only claim IS a negated observation stays GREEN:
     ("Restart your client if you see no `tortoise_*` tools in the list.", False),
     ("Restart your client after you have noticed no errors in the log.", False),
