@@ -1299,22 +1299,44 @@ def _registered_producers(ext_dir: Path) -> list[str]:
     Modelling matches ``_pi_entry_is_loadable`` exactly, including the
     fall-through: an UNREADABLE manifest is Pi's `catch { return null }`, so it
     is NOT a registration and the index files are consulted instead.
+
+    ⛔ AND IT TESTS THE DIRENT, NOT THE TARGET (#14342 round 18, finding 4).
+    ``loader.js:642-647`` tries ``isFile() || isSymbolicLink()`` for a DIRECT
+    entry (gated on ``isExtensionFile(name)``) and only then
+    ``isDirectory() || isSymbolicLink()`` for a subdirectory. So a
+    ``*.ts``-named SYMLINK TO A DIRECTORY is attempted as a FILE, that attempt
+    fails, and its target's index is NEVER resolved — following the link counted
+    a producer Pi does not load. That is an OVER-count (a spurious red), never a
+    false PASS, which is why no current row was affected; but this helper exists
+    precisely to model Pi's rule, so the axis is modelled rather than noted.
+    A link to a FILE still loads.
     """
     found: list[str] = []
     for entry in ext_dir.iterdir():
-        if entry.is_dir():
-            entries, unreadable = capture_install._pi_manifest_entries(entry)
-            if not unreadable and entries:
-                resolved = [name for name in entries
-                            if (entry / name).exists()]
-                if resolved:
-                    found.extend(f"{entry.name}/{name}" for name in resolved)
-                    continue
-            for index in ("index.ts", "index.js"):
-                if (entry / index).is_file():
-                    found.append(f"{entry.name}/{index}")
-        elif entry.name.endswith((".ts", ".js")):
+        suffix_ok = entry.name.endswith((".ts", ".js"))
+        if entry.is_symlink() and entry.is_dir():
+            # A *.ts-named link to a directory: the direct-entry attempt reads it
+            # as a file and fails, so nothing registers. A NON-suffixed link to a
+            # directory (`.tortoise-capture.disabled`) is not a direct entry at
+            # all and IS resolved through `resolveExtensionEntries`.
+            if suffix_ok:
+                continue
+        elif suffix_ok and not entry.is_dir():
+            # a regular file, or a symlink to a file — both load
             found.append(entry.name)
+            continue
+        if not entry.is_dir():
+            continue
+        entries, unreadable = capture_install._pi_manifest_entries(entry)
+        if not unreadable and entries:
+            resolved = [name for name in entries
+                        if (entry / name).exists()]
+            if resolved:
+                found.extend(f"{entry.name}/{name}" for name in resolved)
+                continue
+        for index in ("index.ts", "index.js"):
+            if (entry / index).is_file():
+                found.append(f"{entry.name}/{index}")
     # `lstrip(".")` because a dot-prefixed directory is still LOADED — the
     # stem match must not be defeated by the dot a guard adds.
     return [f for f in found
@@ -1488,8 +1510,10 @@ def test_pi_install_does_not_claim_two_producers_it_could_not_verify(home):
     error = res.error or ""
     assert not res.ok, res.actions
     assert "could not be VERIFIED" in error, error
-    # ⛔ THE FALSE CLAIM: neither measured sentence may appear anywhere, in
-    # either mood (case-insensitive — the clause is capitalised now).
+    # ⛔ CAPITALISED AT THE SENTENCE BOUNDARY (#14342 round 18, finding 2): every
+    # call site splices this after ". ", so a lower-case subject emitted
+    # "… by hand. the second producer could not be VERIFIED …".
+    assert "The second producer could not be VERIFIED" in error, error
     assert "producers are registered" not in error.lower(), error
     assert "producers would stay registered" not in error.lower(), error
     # The remedy and the consequence survive, so saying LESS is not less useful.
@@ -1550,13 +1574,15 @@ def test_legacy_install_does_not_claim_two_producers_it_could_not_verify(home):
     error = res.error or ""
     assert not res.ok, res.actions
     assert "could not be VERIFIED" in error, error
+    assert "The legacy capture extension could not be VERIFIED" in error, error
+    # ⛔ THE FALSE CLAIM: neither measured sentence may appear (case-insensitive,
+    # since the clause is capitalised).
     assert "producers are registered" not in error.lower(), error
     assert "producers stay registered" not in error.lower(), error
-    # ⛔ IT MUST NOT NAME A PRODUCER THIS RUN NEVER READ (#14342 round 17,
+    # ⛔ AND IT MUST NOT NAME A PRODUCER THIS RUN NEVER READ (#14342 round 17,
     # finding 2): the legacy block returns before `_disable_pi_second_producer`
     # runs, so on a legacy-only box `reflect-hook.ts` does not even exist.
     assert "second producer" not in error.lower(), error
-    assert "legacy capture extension" in error.lower(), error
     # The legacy remedy is the one that was already there.
     assert "by hand" in error, error
     assert "hand.. " not in error, error
@@ -1655,6 +1681,229 @@ def test_a_guessed_loadability_behind_a_symlink_is_not_reported_as_measured(home
     assert registered == [capture_install.PI_EXTENSION_NAME], (
         f"the link's target registers nothing while its manifest is "
         f"unreadable; got {registered}")
+
+
+def _legacy_symlink_with_unreadable_manifest(home):
+    """Shared fixture: ``.tortoise-capture.disabled`` is a LINK to a directory
+    whose ``package.json`` cannot be read, and which carries no index file.
+
+    The shape matters: the link half is MEASURED (it is a symlink to a
+    directory), the loadability half is a GUESS, and real Pi registers nothing.
+    Returns ``(ext_dir, disabled, target, manifest)`` so a caller can restore the
+    mode — pytest cannot clean a mode-000 file up on its own.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    # `exist_ok` because a caller may already have installed the seam, which
+    # creates this directory (the already-current row does exactly that).
+    ext_dir.mkdir(parents=True, exist_ok=True)
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "main.ts").write_text("// declared by the manifest\n")
+    manifest = target / "package.json"
+    manifest.write_text('{"pi": {"extensions": ["main.ts"]}}')
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+    os.chmod(manifest, 0o000)
+    return ext_dir, disabled, target, manifest
+
+
+def test_legacy_symlink_dry_run_guessed_arm_is_subjunctive_and_unattributed(home):
+    """The legacy arm's ``_guessed and dry_run`` branch (#14342 round 18,
+    finding 3 — unpinned: the mutant that collapsed it survived the whole suite).
+
+    A preview writes nothing, so it must say the box WOULD run both producers —
+    not that it does — and it must still attribute the guess to the thing it
+    could not read, not to the second producer it never looked at.
+
+    Mutation: make the guessed dry-run branch fall through to the measured
+    wording (`if _guessed and dry_run` -> `if dry_run`) — this row REDs.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir, _disabled, _target, manifest = (
+        _legacy_symlink_with_unreadable_manifest(home))
+    try:
+        res = install_capture("pi", home=home, dry_run=True)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "WOULD be installed" in error, error
+    assert "WAS installed" not in error, (
+        f"a dry run claimed the seam landed: {error!r}")
+    assert "may run both producers" in error, error
+    assert "runs BOTH producers" not in error, error
+    assert "second producer" not in error.lower(), error
+    assert res.changed_artifacts == (), res.changed_artifacts
+    assert not (ext_dir / capture_install.PI_EXTENSION_NAME).exists(), (
+        "a dry run wrote the seam")
+
+
+def test_legacy_symlink_already_current_guessed_arm_says_may(home):
+    """The legacy arm's real-run / seam-ALREADY-current ``_guessed`` branch
+    (#14342 round 18, finding 3 — unpinned).
+
+    On a second run the seam is current, so nothing was written; the receipt
+    must attribute the state to that ("was ALREADY in place") rather than claim
+    a write, and must keep the count a possibility because the manifest is
+    unreadable.
+
+    Mutation: collapse the innermost `if _guessed` to the measured wording —
+    this row REDs on `runs BOTH producers`.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    # First run with NO legacy shape: the seam lands and is current afterwards.
+    assert install_capture("pi", home=home).ok
+    ext_dir, _disabled, _target, manifest = (
+        _legacy_symlink_with_unreadable_manifest(home))
+    try:
+        res = install_capture("pi", home=home)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "ALREADY in place" in error, error
+    assert "WAS installed" not in error, (
+        f"a run with a current seam claimed it installed one: {error!r}")
+    assert "may run both producers" in error, error
+    assert "runs BOTH producers" not in error, error
+    assert "second producer" not in error.lower(), error
+
+
+def test_oracle_does_not_count_a_ts_named_symlink_to_a_directory(home):
+    """Pi tests the DIRENT, not the target (#14342 round 18, finding 4).
+
+    ``loader.js:642-647`` tries a DIRECT entry as ``isFile() ||
+    isSymbolicLink()``, gated on ``isExtensionFile(name)`` — so
+    ``reflect-hook.ts`` symlinked to a DIRECTORY is attempted as a FILE, fails,
+    and its target's ``index.ts`` is never resolved. Following the link counted
+    a producer Pi does not load (an over-count: a spurious red, never a false
+    PASS).
+
+    The MODULE still answers loadable for this shape on purpose, and fails
+    CLOSED on it — the README's documented residual ("a symlink at a producer
+    path pointing at a DIRECTORY is loaded by Pi as a file attempt (which
+    fails), yet retiring it renames the LINK …, which Pi then resolves as a
+    directory and loads"). So the oracle is stricter and the divergence is the
+    safe direction; asserting it here keeps the two from silently re-merging.
+
+    Mutation: drop the dirent branch (`if suffix_ok: continue`) — REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// would resolve, but never reached\n")
+    link = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    link.symlink_to(target, target_is_directory=True)
+
+    assert link.is_symlink() and link.is_dir()
+    assert _registered_producers(ext_dir) == [], (
+        f"Pi attempts a *.ts-named link as a FILE and never resolves the "
+        f"target; got {_registered_producers(ext_dir)}")
+
+
+def test_legacy_symlink_measured_arm_names_the_manifest_branch_not_the_index(home):
+    """The measured branch of the legacy symlink arm named a FILE the shape does
+    not have (#14342 round 18, finding 1).
+
+    With a READABLE ``package.json`` declaring an existing ``main.ts`` and no
+    index file, Pi's ``resolveExtensionEntries`` takes the MANIFEST branch first
+    (``loader.js:593-621``) and never falls back to the index — so "resolves a
+    symlinked subdirectory through its index file" describes a file that is not
+    there. The refusal and the two-producer measurement are right; only the
+    stated mechanism was wrong.
+
+    Mutation: revert to "through its index file" — this row REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "main.ts").write_text("// declared by the manifest\n")
+    (target / "package.json").write_text(
+        '{"pi": {"extensions": ["main.ts"]}}')
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    # The measured branch: the entry really does register, so it says so.
+    assert "BOTH producers" in error, error
+    assert "could not be VERIFIED" not in error, error
+    # …but the mechanism it names must be one the shape actually uses.
+    assert "resolveExtensionEntries" in error, error
+    assert "through its index file" not in error, (
+        f"the receipt named the index-file branch for a manifest-declaring "
+        f"shape: {error!r}")
+    assert "package.json" in error, error
+
+
+def test_legacy_symlink_measured_dry_run_says_would_not_does(home):
+    """Branch 2 of the legacy arm's six-way conditional (#14342 round 18,
+    finding 3 — the reviewer's M5 survived the whole suite).
+
+    MEASURED (a readable manifest naming an existing entry) + ``--dry-run``: the
+    receipt must say the box WOULD run both producers, and must not use the
+    guessed "may" wording. Collapsing ``if _guessed and dry_run`` to
+    ``if dry_run`` is behaviourally identical for every GUESSED case — this row
+    is the only one that separates them, because it is the measured one.
+
+    Mutation: `if _guessed and dry_run` -> `if dry_run` — this row REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "main.ts").write_text("// declared by the manifest\n")
+    (target / "package.json").write_text(
+        '{"pi": {"extensions": ["main.ts"]}}')
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home, dry_run=True)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "WOULD be installed" in error, error
+    assert "this box would run BOTH producers" in error, (
+        f"a measured dry-run refusal must state the count, not hedge: {error!r}")
+    assert "may run both producers" not in error, error
+    assert res.changed_artifacts == (), res.changed_artifacts
+
+
+def test_legacy_symlink_measured_already_current_says_both(home):
+    """Branch 6: MEASURED + the seam is ALREADY current (#14342 round 18,
+    finding 3). Nothing was written, so the receipt must say so, and the
+    measured count must stay BOTH rather than hedge.
+
+    Mutation: collapse the innermost `if _guessed` to the measured wording in
+    the wrong direction (swap branches 5 and 6) — this row REDs.
+    """
+    assert install_capture("pi", home=home).ok
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "main.ts").write_text("// declared by the manifest\n")
+    (target / "package.json").write_text(
+        '{"pi": {"extensions": ["main.ts"]}}')
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "ALREADY in place" in error, error
+    assert "this box now runs BOTH producers" in error, (
+        f"a measured, already-current refusal must state the count, not "
+        f"hedge: {error!r}")
+    assert "may run both producers" not in error, error
 
 
 def test_registered_producers_helper_models_the_manifest_branch(home):

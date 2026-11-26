@@ -2102,7 +2102,13 @@ def _duplication_consequence(*, dry_run: bool, unverified: bool = False,
     consequence whose antecedent was deleted.
     """
     if unverified:
-        return (f"{subject} could not be VERIFIED, so it may still register and "
+        # ⛔ CAPITALISE AT THE SENTENCE BOUNDARY — the contract this helper's own
+        # docstring states (#14342 round 18, finding 2). Every call site splices
+        # this after ". ", so an un-capitalised subject emitted
+        # "… by hand. the second producer could not be VERIFIED …": the double
+        # period was removed and a lower-case sentence start put in its place.
+        what = subject[:1].upper() + subject[1:]
+        return (f"{what} could not be VERIFIED, so it may still register and "
                 "every session could be captured twice.")
     if dry_run:
         return ("Both producers would stay registered and every session would "
@@ -2323,8 +2329,10 @@ def _disable_pi_second_producer(
                 f"the capture seam would be in place, but the second capture "
                 f"producer could not be disabled ({active}): renaming the link "
                 f"to {retired} leaves a suffixed SYMLINK to a directory, which "
-                f"Pi resolves through its index file — so both producers would "
-                f"stay registered. Nothing was written (a dry run); move "
+                f"Pi resolves through `resolveExtensionEntries` (its "
+                f"`package.json` manifest, else its index file) — so both "
+                f"producers would stay registered. Nothing was written (a dry "
+                f"run); move "
                 f"{active} out of the extensions directory by hand and re-run.")
         if active.is_dir() and not active.is_symlink():
             return True, [f"[dry-run] would retire the entry point inside "
@@ -2665,9 +2673,11 @@ def _install_pi(
                                         "twice"
                                         if _guessed else
                                         f"Pi resolves a symlinked "
-                                        f"subdirectory through its index "
-                                        f"file under ANY suffixed name — "
-                                        f"renaming it retires nothing, "
+                                        f"subdirectory through "
+                                        f"`resolveExtensionEntries` (its "
+                                        f"`package.json` manifest, else its "
+                                        f"index file) under ANY suffixed name "
+                                        f"— renaming it retires nothing, "
                                         f"{_both_producers_clause(dry_run=dry_run)}")
                                      + ". "
                                      # ⛔ "THIS BOX NOW RUNS BOTH PRODUCERS" is

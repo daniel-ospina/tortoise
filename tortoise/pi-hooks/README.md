@@ -310,7 +310,15 @@ from this section is the false claim, not a stale measurement.
   `index.ts`/`index.js` fallback are written twice, and
   `_assert_pi_entry_not_loadable` (`tortoise/capture_install.py:2157`) grades
   the end state with the SAME function that decided the retirement, so it adds
-  no independent signal. Both are correct against the Pi measured on 2026-11-26:
+  no independent signal. ⛔ **The two also model the DIRENT differently, on
+  purpose:** the test oracle follows Pi's own order (``isFile() ||
+  isSymbolicLink()`` for a direct entry, only then ``isDirectory() ||
+  isSymbolicLink()``), so a ``*.ts``-named link to a directory is attempted as a
+  FILE and counted as nothing; `_pi_entry_is_loadable` follows the link and
+  answers loadable for it, which is the FAIL-CLOSED direction and is why the
+  residual below ("a symlink at a producer path pointing at a DIRECTORY")
+  refuses rather than retiring. Stricter oracle, safer module — do not "fix"
+  the divergence by making the oracle follow links. Both are correct against the Pi measured on 2026-11-26:
   `isExtensionFile` is `endsWith('.ts') || endsWith('.js')`, and every
   subdirectory is resolved through `resolveExtensionEntries` (manifest, else
   `index.ts`/`index.js`) with **no dot-prefix filter** anywhere in
