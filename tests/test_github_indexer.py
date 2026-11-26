@@ -464,8 +464,9 @@ def test_a_row_whose_position_the_fold_cannot_resolve_is_never_read_as_open(sdk)
 
     ⛔ AND THE ORDER IS THE FIX (#13288 F1/F3, the marker-carrying subset below).
     A guard with the right answer in the wrong place only holds for the rows that
-    reach it: `is_position_ended` short-circuits on `bool(is_closed)`
-    (`live.py:154`) and never consults the slot, so while this guard sat BELOW the
+    reach it: `is_position_ended` answers TRUE on `bool(is_closed)` alone
+    (`live.py:233`, the `isClosed` arm of `ending_axes`) — a slot cannot unseat
+    it — so while this guard sat BELOW the
     polarity arms a row carrying a truthy `isClosed` *and* a broken position
     answered `"closed"` — and against an OPEN issue that mints `-reopened`,
     `-reopened-2`, … on every poll, for ever (`[1,1,1]` measured at head
@@ -981,7 +982,7 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
     (`entities.py:6501`, `excluded = _terminal_object_statuses()` at `:6167` =
     `commit_ops.OBJECT_TERMINAL_STATUSES`), and while the word is SET no fold path
     clears it (`_STAGE_CLEAR_PROPS` is the pending trio only) — ⚠️ not "for ever": a
-    coherent un-supersede does clear `superseded` (`sdk.py:56657-56666`), and this
+    coherent un-supersede does clear `superseded` (`sdk.py:56682-56691`), and this
     read resumes then because it derives from the stored row. So while the word is
     set the row cannot be moved in either direction, and a reader answering
     `"closed"` for it therefore
@@ -1100,7 +1101,7 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     where the fix started looping: the read answered `"closed"` from a LIFECYCLE
     term the fold refuses in BOTH directions while it is set — not one "no writer
     can clear" (a coherent un-supersede DOES clear `superseded`,
-    `sdk.py:56657-56666`) — so each poll minted another `-reopened`
+    `sdk.py:56682-56691`) — so each poll minted another `-reopened`
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
     (`entities.py:6501`).
@@ -1451,7 +1452,7 @@ def test_a_non_scalar_stored_status_does_not_crash_the_reader(sdk):
     Both lifecycle helpers were `frozenset` membership tests, and membership
     HASHES the value — so a stored ARRAY status raised `TypeError: unhashable
     type`. That value is reachable through a PRE-FIX SDK, a raw Cypher producer or a
-    JSONL replay of either (`sdk.py:56505-56507`); it is NOT reachable through
+    JSONL replay of either (`sdk.py:56530-56532`); it is NOT reachable through
     `update_knowledge` any more — the lifecycle doors refuse a non-string status at
     intake (`lifecycle_vocabulary.py:279-286`, reached from `_read_caller_status`),
     so `update_knowledge(id, status=['live'])` raises rather than storing. The row
@@ -3367,9 +3368,25 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # `sdk.py` never moved this region; `main` did,
     # and no later `main` commit re-derived this table. The table, and the citations quoting it
     # (here and in `tortoise/indexer/github_indexer.py`), are re-cut to those measurements.
-    # ⛔ The un-supersede arm's start text occurs TWICE (`56598`, `56637`), so its row is located
-    # by its own `continue` terminator (`56607`) — never by the start text alone, which would
-    # admit either occurrence.
+    # ⛔ THAT READING IS SUPERSEDED AT THIS HEAD, and it is marked rather than deleted because it
+    # is the record of what was true at `main` `af40c97ca312`. After the `origin/main` merge the
+    # three premises above are all FALSE here, measured: `git diff origin/main...HEAD --
+    # tortoise/sdk.py` is `25  0` (NOT empty — three hunks at `10784` +6, `29187` +11, `37064`
+    # +8), the four addresses are IDENTICAL to `origin/main` `071710aea1b8`'s (`23110`, `56446`,
+    # `56448`, `56598`, `57113` — i.e. the block quoted exactly `main`'s CORRECT table, which the
+    # merge resolved this file to) and therefore NOT identical at this head. So the reds this
+    # table's own guard raised were this BRANCH's shift (`+6` above `update_knowledge`, `+25`
+    # below it), not an inherited `main` red. See the re-derivation that follows.
+    # ⛔ The un-supersede arm's start text occurs TWICE at this head (`56654`, the admission arm
+    # this row pins, and `56693`, a hint-message expression, which is NOT an arm), so its row is
+    # located by its own `continue` terminator (`56663`) — never by the start text alone, which
+    # would admit either occurrence. Re-measured with `grep -n` on this tree; the
+    # `56529`/`56568`/`56538` triple this sentence used to carry was the `bbe54363ad65`-era address
+    # of the same two occurrences and the same terminator, and it names unrelated lines both here
+    # and on `origin/main` (`56598`/`56637` there), so it is superseded rather than deleted.
+    # ⛔ `origin/main`'s own three figures for this sentence (`56598`/`56637`/`56607`, on its
+    # side of the merge) describe ITS tree, which does not carry this branch's +25 below
+    # `update_knowledge`; they are not a competing measurement of this one.
     # ⛔ THIS IS THE RE-DERIVATION `#13937` ASKS FOR (its own "suggested scope" item 1:
     # re-derive every address at the current tree), so the note that "no landing re-derived
     # these four rows" no longer holds. Its figures are above and were re-measured here, not
@@ -3377,12 +3394,44 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # `git show <sha>:tortoise/sdk.py | grep -n` probes above name. Every row's SPAN is
     # unchanged (176, 3, 10 and 1 lines), so the addresses moved with the statements rather
     # than being re-pointed at neighbouring code.
-    ("sdk.py", 56505, 56507): (
+    # ⛔ RE-DERIVED AT THE `origin/main` MERGE THAT PUT THIS BRANCH BACK ON CURRENT `main`
+    # (#14587): `main` kept growing the module while this branch waited, and THIS branch
+    # carries one insert of its own BELOW three of the four rows, so the two regions moved by
+    # DIFFERENT amounts and a single offset would have re-pinned the wrong function. Measured
+    # at the MERGED tree, never carried from either side of the conflict:
+    #   `git diff --numstat origin/main...HEAD -- tortoise/sdk.py` -> `28  0`, ONE hunk at
+    #   `@@ -51573,0 +51574,28 @@` — so the delta is **0** above `update_knowledge` and
+    #   **+28** below it. The `+28` is the consistency check on this measurement, never its
+    #   input: each row below is exactly `+28` of `origin/main`'s own reading except
+    #   `update_knowledge`, which is unchanged because the insert sits below it.
+    # Each address was re-found here by its own pinned FIRST-line text — and, for the arm, by
+    # its own LAST-line text `continue`, because the arm's start text occurs TWICE in the
+    # module (the admission arm this row pins and a later hint-message expression that is NOT
+    # an arm), so the start text alone would admit either occurrence. Every row's SPAN is
+    # unchanged (176, 3, 10 and 1 lines), i.e. the addresses moved WITH the statements rather
+    # than being re-pointed at neighbouring code, and the prose citations in this file and in
+    # `tortoise/indexer/github_indexer.py` are re-cut to the same values.
+    # ⛔ THE `#13450` (`ov-14600`) PARAGRAPH BELOW IS KEPT AS HISTORY AND ITS FIGURES ARE
+    # SUPERSEDED HERE, not deleted: it measured `origin/main`'s OWN tree at the merge that
+    # carried `ov-14600` (`+6`/`+25` relative to ITS base), and `main` has moved this module
+    # again since. Its `56502`/`56654`/`23117`/`57169` readings are therefore the DELTA CHECK
+    # on the measurement above — `origin/main` at THIS merge — never the tree being pinned.
+    # ⛔ RE-DERIVED ONCE MORE on the merge that carries #13450 (`ov-14600`): this branch's own
+    # `sdk.py` docstring inserts sit at `:10784` (+6), `:29187` (+11) and `:37064` (+8), so the
+    # two regions the rows live in moved by DIFFERENT amounts — **+6** above `update_knowledge`
+    # and **+25** below it. Measured, not carried: at `main` `4b2fba3e8aa0` all four rows resolve,
+    # and at this head `git show HEAD:tortoise/sdk.py | grep -n` each row's own FIRST-line text
+    # lands at `56502`/`56654`/`23117`/`57169`, with the arm's `continue` at `56663` — so the
+    # `+6`/`+25` pair is the consistency check on the measurement, never its input. Every SPAN is
+    # unchanged (176, 3, 10 and 1 lines), i.e. the addresses moved WITH the statements rather than
+    # being re-pointed at neighbouring code, and the prose citations in this file and in
+    # `tortoise/indexer/github_indexer.py` are re-cut to the same values.
+    ("sdk.py", 56530, 56532): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
-    ("sdk.py", 56657, 56666): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
-    ("sdk.py", 23111, 23286): (
+    ("sdk.py", 56682, 56691): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
+    ("sdk.py", 23117, 23292): (
         "def update_knowledge(", "return self._update_entity_any(id, **props)"),
-    ("sdk.py", 57172, 57172): (
+    ("sdk.py", 57197, 57197): (
         "MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props", None),
 }
 

@@ -1046,6 +1046,14 @@ def test_every_gh_subcommand_is_recognised():
     `gh gist create`, `gh attestation verify`, `gh ruleset list`, `gh alias set`,
     `gh extension install`, `gh org list`, `gh ssh-key list`) were all really executed and
     all read CLEAN. Each was confirmed real by `gh <name> --help` exiting 0.
+
+    ⛔ AND THAT PIN IS WHY `event` IS IN THE LIST. GitHub CLI **2.105.0** added the preview
+    `gh event` command group (`gh event listen`, `gh event subscription …`), so a runner
+    whose `gh` is newer than the `2.102.0` measured above publishes **34** subcommands and
+    this row redded in CI with `['event']` missing — the re-derivation working exactly as
+    intended, not a flake. The entry is added and the tuple now carries 34 names, so
+    `gh event listen` is a recognised invocation rather than a silent CLEAN read. Widen
+    when a later `gh` adds one; never narrow.
     """
     live = subprocess.run(["gh", "--help"], capture_output=True, text=True)
     if live.returncode != 0:
@@ -1133,6 +1141,7 @@ _GH_SUBCOMMANDS = (
     "config",
     "copilot",
     "discussion",
+    "event",
     "extension",
     "gist",
     "gpg-key",
