@@ -87,7 +87,9 @@ version: 1
 # what is GRADED is the FORM rather than the value:
 # `test_the_fast_shards_header_states_no_live_pool_census` reds on a census stated OUTSIDE the
 # fence in the spelling it grades — a bare `fast_pool()` followed by `holds|held|carries|carried`
-# and `N files|entries`. ⛔ THAT IS A SPELLING GUARD, and stating it as more than that is what this
+# and `N files|entries`. ⛔ SPELLINGS IT CANNOT SEE: a census with no `fast_pool()` beside it (the
+# fourth-fold copy below is exactly that), another verb (`contains`, `numbers`), another unit
+# (`members`, `rows`). ⛔ THAT IS A SPELLING GUARD, and stating it as more than that is what this
 # clause did until #14587's review P2 measured it: the censuses that actually arrived at the last
 # folds were written in other spellings (a QUOTED `holds N files … against N on main`, and a
 # `holds N entries` — the second went unseen until that review widened the unit), so what kept
@@ -122,8 +124,10 @@ version: 1
 # rather than to `main`, which the tree refutes (#13450 landed on `main` in `c1c8df1a` itself), and
 # **a LIVE pool census** (a `fast_pool()` file count stated as a live fact about that head, with
 # `main`'s count beside it as the comparison), which is the claim the fenced-history rule above
-# exists to keep out (the guard grades a bare `fast_pool()` + `N files|entries` spelling, and this
-# copy's `entries` unit is why that alternative was added), and what the fenced HISTORY
+# exists to keep out (the guard grades a bare `fast_pool()` + `N files|entries` spelling — the
+# `entries` alternative was added for `main`'s copy at the `bbef0b88` fold, and the spelling quoted
+# just above, a bare `holds N files … against N on main` with no `fast_pool()` beside it, is still
+# outside what the guard can see), and what the fenced HISTORY
 # above exists to hold instead. Deleting the copy is therefore the repair, not a loss: the census is
 # a measurement of ONE tree that goes stale on the next fold, so it is not restated anywhere as a
 # live claim.
