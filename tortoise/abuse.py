@@ -335,13 +335,20 @@ def _ratio_env(name: str, default: float) -> float:
 #: own allowance is read again. The read sits on the capture path and a tier does
 #: not change per request; 5 minutes bounds a stale level to a TWELFTH of the
 #: rule's own 1-hour window (300 of 3 600 s), not the fifth an earlier version of
-#: this note claimed — a fifth would be 720 s. And the direction matters, because
-#: a stale floor errs the SAME way a failed read MUST (``_tier_floor_unknown``
-#: reuses the last KNOWN, higher floor rather than lowering the level): toward
-#: SILENCE. A DOWNGRADE leaves a stale HIGHER floor cached, which keeps R1 blind
-#: (level too high, nothing fires) until the TTL expires; an UPGRADE leaves a
-#: stale LOWER floor, so the level is merely applied late and errs toward
-#: alerting rather than away from it.
+#: this note claimed — a fifth would be 720 s. And the direction is NOT uniform, so
+#: do not summarise it as one:
+#:
+#: * a DOWNGRADE leaves a stale HIGHER floor cached, which keeps R1 blind (level
+#:   too high, nothing fires) until the TTL expires — that is the SILENCING
+#:   direction, and it matches what ``_tier_floor_unknown`` does with a READ
+#:   FAILURE when a floor is known (it reuses it rather than lowering the level).
+#: * an UPGRADE leaves a stale LOWER floor, so the level is merely applied late and
+#:   errs toward ALERTING.
+#: * a read failure with NO known floor answers ``0`` — the configured absolute
+#:   level. That LOWERS the level (a pro org drops from 25 000 to 500) and errs
+#:   toward alerting too. Deliberate: it is the shipped, more sensitive rule, and
+#:   ``tests/test_abuse.py`` pins it as "fail toward the SENSITIVE level on a COLD
+#:   START". Only the with-a-known-floor case errs toward silence.
 _TIER_FLOOR_TTL_S = 300.0
 
 #: #14687: how long a FAILED allowance read is remembered before another attempt.
@@ -1691,10 +1698,12 @@ def _alert_dict(row: dict) -> dict:
         EVENT_FLAG: _point_rate_message(details, sustained=False),
         # #5425: this dict is CUSTOMER-FACING. Its one consumer is the
         # session-authed, membership-gated ``GET /v1/team/alerts``, rendered
-        # verbatim in the dashboard's "Security alerts" list — so the message
-        # must read as something an org member can act on, NOT as an operator
-        # instruction. The operator wording ("review and reach out", the rule,
-        # the issue id) travels separately on the notify/incident path.
+        # verbatim in whichever dashboard REGISTER the row's ``register``
+        # selects — "Security alerts" for an ALERT row, "Recent activity" for an
+        # ACTIVITY row (#10156, and #14687 for the two types this change moved).
+        # So the message must read as something an org member can act on, NOT as
+        # an operator instruction. The operator wording ("review and reach out",
+        # the rule, the issue id) travels separately on the notify/incident path.
         #
         # Round 6: the promise "and will be in touch" was removed. Delivery of
         # the operator signal is BEST-EFFORT — the durable dashboard row is
