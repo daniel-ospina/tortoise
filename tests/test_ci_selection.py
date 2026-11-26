@@ -10956,42 +10956,94 @@ _H_14544_ROW_EXEMPT_SUBJECT_RE = re.compile(
     + r"(?:\s*" + _H_14544_INTERPOSED + r")?"
     + r"\s+\w+\s*"
     + r"(?:" + _H_14544_INTERPOSED + r"\s*)?"
-    + r"(?:\w+\s+){0,3}exempt", re.IGNORECASE)
+    # ⛔ RULE 1b — THE RUN IS BOUNDED BY THE CLAUSE, NOT BY A TOKEN COUNT (#14623 round 30). Round 29
+    # graded `(?:\w+\s+){0,3}` and the bound was UNDRIVEN: loosening it to `{0,9}` left the arm GREEN,
+    # while a four-word adverbial run (`the row is in every relevant respect exempt`), a comma-embedded
+    # one (`the row is, all else equal, exempt`) and a three-word one (`more or less equally`) were all
+    # certified CLEAN. What bounds this claim is that the run may not CROSS a clause boundary — no
+    # `.` `;` `:` `!` `?` and no em-dash — not an arbitrary number of words.
+    + r"(?P<run>[^.;:!?\u2014\n]{0,60}?)exempt", re.IGNORECASE)
 #: Rule 3: `too` is clause-terminal only when it ENDS the sentence — `[.!?]` or end of string.
+#: Closed auxiliary set (Rule 1): every spelling of "so <aux> the row". The peer's round-31 finding that
+#: the COPULA is an open class is honoured in the SUBJECT branch's `\w+` verb slot; here the marker is
+#: `so`/`as` + a light verb, which is a closed paradigm, so it is enumerated — and it must include
+#: `do`/`does`/`did`, because `The REGISTRATION is exempt, and so does the row.` is the same claim and
+#: was certified CLEAN at round 29.
+_H_14544_AUX = (r"(?:is|are|was|were|do|does|did|has|have|had|will|would|can|could"
+                r"|stays|remains|stayed|remained|becomes|became|seems|appears|turns|gets|goes)")
+#: ⛔ RULE 4 — WHICH BRANCH MAY READ THE PREVIOUS SENTENCE IS A PROPERTY OF THE BRANCH, and it is
+#: expressed as NAMED GROUPS rather than as a test on the matched text. The anaphoric markers elide
+#: the predicate their antecedent stated, so they may read one sentence back:
+#:   `anaph` — `so is the row` / `as did the row's weight` / `so too the row` / `so is its weight`
+#:   `ellip` — `…, and the row is too.`
+#: A COORDINATION carries its OWN subject and may NOT: `along with the row's weight` is this block's
+#: own TRUE statement of fact about `durations_floors`, and carrying an `exempt` from the sentence
+#: before REFUSED it end-to-end (measured round 30). ⛔ A first attempt tested the match's first
+#: token instead of tagging the branch, and that silently excluded the ELLIPTICAL form — the branch
+#: that needs the antecedent most.
 _H_14544_ROW_ADDITIVE_RE = re.compile(
-    r"(?:so|as)\s+(?:too\s+)?" + _H_14544_COPULA + r"\s+" + _H_14544_ROW_NOUN_ANY
-    # ⛔ `so too the row` — the elliptical marker with the copula DROPPED (#14623 round 32). The
-    # `so|as` alternative above REQUIRES the copula, so `The REGISTRATION is exempt and so too the
-    # row.` returned `None` (measured at round 31's head). The copula is optional only AFTER `so
-    # too`, which is unambiguous; making it optional after a bare `so`/`as` would refuse TRUE prose
-    # like `As the row above states, …`.
-    + r"|so\s+too\s+(?:" + _H_14544_COPULA + r"\s+)?" + _H_14544_ROW_NOUN_ANY
+    r"(?:"
+    r"(?P<anaph>(?:so|as)\s+(?:too\s+)?" + _H_14544_AUX + r"\s+(?:"
+    + _H_14544_ROW_NOUN_ANY + r"|(?:its|the|that|this)\s+weight\b))"
+    # ⛔ `so too the row` — the marker with the copula DROPPED (#14623 round 32, the peer's finding):
+    # the `so|as` alternative above REQUIRES a light verb, so this spelling returned `None`. The verb
+    # is optional only AFTER `so too`, which is unambiguous; making it optional after a bare `so`/`as`
+    # would refuse TRUE prose like `As the row above states, …`.
+    + r"|so\s+too\s+(?:" + _H_14544_AUX + r"\s+)?" + _H_14544_ROW_NOUN_ANY
+    # coordination that names the row without restating the predicate it modifies
     + r"|(?:as\s+well\s+as|likewise|along\s+with)\s+" + _H_14544_ROW_NOUN_ANY
-    + r"|" + _H_14544_ROW_NOUN_ANY + r"\s*(?:" + _H_14544_COPULA + r")?\s*,?\s*too\s*(?:[.!?]|$)",
-    re.IGNORECASE)
+    + r"|" + _H_14544_ROW_NOUN_ANY + r"\s+as\s+well\b"
+    + r"|" + _H_14544_ROW_NOUN_ANY + r"\s+included\b"
+    + r"|the\s+same\s+goes\s+for\s+" + _H_14544_ROW_NOUN_ANY
+    # the ELLIPTICAL form, which is ANAPHORIC. ⛔ `too` must END its sentence (Rule 3): an intensifier
+    # takes an adjective (`the row is too specific to summarise`) and an appositive continues
+    # (`that row, too, is a packing cause`) — both TRUE, both refused by a bare `too\b`.
+    + r"|(?P<ellip>" + _H_14544_ROW_NOUN_ANY
+    + r"\s*(?:" + _H_14544_COPULA + r")?\s*,?\s*too\s*(?:[.!?]|$))"
+    + r")", re.IGNORECASE)
 #: Rule 2. `n't` is listed because a contraction negates as surely as `not` does.
 _H_14544_NEGATION_RE = re.compile(
     r"\b(?:no|not|never|none|nothing|neither|nor)\b|n['\u2019]t\b", re.IGNORECASE)
 
 
+#: ⛔ RULE 2 — NEGATION IS LOCAL, NEVER SENTENCE-WIDE (#14623 round 30, P1). Round 29 tolerated a
+#: sentence containing ANY negation, and EVERY sentence of the graded paragraph contains one already
+#: — `does NOT claim`, `cannot move`, `not restated`, `no-per-file-weight`, `does NOT exclude`. The
+#: measured consequence: appending the false claim as a CLAUSE to a live sentence was certified GREEN,
+#: while the same claim as its own sentence was RED. The ban was OFF for exactly the rewrite a fold
+#: produces. A negation must therefore sit in a WINDOW around the exemption it negates.
+_H_14544_NEGATION_WINDOW_BEFORE = 30
+_H_14544_NEGATION_WINDOW_AFTER = 25
+
+
+def _h_14544_negated(sentence: str, match: "re.Match[str]") -> bool:
+    """Whether a negation sits in the WINDOW around `match` — Rule 2, scoped."""
+    lo = max(0, match.start() - _H_14544_NEGATION_WINDOW_BEFORE)
+    hi = min(len(sentence), match.end() + _H_14544_NEGATION_WINDOW_AFTER)
+    return _H_14544_NEGATION_RE.search(sentence[lo:hi]) is not None
+
+
 def _h_14544_row_exempted(sentence: str, previous: str = "") -> str | None:
     """The row-exemption phrase in ONE sentence, or None.
 
-    A function rather than one regex because the branches are CONDITIONAL — on a negation (Rule 2)
-    and, for the additive markers, on the block asserting an exemption at all — and encoding
-    conditionals as lookaheads is the kind of cleverness that reads as correct and grades nothing.
-    `previous` is the preceding sentence: the block states the exemption once and then reads
-    `So is the row.`, which is one sentence away from the word it depends on.
+    A function rather than one regex because the branches are CONDITIONAL — on a LOCAL negation
+    (Rule 2), on the block asserting an exemption at all, and on whether this marker is anaphoric
+    enough to read the preceding sentence (Rule 4) — and encoding conditionals as lookaheads is the
+    kind of cleverness that reads as correct and grades nothing. `previous` is the preceding
+    sentence: the block states the exemption once and then reads `So is the row.`.
     """
-    if _H_14544_NEGATION_RE.search(sentence):
-        return None
     m = _H_14544_ROW_EXEMPT_SUBJECT_RE.search(sentence)
-    if m:
+    if m and not _h_14544_negated(sentence, m):
         return m.group(0)
-    if not re.search(r"exempt", sentence + " " + previous, re.IGNORECASE):
+    m = m or _H_14544_ROW_ADDITIVE_RE.search(sentence)
+    if m is None or _h_14544_negated(sentence, m):
         return None
-    m = _H_14544_ROW_ADDITIVE_RE.search(sentence)
-    return m.group(0) if m else None
+    # Rule 4: only the anaphoric branches may read the sentence before it.
+    anaphoric = bool(m.groupdict().get("anaph") or m.groupdict().get("ellip"))
+    context = previous + " " + sentence if previous and anaphoric else sentence
+    if not re.search(r"exempt", context, re.IGNORECASE):
+        return None
+    return m.group(0)
 
 
 def _h_14544_banned_claim(block: str) -> str | None:
