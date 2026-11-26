@@ -10190,7 +10190,12 @@ _H_14544_ACTOR_RE = re.compile(r"#14544|that\s+cut|the\s+cut", re.IGNORECASE)
 _H_14544_NEGATION = (
     r"(?:\bnever\b|\bnot\b|did\s+not|didn['\u2019]?t|does\s+not|doesn['\u2019]?t"
     r"|has\s+not|hasn['\u2019]?t|had\s+not|was\s+not|wasn['\u2019]?t|is\s+not|isn['\u2019]?t"
-    r"|were\s+not|weren['\u2019]?t)")
+    r"|were\s+not|weren['\u2019]?t"
+    # ⛔ THE MODAL AND CONTRACTED FORMS are this claim too, and `\bnot\b` does not fire inside
+    # `cannot`: measured at #14623 review round 11, the block's OWN `cannot move a bin`
+    # construction, folded to name the row, shipped CLEAN at all three preceding heads.
+    r"|cannot|can['\u2019]?t|won['\u2019]?t|wouldn['\u2019]?t|couldn['\u2019]?t"
+    r"|shouldn['\u2019]?t|mustn['\u2019]?t)")
 _H_14544_CHANGE_VERB = (
     r"(?:touch|chang|mov|rewr|re-read|reread|edit|alter|affect|modif|shift)")
 #: ACTIVE order: the cut named FIRST, then a negation, then the change verb, and — ⛔ THE OBJECT IS
@@ -10217,16 +10222,31 @@ _H_14544_CHANGE_VERB = (
 #: `provided`, `till`, `now that`, `given that`, `the moment`, `every time`, `in case`, `supposing`,
 #: `lest` and `whereby` each refused the paragraph's own bin claim — one false red per missing word.
 #: The object is ANCHORED instead: a negated change takes the row as its object only when nothing
-#: but determiners stand between them, so no word list can decide it. The residue (an adjunct set off
-#: by commas inside the verb phrase) is R1 on #14715, declared.
+#: but determiners stand between them, so no word list can decide it. ⛔ THE DETERMINER SET IS
+#: DELIBERATELY WIDE and admits a PARTITIVE (`any of the`, `all of the`, `none of the`): a first cut
+#: carried only `the|that|this|its|their|his|her|a|an|any|which`, and MEASURED at #14623 review round
+#: 11 that dropped NINE shapes the previous head banned — `any of the`, `some of the`, `either of the`,
+#: `all of the`, `these`, `those`, `no`, `both`, and an adverb (`directly`). That is a false PASS, not
+#: a false block, so the set is wide and the partitive is explicit.
+#: The residue (an adjunct set off by commas inside the verb phrase, or a coordinated object) is R1 on
+#: #14715, declared — it is a CLAUSE-PARSING residue and NOT a vocabulary one.
 _H_14544_SUBORDINATOR = (
     r"(?:because|since|while|whereas|although|though|unless|so\b|which|who|whose|where)")
 _H_14544_SAME_CLAUSE = (
     r"(?:[^,;.!?]|,(?!\s*(?:and|but|so|which|that|then|because)\b))")
+_H_14544_OBJECT_DETERMINERS = (
+    r"(?:the|that|this|its|their|his|her|a|an|any|which|no|every|each|some|both|all|either"
+    r"|neither|these|those|my|our|your|whose)\s+")
+_H_14544_PARTITIVE = r"(?:of\s+(?:the|these|those|them|which)\s+)?"
+#: A bounded ADVERB allowance, because `did not touch DIRECTLY the row` is the same claim. It is a
+#: CLOSED list on purpose: a catch-all `\w+` here read `move a bin` as a reach for the row and
+#: re-opened the false block the anchor exists to close (measured, #14623 review round 11).
+_H_14544_OBJECT_ADVERBS = r"(?:directly|actually|ever|really|even|still|then)\s+"
 _H_14544_NEGATED_ACTOR_CHANGE_RE = re.compile(
     r"(?:#14544|that\s+cut|the\s+cut)" + _H_14544_SAME_CLAUSE + r"{0,400}?" + _H_14544_NEGATION
     + _H_14544_SAME_CLAUSE + r"{0,80}?" + _H_14544_CHANGE_VERB + r"[a-z]{0,6}\s+"
-    + r"(?:(?:the|that|this|its|their|his|her|a|an|any|which)\s+){0,3}"
+    + r"(?:" + _H_14544_OBJECT_DETERMINERS + r"|" + _H_14544_OBJECT_ADVERBS + r"){0,3}"
+    + _H_14544_PARTITIVE
     + r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)",
     re.IGNORECASE)
 #: PASSIVE order: `row|row(s)|entry|entries|durations|weight` FIRST, then a negation, then the
@@ -10728,7 +10748,20 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             # ⛔ A PHRASE THAT DESCRIBES THE CUT IS THE CUT: the appositive crosses a comma, so an
             # agent phrase that stopped at every comma read this as foreign (#14623 round 8, F2).
             "The `durations` row was never touched by the commit that took the file off `core`, "
-            "`#14544`."):
+            "`#14544`.",
+            # ⛔ THE OBJECT'S DETERMINER AND PARTITIVE VOCABULARY (#14623 review round 11, P1): a
+            # first anchored cut carried eight determiners, and nine such shapes went CLEAN. A partitive
+            # is spelled out, and a bounded adverb is admitted, because an over-narrow object is a
+            # false PASS rather than a false block.
+            "`#14544` did not touch any of the `durations` rows.",
+            "`#14544` did not touch all of the `durations` rows.",
+            "`#14544` did not touch both `durations` rows.",
+            "`#14544` did not touch those `durations` rows.",
+            "`#14544` did not touch directly the `durations` row.",
+            # ⛔ `\bnot\b` DOES NOT FIRE INSIDE `cannot` — the block's OWN auxiliary, folded to name
+            # the row, shipped CLEAN at three preceding heads.
+            "`#14544`'s removal of the file from the `core` surface cannot touch the `durations` row.",
+            "`#14544`'s cut can't touch that row."):
         assert _h_14544_banned_claim(paraphrase) is not None, (
             f"the retired-claim ban misses the paraphrase {paraphrase!r} — it grades the pronoun "
             "rather than the claim, bounds it by a DISTANCE the fixture exceeds, reads only ONE "
@@ -10784,7 +10817,12 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The `durations` row was never touched, even by the reaper, and `#14544`'s cut is "
             "separate.",
             "The `durations` row was not touched at any point by the reaper; `#14544`'s cut is "
-            "separate."):
+            "separate.",
+            # ⛔ …while a determiners/adverbs-free object keeps the paragraph's own claims clean: the
+            # bin, the `eval` registration, and the block's own `cannot move a bin`.
+            "`#14544` did not touch that `eval` registration, so the `durations` entry stands.",
+            "`#14544`'s removal of the file from the `core` surface cannot move a bin.",
+            "`#14544`'s cut does not move a bin once the bin is held by the `durations` row."):
         assert _h_14544_banned_claim(honest) is None, (
             f"the anaphor ban REDS honest prose ({honest!r}) — the passive arm is missing its BE "
             "verb or the active arm ignores its subject, so the guard refuses a true sentence "
