@@ -2024,6 +2024,71 @@ def _retire_pi_entry(path: Path, *, dry_run: bool = False) -> str | None:
         return f"{path}: {e.__class__.__name__}: {e}"
 
 
+def _pi_retirement_unverifiable(path: Path) -> bool:
+    """Would :func:`_retire_pi_entry` refuse because it could not MEASURE?
+
+    One refusal arm answers "I could not read this shape" rather than "I read
+    it and it registers": an unreadable ``package.json``
+    (:func:`_pi_manifest_entries` returning a reason). ``_pi_entry_is_loadable``
+    deliberately fails CLOSED on that shape — "a path this reader cannot read
+    may register anything" — so the retirement is skipped, not asserted.
+
+    ⛔ The receipt must not inherit the fail-closed GUESS as a measurement
+    (#14342 round 16, finding 1). Measured on disk: an unreadable manifest with
+    no ``index.ts`` registers exactly ONE producer, while both wrappers below
+    reported "TWO producers are registered". This predicate is what lets an
+    arm say "could not be verified" instead — it is the SAME reader
+    (:func:`_pi_manifest_entries`) that produced the refusal, so the sentence
+    and the branch cannot drift apart.
+
+    Deliberately narrow: it answers only the unreadable-manifest question. An
+    ``OSError`` outside that reader (ENOSPC, EROFS) is a failed WRITE whose
+    message already names an OS condition, and every other refusal arm fired on
+    a measured fact.
+    """
+    try:
+        if path.is_symlink() or not path.is_dir():
+            return False
+    except OSError:
+        return False
+    _entries, unreadable = _pi_manifest_entries(path)
+    return bool(unreadable)
+
+
+def _duplication_consequence(*, dry_run: bool, unverified: bool = False) -> str:
+    """What is (or may be) REGISTERED — stated only as far as it was MEASURED.
+
+    ⛔ ONE helper, so a new call site cannot reintroduce the assertion. The two
+    ``_retire_pi_entry`` refusal arms used to hard-code "TWO producers are
+    registered" / "both producers stay registered"; on the unreadable-manifest
+    branch no code path in it had established that, and the receipt stated the
+    fail-closed guess as a fact — the same class as the byte comparison this
+    PR's parent commit removed (#14342 round 16, finding 1).
+
+    The verified arms keep their original sentence (a refusal that measured
+    ``_pi_entry_is_loadable(active) is True`` really does leave two registered),
+    and the unverified arm says what is true: it does not know.
+    """
+    if unverified:
+        return ("the second producer could not be VERIFIED, so it may still "
+                "register and every session could be captured twice")
+    if dry_run:
+        return ("both producers would stay registered and every session would "
+                "be captured twice")
+    return ("both producers are registered and every session is captured "
+            "twice")
+
+
+def _sentence(text: str) -> str:
+    """``text`` terminated by exactly ONE period — never two.
+
+    The wrappers interpolate ``_retire_pi_entry``'s message, which already ends
+    in a period ("… Move it aside by hand."), and then appended their own: the
+    receipt read ``hand.. TWO producers…`` (#14342 round 16, finding 1).
+    """
+    return text.rstrip(". ") + "."
+
+
 def _both_producers_clause(*, dry_run: bool) -> str:
     """The consequence clause, in the mood the RUN is in.
 
@@ -2198,8 +2263,10 @@ def _disable_pi_second_producer(
             # skipped here (#14342 round 11, finding 1).
             return False, [], (
                 f"{seam_state}, but the second capture producer could not be "
-                f"disabled ({active}): {planned}. TWO producers would stay "
-                f"registered, so every session would be captured twice until "
+                f"disabled ({active}): {_sentence(planned)} "
+                f"{_duplication_consequence(
+                    dry_run=True,
+                    unverified=_pi_retirement_unverifiable(active))} until "
                 f"one of them is removed.")
         if active.is_symlink() and active.is_dir():
             # The real run renames the LINK to `retired` and THEN asserts on
@@ -2231,9 +2298,11 @@ def _disable_pi_second_producer(
     if error:
         return False, [], (
             f"the capture seam is installed, but the second capture producer "
-            f"could not be disabled ({active}): {error}. TWO producers are "
-            "registered, so every session is captured twice until one of them "
-            "is removed.")
+            f"could not be disabled ({active}): {_sentence(error)} "
+            f"{_duplication_consequence(
+                dry_run=False,
+                unverified=_pi_retirement_unverifiable(active))} until one of "
+            f"them is removed.")
     # ⛔ ASSERT ON THE PATH THE LOADER CONSULTS, NOT ON THE PATH THE FILE SHAPE
     # HAPPENS TO PRODUCE. ``retired`` is NEVER CREATED for the directory shape
     # (the directory keeps its name), so asserting on it alone was INERT on
@@ -2590,9 +2659,12 @@ def _install_pi(
                                      changed_artifacts=_written(), error=(
                                          f"the legacy capture extension at "
                                          f"{plan_path} could not be retired "
-                                         f"({planned}), so both producers would "
-                                         f"stay registered and a real run would "
-                                         f"refuse the same way. Nothing was "
+                                         f"({_sentence(planned)}), "
+                                         f"{_duplication_consequence(
+                                             dry_run=True,
+                                             unverified=_pi_retirement_unverifiable(
+                                                 plan_path))} and a real run "
+                                         f"would refuse the same way. Nothing was "
                                          f"written (a dry run). Move "
                                          f"{plan_path} out of the extensions "
                                          f"directory by hand and re-run."))
@@ -2616,13 +2688,25 @@ def _install_pi(
                         f"{legacy_disabled} (files preserved) — but Pi STILL "
                         f"loads it")
                     changed = True
+                # ⛔ AN UNVERIFIABLE REFUSAL MUST NOT REPORT A MEASUREMENT
+                # (#14342 round 16, finding 1). `legacy_error` here is one of
+                # two DIFFERENT things: `_retire_pi_entry`'s message (which can
+                # be "I could not read this") or `_assert_pi_entry_not_loadable`'s
+                # (which measured that the entry STILL loads). Only the first
+                # leaves the registration unknown, and only when the rename did
+                # not land — a landed rename followed by a failed assertion is a
+                # measurement of exactly one thing: it still loads.
+                _unverified = (not retired_landed
+                               and _pi_retirement_unverifiable(legacy_disabled))
                 return InstallResult(harness, changed=changed,
                                      actions=tuple(actions),
                                      changed_artifacts=_written(), error=(
                                          f"the legacy capture extension at "
                                          f"{legacy_disabled} could not be "
-                                         f"retired ({legacy_error}), so both "
-                                         f"producers stay registered. Move "
+                                         f"retired ({_sentence(legacy_error)}), "
+                                         f"{_duplication_consequence(
+                                             dry_run=False,
+                                             unverified=_unverified)}. Move "
                                          f"{legacy_disabled} out of the "
                                          f"extensions directory by hand and "
                                          f"re-run."))

@@ -1421,6 +1421,115 @@ def test_pi_install_does_not_claim_a_byte_comparison_it_did_not_run(home):
     assert capture_install.PI_EXTENSION_NAME in _registered_producers(ext_dir)
 
 
+def test_pi_install_does_not_claim_two_producers_it_could_not_verify(home):
+    """An UNREADABLE `package.json` is the one refusal that fires because the
+    reader could not MEASURE — and the receipt used to state the fail-closed
+    guess as a fact: "TWO producers are registered".
+
+    The reader that produced the refusal (`_pi_manifest_entries`) returned a
+    reason, not an answer, so no code path here established that the second
+    producer registers at all. Measured on disk: this shape carries no
+    `index.ts`, real Pi's `readPiManifest` catches the unreadable file and falls
+    through to an index that does not exist, so exactly ONE producer is
+    registered while the receipt claimed two (#14342 round 16, finding 1).
+
+    Mutation: word the unverified arm with the measured sentence (drop the
+    `_pi_retirement_unverifiable` call, always `unverified=False`) — this row
+    REDs on the false claim while the remedy stays intact.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    # A DIRECTORY producer with an unreadable manifest and NO index.ts.
+    active = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    active.mkdir(parents=True)
+    (active / "main.ts").write_text("// declared by the manifest\n")
+    manifest = active / "package.json"
+    manifest.write_text('{"pi": {"extensions": ["main.ts"]}}')
+    os.chmod(manifest, 0o000)
+    try:
+        res = install_capture("pi", home=home)
+        # The dry run must not claim a measurement either, and must not claim a
+        # write: same predicate, subjunctive mood.
+        dry = install_capture("pi", home=home, dry_run=True)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "could not be VERIFIED" in error, error
+    # ⛔ THE FALSE CLAIM: neither measured sentence may appear anywhere.
+    assert "both producers are registered" not in error, error
+    assert "TWO producers are registered" not in error, error
+    assert "TWO producers would stay registered" not in error, error
+    # The remedy and the consequence survive, so saying LESS is not less useful.
+    assert "captured twice" in error, error
+    assert "by hand" in error, error
+    # …and the doubled period the interpolated message produced is gone.
+    assert "hand.. " not in error, error
+
+    # The disk agrees with the weaker sentence: ONE producer is registered.
+    assert _registered_producers(ext_dir) == [
+        capture_install.PI_EXTENSION_NAME], (
+        "the shape must carry exactly one registered producer — that is the "
+        "premise of the assertion above")
+    # Non-destructive: the unreadable producer is untouched.
+    assert (active / "main.ts").read_text() == "// declared by the manifest\n"
+
+    dry_error = dry.error or ""
+    assert not dry.ok, dry.actions
+    assert "could not be VERIFIED" in dry_error, dry_error
+    assert "TWO producers are registered" not in dry_error, dry_error
+    assert dry.changed_artifacts == (), dry.changed_artifacts
+
+
+def test_legacy_install_does_not_claim_two_producers_it_could_not_verify(home):
+    """The legacy directory's sibling arm of the same class (#14342 round 16,
+    finding 1): `{…} could not be retired ({unreadable}), so both producers stay
+    registered` reports a registration on the branch that could not read it.
+
+    Mutation: same as its sibling — always pass `unverified=False`, and this row
+    REDs on "both producers are registered" for a tree where the real loader
+    registers only the seam.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    legacy = ext_dir / capture_install.LEGACY_PI_DIRNAME
+    legacy.mkdir(parents=True)
+    (legacy / "main.ts").write_text("// declared by the manifest\n")
+    manifest = legacy / "package.json"
+    manifest.write_text('{"pi": {"extensions": ["main.ts"]}}')
+    os.chmod(manifest, 0o000)
+    try:
+        res = install_capture("pi", home=home)
+    finally:
+        # ⛔ THE REAL RUN RENAMES THE DIRECTORY FIRST, then retires inside it, so
+        # the unreadable manifest is no longer at the source path afterwards.
+        # Restore whichever of the two the run landed on, or the fixture's temp
+        # tree keeps a mode-000 file that pytest cannot clean up.
+        for candidate in (manifest,
+                          ext_dir / capture_install.PI_DISABLED_DIRNAME
+                          / "package.json"):
+            if candidate.exists():
+                os.chmod(candidate, 0o644)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "could not be VERIFIED" in error, error
+    assert "both producers are registered" not in error, error
+    assert "both producers stay registered" not in error, error
+    # The legacy remedy is the one that was already there.
+    assert "by hand" in error, error
+    assert "hand.. " not in error, error
+    assert _registered_producers(ext_dir) == [
+        capture_install.PI_EXTENSION_NAME], (
+        "no index.ts and an unreadable manifest ⇒ the legacy directory "
+        "registers nothing; the assertion above must match the disk")
+
+
 def test_pi_install_refuses_a_farm_recreated_second_producer_that_differs(home):
     """A re-created copy that DIFFERS is not a farm sync of the same bytes — a
     human or another tool changed it, and deleting it would destroy that. Refuse.

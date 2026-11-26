@@ -301,6 +301,26 @@ from this section is the false claim, not a stale measurement.
   `PI_DISABLED_DIRNAME` is refused BEFORE any rename, so every re-run sees the
   same shape instead of the second run finding the name vacated and going
   green. Neither is converged — a human moves it aside.
+- **The loader rule is TRANSCRIBED, not executed, and nothing pins it to Pi's
+  version.** `_pi_entry_is_loadable` (`tortoise/capture_install.py:1901-1946`)
+  models `dist/core/extensions/loader.js`, and the test helper
+  `_registered_producers` (`tests/test_capture_install.py:1281-1302`) models the
+  same rule a second time — so the two cannot disagree with each other, and
+  `_assert_pi_entry_not_loadable` (`tortoise/capture_install.py:2125`) grades
+  the end state with the SAME function that decided the retirement. Both are
+  correct against the Pi measured on 2026-11-26: `isExtensionFile` is
+  `endsWith('.ts') || endsWith('.js')`, and every subdirectory is resolved
+  through `resolveExtensionEntries` (manifest, else `index.ts`/`index.js`) with
+  **no dot-prefix filter** anywhere in `discoverExtensionsInDir`. ⛔ If a later
+  Pi adds a dot filter — `collectAutoExtensionEntries` already has one, which is
+  why the dot-prefix contrast is accurate today but not guaranteed — or renames
+  the suffix rule, then `reflect-hook.ts.disabled` starts loading while both
+  transcriptions still answer "not loadable": a GREEN install with TWO
+  producers, and no test reds. **Re-measure the rule on every Pi bump.** The
+  durable fix — pin it as a versioned fixture table consumed by both call sites,
+  so a bump shows up as a diff to re-measure instead of as silent agreement — is
+  tracked as a tortoise follow-up (agent-infra#1671 is the separate shim
+  decision). This note is the tripwire until then.
 
 #### The backlog is a decision, not a delete
 
