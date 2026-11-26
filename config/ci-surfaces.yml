@@ -63,6 +63,18 @@ version: 1
 # ⛔ this head's own fold touched no row here — `git show --stat a0be10ac456b --
 # config/ci-surfaces.yml` is empty — so it renumbers the chain without moving the derivation),
 # carrying
+# ⛔ THAT LABEL IS HAND-CHECKED, and it is stated here rather than left implied: it has been wrong
+# FOUR times inside this issue (`90c125a736a0c`, `d6a2104518762`, `cc7b1f3f2c6a3`, and `dc479c6f` —
+# the last of which is this head's own correction), each time caught by a reader rather than by a
+# gate. ⛔ A MECHANICAL PIN WAS TRIED AND REJECTED, and the reason is a measurement rather than a
+# preference: asserting the label prefixes `git rev-parse origin/main` is TRUE only for a tree that
+# has itself just folded the tip. On `main` — the tree this block LANDS IN — the label is
+# `bbef0b8840` while `origin/main` is `a0be10ac456b`, so that assertion REDS there by construction;
+# and where `origin/main` does not resolve (a depth-1 CI checkout) it can only SKIP. A gate that is
+# red where it lands and absent where it gates is not a gate. On a branch whose own first-parent
+# history carries self-merges there is no sound mechanical reading of “the fold this head carries”,
+# so the RULE survives and the label is re-pointed by hand on each fold — a residual named on the
+# artifact, which is the convention this block uses for the row-exemption class above.
 # `#14597`'s expansion fusion over the residue RATCHET
 # (`tests/test_expansion_fusion_14344.py`, `core`, carrying a `durations` row),
 # `#14415`'s `tests/test_14219_batch_ingest.py` row and `tests/test_14219_batches_api.py` row,

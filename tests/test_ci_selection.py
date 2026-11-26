@@ -9169,8 +9169,18 @@ _EMISSION_CEIL_RE = re.compile(
 #: Absence is legal (the block's doctrine is GRADED-OR-ABSENT — deleting the parenthetical drops the
 #: claim without falsifying it); a PRESENT ratio must be the one the code computes.
 _EMISSION_RATIO_RE = re.compile(
-    r"\((?P<window>\d+)\s*(?:/|\u00f7|\bper\b)\s*(?P<est>\d+\.\d+)\s*s?\s*"
-    r"(?:=|\u2248|~)\s*(?P<ratio>\d+\.\d+)\s*s?\)")
+    # ⛔ THE CONNECTORS ARE NOT ENUMERATED, because enumerating them only moves the escape to the
+    # next spelling and this arm's job is to grade a FIGURE. Measured on the first two cuts of this
+    # pattern: `/`+`=` only missed `÷` with a FALSE quotient (`52 passed`); adding `÷`/`per`/`≈`
+    # then missed `—`, `→`, `is` and `:` with a FALSE quotient (whole file green, #14623 round 31,
+    # P1). A connector is therefore ANY short non-digit token, which costs nothing: the value
+    # check below is what grades the claim, and an unrecognised connector can no longer make a
+    # false figure unread.
+    # ⛔ The optional `s` is admitted on EVERY operand, including the window (#14623 round 31, P2):
+    # `1680 / 827.6 s` was read while `1680 s / 827.6 s` — the same figures with units stated
+    # consistently — was refused as "a figure nobody reads", a false block on TRUE prose.
+    r"\((?P<window>\d+)\s*s?\s*(?P<sep>[^\d\s]{1,6})\s*(?P<est>\d+\.\d+)\s*s?\s*"
+    r"(?P<rel>[^\d\s]{1,6})\s*(?P<ratio>\d+\.\d+)\s*s?\)")
 #: ⛔ THE SEPARATOR AND THE RELATION ARE OPEN SPELLINGS, not literals. The first cut of the pattern
 #: above admitted only `/` and `=`, so a PRESENT, FALSE ratio re-spelled `(1680 ÷ 827.6 = 2.0400)` —
 #: ONE character — passed every arm (measured, 52 passed; #14623 review round 30, P2). Widening the
@@ -9181,7 +9191,22 @@ _EMISSION_RATIO_RE = re.compile(
 #: parentheticals in this block ("(measured at 90.0 s = the row's weight)") do not trip it —
 #: measured: the live block carries exactly ONE such parenthetical, the real ratio.
 _EMISSION_RATIO_SHAPE_RE = re.compile(
-    r"\([^()]*\d[^()]*\d+\.\d+[^()]*(?:\u00f7|\u2248|=)[^()]*\d+\.\d+[^()]*\)")
+    # Anchored on an unambiguous DIVISION SIGN (`/`, `÷`) rather than on a relation glyph: a stated
+    # headroom ratio IS a quotient, so this catches a division statement the reader did not consume
+    # however its relation is spelled. The trailing `[^()]*\d+\.\d+` requires a third figure, so a
+    # bare two-figure parenthetical — the live block carries `(827.4/827.5)` as a shrunk pair with
+    # no relation — does not trip it (measured: exactly ONE shape in the live header, the real
+    # ratio).
+    r"\([^()]*\d+\s*s?\s*(?:/|\u00f7)\s*\d+\.\d+[^()]*\d+\.\d+[^()]*\)")
+#: ⛔ THE RESIDUAL, declared rather than papered over: the reader above takes a ONE-TOKEN connector
+#: (any non-digit run up to six characters), so a ratio re-spelled with a WORDY connector — `(1680
+#: divided by 827.6 equals 2.0300)` — is not consumed, and the shape backstop only fires on a
+#: division SIGN, so that spelling passes as absence. Widening the reader to swallow spaces is what
+#: would turn it into a prose matcher, and every wider cut of it has either missed a glyph (measured:
+#: `÷`, then `—`, `→`, `is`, `:`) or begun refusing TRUE sentences. So the RULE is: a ratio stated
+#: in this block is spaced as `<window> <sign> <est> <sign> <ratio>`; anything else is not graded,
+#: and that is a residual of reading arithmetic with a pattern rather than a property this arm can
+#: keep. Named here so the next round widens it knowingly instead of re-deriving it.
 _EMISSION_RANGE_RE = re.compile(r"(?P<lo>[a-z])\s*[\u2013\u2014-]\s*(?P<hi>[a-z])")
 #: A shard-figure sentence the CLAUSE parser above cannot read: a seconds figure
 #: immediately followed by a shard-name list opener. `_EMISSION_CLAUSE_RE` needs one
@@ -9880,8 +9905,10 @@ def _emission_block_claims(
             "class `_EMISSION_UNREAD_SENTENCE_RE` closes for the shard sentences. Re-spell it in "
             "the reader's form, or widen `_EMISSION_RATIO_RE` (this detector then covers the next "
             "one).")
-    for window_str, ratio_est_str, ratio_str in _EMISSION_RATIO_RE.findall(header):
-        ratio_est = float(ratio_est_str)
+    for ratio_match in _EMISSION_RATIO_RE.finditer(header):
+        window_str = ratio_match.group("window")
+        ratio_est = float(ratio_match.group("est"))
+        ratio_str = ratio_match.group("ratio")
         assert ratio_est in ceil_by_est, (
             f"the block states a headroom ratio for {ratio_est} s, which no `ceil(...)` clause in "
             "the same block derives — the ratio is arithmetic on a budget nothing states, so it is "
@@ -9893,8 +9920,12 @@ def _emission_block_claims(
         expected = cs.watchdog_headroom(ratio_est, minutes)
         decimals = len(ratio_str.split(".")[1])
         assert abs(float(ratio_str) - expected) <= 0.5 * 10 ** (-decimals), (
-            f"the block states the headroom ratio as `{window_str} / {ratio_est_str} = {ratio_str}`, "
-            f"but `ci_selection.watchdog_headroom({ratio_est_str}, {minutes})` is {expected:.6f} "
+            # ⛔ The QUOTED sentence is the matched text, not a reconstruction: rebuilding it from the
+            # named groups silently re-spelled the author's own separator (`÷` came back as `/`), so
+            # a reader searching the manifest for the diagnostic's quotation found nothing
+            # (#14623 round 31, P3).
+            f"the block states the headroom ratio as {ratio_match.group(0)!r}, "
+            f"but `ci_selection.watchdog_headroom({ratio_est}, {minutes})` is {expected:.6f} "
             f"(={expected:.{decimals}f}) — the figure beside the emission is not the one the code "
             "computes, so it will read as verified while it rots. Re-emit it with the verb.")
     if not groups:
@@ -10007,95 +10038,66 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
         return ("# eleven shards at 827.6 s (a, b, c, d, e, f, g, h, i, j, k), so "\
                 "`ceil(827.6/60 x 2)` = 28 m governs " + rationale + "\n\nfast_shards: 11\n")
 
+    # ⛔ EVERY CONNECTOR GLYPH AND SHORT WORD the reviewer measured as an escape is now READ, and
+    # that is the point of the generic connector: enumerating `/`+`=` missed `÷` with a false
+    # quotient, then adding `÷`/`per`/`≈` missed `—`, `→`, `is` and `:` with a false quotient
+    # (whole file green, #14623 round 31, P1). The list below is those exact escapes, so a return to
+    # an enumerated connector REDs here.
     for legal in ("(1680 / 827.6 = 2.0300)",
                   "(1680 ÷ 827.6 = 2.0300)",
                   "(1680 per 827.6 ≈ 2.0300)",
-                  "(1680 / 827.6 = 2.03)"):
+                  "(1680 / 827.6 = 2.03)",
+                  "(1680 — 827.6 — 2.0300)",
+                  "(1680 → 827.6 → 2.0300)",
+                  "(1680 is 827.6 is 2.0300)",
+                  "(1680: 827.6: 2.0300)",
+                  # ⛔ THE UNIT IS ADMITTED ON EVERY OPERAND, including the window (#14623 round 31,
+                  # P2): `1680 / 827.6 s` was read while `1680 s / 827.6 s` — the same figures,
+                  # stated consistently — was REFUSED as "a figure nobody reads". A false block on
+                  # TRUE prose, so the symmetric spelling is pinned here.
+                  "(1680 s / 827.6 s = 2.0300)",
+                  "(1680 s / 827.6 = 2.03 s)"):
         assert _emission_block_claims(_ratio_header(legal)) is not None, (
             f"`_emission_block_claims` refuses the legal ratio spelling {legal!r}, so the arm "
             "skips a figure it should grade — a widening that refused true prose would be the "
             "false-block twin of the round-30 finding")
-    for illegal in ("(1680 over 827.6 = 2.0300)", "(1680 :: 827.6 = 2.0300)"):
+    # ⛔ THE BACKSTOP STILL FIRES where the reader genuinely cannot parse: a DIVISION SIGN with a
+    # third figure the reader did not consume is a figure nobody reads, not an absent one.
+    for unread in ("(1680 ÷ 827.6 = and 2.0300 more)",
+                   "(1680 / 827.6 = or 2.0300 more)"):
         try:
-            _emission_block_claims(_ratio_header(illegal))
+            _emission_block_claims(_ratio_header(unread))
         except AssertionError as exc:
             assert "does not consume" in str(exc), (
-                f"the ratio {illegal!r} was refused for the wrong reason — it must be reported as "
+                f"the ratio {unread!r} was refused for the wrong reason — it must be reported as "
                 f"a figure nobody READS, not as a bad value: {exc}")
         else:
             raise AssertionError(
                 f"a ratio-shaped parenthetical in a spelling the reader does not consume "
-                f"({illegal!r}) was read as ABSENT, so that figure is graded by nothing — the "
-                "class this PR exists to remove (#14623 review round 30, P2)")
+                f"({unread!r}) was read as ABSENT, so that figure is graded by nothing — the "
+                "class this PR exists to remove")
     # …and the VALUE is still checked under a widened spelling, so the widening traded no grading
-    # for its tolerance: `÷` with a false quotient must RED as a wrong figure.
+    # for its tolerance: a false quotient must RED as a wrong figure under EACH connector.
+    for wrong in ("(1680 ÷ 827.6 = 2.0400)", "(1680 — 827.6 — 2.0400)",
+                  "(1680 is 827.6 is 2.0400)", "(1680 s / 827.6 s = 2.0400)"):
+        try:
+            _emission_block_claims(_ratio_header(wrong))
+        except AssertionError as exc:
+            assert "watchdog_headroom" in str(exc), (
+                f"the wrong quotient {wrong!r} was refused for the wrong reason: {exc}")
+        else:
+            raise AssertionError(
+                f"a FALSE quotient re-spelled as {wrong!r} passed every check — the widening "
+                "admitted the spelling without grading the figure, which is the round-30 P2 itself")
+    # ⛔ AND THE DIAGNOSTIC QUOTES THE AUTHOR'S OWN TEXT (#14623 round 31, P3): rebuilding the
+    # sentence from named groups silently re-spelled `÷` back to `/`, so a reader searching the
+    # manifest for the quoted figure found nothing.
     try:
         _emission_block_claims(_ratio_header("(1680 ÷ 827.6 = 2.0400)"))
     except AssertionError as exc:
-        assert "watchdog_headroom" in str(exc), (
-            f"the wrong quotient under `÷` was refused for the wrong reason: {exc}")
-    else:
-        raise AssertionError(
-            "a FALSE quotient re-spelled with `÷` passed every check — the widening admitted the "
-            "spelling without grading the figure, which is the round-30 P2 itself")
-
-
-#: The block's own label for the fold it carries — `On THIS tree — `origin/main` `a0be10ac456b`
-#: folded in`. ⛔ READ rather than trusted, because this label has been WRONG four times inside this
-#: PR (`90c125a736a0c`, `d6a2104518762`, `cc7b1f3f2c6a3`, and `dc479c6f`) and each time the repair
-#: was a hand-check that nothing graded — the carried-claim shape the block forbids two lines above
-#: itself (#14623 review round 30, P3).
-_FOLD_LABEL_RE = re.compile(
-    r"On THIS tree \u2014 `origin/main` `(?P<sha>[0-9a-f]{7,40})` folded in")
-
-
-def test_the_fast_shards_header_block_names_the_fold_this_head_carries():
-    """The `origin/main <sha>` the block labels as "the fold this head carries" must BE that fold.
-
-    The block states the derivation is a PER-TREE measurement "never carried", and labels the tree
-    with `origin/main`'s tip. That label is the one part of the sentence nothing could disagree with,
-    so it rotted: FOUR hand-corrections inside this PR, the last being `dc479c6f` re-pointing a label
-    one fold stale. Graded here against `git rev-parse origin/main`, which is the only authority for
-    "the fold this head carries".
-
-    ⛔ SKIPPED, announced and out loud, where `origin/main` does not resolve (a depth-1 CI checkout
-    or a detached clone has no such ref). A bare `skipped` would let a green run read as "the label
-    was verified", which is the vacuous pass this arm exists to prevent.
-    """
-    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
-    labelled = _FOLD_LABEL_RE.search(header)
-    assert labelled is not None, (
-        "the block no longer opens its derivation with `On THIS tree — `origin/main` `<sha>` "
-        "folded in`, so this arm grades nothing — re-point `_FOLD_LABEL_RE` at the sentence the "
-        "block uses rather than letting the label go back to a hand-check")
-    named = labelled.group("sha")
-    live = subprocess.run(["git", "rev-parse", "--verify", "origin/main"],
-                          cwd=REPO, capture_output=True, text=True)
-    if live.returncode != 0:
-        reason = (
-            "origin/main does not resolve in this checkout ("
-            f"{live.stderr.strip().splitlines()[:1]}), so the fold label the block carries "
-            f"(`{named}`) is UNVERIFIED here. Announced rather than silent: a skip must not read "
-            "as a pass. Run this arm from a clone with `origin/main` fetched.")
-        print(reason)
-        pytest.skip(reason)
-    live_sha = live.stdout.strip()
-    assert live_sha.startswith(named), (
-        f"the block labels `{named}` as the fold this head carries, but `origin/main` is "
-        f"`{live_sha[:12]}` — the label is stale, which is the carried-claim shape the block "
-        "forbids two lines above it. Fold `origin/main` in, then re-point the label at the sha "
-        "actually folded; do NOT delete the phrase 'the fold this head carries'.")
-    # NON-VACUITY: the pattern really reads a label, and a WRONG one really reds. Driven on a
-    # fixture so re-pointing the regex at something that matches nothing REDs here rather than
-    # passing silently over the live block.
-    fixture = "On THIS tree — `origin/main` `deadbeef1234` folded in, carrying"
-    fixture_sha = _FOLD_LABEL_RE.search(fixture).group("sha")
-    assert fixture_sha == "deadbeef1234", (
-        "the fold-label pattern does not read even its own fixture, so the assertion above is "
-        f"decoration: {_FOLD_LABEL_RE.pattern!r}")
-    assert not live_sha.startswith(fixture_sha), (
-        "the non-vacuity fixture's sha happens to prefix the real one, so the RED direction above "
-        "is unproven — pick a fixture sha that differs")
+        assert "÷" in str(exc), (
+            f"the failure message does not quote the spelling that is actually in the block, so it "
+            f"sends the reader looking for text that is not there: {exc}")
 
 
 def test_the_fast_shards_header_block_states_no_span_twice():
