@@ -10269,10 +10269,6 @@ _H_14544_NEGATED_ROW_CHANGE_RE = re.compile(
 #: `by <word>` prose ("is not touched by this line", "S is chosen by that formula"), so the
 #: actor-anywhere form fails open on the live file. `verb … by <agent>` is the shape that
 #: distinguishes "touched by the reaper" (foreign) from "touched by `#14544`, by design" (the cut).
-_H_14544_FOREIGN_AGENT_RE = re.compile(
-    _H_14544_CHANGE_VERB
-    + r"[a-z]{0,8}\s+by\s+`?(?!#14544|that\s+cut|the\s+cut)\w",
-    re.IGNORECASE)
 #: What may sit between the claim's verb and its agent before the excuse applies: whitespace, or a
 #: comma plus one short adverb. Anything else — another clause, another verb — is not this verb's
 #: agent. Measured on the five shapes in `test_the_14544_exemption_paragraph_states_what_14544_did…`.
@@ -10291,6 +10287,13 @@ _H_14544_AGENT_NP_RE = re.compile(
     r"(?!way\b|design\b|construction\b|default\b|hand\b|then\b|now\b|contrast\b|definition\b"
     r"|time\b|far\b|mistake\b|accident\b)\w)")
 
+
+#: ⛔ THE `by …` EXCUSE HAS ONE GATE AND IT IS A HELPER, not a constant plus a helper: this arm
+#: carried `_H_14544_FOREIGN_AGENT_RE` for two rounds with exactly one reference (its own
+#: definition), so narrowing or widening it changed NOTHING while its 14-line comment presented it as
+#: the guard — an inert enforcer (measured, #14623 review round 12, F4). Deleted rather than left
+#: beside `_h_14544_foreign_agent`, which is where the rule actually lives and where its three
+#: measured boundaries are documented.
 
 def _h_14544_foreign_agent(sentence: str, match: "re.Match[str]") -> bool:
     """True when the change verb's `by <agent>` names someone OTHER than the cut.
@@ -10385,13 +10388,24 @@ _H_14544_IMPERSONAL_NEGATION_RE = re.compile(
 #: exempt`, so the predicate is what makes it the inverse; the non-vacuity assertions beside the
 #: arm pin both spellings it must still read.
 _H_14544_INVERTED_RE = re.compile(
-    r"both\s+halves[\s\S]{0,20}?(?:exempt|excluded)|both\s+(?:are|stay)\s+exempt"
-    r"|neither\s+half\s+is\s+excluded|row\s+half\s+is\s+exempt"
+    # ⛔ `\b` AFTER EACH VERB, not decoration: without it `exempt` matched the paragraph's own noun
+    # `exemption` (and `exempted`/`exempting`), so TRUE prose — "Both halves of the exemption are
+    # graded by an arm each." — was refused with a diagnostic quoting an inverse it never makes
+    # (measured RED, #14623 review round 12, F2).
+    r"both\s+halves[\s\S]{0,20}?(?:exempt\b|excluded\b)|both\s+(?:are|stay)\s+exempt\b"
+    r"|neither\s+half\s+is\s+excluded\b(?!\s+from)|row\s+half\s+is\s+exempt\b"
     # ⛔ THE NATURAL NEGATION OF `_H_14544_SCOPE_RE`, and the row-half spellings — measured GREEN
     # beside the true claim at #14623 review round 8, F1: the inverse ban read five spellings and not
     # the one a fold reaches for first when it wants the row exempt again.
     r"|not\s+the\s+ONLY\s+half|row\s+half\s+is\s+the\s+exempt|exempts\s+the\s+row"
-    r"|paragraph\s+DOES\s+exclude",
+    # ⛔ AND THE NEGATION AFTER THE PINNED SPAN — `_H_14544_SCOPE_RE` stops at `half`, so
+    # "the REGISTRATION is the ONLY half that is NOT exempt" satisfied it while stating the exact
+    # inverse (measured GREEN, #14623 review round 12, F1).
+    r"|ONLY\s+half[^;.!?]{0,60}?\b(?:not|never)\b[^;.!?]{0,20}?exempt\b"
+    r"|paragraph\s+DOES\s+exclude"
+    # …and the provenance claim kept ONLY to be retracted: "An earlier draft claimed that row is
+    # `#14544`'s own edit, which is false." (measured GREEN, #14623 review round 12, F5).
+    r"|own\s+edit[^.;!?]{0,40}?(?:which\s+is\s+(?:false|untrue|wrong)|is\s+(?:false|untrue|wrong))",
     re.IGNORECASE)
 
 
@@ -10462,8 +10476,14 @@ _H_14544_WEIGHT_FIGURE_RE = re.compile(
     # review round 8 (F3) on the TRUE "the weight of shard a and the weight of shard b are 827.2 s
     # and 827.3 s, neither of which moved" — the block itself quotes shard weights, shard minutes
     # and a headroom ratio, and this block's rule is about a PER-FILE (row) weight only.
-    r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b)[^,;.!?]{0,60}?\b\d+\.\d+\b"
-    r"|\b\d+\.\d+\b[^,;.!?]{0,40}?(?:`durations`|\brows?\b|\bentr(?:y|ies)\b)")
+    # ⛔ AND THE PARAGRAPH'S OWN PHRASING: measured GREEN at #14623 review round 12 (F3) for "The
+    # file's weight is 90.0 s.", "That weight beside it is 90.0 s." and the live clause turned into
+    # "… re-read the same file's weight (90.0 s)" — the row-noun bound above cannot see them. A bare
+    # `weight … is/to/at/=  NN.N` is a stated value; the shard figures use "are … 827.2 s", so the
+    # singular copula is what separates a row's weight from a shard reading.
+    r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bfile\b)[^,;.!?]{0,60}?\b\d+\.\d+\b"
+    r"|\b\d+\.\d+\b[^,;.!?]{0,40}?(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bfile\b)"
+    r"|\bweight\b[^,;.!?]{0,30}?\b(?:is|at|to|=|:)\s*\d+\.\d+\b")
 
 
 def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
