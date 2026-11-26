@@ -1838,7 +1838,7 @@ _PRE_CUE_ONLY = _inversion_form(
     # review cycle 37). The run is capped-free and repeats, and it was measured
     # at **0 flips over all 405 rows** plus the shipped doc before landing.
     r"^(?:(?:(?:now|then|next|finally|lastly|immediately|again|simply|still"
-    r"|please|kindly)\s*,?\s+)+)?"
+    r"|afterwards?|subsequently|additionally|please|kindly)\s*,?\s+)+)?"
     r"(?:(?:first(?:ly)?|also|just)\s*,?\s+)?"
     r"(?:(?:you\s+)?(?:must|should|need\s+to|have\s+to|can|could|will)\s+"
     r"|be\s+sure\s+to\s+|make\s+sure\s+to\s+)?"
@@ -2641,8 +2641,8 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     return None
 
 
-def _cue_governing_clause(statements: list[str]) -> list[str]:
-    """The clause that GOVERNS the cue: the last one that carries content.
+def _cue_governing_clause(statements: list[str]) -> tuple[list[str], str]:
+    """The clause that GOVERNS the cue, and the STATEMENT it sits in.
 
     A clause with no content word in it — only sequencers, restrictives,
     courtesy, modal subjects, pronouns and subordinators (`then`, `only then`,
@@ -2659,15 +2659,17 @@ def _cue_governing_clause(statements: list[str]) -> list[str]:
     client" the surviving statement is the literal `Then` and the imperative
     lives in the PREVIOUS statement. Popping only within the last statement
     fixes the comma twin and leaves both other twins GREEN (measured).
+
+    ⛔ AND IT RETURNS THE STATEMENT THE CLAUSE CAME FROM, not the last one. The
+    two differ exactly when the walk-back crossed a boundary, and the deferral
+    exemption is a property of the clause's OWN statement: handing it
+    `statements[-1]` (the literal `Then`) made `After restarting, check the
+    tools are present. Then restart your client, …` a FALSE RED — one inserted
+    `Then` over a declared-GREEN row (measured, #14679 review at `31554d1424af`).
     """
-    clause_lists = [
-        [c.strip().lstrip(_PRE_CUE_PREFIX).strip()
-         for c in re.split(r"[,;]", statement) if c.strip()]
-        for statement in statements
-    ]
-    while clause_lists:
-        if not clause_lists[-1]:
-            clause_lists.pop()
+    for statement in reversed(statements):
+        clauses = [c.strip().lstrip(_PRE_CUE_PREFIX).strip()
+                   for c in re.split(r"[,;]", statement) if c.strip()]
         # ⛔ SEARCH A DECORATION-FREE COPY, exactly as the post-cue side does: a
         # decorated sequencer (`**then**`, `*then*`, `` `then` ``) is the same
         # word to a reader, and matching the raw clause left
@@ -2675,12 +2677,12 @@ def _cue_governing_clause(statements: list[str]) -> list[str]:
         # GREEN while its bare twin is RED (measured — the verdict turns on a
         # markdown marker, which is the failure mode `_PRE_CUE_PREFIX` exists to
         # close).
-        elif _SEQUENCER_FRAGMENT_RE.match(
-                _DECORATION_RE.sub(" ", clause_lists[-1][-1])):
-            clause_lists[-1].pop()
-        else:
-            return clause_lists[-1][-1:]
-    return []
+        while clauses and _SEQUENCER_FRAGMENT_RE.match(
+                _DECORATION_RE.sub(" ", clauses[-1])):
+            clauses.pop()
+        if clauses:
+            return clauses[-1:], statement
+    return [], ""
 
 
 # ⛔ A PRE-CUE IMPERATIVE THAT DEFERS ITS OWN CHECK PAST THE RESTART IS FORWARD.
@@ -2694,8 +2696,11 @@ def _cue_governing_clause(statements: list[str]) -> list[str]:
 # "After restarting, check the tools are present." and "Once the client restarts,
 # check the tools are present." all came back RED with the "inverts its own
 # restart cue" message over copy that plainly puts the restart FIRST (measured,
-# #14679 review at `18f99499d7`). The phrase is found ANYWHERE IN THE CLAUSE'S
-# STATEMENT now — not in the clause alone, and not in the paragraph
+# #14679 review at `18f99499d7`). The phrase is found ANYWHERE IN THE GRADED
+# CLAUSE'S OWN STATEMENT now — not in the clause alone, and not in the paragraph
+# (nor in a LATER statement: the walk-back can cross a `.`/`;` boundary, and the
+# statement it lands in is the one whose deferral counts — `statements[-1]` was
+# the literal `Then` in that case and was a false red)
 # because where the deferral sits in the sentence does not change what it defers.
 _DEFERRED_CHECK_RE = re.compile(
     r"\b(?:after|once|when|following|upon)\s+(?:\w+\s+){0,3}restart(?:ing|s|ed)?\b"
@@ -2721,7 +2726,7 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     # anchors on, so a decoration sitting after a comma (`Delete the old entry,
     # **confirm the tools are actually there**. Restart …`) hides the imperative
     # exactly as a leading one does (measured).
-    pre_clauses = _cue_governing_clause(pre_statements)
+    pre_clauses, governing_statement = _cue_governing_clause(pre_statements)
     # The cue's OWN sentence, on the same reasoning: a `.` OR a `;` ends the
     # window (both begin a new statement — grading past them read a subordinate
     # clause that attaches to the NEXT verb as a deferral of the restart:
@@ -2801,11 +2806,22 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
                 # break, so "Check the logs after restarting. Confirm the tools
                 # are actually there. Restart your client" still reds the
                 # confirmation it must red (measured).
-                or _defers_its_check_past_the_restart(
-                    pre_statements[-1] if pre_statements else "")):
+                or _defers_its_check_past_the_restart(governing_statement)):
             continue
         for pattern in _INVERSION_FORMS:
-            if pattern.search(clause):
+            # ⛔ STRIP THE DECORATION FOR FORM (f) ONLY, AND FROM THE WHOLE
+            # CLAUSE. `_PRE_CUE_PREFIX` is applied at the clause's START only, so
+            # once the leading run consumes `Now ` the markdown marker is
+            # INTERIOR and the `^` anchor never reaches the verb: `Now **Confirm
+            # the tools are actually there.** Restart your client, …` was GREEN
+            # end-to-end on the real quickstart, and the four declared-RED
+            # decorated rows flipped GREEN under every recognised lead (measured,
+            # #14679 review at `31554d1424af`). The other forms match raw text by
+            # design, so the substitution is scoped here rather than to `clause`.
+            subject = clause
+            if pattern is _PRE_CUE_ONLY:
+                subject = _DECORATION_RE.sub(" ", clause).strip()
+            if pattern.search(subject):
                 return clause
     # ⛔ SEE `_CUE_UNDER_INVERTING_SUBORDINATE_RE`: when "before"/"until" governs
     # the cue, the confirmation that FOLLOWS it happens first, so form (f) — the
@@ -4265,6 +4281,29 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      False),
     ("Simply restart your client, then confirm the tools are actually there.",
      False),
+    # ── CYCLE 39 (#14679's review at `31554d1424af`): the leading run consumed
+    # the adverb, which turned the markdown marker INTERIOR — where
+    # `_PRE_CUE_PREFIX` does not reach — so the four declared-RED DECORATED rows
+    # flipped GREEN under every recognised lead, and `Now **Confirm the tools are
+    # actually there.** Restart your client, …` passed both doc-level assertions
+    # end-to-end on the real quickstart. Form (f) is now matched against a
+    # decoration-free copy, like the rest of the file's decoration handling.
+    ("Now **Confirm the tools are actually there.** Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("Then *confirm the tools are actually there*. Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("Now > confirm the tools are actually there. Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("Now `confirm the tools are actually there`. Restart your client, then "
+     "confirm the tools are actually there.", True),
+    # ── …and the deferral exemption is looked up on the GRADED CLAUSE'S OWN
+    # STATEMENT, not the last one: `_cue_governing_clause` walks back across a
+    # `.`/`;` boundary, so one inserted `Then` made `After restarting, check the
+    # tools are present. …` a FALSE RED over a declared-GREEN row (measured).
+    ("After restarting, check the tools are present. Then restart your client, "
+     "then confirm the tools are actually there.", False),
+    ("Once the client restarts, check the tools are present. Then restart your "
+     "client, then confirm the tools are actually there.", False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
