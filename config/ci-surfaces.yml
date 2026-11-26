@@ -58,19 +58,26 @@ version: 1
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
 # reader of the prose can see. On THIS tree — `origin/main` merged in, plus THIS lane's own row
-# (`tests/test_13450_ep_position_axis_participation.py`, `core`, at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`), PLUS every row `main` carries at this base — the verb packs seven shards
-# at 827.2 s (a, b, c, d, i, j, k) and four at 827.3 s (e, f, g, h), so `ceil(827.3/60 x 2)` = 28 m
+# (`tests/test_own_site_fragment_targets.py`, `core`, at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — no
+# `durations` entry), PLUS every row
+# `main` carries at this base (including `#13450`'s
+# `tests/test_13450_ep_position_axis_participation.py`, which is on `main` here and is NOT this
+# lane's — see the delta paragraph below) — the verb packs nine shards
+# at 827.4 s (a, c, d, e, f, h, i, j, k) and two at 827.5 s (b, g), so `ceil(827.5/60 x 2)` = 28 m
 # governs (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.3 = 2.0307), so the two agree
+# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.5 = 2.0302), so the two agree
 # by construction rather than by a hand re-read.
 # ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
 # own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
 # figures stay on the commit that measured them. The delta is measurable and small: `fast_pool()`
-# holds 1339 files at this head against 1338 on `main`, read by running the verb on one manifest per
-# side (`origin/main`'s blob and this tree's), and the ONE addition this lane brings is
-# `tests/test_13450_ep_position_axis_participation.py` — the row that moved the partition off
-# `main`'s own — with nothing `main` carries missing from this tree. ⛔ Every OTHER row this tree
+# holds 1340 files at this head against 1339 on `main`, read by running the verb on one manifest per
+# side (`origin/main`'s blob and this tree's), and the ONE addition this tree carries over `main` is
+# `tests/test_own_site_fragment_targets.py` — `#13450`'s
+# `tests/test_13450_ep_position_axis_participation.py` row is ALREADY on `main` at this base
+# (`c1c8df1a3817f`, an ancestor of `f37a250d`), which is why the delta is exactly one file; counting
+# it as this tree's addition would attribute a partition move to a row that landed before the base.
+# That ADDED `tests/test_own_site_fragment_targets.py` row is the one that moves the partition off
+# `main`'s own here, with nothing `main` carries missing from this tree. ⛔ Every OTHER row this tree
 # carries is `main`'s at this head, NOT this lane's (`#14597`'s expansion-fusion row, `#14548`'s
 # residue RATCHET — `tests/test_sdk_privatise_sweep.py`, the one `core` row here whose weight is
 # NOT the flat 2.0 s — `#14607`'s `tests/test_mcp_selfcheck.py` and
@@ -2981,6 +2988,18 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #11939: the own-site fragment guard. DUAL-REGISTERED with `onboarding` —
+  # and the split is measured, not assumed, because the two arms read different
+  # trees and a single registration leaves one direction asleep:
+  #   * `tortoise/abuse.py`-only  → `['core']`   (the `appeal_url()` literal arm)
+  #   * `website/docs.html`-only  → `['onboarding']` (the ids the pages declare)
+  #   * `website/product.html`-only → `['onboarding']` (the `#pricing-section` arm)
+  # A `tortoise/`-diff registration alone (`core`) would never fire on the page
+  # that carries the id, which is the half of the class #11939 was filed for;
+  # an `onboarding`-only registration would never fire when the emitting literal
+  # moves. Both rows are load-bearing — the same reasoning as
+  # `test_14592_read_parity.py` above. See the `onboarding` row too.
+  - test_own_site_fragment_targets.py
 
   # #14592 Phase A: the REST read parity suite (`/v1/objects`, `/v1/subjects`,
   # `/v1/sources`, `/v1/entities/{id}/relations`, `/v1/entities/{id}/belief`).
@@ -10979,6 +10998,19 @@ surfaces:
   - test_runtime_urls_are_canonical.py  # #11767: dual-registered api + core + onboarding — measured: abuse.py-only → ['core'], SKILL.md-only → ['onboarding'], email_notify.py-only → ['api']
   - test_website_static.py
   - test_website_docs_consistency.py  # #3332: checks each public page against its canonical source (status vocab, EP mechanism, ontology link)
+  # #11939: the own-site fragment guard — the `onboarding` half of a DUAL
+  # registration (the `core` row is above, beside the `tortoise/`-diff reasoning).
+  # This row is the one that keeps the guard awake on the diff that actually
+  # breaks it: `website/*.html` and `website/functions/**` are `onboarding`
+  # SOURCE_PATTERNS, so a page-only diff selects THIS surface and not `core`.
+  # Measured with the selector, not assumed: `website/faq.html`,
+  # `website/product.html`, `website/functions/blog/_lib.ts` and
+  # `tortoise/onboarding/SKILL.md` each resolve `['onboarding']`. The guard reads
+  # the own-site absolute hrefs in `website/*.html` (`#pricing-section` in
+  # faq/tos), the ts-built `navHtml` in `website/functions/blog/_lib.ts`, and the
+  # `<…docs#chatgpt>` autolinks in the pasted onboarding copies — none of which a
+  # `core`-only row would ever grade.
+  - test_own_site_fragment_targets.py
   # #3329: the public capacity page. Registered HERE because `website/self-hosted.html`
   # is a SOURCE_PATTERN of this surface, and `docs/capacity.md` is added as a CONCRETE
   # path below — `docs/` alone is NOT a pattern and is in NON_PYTHON_PREFIXES, so

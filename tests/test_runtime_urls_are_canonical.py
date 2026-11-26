@@ -23,7 +23,9 @@ So the assertions here are on the ARTIFACT (the invite email's own body, the
 The siblings named on #11767 are pinned too: the CORS allowlist that must KEEP
 the retired origin with a recorded removal trigger, the two Supabase edge
 functions whose public allowlists already carry both hosts, and the appeal URL
-whose host moved while its dead `#appeal` fragment did not (#11939).
+whose host moved (#11767) and whose `#appeal` fragment #11939 has since made
+live — the host and the fragment were separate defects, and only the host was
+fixed here.
 
 ⛔ #11767's items 4 and 5 are IN THIS FILE'S SURFACE: the dashboard landing
 pages, the blog origin, and the dashboard's docs links used to spell the retired
@@ -841,7 +843,7 @@ def test_supabase_edge_function_allowlists_agree():
         "front the same marketing pages")
 
 
-# ── The appeal URL — host moved, fragment did NOT (that is #11939) ────────────
+# ── The appeal URL — host moved (#11767), fragment landed (#11939) ───────────
 
 
 def test_appeal_url_default_is_the_canonical_origin(monkeypatch):
@@ -864,15 +866,33 @@ def test_appeal_url_still_follows_the_override(monkeypatch):
     assert abuse.appeal_url() == "https://x.example/appeal"
 
 
-def test_appeal_url_documents_the_dead_fragment_rather_than_implying_it_works():
-    """#11767 §6.1: `#appeal` has no `id="appeal"` on the docs page — it is a
-    pre-existing defect filed as #11939, deliberately NOT fixed here. The
-    docstring must say so, so a host flip is never read as a working appeal
-    link."""
+def test_appeal_url_documents_a_live_fragment_rather_than_an_open_issue():
+    """#11939 closed the destination question, and `docs.html` carries the section.
+
+    This pin used to assert the OPPOSITE — `"DEAD" in doc.upper()` — because the
+    fragment was dead then and the docstring said so deliberately (#11767 §6.1).
+    #11939 fixed the fragment, so the same pin must now state the new truth: a
+    docstring that still called this link dead would be the next regression,
+    which is the exact failure the old pin existed to catch, mirrored.
+
+    Asserted against the TREE and not only against the prose. `"11939" in doc`
+    is satisfied by a docstring that merely mentions the issue; the id is what
+    makes the link work, and a docstring claiming a LIVE destination over a page
+    that declares no such id is precisely the false claim this pin is for.
+    """
     import inspect
 
     from tortoise import abuse
 
     doc = inspect.getdoc(abuse.appeal_url) or ""
     assert "11939" in doc
-    assert "DEAD" in doc.upper()
+    assert "DEAD" not in doc.upper(), (
+        "appeal_url()'s docstring still calls the fragment dead; #11939 made it "
+        "live by adding the docs.html section, so a stale DEAD paragraph now "
+        "contradicts the page this function points at")
+
+    docs_html = (Path(__file__).resolve().parent.parent / "website" / "docs.html")
+    html = docs_html.read_text(encoding="utf-8")
+    assert 'id="appeal"' in html, (
+        'appeal_url() points at /docs#appeal but website/docs.html declares no '
+        'id="appeal" — the link would land at the top of the page (#11939)')

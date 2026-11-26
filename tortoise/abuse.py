@@ -418,13 +418,12 @@ def appeal_url() -> str:
     ``/docs`` is a permanent SAME-HOST 301 onto the docs page's terminal address
     ``/tortoise/docs`` (#11763; measured live 2026-11-12 — 301, then 200, one
     redirect, both on the company origin). Emitting the terminal path here would
-    make it 0 hops, and that is deliberately NOT done in this PR: this function's
-    DESTINATION is #11939's decision (`/docs#appeal` with the section written, or
-    `/contact`), so flipping the path now would decide half of a question that
-    issue may answer by moving the link somewhere else entirely. #12049 re-points
-    the pasted onboarding copies and explicitly does NOT touch this function
-    (its item 4) — so do not read this comment as "someone else will";
-    #11939 is the owner of where this link goes, and it is OPEN.
+    make it 0 hops, and that is deliberately NOT done here (#11939 closed the
+    DESTINATION question, below; the 1-hop -> 0-hop flip is a separate change and
+    no issue owns it yet — flipping it is safe and welcome, it is simply not
+    part of this one). #12049 re-points the pasted onboarding copies and
+    explicitly does NOT touch this function (its item 4) — so do not read this
+    comment as "someone else will".
     ⛔ An earlier revision of THIS docstring left a `#12049 and not #11764`
     paragraph here, arguing the pasted-onboarding re-point would have no owner
     without #12049. That fact is true but it is about `onboarding/SKILL.md`, not
@@ -434,10 +433,12 @@ def appeal_url() -> str:
     paragraph, and #12049's own scope), not here.
 
     ✅ The fragment is LIVE, and #11939 is what made it so: ``website/docs.html``
-    now carries the ``#appeal`` section this URL names (the destination decision
-    #11939 asked for — "add the section" rather than "point somewhere else",
-    because the sentence a suspended org reads already promises an appeal, not a
-    contact form). The section is guarded from regressing quietly:
+    now carries the ``#appeal`` section this URL names. That CLOSES the
+    destination question #11939 opened — the fix is "add the section", not
+    "point at ``/contact``", because the sentence a suspended org reads already
+    promises an appeal, not a contact form. So `/docs#appeal` is this function's
+    settled destination; it is not a placeholder waiting on an open issue.
+    The section is guarded from regressing quietly:
     ``tests/test_own_site_fragment_targets.py`` compares every fragment URL our
     sources emit against the ids our pages declare, so deleting that id turns
     the suite red instead of turning this link into a silent no-op (a fragment
