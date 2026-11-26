@@ -3582,6 +3582,16 @@ def _defers_its_check_past_the_restart(clause: str) -> bool:
 # `_CUE_UNDER_INVERTING_SUBORDINATE_RE`). Their verdict is still correct; they are
 # simply not graded by form (a) at all, so there is nothing to exempt.
 _CONCESSION_OPENER_RE = re.compile(r"^(?:even\s+)?(?:if|when)\b", re.IGNORECASE)
+# ⛔ THE MARKER IS TWO ADVERBS, AND WIDENING IT TO A PAST-TENSE PREDICATE WAS
+# TRIED AND MEASURED INEFFECTIVE, so it is DECLARED here instead of shipped as
+# dead complexity: `If you checked the tools BEFORE …, restart …, then confirm …`
+# stays RED with `earlier`, `before`, `last time` all admitted, because the shape
+# fails at a LATER gate than this marker (the concession never reaches it), and
+# the only cut that moved those rows also re-reddened the present-tense deferral
+# `If you check the tools before restarting …` in the other direction. The three
+# shapes are pinned GREEN in the table's declared-residual block, so the boundary
+# is MEASURED and a future tightening shows up as a deliberate row flip
+# (#14679 review round 9).
 _PRIOR_COMPLETION_RE = re.compile(r"\b(?:already|previously)\b", re.IGNORECASE)
 
 
@@ -5827,9 +5837,12 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # CLOSED verb list, so an imperative outside it keeps the pre-fix verdict —
     # folded in and graded, i.e. a false RED of #3429's class that ALREADY
     # existed and is not made worse. Pinned as RED so the boundary is visible and
-    # a future fix flips exactly this row AND reds the declared-GREEN
-    # `Before you start - restart your client …` row (2 rows measured at this head);
-    # closing it means adding the verb, not
+    # a future fix flips exactly this row (measured — and the round-8 revision
+    # that claimed "2 rows, the second being the declared-GREEN `Before you start -
+    # restart …`" was WRONG: that row contains no `and` at all, so no closure of
+    # this constant can touch it. A claim introduced while correcting a stale
+    # count is the same defect as the count.); closing it means adding the verb,
+    # not
     # a new arm.
     ("Restart your client after confirming the config is right, and once the "
      "tools are listed grep the log.", True),
