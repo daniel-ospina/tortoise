@@ -572,11 +572,13 @@ export function episodeOf(alert) {
  *     reason. So two different keys crossing the same threshold in the same
  *     scope are ONE local identity;
  *   * the incident types — `suspend` / `auth_ip`, for two different reasons:
- *     `suspend`'s customer message is a CONSTANT, so every suspend row is one
+ *     `suspend`'s customer message is a CONSTANT, so every suspend row shares one
  *     local identity (server-side too — `_alert_subject` returns `()` for it, so
- *     they are one episode); `auth_ip`'s subject IS its country, which its
- *     message already names. Neither collides across rules; they collide by
- *     REPEAT, which is why one identity can cover several bouts.
+ *     they have one episode IDENTITY; separate bouts are still separate EPISODES,
+ *     and which of those a dismissal covers is exactly what `isDismissed`'s window
+ *     test decides); `auth_ip`'s subject IS its country, which its message already
+ *     names. Neither collides across rules; they collide by REPEAT, which is why
+ *     one identity can cover several bouts.
  *
  *     The collision-across-rules case belongs to the types whose subject is a
  *     rule the message omits — see the ⚠️ note below.
@@ -765,9 +767,10 @@ export function buildLedger({ alerts, state, now = new Date(), days = OLD_AFTER_
   // whenever two episodes render the SAME SENTENCE two genuinely different
   // episodes collide on the client key — which is what `flag` rows did until
   // #14702 put the measured numbers into their message, and what `read_velocity`
-  // rows still do by naming only the scope. Collapsing to one row per
-  // today's bout was acknowledged, an OLDER unacknowledged one was neither listed
-  // nor counted — an alert made invisible and uncountable on the security surface
+  // rows still do by naming only the scope. Collapsing to one row per identity
+  // meant that once today's bout was acknowledged, an OLDER unacknowledged one
+  // was neither listed nor counted — an alert made invisible and uncountable on
+  // the security surface
   // — and "prefer the unacknowledged one" only moves which row disappears. With a
   // per-row identity the question does not arise: each row is bucketed on its own
   // `acked`/dismissed/snoozed state, so an identity is unresolved iff any of its
@@ -840,14 +843,15 @@ export const KIND_UNCLASSIFIED =
 //: Organization's own allowance, not a measurement — rendering `true` would be
 //: machine detail, and the row's own sentence already states it in words.
 //:
-//: ⛔ `country` / `ip` / `key_name` are RETAINED BUT NEVER SHIPPED. They predate
-//: #14702 and are NOT in `_CUSTOMER_DETAIL_KEYS`, so `_customer_details` strips
-//: them: `auth_ip` records the country as a COLUMN, which `_alert_dict` renders
-//: inside the message (`abuse.py`), never in `details`. They stay only because the
-//: API and this dashboard deploy INDEPENDENTLY — the same reverse race this module
-//: reasons about elsewhere — so a payload shaped by an older or newer server must
-//: not be silently dropped. If you are re-checking this list, re-check it against
-//: `_CUSTOMER_DETAIL_KEYS`, not against what looks plausible.
+//: ⛔ `country` / `ip` / `key_name` are RETAINED BUT NEVER SHIPPED TODAY. They
+//: predate #14702 and are NOT in `_CUSTOMER_DETAIL_KEYS`, so `_customer_details`
+//: strips them: `auth_ip` records the country as a COLUMN, which `_alert_dict`
+//: renders inside the message (`abuse.py`), never in `details`. They stay because
+//: the API and this dashboard deploy INDEPENDENTLY, so a payload from a NEWER
+//: server that adds these keys to `_CUSTOMER_DETAIL_KEYS` must not be silently
+//: dropped. (No OLDER server can ship them: `details` did not exist on this
+//: surface before #14702 at all.) If you are re-checking this list, re-check it
+//: against `_CUSTOMER_DETAIL_KEYS`, not against what looks plausible.
 const DETAIL_FIELDS = [
   ['surface', 'Measured'],
   ['count', 'Measured count'],
