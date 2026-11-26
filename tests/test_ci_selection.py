@@ -10162,6 +10162,13 @@ _H_14544_EXEMPTION_OPEN_RE = re.compile(r"The one cause this paragraph does NOT 
 #: and the RETIRED SENTENCE returned verbatim after the bound with this arm reporting GREEN. A ban
 #: that the graded text can move out from under is not a ban, so every NEGATIVE claim here reads the
 #: whole block; the POSITIVE ones stay paragraph-bounded, where a lost claim reds instead of passing.
+#: ⛔ ONE RULE IS PARAGRAPH-BOUNDED ON PURPOSE, and the exception is named rather than implied: the
+#: WEIGHT rule reads the corrected paragraph, not the block, because the block legitimately quotes
+#: figures that are not a row's weight ("10.0 s` row", the shard minutes, the headroom ratio) and
+#: widening it refuses that true prose (measured, #14623 review round 13, F1). Consequence, stated:
+#: an inserted `⛔` inside the paragraph moves a restated figure out of the graded region — a
+#: text-controlled bound for THIS rule alone, carried as a residual on #14715 rather than closed by
+#: a widening that re-opens a false block.
 #: ⛔ IT IS NOT A UNIVERSAL BAN AND SAYS SO. Graded, in the whole block and per SENTENCE: (1) the
 #: bare pronoun form `neither of which`, in a sentence that names this row (so a TRUE `neither of
 #: which` about two shard figures is not refused — measured RED, #14623 review round 5 F4); (2) a
@@ -10212,28 +10219,11 @@ _H_14544_CHANGE_VERB = (
 #: the paragraph's TRUE `NOT exclude` into the next clause's `re-read` and refused the live block. A
 #: plain comma stays legal, because the claim's own adverbial carries them — "never, in that commit
 #: or any other, touched".
-#: …and a SUBORDINATOR ends one when no punctuation does: "`#14544`'s cut does not move a bin since
-#: the bin is held by the `durations` row" joins its subordinate clause with no punctuation, so a
-#: punctuation-only bound reached the object 38 characters later and refused the paragraph's own true
-#: claim (#14623 review round 8, P2). Both lists are read together wherever a gap must stay in one
-#: clause.
-#: ⛔ THE OBJECT OF THE CHANGE VERB DOES NOT USE THE SUBORDINATOR LIST AT ALL (#14623 review round
-#: 9-10, P2): an enumeration of subordinators is never complete, and MEASURED, `once`, `whilst`,
-#: `provided`, `till`, `now that`, `given that`, `the moment`, `every time`, `in case`, `supposing`,
-#: `lest` and `whereby` each refused the paragraph's own bin claim — one false red per missing word.
-#: The object is ANCHORED instead: a negated change takes the row as its object only when nothing
-#: but determiners stand between them, so no word list can decide it. ⛔ THE DETERMINER SET IS
-#: DELIBERATELY WIDE and admits a PARTITIVE (`any of the`, `all of the`, `none of the`): a first cut
-#: carried only `the|that|this|its|their|his|her|a|an|any|which`, and MEASURED at #14623 review round
-#: 11 that dropped NINE shapes the previous head banned — `any of the`, `some of the`, `either of the`,
-#: `all of the`, `these`, `those`, `no`, `both`, and an adverb (`directly`). That is a false PASS, not
-#: a false block, so the set is wide and the partitive is explicit.
-#: The residue (an adjunct set off by commas inside the verb phrase, or a coordinated object) is R1 on
-#: #14715, declared — it is a CLAUSE-PARSING residue. ⛔ The quantifier VOCABULARY is a separate,
-#: separately-declared residue (R4 on the same issue): this object is anchored, and its determiner and
-#: quantifier words are a CLOSED list, so an unlisted quantifier is a miss.
-_H_14544_SUBORDINATOR = (
-    r"(?:because|since|while|whereas|although|though|unless|so\b|which|who|whose|where)")
+#: ⛔ NO SUBORDINATOR LIST: this arm carried `_H_14544_SUBORDINATOR` with ONE reference (its own
+#: definition) — an inert enforcer, the same class as `_H_14544_FOREIGN_AGENT_RE` one round earlier
+#: (measured, #14623 review round 13, F2). The clause keeps its punctuation + coordinator bound
+#: (`_H_14544_SAME_CLAUSE`); the object of a change verb is ANCHORED on determiners instead, so no
+#: word list decides it and nothing here depends on a subordinator.
 _H_14544_SAME_CLAUSE = (
     r"(?:[^,;.!?]|,(?!\s*(?:and|but|so|which|that|then|because)\b))")
 #: The object is ANCHORED instead: a negated change takes the row as its object only when nothing

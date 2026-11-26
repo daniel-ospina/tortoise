@@ -168,7 +168,8 @@ version: 1
 # `#14544`'s own edit — the commit that took the file off `core` re-read the same file's weight after
 # cutting its cases (its note on the row records exactly that) — so a packing change attributed to
 # that row is a cause this paragraph does NOT exclude, and the row's WEIGHT is that cut's re-read
-# rather than the default (the ROW itself predates it — its own note records `new in `#10465``).
+# rather than the default (the ROW itself predates it — `#10465` introduced it, and this cut
+# replaced that note with its own reading, so the note at this head records the cut).
 # The weight is not restated here: the no-per-file-weight rule above binds the
 # figure, and a weight re-read is a packing input rather than the membership change this paragraph is
 # about.
