@@ -617,6 +617,28 @@ export function entryKeyOf(alert) {
   if (!alert) return ''
   const type = String(alert.type || '')
   const message = String(alert.message || '')
+  // ⛔ THE STABLE HALF FIRST, because the message is not stable since #14702.
+  //
+  // A rate row's message embeds the ROLLING count ("Memory writes reached 2,309
+  // units in the last 1 hour …", `_point_rate_message`), and
+  // `group_alert_episodes` keeps the NEWEST row's message — so every detection
+  // window re-renders the SAME episode with a bigger number. Keying the decision
+  // on `type|message` therefore made Dismiss and Snooze evaporate on the next
+  // read: the exact "I can't clear them" this surface exists to fix, on the
+  // dominant row type (measured: two windows of one episode produce two
+  // different messages and two different keys, and the stored dismissal matches
+  // neither).
+  //
+  // `details.surface` is the per-rule CONSTANT the same payload carries
+  // (`_RULE_SURFACE`: point_create → "Memory writes", key_create → "API key
+  // creation"), and the rule is exactly what the server groups the episode by
+  // (`_alert_subject`) — so this is the server's identity in customer-safe form,
+  // not a client invention. Rows without it (velocity, suspend, auth_ip) keep the
+  // message key, which is stable for them: their sentences carry no rolling
+  // number.
+  const details = alert.details && typeof alert.details === 'object' ? alert.details : null
+  const surface = details ? String(details.surface || '') : ''
+  if (type && surface) return `${type}|surface:${surface}`
   if (type || message) return `${type}|${message}`
   // A row with neither: identify it by whatever else it carries rather than
   // returning one shared key that would let one dismissal hide every such row.
