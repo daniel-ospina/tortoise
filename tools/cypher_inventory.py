@@ -1185,7 +1185,9 @@ def _path_in_HEAD(probe_cwd: Path, probe_path: str) -> bool | None:
     return None
 
 
-def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
+def _tracked_destination_refusal(
+    target: Path, rel: str | None, _root_probe_done: bool = False
+) -> int | None:
     """Refuse a destination that git TRACKS; `None` means the path is free.
 
     Answers the invariant `--render`'s output is never committed — the same one for a
@@ -1224,7 +1226,29 @@ def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
     probe_dir = target.parent
     while not probe_dir.is_dir() and probe_dir != probe_dir.parent:
         probe_dir = probe_dir.parent
-    probe_cwd, label = probe_dir, (rel if rel is not None else str(target))
+    # ⛔ ASK BOTH REPOSITORIES AND PERMIT ONLY IF BOTH PERMIT (#14625 review, round 8,
+    # P0). Following the destination alone INVERTED two rows: a nested `git init` under
+    # ROOT (or a nested repo whose commit predates the file) answers "untracked" for a
+    # path ROOT's index AND HEAD both track, so the write went ahead at rc 0 over tracked
+    # content — measured, 12 bytes to 109 with empty stderr, and the pre-fix code refused
+    # both of those rows. Neither repository is authoritative: the destination's own repo
+    # knows about gitlinks and linked worktrees, and ROOT knows about the tree this tool
+    # writes into. So the ROOT-relative probe runs FIRST whenever the destination is
+    # inside ROOT and its own repository is not ROOT's, and a refusal from either side
+    # (tracked, or could-not-answer) is the verdict.
+    if rel is not None and not _root_probe_done:
+        root_verdict = _tracked_destination_refusal(
+            ROOT / rel, rel, _root_probe_done=True)
+        if root_verdict is not None:
+            return root_verdict
+    if _root_probe_done:
+        # ⛔ THE ROOT HALF MUST ASK *ROOT*, not the destination's nearest ancestor:
+        # `probe_dir` for a nested destination resolves to the NESTED repository, which
+        # is exactly the answer this half exists to cross-check (round 8 measured that
+        # shape permitting at rc 0 before this branch existed).
+        probe_cwd, probe_path, label = ROOT, rel, str(rel)
+    else:
+        probe_cwd, label = probe_dir, (rel if rel is not None else str(target))
     # ⛔ THE FULL PATH FROM THE NEAREST EXISTING ANCESTOR, not `target.name`
     # (#14625 review, round 5, P3): a destination whose parent directories do not
     # exist yet asked about its BASENAME in a directory that is not its parent, so a
@@ -1233,7 +1257,8 @@ def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
     # TRACKED path at rc 0. The invariant is about the path, so the probe names the
     # whole remainder — `git ls-files` matches an index entry whose work-tree file is
     # absent, which is exactly this case.
-    probe_path = target.relative_to(probe_dir).as_posix()
+    if not _root_probe_done:
+        probe_path = target.relative_to(probe_dir).as_posix()
     # ⛔ AND THE PROBE ALWAYS FOLLOWS THE DESTINATION, `rel` OR NOT (#14625 review,
     # round 7, P0): this used to ask `ROOT`'s repository for any destination INSIDE
     # `ROOT` — `(ROOT, rel)` — which is the same repository only while the destination
