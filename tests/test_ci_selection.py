@@ -10827,15 +10827,15 @@ _H_14544_INVERTED_RE = re.compile(
 #: graded by `_h_14544_row_exempted` below, which reads the STRUCTURE of a sentence — is the row the
 #: subject of an exemption, or the complement of an additive marker — rather than a list of spellings
 #: of it. The non-vacuity loops beside the arm drive that function directly, in both directions.
-#: THE ROW-EXEMPTION CLASS, graded STRUCTURALLY (#14623 rounds 27-33).
+#: THE ROW-EXEMPTION CLASS, graded STRUCTURALLY (#14623 — the round table below is the history).
 #: The paragraph's false reading is that the `durations` ROW is exempt as well as the REGISTRATION.
 #: English says that two ways, and both are GRAMMATICAL:
 #:   * the row (or its weight, in EITHER order — `the row's weight` / `the weight of the row`) is
 #:     the SUBJECT of an exemption predicate; and
 #:   * the row is the COMPLEMENT of an additive marker — `so is` / `as is` / `as well as` /
 #:     `likewise` / `along with` / an elliptical `…, and the row is too`.
-#: ⛔ EIGHT ROUNDS OF HISTORY, AND WHAT THEY TAUGHT — read this before widening ANY of it. Rounds 26
-#: to 33 each narrowed one class and each bought one gap by opening another:
+#: ⛔ THE HISTORY BELOW, AND WHAT IT TAUGHT — read every row before widening ANY of it. Each row
+#: narrowed one class and bought one gap by opening another:
 #:   26  enumerated conjunctions               -> `as is the durations row` (ONE inserted adjective)
 #:                                             escaped, and `row is too` FALSE-BLOCKED ordinary English
 #:   27  enumerated the copula+adverb run      -> the elliptical `…, and the row is too` went GREEN
@@ -11172,10 +11172,10 @@ def _h_14544_banned_claim(block: str) -> str | None:
             return sentence.strip()
         if _H_14544_QUANTIFIER_NEGATION_RE.search(sentence):
             return sentence.strip()
-        # ⛔ THE ROW-EXEMPTION CLASS, graded STRUCTURALLY (#14623 rounds 27-28): the row (or its
-        # weight) as the SUBJECT of an exemption, or as the COMPLEMENT of an additive marker in a
-        # sentence that asserts one. Sentence-scoped on purpose — the live paragraph's scope claim
-        # SHARES a sentence with `that row's WEIGHT is \`#14544\`'s own edit`, so a whole-block
+        # ⛔ THE ROW-EXEMPTION CLASS, graded STRUCTURALLY (the rules and round table above): the row
+        # (or its weight) as the SUBJECT of an exemption, or as the COMPLEMENT of an additive marker
+        # in a sentence that asserts one. Sentence-scoped on purpose — the live paragraph's scope
+        # claim SHARES a sentence with `that row's WEIGHT is \`#14544\`'s own edit`, so a whole-block
         # row-and-exempt co-occurrence test would refuse the very prose this arm certifies.
         # `previous` is the sentence before: the block states the exemption once and then reads
         # `So is the row.`, and the additive markers are one sentence away from the word they modify.
