@@ -470,7 +470,7 @@ def test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish(
         # regression that silently ignores `--all-surface` (exactly the
         # scope-narrowing the sibling refusal arm exists to prevent) would stay
         # green, and the two outputs differ by ~7,900 rows. Measured at this head:
-        # `--markdown` emits ~1,334 lines, `--markdown --all-surface` ~9,238; the
+        # `--markdown` emits ~1,334 lines, `--markdown --all-surface` ~9,239; the
         # JSON form names its prefix set, which is the whole difference.
         if "--json" in legal:
             payload = json.loads(ok.stdout)
