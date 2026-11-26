@@ -55,10 +55,23 @@ import pytest
 
 import tortoise.hosted_api as ha
 
+#: The sentence a LEGACY prose-matcher keys on, as a literal — the compat promise
+#: is that text a consumer already matches KEEPS matching, so the assertion has to
+#: be against bytes fixed here, not against `hosted_api`'s own constant (#14700
+#: review, P3): a constant-to-constant compare moves both sides at once, so
+#: rewording the constant would keep that row green while breaking every matcher.
+_PRE_14700_IN_FLIGHT_SENTENCE = (
+    "a capture for this session_id is already in flight — retry shortly")
+
 #: The REAL policy `409` sentence (`hosted_api._capture_session_impl`, the
 #: team branch) — no `code`, no `retry_after`, cleared by a human, not by
 #: waiting. Copied verbatim so the mirror row below drives the shape the route
 #: can actually emit, rather than a string no raise site produces.
+#:
+#: ⛔ THIS IS A COPY, SO ITS `isinstance(...)` GRADES NOTHING (#14700 review, P3):
+#: it is decidable when written and stays green under every edit to the
+#: production refusal. The row's claim is carried by the two
+#: `_is_capture_in_flight_refusal(...)` calls below it, which DO vary.
 _POLICY_409_DETAIL = (
     "Session recording is disabled for this team. Enable it "
     "in the dashboard (Memory sources > Agent sessions) or "
@@ -132,7 +145,7 @@ def test_the_in_flight_refusal_names_itself_and_the_delay() -> None:
     # The pre-#14700 sentence survives VERBATIM inside the body, so a legacy
     # reader that matches on prose keeps matching (`resp.text` still contains it)
     # AND the human reading a log can still see what happened.
-    assert detail["message"] == ha._CAPTURE_SESSION_IN_FLIGHT_DETAIL
+    assert detail["message"] == _PRE_14700_IN_FLIGHT_SENTENCE
     assert "already in flight" in detail["message"]
 
 
@@ -155,7 +168,6 @@ def test_the_in_flight_code_is_not_the_policy_409() -> None:
     # disabled` exists NOWHERE in the tree; asserting that literal proved
     # nothing about the production refusal, #14700 review.)
     policy = _POLICY_409_DETAIL
-    assert isinstance(policy, str)
     assert not ha._is_capture_in_flight_refusal(policy)
     assert not ha._is_capture_in_flight_refusal({"message": policy})
 
@@ -382,5 +394,5 @@ def test_the_wire_body_is_the_nested_detail_envelope_with_the_header_agreeing(
     assert detail["code"] == "capture_session_in_flight"
     # Body and header must not disagree: one contract, two carriers.
     assert detail["retry_after"] == int(response.headers["retry-after"])
-    assert detail["message"] == ha._CAPTURE_SESSION_IN_FLIGHT_DETAIL
+    assert detail["message"] == _PRE_14700_IN_FLIGHT_SENTENCE
     assert "already in flight" in detail["message"]
