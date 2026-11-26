@@ -386,10 +386,6 @@ export function snooze(state, episode, ms, now = new Date(), alert = null) {
   // week lasted 70 minutes. `Math.max` is the fix — a deadline only ever grows
   // toward the longest period the reader asked for on this key (#14694 review P2).
   const liveKey = snoozedUntil(base, episode, now)
-  const next = {
-    ...base,
-    snoozed: { ...base.snoozed, [episode]: Math.max(liveKey, until) },
-  }
   const atMs = atMsOf(alert)
   // ⛔ APPEND, never replace. A second row on the same decision key is a second
   // row the READER snoozed; replacing the anchor evicted the first row's
@@ -422,6 +418,16 @@ export function snooze(state, episode, ms, now = new Date(), alert = null) {
     : existing
       ? anchors.map((a) => (a.at === atMs ? { at: a.at, until: Math.max(a.until, until) } : a))
       : [...anchors, { at: atMs, until }].slice(-MAX_SNOOZE_ANCHORS)
+  // ⛔ THE KEY DEADLINE IS ONLY EVER AS LONG AS A SURVIVING ANCHOR JUSTIFIES. It is
+  // the identity-wide period an ACTIVITY row is hidden for, so it must be the
+  // longest period still on the key — never a period belonging to an anchor that
+  // was evicted by `MAX_SNOOZE_ANCHORS`, and never one a released row took with it.
+  // A deadline outliving every anchor is the state that gap-clamps a suspension
+  // nobody snoozed (#14694 review P2).
+  const keyUntil = finalAnchors.length && atMs > 0
+    ? Math.max(until, ...finalAnchors.map((a) => a.until))
+    : Math.max(liveKey, until)
+  const next = { ...base, snoozed: { ...base.snoozed, [episode]: keyUntil } }
   if (finalAnchors.length) {
     next.snoozedAt = { ...(base.snoozedAt || {}), [episode]: finalAnchors }
   }
@@ -468,7 +474,20 @@ export function unsnooze(state, episode, alert = null, now = new Date()) {
     // is never live while `snoozedAt[key]` holds no live anchor (#14694 review P2).
     const remaining = anchors.filter((a) => a.at !== atMs && a.until > nowMs)
     if (remaining.length && remaining.length !== anchors.length) {
-      return { ...base, snoozedAt: { ...(base.snoozedAt || {}), [episode]: remaining } }
+      // ⛔ AND THE KEY DEADLINE IS CLAMPED TO WHAT SURVIVES. `snooze` sets it to the
+      // LONGEST period, so the row being released is usually the one holding it;
+      // inheriting the old deadline left `snoozed[key]` live with no anchor able to
+      // justify it once the survivors expired, which `readState` then prunes into
+      // exactly the anchor-less live key the comment above forbids (#14694 review
+      // P2, measured: a suspension nobody snoozed hid for the leftover window).
+      return {
+        ...base,
+        snoozed: {
+          ...base.snoozed,
+          [episode]: Math.max(...remaining.map((a) => a.until)),
+        },
+        snoozedAt: { ...(base.snoozedAt || {}), [episode]: remaining },
+      }
     }
   }
   const snoozed = { ...base.snoozed }
@@ -515,9 +534,11 @@ export function dismiss(state, episode, now = new Date(), alert = null) {
   // ⛔ A WINDOW IS ONLY RECORDED WHEN THE ROW IS IN HAND. A caller without one
   // (`dismiss(state, episode, now)`) holds no acknowledged WINDOW — only "not before
   // now" — and synthesising a point at `now` would UN-dismiss every row whose `at`
-  // precedes it. That case keeps the original watermark semantics, exactly as it did
-  // before this list existed. The panel always passes the row
-  // (`notificationPanel.jsx::handleDismiss`), so this arm exists for compatibility.
+  // precedes it. That case keeps the original watermark semantics, WITH ONE BOUND: the
+  // watermark is only consulted while the key holds no window at all
+  // (`isDismissed`'s windows short-circuit), and this module is new in #14686, so no
+  // shipped store mixes the two. The panel always passes the row
+  // (`notificationPanel.jsx::handleDismiss`); this arm is compatibility only.
   const win = lastMs > 0
     ? { first: firstMs || lastMs, last: lastMs }
     : null
@@ -865,6 +886,14 @@ export function isDismissed(state, episode, alert = null) {
  *  test to BOTH registers and only then the incident `acked_through` gate. Two
  *  copies of this rule is how the ACTIVITY arm and the INCIDENT arm drifted apart
  *  once already.
+ *
+ *  ⚠️ ONE DELIBERATE DIVERGENCE, stated rather than left to be discovered: a row with
+ *  no comparable timestamp is treated as COVERED here, while the server treats it as
+ *  not acknowledged (`abuse.py::_episode_acknowledged` skips an ack whose window
+ *  cannot be read). The shipped feed always emits `at`, so this is unreachable from
+ *  real data — and resurfacing a row the reader already cleared, on the strength of
+ *  a MISSING FIELD, is the worse error (the same choice `isDismissed`'s watermark
+ *  fallback makes).
  */
 function windowCovers(win, alert) {
   const episodeStart = firstMsOf(alert)

@@ -591,6 +591,56 @@ test('#14694 P2: an expired anchor cannot keep the key deadline alive', () => {
   assert.ok(ledger.current.concat(ledger.older).some((e) => e.rowKey === rowKeyOf(fresh)),
     'the never-snoozed suspension must be countable')
 })
+test('#14694 P2: releasing the row that holds the LONGEST period clamps the key to the survivors', () => {
+  // `snooze` sets the key deadline to the LONGEST period on the key, so the row the
+  // reader releases is usually the one holding it. Keeping that old deadline left
+  // `snoozed[key]` live while the surviving anchor expired FIRST; `readState` then
+  // pruned the anchor and kept the key, and `effectiveSnoozedUntil` fell to its
+  // no-anchor gap clamp — hiding a suspension NOBODY snoozed, with the badge at 0.
+  // The earlier pin could not see it: it snoozes both rows at the SAME instant, so
+  // both anchors share one `until` and the leftover window is invisible.
+  const take = (at, episode) => alert({
+    type: 'suspend',
+    label: 'Organization suspended',
+    message: 'Organization suspended by an operator',
+    at,
+    first_at: at,
+    episode,
+  })
+  const a = take(new Date(NOW.getTime() - 2 * DAY).toISOString(), 'suspend||cа')
+  const b = take(new Date(NOW.getTime() - HOUR).toISOString(), 'suspend||cb')
+  const key = entryKeyOf(a)
+
+  // A snoozed at NOW for 1 h (until +60'); B snoozed 55 minutes LATER for 1 h
+  // (until +115'), so the key deadline belongs to B.
+  const t55 = new Date(NOW.getTime() + 55 * MIN)
+  let state = snooze(emptyState(), key, periodMs('1h'), NOW, a)
+  state = snooze(state, key, periodMs('1h'), t55, b)
+  assert.equal(state.snoozed[key], t55.getTime() + periodMs('1h'), 'premise: B holds the deadline')
+
+  // Release B one minute later. A's anchor is still live, so the key survives — but
+  // clamped to A's own deadline, NOT B's.
+  const t56 = new Date(NOW.getTime() + 56 * MIN)
+  const released = unsnooze(state, key, b, t56)
+  assert.equal(released.snoozed[key], NOW.getTime() + periodMs('1h'),
+    'the key deadline must be clamped to the surviving anchor')
+
+  // At +70' A's anchor has expired too: a reload must leave NO live key, so a
+  // suspension nobody snoozed is COUNTED.
+  const t70 = new Date(NOW.getTime() + 70 * MIN)
+  const storage = fakeStorage()
+  writeState(storage, 'k', released)
+  const { state: reloaded } = readState(storage, 'k', t70)
+  assert.equal(reloaded.snoozed[key], undefined, 'no live anchor may leave a live key')
+
+  const fresh = take(new Date(NOW.getTime() + 68 * MIN).toISOString(), 'suspend||cc')
+  const ledger = buildLedger({ alerts: [a, b, fresh], state: reloaded, now: t70 })
+  assert.equal(ledger.snoozed.length, 0)
+  // A and B are back because their own periods ended / were released; the point is
+  // that the FRESH one is counted too, rather than being silently hidden.
+  assert.equal(ledger.unresolved, 3, 'the never-snoozed suspension must be counted')
+  assert.ok(ledger.current.concat(ledger.older).some((e) => e.rowKey === rowKeyOf(fresh)))
+})
 
 test('#14694 P1: a snooze on an INCIDENT does not cover a NEWER one', () => {
   // `suspend`'s customer message is a CONSTANT, so every suspension shares one
