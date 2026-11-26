@@ -10787,20 +10787,48 @@ _H_14544_ROW_PROVENANCE_RE = re.compile(
 #: enumeration is a false claim in the one place a later widener reads, which is why this survived
 #: three rounds: the fixture asserted six spellings and the prose claimed a shape, so nothing could
 #: disagree with it.
-#: SO THE SHAPE IS GRADED BY CONSTRUCTION, not by a longer enumeration: every alternative fixes the
-#: CLAIM — the exempt half IS the REGISTRATION — and lets the prose vary AROUND it. A bounded
-#: qualifier run (`half` / `alone` / `side`) sits between the noun and the copula; three copulas that
-#: all leave the claim standing are admitted (`is` / `stays` / `remains`); and the four attested
-#: ORDERS are covered (noun-first, `only`-first, cleft, predicate-first). The POLARITY is NOT
-#: widened with it: every alternative names the REGISTRATION on the exempt side and none tolerates
-#: a negation between noun and copula, so the half-swap mutation and "Both halves stay exempt"
-#: still red — see the fixtures in the arm.
+#: SO THE NOTE STATES AN ADMISSION, NOT AN ORDER — and the difference is the defect, not the
+#: wording. ⛔ ROUND 24's replacement claimed the four attested ORDERS were covered while its
+#: alternation shipped ONE spelling per order, so TWO TRUE rewordings *inside* an admitted order
+#: still matched NOTHING — `The exempt half is ONLY the REGISTRATION.` (the `ONLY` moved inside the
+#: predicate) and `REGISTRATION is the exempt half.` (predicate `the exempt half` instead of
+#: `the ONLY half` / bare `exempt`), each of which reds this arm on true prose with a diagnostic
+#: asserting the paragraph named no scope at all (#14623 review of `bd8f854a3fcc`, P3; re-measured on
+#: this tree at `ff37992863df`, where BOTH were `NO`). An ORDER is an abstraction that no assertion
+#: can disagree with, so it re-creates the very defect this note exists to forbid — the pin is
+#: therefore WIDENED to make the alternation symmetric and the note is written as the ADMISSIONS the
+#: pattern actually carries, each one driven as a fixture beside the arm:
+#:   1. noun-first — `REGISTRATION [half|alone|side]… is|stays|remains (exempt | the [ONLY] half |
+#:      the [ONLY] exempt half)`;
+#:   2. `only`-first — `only the REGISTRATION [half|alone]… [is|stays|remains] exempt`;
+#:   3. the cleft — `it is only the REGISTRATION that [is|stays|remains] exempt`;
+#:   4. predicate-first — `the [ONLY] exempt half is|stays|remains [only] the REGISTRATION`;
+#:   5. the relative-clause subject — `the half that|which is|stays|remains exempt is|stays|remains
+#:      the REGISTRATION`.
+#: ⛔ WHAT THAT DOES NOT ADMIT, stated rather than implied (the convention the row-exemption note
+#: below already uses): a TRUE rewording that reuses NONE of those five structures is refused — e.g.
+#: `The exemption applies to the REGISTRATION alone.` That is a residual of reading English with an
+#: alternation, named here so a later round widens it knowingly instead of re-deriving it.
+#: The POLARITY is NOT widened with any of them: every structure names the REGISTRATION on the
+#: exempt side and none tolerates a negation between noun and copula, so the half-swap mutation and
+#: "Both halves stay exempt" still red — see the fixtures in the arm.
 _H_14544_SCOPE_RE = re.compile(
+    # 1. noun-first: the REGISTRATION as the SUBJECT of the exemption. `the [only] exempt half` is
+    #    the same claim as bare `exempt` with the half named as a predicate instead of an adjective.
     r"REGISTRATION(?:\s+(?:half|alone|side)){0,2}\s+(?:is|stays|remains)\s+"
-    r"(?:(?:the\s+)?ONLY\s+half|exempt)"
+    r"(?:(?:the\s+)?ONLY\s+half|the\s+(?:only\s+)?exempt\s+half|exempt)"
+    # 2. `only`-first
     r"|only\s+the\s+REGISTRATION(?:\s+(?:half|alone))?\s+(?:(?:is|stays|remains)\s+)?exempt"
+    # 3. the cleft
     r"|it\s+is\s+only\s+the\s+REGISTRATION\s+that\s+(?:(?:is|stays|remains)\s+)?exempt"
-    r"|the\s+(?:only\s+)?exempt\s+half\s+is\s+the\s+REGISTRATION", re.IGNORECASE)
+    # 4. predicate-first, with `ONLY` admitted on EITHER side of the copula — it is one modifier of
+    #    one noun phrase, and admitting only its leading position was the asymmetry that red a TRUE
+    #    rewording (#14623 review of `bd8f854a3fcc`, P3).
+    r"|the\s+(?:only\s+)?exempt\s+half\s+(?:is|stays|remains)\s+(?:only\s+)?the\s+REGISTRATION"
+    # 5. the relative-clause subject, which is a STRUCTURE rather than another spelling of #4.
+    r"|the\s+half\s+(?:that|which)\s+(?:is|stays|remains)\s+exempt\s+"
+    r"(?:is|stays|remains)\s+the\s+REGISTRATION",
+    re.IGNORECASE)
 #: The CONCLUSION half: the paragraph's own payoff sentence — a packing change attributed to that row
 #: is a cause it does NOT exclude. Measured at `d1f14298`: flipping `NOT` -> nothing (i.e. “…is a
 #: cause this paragraph DOES exclude”, the exact reading `#14612` deletes) left this arm GREEN — it
@@ -11140,9 +11168,12 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # only proves WHICH half is graded, never that a differently-spelled TRUE claim is read.
     #: ⛔ THE FIRST SIX ARE ROUND 24's SET; the ones after them are the spellings ROUND 24's OWN
     #: COMMENT CLAIMED AND ITS ALTERNATION MISSED (measured at `1b34f53f55a0`: `half alone` — both
-    #: qualifiers — plus the predicate-first and cleft orders). A six-item fixture beside a "the
-    #: SHAPE is admitted" comment is exactly how this defect survived three rounds, so the fixture
-    #: now covers every ORDER the comment names rather than one spelling per round.
+    #: qualifiers — plus the predicate-first and cleft orders), and the LAST FOUR are the two
+    #: asymmetries the ORDERS phrasing hid until a review re-measured it at `ff37992863df` (`ONLY`
+    #: inside the predicate; `the exempt half` as the predicate) plus the relative-clause subject.
+    #: A six-item fixture beside a "the SHAPE is admitted" comment is exactly how this defect
+    #: survived three rounds, so the fixture now covers every ADMISSION the note lists, and a
+    #: narrowing of any one of the five structures REDs here rather than on the live paragraph.
     for scope_spelling in (
             "The REGISTRATION is the ONLY half exempt.",
             "The REGISTRATION alone is the ONLY half exempt.",
@@ -11156,18 +11187,35 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "It is only the REGISTRATION that is exempt.",
             # …and the copulas the shape admits without changing the claim:
             "The REGISTRATION stays exempt.",
-            "The REGISTRATION half remains exempt."):
+            "The REGISTRATION half remains exempt.",
+            # …and the TRUE rewordings the ORDERS phrasing over-claimed (#14623 review of
+            # `bd8f854a3fcc`, P3). ⛔ THREE of these four matched NOTHING before this round's
+            # widening; `The ONLY exempt half is the REGISTRATION.` DID already match and is kept
+            # as the predicate-first anchor beside its mirrored `ONLY`-after-copula twin — the
+            # asymmetry between the two was the finding, so grading only one of them no longer
+            # proves anything.
+            "The ONLY exempt half is the REGISTRATION.",
+            "The exempt half is ONLY the REGISTRATION.",
+            "REGISTRATION is the exempt half.",
+            "The half that is exempt is the REGISTRATION."):
         assert _H_14544_SCOPE_RE.search(scope_spelling), (
             f"the scope pin no longer reads {scope_spelling!r} — a TRUE statement of the scope the "
             "paragraph makes would red this arm, and the diagnostic would assert the opposite of "
             "what the paragraph says (the spelling lock #14623 review round 24 measured)")
     # …and widening it must not have widened the POLARITY with it: neither half-swapped inverse may
-    # read, or the pin now certifies the reading `#14612` deletes.
+    # read, or the pin now certifies the reading `#14612` deletes. ⛔ ONE INVERSE PER NEW STRUCTURE:
+    # the two predicate widenings and the relative clause each name a half, so each is driven with
+    # the ROW in that half — otherwise the widening itself is ungraded and a pattern that lost the
+    # half (`(?:REGISTRATION|row)`) would still pass every fixture above.
     for scope_inverse in ("Both halves stay exempt.", "The row alone is the only half exempt.",
                           # …plus the NEGATION the `is`/`stays`/`remains` copula run makes
                           # reachable: a widened copula must not also admit `is not`.
                           "The REGISTRATION is not the ONLY half exempt.",
-                          "The REGISTRATION half is not exempt."):
+                          "The REGISTRATION half is not exempt.",
+                          # …and the mirrored predicate / relative-clause forms with the ROW exempt.
+                          "The row is the exempt half.",
+                          "The exempt half is ONLY the row.",
+                          "The half that is exempt is the row."):
         assert _H_14544_SCOPE_RE.search(scope_inverse) is None, (
             f"the widened scope pin reads {scope_inverse!r}, so the half it exists to name is no "
             "longer graded — the widening admitted the SHAPE of the true claim, not its inverse")
