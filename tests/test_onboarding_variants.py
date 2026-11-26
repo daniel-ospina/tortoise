@@ -1723,6 +1723,28 @@ _DOC_PLACE = (r"(?:above|below|earlier|later|here|there|in\s+this\s+guide"
 _NOT_A_DOC = (r"(?!\s+" + _DOC_NOUN + r"\b)"
               r"(?!\s+" + _DOC_PARTICIPLE + r"\s+" + _DOC_PLACE + r"\b)")
 
+# ⛔ THE ADVERB RUN IS DEFINED ONCE, BECAUSE THE ARM USES IT TWICE AND THE TWO
+# COPIES DIVERGED. It skips the adverbs that can sit between a predicate and the
+# state word without changing the claim: `-ly` covers the open class
+# (`temporarily`, `completely`, `seemingly` …), and the closed members cover the
+# ones with no `-ly` form.
+# ⛔ A NEGATING ADVERB IS NOT ONE OF THEM. `hardly|barely|scarcely|rarely|seldom`
+# INVERT the word behind them — "the tools are hardly missing" is a PRESENCE
+# claim — so the `-ly` slot excludes them by lookahead rather than admitting them
+# and reading the absence word as a bare absence (#14679 review cycle 33,
+# measured: adding a bare `\w+ly` slot here turned those four GREEN).
+# ⛔ `just|also|first` ARE IN THE RUN. They are focus words, and leaving them out
+# flips a declared-GREEN row: "when the tools are just missing" is an absence and
+# must stay GREEN (measured). The residual that buys is the other side of the
+# same word — "the tools are NOT JUST missing" is also an absence, and it is
+# graded RED, because the run then reads `not … missing` as a negated absence
+# (a presence claim). Rare copy, and the alternative re-REDs the common one.
+_ABSENCE_ADVERB_RUN = (
+    r"(?:(?:(?!(?:hardly|barely|scarcely|rarely|seldom)\b)\w+ly"
+    r"|longer|yet|still|now|very|so|too|quite|rather|already|just|also|first)"
+    r"\s+)*"
+)
+
 _CONFIRM_PREDICATE = (
     r"\b(?:confirm|check|verif(?:y|ies|ied|ying)|ensur(?:e|es|ed|ing)"
     r"|see|saw|seen|look|list)(?:ing|ed|s|es|d)?\b"
@@ -2077,27 +2099,29 @@ _INVERSION_FORMS = (
         # whose complement is not one (`not visible`, `no longer visible`),
         # NEVER `not <absence>` / `no longer <absence>`, which is a presence
         # claim and must be graded.
-        # ⛔ BOTH RUNS ARE THE FILE'S OWN ADVERB CLASS, not a hand-picked list.
+        # ⛔ BOTH RUNS ARE THE SAME CLASS, `_ABSENCE_ADVERB_RUN`, defined once.
         # The first cut spelled eight words on ONE side and `longer?` on the
         # other, so a single inserted adverb leaked in BOTH directions
         # (#14679 review cycle 32, measured): `not ACTUALLY missing` (presence)
         # was GREEN, while `TEMPORARILY missing` / `JUST missing` / `COMPLETELY
-        # gone` (absences) were RED. This is the lesson form (a) already records
-        # 300 lines above — "an EIGHT-WORD ADVERB BLACKLIST WAS THE WRONG SHAPE
-        # … so the adverb list is gone" — and (a)'s own `(?:\w+ly|very|so|too|
-        # quite|rather|first|already|just|also)` is the class reused here. A
-        # closed list cannot be completed; the `-ly` slot can.
-        # ⛔ ONE NEGATION BRANCH, NOT TWO. A separate `no longer <non-absence>`
-        # alternative was measured to flip 0 of 319 rows, because `(?:not|never|
-        # no)\b` + its own lookahead already matches it — an arm no row can
-        # depend on is dead weight and it was removed (review cycle 32).
+        # gone` (absences) were RED. Cycle 33 then measured the two runs STILL
+        # diverged (13 members outer, 4 inner), so `not QUITE missing` and its
+        # nine twins failed open while their `-ly` twins were graded — two copies
+        # of one class is how they diverged, so there is now one.
+        # ⛔ ONE NEGATION BRANCH, NOT TWO — and the reason is MEASURED, not
+        # assumed. The previous comment claimed `(?:not|never|no)\b` "already
+        # matches" a deleted `no longer <non-absence>` alternative; re-adding it
+        # flips exactly one row (`no longer ACTUALLY missing`, RED→GREEN), so that
+        # reason was FALSE. The true one: the old alternative's gap was `\s*`
+        # with no adverb run, i.e. it was WIDER than the negation branch and
+        # FAIL-OPENED `no longer <adverb> <absence>`; it was removed for that,
+        # not for being dead (#14679 review cycle 33, measured).
         r"(?!\s+"
-        r"(?:(?:\w+ly|still|yet|now|very|so|too|quite|rather|first|already"
-        r"|just|also)\s+)*"
+        + _ABSENCE_ADVERB_RUN +
         r"(?:"
         r"(?:missing|gone|absent|broken|empty|stale)\b"
         r"|(?:not|never|no)\b"
-        r"(?!\s+(?:(?:\w+ly|longer|yet|still)\s+)*"
+        r"(?!\s+" + _ABSENCE_ADVERB_RUN +
         r"(?:missing|gone|absent|broken|empty|stale)\b)"
         r")"
         r")"
@@ -3656,6 +3680,28 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Restart your client once the tools are not entirely absent.", True),
     ("Restart your client once the tools are no longer actually missing.", True),
     ("Restart your client once the tools are never actually gone.", True),
+    # ── CYCLE 33 (#14679's review at `9e7e1f60`): the two adverb runs had
+    # DIVERGED (13 members outer, 4 inner), so a non-`-ly` focus/degree adverb
+    # after a negation suppressed a PRESENCE claim — one word from the declared
+    # RED row above (`not ENTIRELY absent`). They are one constant now:
+    ("Restart your client when the tools are not quite missing.", True),
+    ("Restart your client once the tools are not quite gone.", True),
+    ("Restart your client after the tools are not very missing.", True),
+    ("Restart your client when the tools are not still missing.", True),
+    ("Restart your client when the tools are not now missing.", True),
+    # …and a NEGATING adverb inverts the absence word behind it, so `hardly
+    # missing` is presence. A bare `\w+ly` slot in the run turned all four of
+    # these GREEN; the slot now excludes them by lookahead:
+    ("Restart your client when the tools are hardly missing.", True),
+    ("Restart your client once the tools are barely missing.", True),
+    ("Restart your client after the tools are scarcely missing.", True),
+    ("Restart your client when the tools are rarely missing.", True),
+    # A declared RESIDUAL, pinned so a reader sees the boundary: `not just
+    # missing` is an ABSENCE (a focus negation), and it is graded RED because the
+    # run reads `not … missing` as a negated absence. Keeping `just` out of the
+    # run instead flips the declared-GREEN `when the tools are just missing`, so
+    # the common copy wins and the rare shape is recorded here.
+    ("Restart your client when the tools are not just missing.", True),
     # …while a real PRESENCE condition stays graded:
     ("Restart your client when the tools are actually there.", True),
     ("Restart your client when the tools appear.", True),
