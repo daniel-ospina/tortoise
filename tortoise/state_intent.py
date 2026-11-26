@@ -882,8 +882,36 @@ _ENDING_BASE = (
 #:   MODIFIES ``claims``, which is the same attributive slot as the pinned
 #:   `which archived report has the Q3 numbers`. A modifier is not the question's
 #:   predicate, and reading it as one is the round-2/4/5 hijack class. The
-#:   caller reaches the population the stated way instead (``ended_scope=True``,
-#:   or the unqualified `which claims were withdrawn`).
+#:   caller reaches the population the stated way instead — the unqualified
+#:   `which claims were withdrawn`. ⛔ NOT by passing ``ended_scope=True``: that
+#:   parameter is declared only on the PRIVATE ``_tortoise_fts_query``, and no
+#:   public door FORWARDS it (#13558). What the two doors DO with it differs,
+#:   which is why the flat "no surface accepts it" is wrong about the SDK door:
+#:   ``search_knowledge`` declares ``**filters``, so the keyword BINDS there — the
+#:   ``hybrid`` arm then drops it (its forwarding call names every argument, none
+#:   of them this one, so the default population is served) and the ``full_text``
+#:   arm passes ``**filters`` into ``list_knowledge``, where
+#:   ``_property_filter_clause`` reinterprets it as an ``n.ended_scope`` property
+#:   filter and the arm answers ZERO ROWS (the same measurement
+#:   `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 Q2 records). ⛔ The MCP door is the ONE
+#:   that fails LOUDLY, which is the reverse of the earlier reading here:
+#:   `mcp_server.py::tortoise_search` declares no such parameter AND FastMCP
+#:   builds its tool schema with `additionalProperties: False` (fastmcp 3.4.6, the
+#:   version `uv.lock` pins), so an undeclared keyword is REJECTED before the
+#:   handler runs — measured on this tree,
+#:   `FunctionTool.from_function(tortoise_search).run({"query":…, "ended_scope": True})`
+#:   raises `ValidationError: … Unexpected keyword argument` rather than dropping it.
+#:   (An earlier cut of this note cited `fastmcp.utilities.func_metadata.arg_model` and
+#:   pydantic's `extra="ignore"`; that module does not exist in fastmcp 3.x, so the
+#:   measurement it recorded was never reproducible here.) So the THREE paths over
+#:   those two doors fail DIFFERENTLY and only two silently: `search_knowledge`'s
+#:   `hybrid` arm serves the default population and its `full_text` arm serves zero
+#:   rows, while the MCP tool raises. ⚠️ The MCP half is no longer prose a reader has
+#:   to trust: `tests/test_14033_state_cue_gap.py::test_the_mcp_door_refuses_an_undeclared_ended_scope_keyword`
+#:   measures it against the built tool, so a FastMCP release that reverts to
+#:   permissive keyword handling reds there instead of leaving this note stale. The
+#:   question router above is what makes the ended population reachable from every
+#:   door WITHOUT the flag.
 _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # "has anything we relied on been withdrawn?" / "have any claims been retired?"
     # An EXISTENCE question about an ending: the auxiliary + quantifier is the

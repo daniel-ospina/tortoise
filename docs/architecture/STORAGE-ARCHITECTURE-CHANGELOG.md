@@ -2745,3 +2745,95 @@ Two further sites in the same class, both introduced by this branch's own review
 
 **Gates at this change.** `tests/test_extractor_v4_citation_rot.py` (17) — offender scan 0 on
 `STORAGE-ARCHITECTURE.md` after the rewrite; the design document keeps every design claim it carried.
+
+## §13 gains row 46 — `#14592`'s relations preview is an all-edge reader (`2026-11-25`, `cy-14593`)
+
+`tortoise/entity_reads.py` is new on `#14592` (Phase A read parity), and its `entity_relations` walks
+**every** relationship type in both orientations — `MATCH (n:{root_label} {root_key:$eid})-[r]->(m)` and
+the `UNION ALL` reverse. Nothing declared it, so `tests/test_7948_about_object_read_sites.py`'s
+empty-pattern class found a live site owning neither a row nor an entry, and
+`test_the_empty_pattern_class_is_derived_and_declared` reddened with `30 derived, 12 registered`.
+
+**A ROW (46), not an `EMPTY_PATTERN` entry**, for row 42's reason: the walk reads the edge for a
+referent — `type(r) AS mechanism` IS part of the answer the route returns — so the entry form
+("a code fact keeping the walk out of a referent read") would assert something untrue. The type
+cannot be restricted either: a `type(r) IN [...]` filter would answer only for the predicates this
+build knows and would hide every edge it does not name, which is the opposite of what a relations
+preview is for. The facts that bound it are stated on the row (one hop from one identity-resolved
+root, `CALL { … } … SKIP/LIMIT` paging, the `id(m) <> id(n)` self-loop exclusion on the reverse arm,
+and the `_RELATION_ENDPOINT_NAME` arm that never reaches a `:Source`'s denied `content` — it selects
+`m.url` for a `:Source`, and the preview is cut to `_ENDPOINT_NAME_MAX` with a `nameTruncated` flag).
+
+**Both documents re-derive every figure the row moves** — measured over `_section_13()` rather than
+counted by eye, and the count that matters is how many statements exist versus how many an arm READS:
+the read-site total (`FORTY-FOUR`) is stated ONCE, the customer-callable figure (`NINETEEN`) FOUR
+times, the distinct-door figure (`SIXTEEN` twice spelled out, once as `16`) THREE times, and the
+cell-occurrence figure (`23`) ONCE. ⛔ Only some of those statements are graded, and the split is the
+disclosure: `_SITE_COUNT` reads the read-site total, `_CALLABLE_SITE_COUNT` reads TWO of the four
+customer-callable statements (the `NINETEEN of them are CUSTOMER-CALLABLE` head and the `at least
+NINETEEN customer-callable read sites` blast-radius line) while the other TWO — `counted ONCE however
+many of the NINETEEN sites reach it` and `carries FIVE of the NINETEEN sites` — are read by NO arm
+(measured: rewriting BOTH to `EIGHTEEN` leaves all 61 of the file's tests green), and
+`_STATED_DOOR_COUNT` reads all three door statements, the `over the 16 distinct doors` parenthetical
+included. The cell-occurrence figure IS graded, though not where the paragraph above says: its own
+regex `\b(\d+) cell occurrences?\b` sits in `test_the_stated_door_count_matches_the_table` and is
+asserted EQUAL to the table's door instances (measured: `23` -> `24` reds it), while the separate
+DERIVATION floors are `attributed >= 23` and `total >= _ACCEPTED_PAIRS_AT_THIS_HEAD` (28) — the
+OCCURRENCE count and the accepted-PAIR count, two different measurements, which is why a prose edit
+CAN red here and why this sentence no longer claims otherwise. ⛔ The pair floor was `total >= 23` in
+this branch's own cut of the arm; the reconcile onto `origin/main` took main's formulation, which
+names the ceiling's own constant so the arm is exact in both directions instead of carrying five
+pairs of slack — this branch's contribution (row 45's second door) is a CELL-OCCURRENCE move that
+changes no accepted pair, so the stronger floor costs nothing here.
+`tests/test_7948_about_object_read_sites.py` derives them from the table rather than trusting prose:
+read sites `FORTY-THREE` → `FORTY-FOUR`, customer-callable `EIGHTEEN` → `NINETEEN`, distinct doors
+`FIFTEEN` → `SIXTEEN` (nine MCP tools, TWO SDK methods, five REST routes — the new door is
+`GET /v1/entities/{entity_id}/relations`), cell occurrences `21` → `22`, then `22` → `23` where row 45's cell names its SECOND door (`MCP tortoise_search` — a CELL-OCCURRENCE move only: the distinct door set is 16 either way and the accepted-pair pin is 28 either way). Derived, not hand-counted:
+`_rows()` 44, `_customer_callable_doors()` 16 over 23 cells, `_door_reaches()` accepting 28 pairs
+(was 27 — the new row accepts exactly ONE, its own door, and no older row's set moved; the worst-row
+bound stays 4). `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 states the same figures and enumerates the same
+readers, so it moves with it, including its `Outside this nineteen` list marker.
+
+**Also in this change, a stale cite the branch's own `+1082` lines in `hosted_api.py` created — and
+the reconcile onto `origin/main` then made the fix a NO-OP:** `tools/graphevent_home.py`'s export-scan
+sentence (and the README and `readers.json` that mirror it) named `hosted_api.py`'s `:35810` for
+`_export_graph_snapshot`, which the branch's own lines had moved. The reconcile took main's
+`hosted_api.py` **and** main's already-re-derived artefacts, so this branch performs no artefact edit
+at all (`git diff origin/main HEAD -- tortoise/hosted_api.py tools/graphevent_home.py
+docs/evidence/13094-graphevent/` is empty) and the triple the artefacts carry is main's. Verified
+against the tree at this head rather than restated from a captured number: `_export_graph_snapshot`
+at `:36943`, the `"GraphEvent" in labels` branch at `:36973`, `events.append(d)` at `:36981` — which
+is what `tools/graphevent_home.py`, the README and `readers.json` all name.
+`test_the_export_scan_cites_open_on_the_statements_they_name` is green here (40 passed in
+`tests/test_13094_graphevent_home.py`). ⚠️ A re-derivation this change did NOT perform is not claimed
+above: the symbols are the authority and a triple copied into prose from an earlier head is exactly
+the rot the paragraph before this one is about.
+
+**Gates at this change.** `tests/test_7948_about_object_read_sites.py` 61 passed ·
+`tests/test_13094_graphevent_home.py` 40 passed · `test_docs_citation_refs`, `test_12184_shifted_cites`,
+`test_substrate_map`, `test_7949_capstone_measure`, `test_13098_cypher_inventory` (`TORTOISE_CYPHER_DOC_PIN=1`) and
+`test_ci_selection` 948 passed, 0 skipped (measured at this head) · `tools/cypher_inventory.py --check` 25 pins ·
+`tools/hosted_api_cite_census.py --check` every stated figure · `tools/ci_selection.py --integrity` clean.
+
+**Reconciled onto `origin/main` (`2026-11-26`, `2341e3cb86`)** — two conflicts, resolved by measurement
+rather than by picking a side. `docs/architecture/STORAGE-ARCHITECTURE.md`: the `23 cell occurrences`
+figure is this branch's and is kept, and row 45's cell names both of its doors because the MCP door is
+a MEASURED reach (the scope is set inside `_tortoise_fts_query`, not passed by the handler), so main's
+"a FALSE door" reading of that cell is refuted rather than merged.
+`tests/test_7948_about_object_read_sites.py`: the `21 -> 22` occurrence rise and the `27 -> 28`
+accepted-pair rise came from **row 46** — registered INDEPENDENTLY TWICE, by this branch first
+(`84c2e91e7d15`, 2026-11-25 16:20 UTC) and by `main` later (`#14682`'s fix, landed in `#14671` at
+`c1c8df1a3817`, 2026-11-26 02:11 UTC) — so the merged tree takes it from whichever lineage it meets
+first and the move belongs to neither side alone; this branch's additive moves are the `22 -> 23`
+occurrence bump and the row-45 correction. Both arms therefore now measure the SAME table — re-derived at the
+merged tree with `_rows()` / `_doors()` / `_door_reaches()`, not concatenated: `_rows()` 44, 19
+customer-callable, 16 distinct doors over **23 cells**, **28 accepted pairs**, worst rows 2, 17 and
+24 at 3 accepted doors each, and cell ≠ accepted on rows **1, 2 and 17** (three rows — row 45 agrees now that its cell names both
+doors). ⚠️ The merged comment on the arm-1 floor carried "§13's 22 is the OCCURRENCE count" and "they
+differ on exactly four rows … row 45 is the OVER-COUNT … do NOT add the door the cell forbids", which
+contradicted both the merged table and the sibling arm's own note; that is the stale reading this
+branch had already refuted, and it is corrected rather than carried.
+
+**Gates at the reconcile** (measured on the merged tree, not carried from either side):
+`tests/test_7948_about_object_read_sites.py tests/test_runner_tool_contract.py` — 116 passed;
+`tests/test_docs_citation_refs.py tests/test_12184_shifted_cites.py` — 23 passed.
