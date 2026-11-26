@@ -166,14 +166,18 @@ version: 1
 # minute agrees either way.
 # ⛔ THIS BLOCK ARRIVES SPLICED, REPEATEDLY, and that is mechanical rather than mysterious:
 # `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
-# derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. Measured on
-# this rebase: two copies arrived, one naming `origin/main` `c1c8df1a3817` with `#14700`'s row, one
-# naming the same base with this change's row, and NEITHER described the merged tree (both said
-# 827.4/827.5 and a `fast_pool()` of 1340 against the 827.6 and 1341 the verb emitted on that
-# rebase). Neither
-# side is picked: both are DELETED and the paragraph above is a fresh re-derivation with
-# `--emit-push-matrix` on this merged tree. Each earlier fold's figures live on the commit that
-# measured them (`git log`), which is where a spliced copy belongs.
+# derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. FIVE folds of
+# this PR have arrived that way — the `4b2fba3e8a` merge, the `c1c8df1a` and `bbef0b88` rebases, and
+# this merge with `ff10fb32`, each recording its own copies in the paragraphs above — and in every
+# case NEITHER copy described the tree it landed on. No side is picked on any of them: both copies
+# are DELETED and the graded clause above is a re-derivation with `--emit-push-matrix` on the merged
+# tree. ⛔ This fold's copy also carried a LIVE pool census and a one-bin emission, which is why the
+# emission, census and splice arms all reddened at once — the first splice in this PR's history that
+# a check caught rather than a reviewer reading the block. ⛔ No census figure is stated here,
+# and none is stated anywhere outside the fence: a count of that pool measures ONE tree, so it is
+# HISTORY bound to the sha it was read at (the fenced span above) or it is not stated at all. Each
+# fold's emission figures live on the commit that measured them (`git log`), which is where a
+# spliced copy belongs.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
