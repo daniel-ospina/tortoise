@@ -1043,7 +1043,7 @@ def _site_fact_text(rel: str, line: int) -> str:
 
     The statement span, plus — ONE level, no recursion — the body of every
     module-level constant that span NAMES. The second half is load-bearing and
-    was measured, not assumed: three of the ten entries keep their Cypher in a
+    was measured, not assumed: three of the TWELVE entries keep their Cypher in a
     query CONSTANT their statement executes (`session_source_migration._DEGREE`
     behind `_degree`, `_OUT_TYPES`/`_IN_TYPES` behind `_rel_types`), and the
     derived SITE for those is the constant's own line. Without it the arm would
@@ -3752,11 +3752,13 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # names its SECOND door (`MCP tortoise_search`; the note above records the
     # measurement that refuted the "not a door" reading). Both moves are
     # CELL-OCCURRENCE moves: the distinct door set is 16 either way and the
-    # accepted-PAIR pin is 28 either way. ⚠️ The `21 -> 22` move is NOT this branch's:
-    # the earlier cut of this note read "at `#14592`'s head (`cy-14593`)", but row 46
-    # reached this tree through the merge with `origin/main`, which took it from
-    # `#14671`. This branch's own moves are the `22 -> 23` bump above and the row-45
-    # correction.
+    # accepted-PAIR pin is 28 either way. ⚠️ The `21 -> 22` move was made TWICE and
+    # INDEPENDENTLY — this branch first (row 46 registered in `84c2e91e7d15`,
+    # 2026-11-25 16:20 UTC), and `main` later through `#14671` (`c1c8df1a3817`,
+    # 2026-11-26 02:11 UTC). The earlier cut of this note attributed the move to
+    # `#14592`'s head alone; the reconcile then swung to attributing it to `main`
+    # alone. Both are half the story, and neither side owns it. This branch's additive
+    # moves are the `22 -> 23` bump above and the row-45 correction.
     assert attributed >= 23, (
         f"only {attributed} door attributions were attempted across the "
         f"customer-callable rows, and this arm cross-checks against NO fewer than 23 "

@@ -2802,7 +2802,7 @@ sentence (and the README and `readers.json` that mirror it) named `hosted_api.py
 at all (`git diff origin/main HEAD -- tortoise/hosted_api.py tools/graphevent_home.py
 docs/evidence/13094-graphevent/` is empty) and the triple the artefacts carry is main's. Verified
 against the tree at this head rather than restated from a captured number: `_export_graph_snapshot`
-at `:36937`, the `"GraphEvent" in labels` branch at `:36967`, `events.append(d)` at `:36975` — which
+at `:36943`, the `"GraphEvent" in labels` branch at `:36973`, `events.append(d)` at `:36981` — which
 is what `tools/graphevent_home.py`, the README and `readers.json` all name.
 `test_the_export_scan_cites_open_on_the_statements_they_name` is green here (40 passed in
 `tests/test_13094_graphevent_home.py`). ⚠️ A re-derivation this change did NOT perform is not claimed
@@ -2821,9 +2821,11 @@ figure is this branch's and is kept, and row 45's cell names both of its doors b
 a MEASURED reach (the scope is set inside `_tortoise_fts_query`, not passed by the handler), so main's
 "a FALSE door" reading of that cell is refuted rather than merged.
 `tests/test_7948_about_object_read_sites.py`: the `21 -> 22` occurrence rise and the `27 -> 28`
-accepted-pair rise belong to **row 46 arriving on `main`** (`#14682`'s fix, landed in `#14671` at
-`c1c8df1a3817`) and are attributed to it here; this branch's own moves are the `22 -> 23` occurrence
-bump and the row-45 correction. Both arms therefore now measure the SAME table — re-derived at the
+accepted-pair rise came from **row 46** — registered INDEPENDENTLY TWICE, by this branch first
+(`84c2e91e7d15`, 2026-11-25 16:20 UTC) and by `main` later (`#14682`'s fix, landed in `#14671` at
+`c1c8df1a3817`, 2026-11-26 02:11 UTC) — so the merged tree takes it from whichever lineage it meets
+first and the move belongs to neither side alone; this branch's additive moves are the `22 -> 23`
+occurrence bump and the row-45 correction. Both arms therefore now measure the SAME table — re-derived at the
 merged tree with `_rows()` / `_doors()` / `_door_reaches()`, not concatenated: `_rows()` 44, 19
 customer-callable, 16 distinct doors over **23 cells**, **28 accepted pairs**, worst rows 2, 17 and
 24 at 3 accepted doors each, and cell ≠ accepted on rows **1, 2 and 17** (three rows — row 45 agrees now that its cell names both
