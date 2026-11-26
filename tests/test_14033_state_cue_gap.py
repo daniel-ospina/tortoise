@@ -195,8 +195,11 @@ def test_the_widening_does_not_admit_the_attributive_participle():
     `claims`, which is exactly the slot the pinned
     `which archived report has the Q3 numbers` occupies. Routing a modifier is
     the round-2/4/5 hijack class, so this refuses and the caller reaches the
-    population the stated way instead (``ended_scope=True``, or the unqualified
-    `which claims were withdrawn`).
+    population the stated way instead — the unqualified `which claims were
+    withdrawn`. ⛔ NOT by passing ``ended_scope=True``: that parameter is declared
+    only on the private ``_tortoise_fts_query`` and no public door forwards it (see
+    `tortoise/state_intent.py`'s `_ENDING_BASE` note, which records what each door
+    does with the keyword).
     """
     from tortoise.state_intent import ENDED, detect_state_question
 
@@ -210,6 +213,55 @@ def test_the_widening_does_not_admit_the_attributive_participle():
     # …and the same question in its unqualified form does reach the population,
     # so the refusal above is a boundary and not a dead end.
     assert detect_state_question("which claims were withdrawn").population == ENDED
+
+
+def test_the_mcp_door_refuses_an_undeclared_ended_scope_keyword():
+    """The MCP door REFUSES `ended_scope`; it does not silently serve the default.
+
+    This is the fact the `_ENDING_BASE` note in `tortoise/state_intent.py` rests on,
+    and it has flipped twice in review because nobody measured it against the built
+    tool — the reading it replaced cited `fastmcp.utilities.func_metadata.arg_model`
+    and pydantic's `extra="ignore"`, and that module does not exist in fastmcp 3.x,
+    so the "silently drops it, serves the default population" claim was never
+    reproducible here. Measured on this tree instead (`fastmcp` 3.4.6, the version
+    `uv.lock` pins): the tool schema carries `additionalProperties: False` and the
+    call raises — so the three paths over the two doors fail DIFFERENTLY, two
+    silently (`search_knowledge`'s `hybrid` arm serving the default population, its
+    `full_text` arm serving zero rows) and this one loudly.
+
+    ⛔ Why a test rather than a sentence: the discrimination is about which DOOR
+    refuses. Declaring `ended_scope` on `tortoise_search` — the change a reviewer
+    would reach for to "fix" the asymmetry — flips both assertions here, and it is
+    an MCP surface change that needs owner approval first. A FastMCP release that
+    reverted to permissive keyword handling reds the same two lines.
+    """
+    import asyncio
+
+    import pytest
+    from fastmcp.tools.function_tool import FunctionTool
+
+    from tortoise.mcp_server import tortoise_search
+
+    tool = FunctionTool.from_function(tortoise_search)
+    properties = tool.parameters.get("properties") or {}
+    assert "ended_scope" not in properties, (
+        "`tortoise_search` now DECLARES `ended_scope` — that is an MCP surface "
+        "change needing owner approval (#4282), and it makes the `_ENDING_BASE` "
+        "note's claim that the MCP door refuses it false")
+    assert tool.parameters.get("additionalProperties") is False, (
+        "the built tool schema is permissive about undeclared keywords "
+        f"(additionalProperties={tool.parameters.get('additionalProperties')!r}), "
+        "so an undeclared keyword would reach the handler instead of being refused "
+        "— the reading this note records as falsified")
+
+    with pytest.raises(Exception) as err:
+        asyncio.run(tool.run({
+            "query": "has anything we relied on been withdrawn",
+            "ended_scope": True,
+        }))
+    assert "ended_scope" in str(err.value), (
+        "the undeclared keyword did not raise a validation error naming it, so the "
+        f"call was accepted or dropped instead: {err.value!r}")
 
 
 def test_the_adverb_tail_stays_out_until_the_docstring_moves_with_it():
