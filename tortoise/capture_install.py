@@ -2052,6 +2052,16 @@ def _disable_pi_second_producer(
     """
     active = ext_dir / PI_SECOND_PRODUCER_NAME
     retired = active.with_name(f"{PI_SECOND_PRODUCER_NAME}.disabled")
+    # ⛔ THE RECEIPT MUST NOT CLAIM THE DISK IS UNTOUCHED. Every refusal below
+    # runs AFTER `_install_pi` wrote and verified the seam, so the same
+    # InstallResult carries `actions=('installed …')` and
+    # `changed_artifacts=('tortoise-capture.ts',)`: saying "nothing was touched"
+    # beside those is the #10241 report shape this module forbids (#14342 round
+    # 10, finding 3). Under `--dry-run` nothing is written, so the clause is
+    # subjunctive — one sentence must not lie in either mode.
+    seam_state = ("the capture seam WOULD be in place"
+                  if dry_run else
+                  "the capture seam is in place (see the actions above)")
     # ⛔ THE RETIRED NAME IS GUARD STATE, NOT A BY-PRODUCT OF THIS RUN. A
     # refusal that fires only in the run that performed the rename is not a
     # guard: run 1 renamed a SYMLINK TO A DIRECTORY and refused (a suffixed
@@ -2063,11 +2073,11 @@ def _disable_pi_second_producer(
     if _pi_entry_is_loadable(retired):
         return False, [], (
             f"cannot disable the second capture producer: {retired} is still "
-            "an extension Pi loads — a symlink to a directory is resolved "
-            "through `resolveExtensionEntries` under any suffixed name — so "
-            "both producers stay registered and every session is captured "
-            "twice. Nothing was touched. Move it out of the extensions "
-            "directory by hand and re-run.")
+            "an extension Pi loads — a suffixed DIRECTORY, or a link to one, "
+            "is resolved through `resolveExtensionEntries` under ANY name — "
+            "so both producers stay registered and every session is captured "
+            f"twice. {seam_state}. Move it out of the extensions directory "
+            "by hand and re-run.")
     if not os.path.lexists(active):
         return False, [], None
     if not _pi_entry_is_loadable(active):
@@ -2087,7 +2097,8 @@ def _disable_pi_second_producer(
                 f"cannot disable the second capture producer {active}: "
                 f"{retired} exists and is not a regular file (a symlink or a "
                 "directory). Renaming or removing either could destroy the "
-                "only copy, so nothing was touched — move one aside by hand.")
+                f"only copy, so it was not modified. {seam_state} — move one "
+                "aside by hand.")
         live_digest = _sha256_file(active) if active.is_file() else None
         retired_digest = _sha256_file(retired)
         if live_digest is None or live_digest != retired_digest:
@@ -2127,6 +2138,20 @@ def _disable_pi_second_producer(
                 f"could not be disabled ({active}): {planned}. TWO producers are "
                 "registered, so every session is captured twice until one of them "
                 "is removed.")
+        if active.is_symlink() and active.is_dir():
+            # The real run renames the LINK to `retired` and THEN asserts on
+            # it; a suffixed link to a directory is still resolved through
+            # `resolveExtensionEntries`, so it refuses — AFTER mutating. A
+            # preview that reports this shape as fine is a false PASS on the
+            # plane whose whole job is previewing the real run (#14342 round
+            # 10, finding 2). Model the post-mutation predicate here.
+            return False, [], (
+                f"the capture seam would be in place, but the second capture "
+                f"producer could not be disabled ({active}): renaming the link "
+                f"to {retired} leaves a suffixed SYMLINK to a directory, which "
+                f"Pi resolves through its index file — so both producers would "
+                f"stay registered. Nothing was written (a dry run); move "
+                f"{active} out of the extensions directory by hand and re-run.")
         if active.is_dir() and not active.is_symlink():
             return True, [f"[dry-run] would retire the entry point inside "
                           f"{active} (index.ts/index.js → *.disabled; the "
@@ -2453,19 +2478,39 @@ def _install_pi(
                                      f"subdirectory through its index file "
                                      f"under ANY suffixed name — renaming it "
                                      f"retires nothing, so both producers "
-                                     f"stay registered. The capture seam at "
-                                     f"{dst} WAS installed, so this box now "
-                                     f"runs BOTH producers; the link was not "
-                                     f"renamed and the checkout it points at "
-                                     f"is untouched. Move {legacy_disabled} "
-                                     f"out of the extensions directory by "
-                                     f"hand and re-run."))
+                                     f"stay registered. "
+                                     + (f"The capture seam at {dst} WOULD be "
+                                        f"installed, so this box would run "
+                                        f"BOTH producers; nothing was written."
+                                        if dry_run else
+                                        f"The capture seam at {dst} WAS "
+                                        f"installed, so this box now runs "
+                                        f"BOTH producers.")
+                                     + f" The link was not renamed and the "
+                                       f"checkout it points at is untouched. "
+                                       f"Move {legacy_disabled} out of the "
+                                       f"extensions directory by hand and "
+                                       f"re-run."))
         if dry_run:
             # Preview the REAL run's refusal, from the same predicate: a
             # plan that says "ok" for a shape the real run refuses is a
             # dry-run false PASS on the one shape the operator is previewing
             # BECAUSE it looks broken (#14342 round 9, finding 3).
-            planned = _retire_pi_entry(legacy_disabled, dry_run=True)
+            # ⛔ AGAINST THE PATH THE REAL RUN RETIRES FROM. Under `--dry-run`
+            # the rename is only PLANNED, so `legacy_disabled` does not exist:
+            # asking about it fell through every branch and answered "no
+            # refusal" — a vacuous preview on exactly the shape round 8 asked
+            # for (#14342 round 10, finding 1). The rename preserves the
+            # directory's contents, so the SOURCE answers every refusal the
+            # destination would.
+            # Which path depends on whether the RENAME is planned: on the fresh
+            # directory shape the real run renames the source aside and retires
+            # inside the destination; on the upgrade shape there is no source
+            # and the destination is already on disk.
+            plan_path = (legacy if (legacy.is_dir() and not legacy.is_symlink()
+                                    and not os.path.lexists(legacy_disabled))
+                         else legacy_disabled)
+            planned = _retire_pi_entry(plan_path, dry_run=True)
             if planned:
                 return InstallResult(harness, changed=changed,
                                      actions=tuple(actions),

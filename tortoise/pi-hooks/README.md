@@ -106,8 +106,10 @@ keep talking.
 
 ## Migration: the install must not leave two capture producers (#3713, #3512)
 
-Pi's extension loader (`collectAutoExtensionEntries`) enumerates directory
-entries and does **no basename dedupe**: a top-level `tortoise-capture.ts` and
+Pi's extension loader (`discoverExtensionsInDir` in `dist/core/extensions/loader.js`)
+enumerates directory entries and does **no basename dedupe** — and, unlike the
+package manager's `collectAutoExtensionEntries`, it applies **no dot-prefix
+filter**: a top-level `tortoise-capture.ts` and
 a `tortoise-capture/index.ts` are **two** independent extensions. On a host
 that already has the legacy agent-infra extension at
 `~/.pi/agent/extensions/tortoise-capture/` (a symlink to
@@ -116,7 +118,9 @@ that already has the legacy agent-infra extension at
 it makes both producers POST `/v1/sessions` for the same `session_id` —
 doubled work, and the server's in-flight dedup hands the loser a 409.
 
-The install step therefore disables the legacy entry before copying this one:
+The install step therefore disables the legacy entry — but only **after** the
+replacement seam is written and verified, so a failed copy can never leave a box
+with no producer at all:
 
 - a **symlink** is unlinked (`rm`, no `-r`) — the agent-infra checkout it
   points at is untouched;

@@ -7326,3 +7326,152 @@ def test_pi_dry_run_names_the_second_producer_entry_point_when_it_is_a_directory
     assert not (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).exists(), (
         "the real run created the name the directory shape never uses")
     assert (producer / "index.ts.disabled").exists()
+
+
+def test_pi_dry_run_refuses_the_legacy_directory_shape_the_real_run_refuses(home):
+    """The preview must evaluate the refusal against the path the REAL run
+    retires from.
+
+    On the FRESH legacy-directory shape the real run renames
+    ``tortoise-capture/`` aside and then retires the entry point INSIDE it. The
+    dry run asked about ``.tortoise-capture.disabled`` — a path that does not
+    exist while the rename is only planned — so every branch fell through and
+    the preview answered "no refusal" for a shape the real run refuses, after
+    mutating (#14342 round 10, finding 1). The rename preserves the directory's
+    contents, so the source answers every refusal the destination would.
+
+    Mutation: ask about ``legacy_disabled`` under ``--dry-run`` — the preview
+    goes green and the real run renames, refuses, and leaves two producers.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    legacy = ext_dir / capture_install.LEGACY_PI_DIRNAME
+    legacy.mkdir(parents=True)
+    (legacy / "index.ts").write_text("// legacy producer\n")
+    (legacy / "package.json").write_text(
+        '{"pi": {"extensions": ["index.ts"]}}\n', encoding="utf-8")
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert not dry.ok, (
+        f"the dry run previewed success for a shape the real run refuses: {dry.actions}")
+    assert "package.json" in (dry.error or ""), dry.error
+    assert not (ext_dir / capture_install.PI_DISABLED_DIRNAME).exists(), (
+        "a dry run renamed the legacy directory")
+
+    real = install_capture("pi", home=home)
+    assert not real.ok
+    assert "package.json" in (real.error or ""), real.error
+
+
+def test_pi_dry_run_refuses_a_preserved_entry_on_the_legacy_directory_shape(home):
+    """The sibling refusal on the same path: a preserved ``index.ts.disabled``
+    already inside the legacy directory. The real run renames first and then
+    refuses (`Path.rename` must not overwrite preserved bytes); the preview must
+    say so instead of planning a retirement that cannot happen.
+
+    Mutation: as above — the preview omits the refusal (#14342 round 10,
+    finding 1).
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    legacy = ext_dir / capture_install.LEGACY_PI_DIRNAME
+    legacy.mkdir(parents=True)
+    (legacy / "index.ts").write_text("// legacy producer\n")
+    (legacy / "index.ts.disabled").write_text("// PRESERVED\n")
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert not dry.ok, (
+        f"the dry run previewed success for a shape the real run refuses: {dry.actions}")
+    assert "already exists" in (dry.error or ""), dry.error
+    assert (legacy / "index.ts").exists(), "a dry run retired the entry point"
+    assert (legacy / "index.ts.disabled").read_text() == "// PRESERVED\n"
+
+
+def test_pi_dry_run_refuses_a_symlinked_second_producer_that_still_loads(home):
+    """A second producer that is a SYMLINK to a loadable directory is refused by
+    the real run — after renaming the link, which still resolves. The dry run
+    previewed ``ok`` because it modelled only ``_retire_pi_entry``'s refusal and
+    not the post-mutation assertion (#14342 round 10, finding 2).
+
+    Mutation: drop the symlink-to-directory arm — the preview reports a shape
+    as fine that the real run refuses.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// live producer\n")
+    active = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    active.symlink_to(target, target_is_directory=True)
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert not dry.ok, (
+        f"the dry run previewed success for a shape the real run refuses: {dry.actions}")
+    assert "SYMLINK" in (dry.error or ""), dry.error
+    assert "nothing was written" in (dry.error or "").lower(), dry.error
+    assert active.is_symlink(), "a dry run renamed the producer"
+    assert not (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).exists()
+
+
+def test_pi_second_producer_refusals_do_not_claim_the_disk_is_untouched(home):
+    """Every refusal that runs AFTER the seam write carries the install in the
+    same receipt, so none of them may say the disk was not touched.
+
+    Round 9 reworded one arm; its two siblings kept asserting "Nothing was
+    touched" beside ``actions=('installed …')`` and
+    ``changed_artifacts=('tortoise-capture.ts',)`` — the #10241 report shape
+    (#14342 round 10, finding 3).
+
+    Mutation: restore "Nothing was touched." in either arm — this row REDs on
+    the claim while the action set still shows the install.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// live producer\n")
+    # `retired` is a symlink to a loadable directory: the stickiest refusal.
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, res.actions
+    error = res.error or ""
+    assert "Nothing was touched" not in error, (
+        f"the receipt claims an untouched disk beside its own actions: {error!r}")
+    assert any("installed" in a for a in res.actions), res.actions
+    assert capture_install.PI_EXTENSION_NAME in res.changed_artifacts
+    assert "is in place" in error, (
+        f"the refusal must state that the seam landed: {error!r}")
+
+
+def test_pi_dry_run_receipt_does_not_claim_a_write(home):
+    """The legacy-symlink refusal is reached under ``--dry-run`` too (it is
+    evaluated before the dry-run branch), and it used to say the seam "WAS
+    installed" on a run that wrote nothing — the same false-report class as
+    round 9's finding, one branch over (#14342 round 10, finding 4).
+
+    Mutation: use the past-tense sentence unconditionally — this row REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// legacy producer\n")
+    legacy = ext_dir / capture_install.LEGACY_PI_DIRNAME
+    legacy.symlink_to(target, target_is_directory=True)
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert not dry.ok, dry.actions
+    error = dry.error or ""
+    assert "WOULD be installed" in error, error
+    assert "WAS installed" not in error, (
+        f"a dry run claimed the seam landed: {error!r}")
+    assert dry.changed_artifacts == (), dry.changed_artifacts
+    assert not (ext_dir / capture_install.PI_EXTENSION_NAME).exists(), (
+        "a dry run wrote the seam")
