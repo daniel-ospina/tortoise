@@ -493,16 +493,16 @@ names its mutant in its own docstring:
 
 Three content defects were corrected rather than re-pinned:
 
-* **`not_in_corpus` was the wrong bucket, and it truncated.** In `t6-score.json` it was a 10-row list
+- **`not_in_corpus` was the wrong bucket, and it truncated.** In `t6-score.json` it was a 10-row list
   of the **best-anchored paraphrases** (overlaps 0.636–1.0) — the opposite population — so a consumer
   reading its length as "quotes the corpus never states" got the display cap, `10`, which is the
   figure the PR description carried. It is now a **count** (`12`, equal to `invented`), the paraphrase
   rows live under `paraphrase_examples`, and each capped list carries its OWN
   `*_examples_truncated` flag (one shared boolean could not say which sample was complete).
-* **An unclassifiable `produces` row was graded `correct`** because the check was
+- **An unclassifiable `produces` row was graded `correct`** because the check was
   `"INVERTED" if src_kind_is_an_agent else "correct"`. It is now its own
   `UNCLASSIFIABLE` bucket, counted in `asymmetric_rows_unclassifiable` and in neither arm.
-* **The fresh-graph refusal read two fields, and its enforcement was unpinned.** It is now
+- **The fresh-graph refusal read two fields, and its enforcement was unpinned.** It is now
   `refuse_if_not_fresh()` — a function the falsifier drives to observe the `SystemExit` itself, not
   just the predicate behind it — over an `occupancy()` walk of the whole `graph_overview()` reply.
   Excluded, each because it is not content: `namespaces` (the installed kind vocabulary),
@@ -657,7 +657,7 @@ The same reviewer's next pass re-measured §8.6's claims and found two of the tw
 still open, plus six new free paths — all twelve are now closed, and each is
 pinned by an arm that reds on its own mutation:
 
-* **plain-text / `list[str]` error replies (P1, was open).** The producer's own
+- **plain-text / `list[str]` error replies (P1, was open).** The producer's own
   failure text — `["Error: timeout while expanding relationships"]` — is not JSON,
   so `is_error_reply` returned `False` and the door read as ANSWERED-EMPTY: all
   seven witness replies replaced with that shape left 73 passed, the artifact
@@ -665,47 +665,47 @@ pinned by an arm that reds on its own mutation:
   answered**. `is_error_reply` now matches failure text in a bare string and in an
   all-string row list, and the suite's `_measured()` DELEGATES to it instead of
   re-deciding the question with a narrower rule of its own.
-* **`readback.json.resolved` (P3, was open).** 35 entries → 1 left 73 passed. Every
+- **`readback.json.resolved` (P3, was open).** 35 entries → 1 left 73 passed. Every
   element the artifact resolved must still resolve to the id the element carries;
   the two names in `unresolved_elements` must NOT resolve (that is D2's finding).
-* the corroboration table's **verdict and Agree columns** (`✅ agree` →
+- the corroboration table's **verdict and Agree columns** (`✅ agree` →
   `❌ DISAGREE`, `PASS half — 5/5` → `FAIL — 0/5`): pinned to the artifact's totals,
   and the Agree cell derived per row — A4 is the one row that must **not** agree,
   because the peer probe ran no traceability check.
-* the peer document's **Graph under test** row → pinned to `t6-score.json.graph`,
+- the peer document's **Graph under test** row → pinned to `t6-score.json.graph`,
   and `live-v5` (the production graph this bundle must never touch) refused.
-* `out/tool-surface.json` **schema attribution** — rotating `(params, required)`
+- `out/tool-surface.json` **schema attribution** — rotating `(params, required)`
   between tools preserves every shape and both populations (256/30), so a digest
   over the name→schema mapping is what reds; the shapes alone did not.
-* the peer artifact's **`*_listed` booleans** (`tortoise_recall_listed`,
+- the peer artifact's **`*_listed` booleans** (`tortoise_recall_listed`,
   `tortoise_get_governance_listed`) → derived from membership in
   `out/tool-surface.json`; flipping them to `True` would delete the product finding
   that both tools EXECUTE while the surface advertises neither.
-* the witness rows' **`mechanism`** (`IMPL` → `hasPart`) → rows must stay epistemic,
+- the witness rows' **`mechanism`** (`IMPL` → `hasPart`) → rows must stay epistemic,
   and exactly six of seven witnesses must still be isolated (D4).
 
 ### 8.8 What the sixth round closed (a prose finding that carried no derivation)
 
-* **P1 — the prose door findings.** D1 and D5 arrive from `readback.json` entirely
+- **P1 — the prose door findings.** D1 and D5 arrive from `readback.json` entirely
   as prose, and the scorer copied their `answer_over_mcp` through unread: reversing
   D1 to *"YES — … its direction is visible too"* left 85-passed-green and
   self-contradicted the `the_read_that_can` field in the same object. A prose
   finding now survives only while its answer's POLARITY matches what its own
   evidence says, and while its evidence is non-empty.
-* **P1 — D4 outliving its witnesses.** The append path guarded against errored
+- **P1 — D4 outliving its witnesses.** The append path guarded against errored
   calls; the PROSE D4 did not. With all seven witness replies replaced by failure
   text the finding stayed, its evidence still naming six "isolated" nodes, and the
   artifact re-derived identically. D4 now requires a NON-ERRORED silent witness, and
   the producer agrees: `run_readback._call()` records the MCP `isError` flag instead
   of discarding it, and its D4 emitter refuses a failed witness.
-* **P2 — the peer's second copy of the witness rows.** `witness_neighbourhood_doors`
+- **P2 — the peer's second copy of the witness rows.** `witness_neighbourhood_doors`
   in `out/t6-independent-verification.json` carries the same rows; `IMPL` → `hasPart`
   there contradicted both documents and was free. Pinned to the same rule and to the
   same row counts (one epistemic row, on `Lumen Core`).
-* **P3 — `readback.db_uri`.** Nothing read it: pointing it at
+- **P3 — `readback.db_uri`.** Nothing read it: pointing it at
   `live-v5.prod.example:6379/live-v5` left the suite green. Now pinned to the graph
   the score names, on the lane's own host.
-* **P3 — `score_t6.py --check` was a NO-OP.** `sys.argv` was never parsed: the
+- **P3 — `score_t6.py --check` was a NO-OP.** `sys.argv` was never parsed: the
   scorer always rewrote the artifact and exited 0, so the gate the review brief names
   would silently REPAIR a corrupted artifact and report success. It now compares and
   exits 1 without writing — and it refuses to score at all when the ruled direction
@@ -714,7 +714,7 @@ pinned by an arm that reds on its own mutation:
 
 ### 8.9 What the seventh round closed (one predicate, one count, one port)
 
-* **P1 — a THIRD error predicate.** The producer's round-6 guard spelled its own
+- **P1 — a THIRD error predicate.** The producer's round-6 guard spelled its own
   five-token list while the scorer spelled nine, so the two DISAGREED on 6 of 20
   reply shapes and `run_readback` still wrote D4 for `["Failure: …"]`,
   `["Refused: …"]`, `["Unauthorized"]` — manufacturing the bundle's central
@@ -722,12 +722,12 @@ pinned by an arm that reds on its own mutation:
   The producer now ASKS the scorer (`from score_t6 import is_error_reply`), and the
   contract is pinned by BEHAVIOUR over 20 shapes, taken from the file rather than
   restated — its body is unpinned content and a literal would not have held.
-* **P3 — D4's evidence counts.** `nodes_read_as_isolated_by_expand` and its
+- **P3 — D4's evidence counts.** `nodes_read_as_isolated_by_expand` and its
   byte-identical duplicate were read by nothing: rotating one made the artifact
   contradict its own `link_witness` block with the size held at 809,812. Every count
   is now the witness's own `explore_neighbour_count`, the two copies must agree, and
   `code_path` must name a file this tree has.
-* **P3 — the db_uri port.** The arm claimed to pin "the lane's own port" and pinned
+- **P3 — the db_uri port.** The arm claimed to pin "the lane's own port" and pinned
   none: 16413 → 16414 stayed green. The host:port is now the receipt's own, so the
   readback and the ingest cannot be talking to different containers.
 
@@ -762,8 +762,8 @@ add a pin, not widen an allowlist.
 The dispatch brief carried a `[mandate-preflight]` block naming two files this lane was ordered to
 read and **cannot**, both absent on this box with no provisioning path:
 
-* `/home/cmux/.pi/agent/state/LANE-BRIEF-PREAMBLE.md` — MISSING
-* `/home/cmux/.pi/agent/state/TORTOISE-GRAPH-BRIEF.md` — MISSING
+- `/home/cmux/.pi/agent/state/LANE-BRIEF-PREAMBLE.md` — MISSING
+- `/home/cmux/.pi/agent/state/TORTOISE-GRAPH-BRIEF.md` — MISSING
 
 **I did not read them and am not claiming to.** The brief's own text was treated as the authority, per
 the block's instruction. The consequence is concrete: `tortoise`'s `AGENTS.md` skill table orders a
