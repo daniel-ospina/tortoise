@@ -453,9 +453,14 @@ test('#14686: an in-flight alerts read cannot land on the wrong Organization', (
   //    the null case, which lets a response landing AFTER a logout
   //    (`orgIdRef.current = null`) write into the next state.
   //
-  // Capturing at call time answers the actual question — "did the Organization
-  // change under this read?" — so logout (A -> null), a switch (A -> B) discard,
-  // and a first-org read (null -> null) is allowed.
+  // Capturing at call time answers "did the Organization change UNDER this read?"
+  // — logout (A -> null) and a switch (A -> B) discard, and a first-org read
+  // (null -> null) is allowed. It does NOT answer "is this read's TARGET the
+  // current org", which is pinned separately below: `acknowledgeAlert` captures
+  // `tid` when the ack starts and re-reads `loadAlerts(tid)` after the round trip,
+  // so a switch during the ack makes `orgAtCall` the NEW org while `tid` is the
+  // OLD one — the capture guard passes and the previous Organization's rows land
+  // under the new header.
   const captureAt = body.indexOf('const orgAtCall = orgIdRef.current')
   assert.ok(captureAt !== -1, 'loadAlerts must capture the Organization at call time')
   const firstRequestAt = body.search(/await fetch\(/)
@@ -575,8 +580,11 @@ test('#14686: every acknowledgement refusal carries its Organization and its ale
     'both refusal sites (non-2xx and the network throw) must name the Organization')
   assert.equal((body.match(/label: alert\.label \|\| ''/g) || []).length, 2,
     'both refusal sites must name the alert the sentence is about')
-  // …and the panel must SCOPE on it, or the payload buys nothing.
-  assert.match(readFileSync(join(here, 'notificationPanel.jsx'), 'utf8'),
+  // …and the panel must SCOPE on it, or the payload buys nothing. STRIPPED for the
+  // same reason as the guard pin below: run against the raw file this assertion is
+  // satisfied by the COMMENT that documents the rule (`//  * \`ackError.orgId ===
+  // orgId\` — …`) as well as by the code, so deleting the scoping left it green.
+  assert.match(stripComments(readFileSync(join(here, 'notificationPanel.jsx'), 'utf8')),
     /ackError\.orgId === orgId/,
     'the ledger note must render only for the Organization it belongs to')
 })

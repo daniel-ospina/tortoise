@@ -200,7 +200,14 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
                       ackError, onBack, onDismiss }) {
   const detail = detailOf(alert, now)
   const pending = Boolean(ackPending) && ackPending === (alert && alert.episode)
-  const error = ackError && alert && ackError.episode === (alert && alert.episode)
+  // ⛔ The admission must match the chrome's EXACTLY (`message` is the field both
+  // sites actually draw). The chrome is suppressed when the open detail is this
+  // episode, so a payload with a `label` but no `message` was admitted by neither
+  // — stated ZERO times. Unreachable today (both `main.jsx` write sites set a
+  // non-empty message), but that is the "never zero" invariant this pair exists to
+  // hold, and a future caller would break it silently (review finding).
+  const error = ackError && ackError.message
+    && alert && ackError.episode === (alert && alert.episode)
     ? ackError.message
     : ''
   // #14686 (review finding 5): opening the detail UNMOUNTS the whole list, and the
@@ -554,7 +561,7 @@ export function NotificationBell({
   // two Organizations crossing the same rule in the same second collide.
   const scopedAckError = ackError && ackError.orgId === orgId ? ackError : null
   const ackNote = scopedAckError
-    && (scopedAckError.label || scopedAckError.message)
+    && scopedAckError.message
     && !(detailAlert && detailAlert.episode === scopedAckError.episode)
     ? scopedAckError
     : null

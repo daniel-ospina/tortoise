@@ -5507,7 +5507,7 @@ function claimIntentInFlight() {
         // applies here as on the success branch: stamping A's failed read onto B's
         // state makes B's closed bell say "the alerts could not be loaded" about a
         // read B never made — a claim about the wrong Organization (review finding).
-        // Same capture-and-compare guard as the success branch.
+        // Same guard as the success branch.
         if (orgIdRef.current !== orgAtCall) return
         setAlertsUnavailable(true)
       }
