@@ -42,7 +42,12 @@ const here = dirname(fileURLToPath(import.meta.url))
 
 //: The LIVE row this issue is about — copied from the project's `abuse_events`
 //: table (project ybetwichurajbfswfeqa, 2026-09-25/26) so the fixture is the
-//: real thing rather than a shape someone imagined.
+//: real thing rather than a shape someone imagined. ⛔ `message` is NOT one of
+//: those columns: it is derived at read time by `abuse._alert_dict`, so it is
+//: reproduced from the renderer (`_read_velocity_message`'s `scope == "key"`
+//: branch) and is checked against `tests/test_10156_alert_registers.py` — a
+//: fixture that quotes a wording no server version emits is a claim about the
+//: product that nothing measures.
 const REAL_VELOCITY_ROW = {
   type: 'read_velocity',
   label: 'Unusual read volume',
@@ -54,7 +59,7 @@ const REAL_VELOCITY_ROW = {
   episode: 'read_velocity|key|989c68e6a35b479b923a28542e|2026-09-25T17:19:05',
   message:
     "Read volume on one of this Organization's API keys crossed our " +
-    'unusual-activity threshold. This is informational; nothing was changed. ' +
+    'unusual-activity threshold. This is informational; it did not change anything. ' +
     "If you don't recognise this activity, review your API keys in Keys — " +
     'an unrecognised key should be revoked there.',
 }
@@ -82,7 +87,11 @@ test('#10156: an unknown or missing register defaults to the QUIET one', () => {
   // pipelines are independent) is rescued for the types whose incident reading is
   // certain, so a suspension is never rendered as "nothing was changed".
   assert.equal(registerOf({ type: 'suspend' }), REGISTER_ALERT)
-  assert.equal(registerOf({ type: 'flag' }), REGISTER_ALERT)
+  // #14687: `flag` / `review_needed` are rate MEASUREMENTS (the server stamps
+  // them `activity`), so an un-stamped row from an older API is not rescued into
+  // the incident register any more — the quiet reading is true for them.
+  assert.equal(registerOf({ type: 'flag' }), REGISTER_ACTIVITY)
+  assert.equal(registerOf({ type: 'review_needed' }), REGISTER_ACTIVITY)
   assert.equal(registerOf({ type: 'read_velocity' }), REGISTER_ACTIVITY)
   // …and a declared incident still lands in the incident register.
   assert.equal(registerOf({ register: REGISTER_ALERT }), REGISTER_ALERT)
@@ -101,12 +110,38 @@ test('#10156: the activity lead carries no imperative and no incident claim', ()
   ]) {
     assert.doesNotMatch(ACTIVITY_LEAD, forbidden)
   }
+  // #14702 review P2: the assertion BELOW cannot see the verb its own message
+  // argues for — `[^.]*` matches "changed" as readily as "disabled", so the
+  // word this commit is about has to be pinned positively. Measured: mutating
+  // ACTIVITY_LEAD back to "…nothing was changed, throttled or locked by them."
+  // left all 21 tests green before this line existed.
+  assert.match(ACTIVITY_LEAD, /nothing was disabled, throttled or locked by them\./i,
+    'the ENFORCEMENT claim is the only true one — "changed" is false for a `flag` '
+    + 'row, which writes `organizations.flagged_at`')
   assert.match(ACTIVITY_LEAD, /nothing was [^.]*by them\./i,
-    'the activity register must state that nothing was changed — SCOPED to the '
-    + 'observations. The panel renders both registers on one screen, so an '
-    + 'absolute "nothing was changed, disabled or locked" sits beside a `suspend` '
-    + 'row on an Organization that IS suspended: the whole-org-state claim the '
-    + 'copy rule forbids (round-23 review finding).')
+    'the activity register must state that nothing was disabled, throttled or '
+    + 'locked — SCOPED to the observations. "changed" is deliberately NOT the '
+    + 'verb: a `flag` row DOES change state (`flagged_at`, which `/v1/team` '
+    + 'renders as status "flagged"), so only the ENFORCEMENT claim is true. The '
+    + 'panel renders both registers on one screen, so an absolute "nothing was '
+    + 'changed, disabled or locked" sits beside a `suspend` row on an '
+    + 'Organization that IS suspended: the whole-org-state claim the copy rule '
+    + 'forbids (round-23 review finding).')
+  // #14687: `flag`/`review_needed` are ACTIVITY rows now, and a `flag` row writes
+  // `organizations.flagged_at` — `/v1/team` renders that as status "flagged" and
+  // `main.jsx` draws the "⚠ flagged" badge ON THIS SCREEN. "Not actions taken on
+  // your account" therefore denied a state the page itself displays: the same
+  // false-claim class as "nothing was changed", reached through the other clause.
+  // The lead must stay scoped to ENFORCEMENT (disabled/throttled/locked).
+  for (const forbidden of [
+    /not actions taken/i,
+    /no action (?:was )?taken/i,
+  ]) {
+    assert.doesNotMatch(ACTIVITY_LEAD, forbidden,
+      'an activity `flag` row DOES set `flagged_at`, which the header renders as '
+      + 'a "flagged" badge — "no action taken on your account" is the same false '
+      + 'claim as "nothing was changed", so the lead may only deny ENFORCEMENT')
+  }
   assert.doesNotMatch(ACTIVITY_LEAD, /nothing was (?:changed, disabled|disabled, changed) or locked\./i,
     'an UNSCOPED no-change clause is a whole-org-state claim')
   assert.match(ACTIVITY_HEADING, /activity/i)
