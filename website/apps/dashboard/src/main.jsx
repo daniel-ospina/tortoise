@@ -5439,6 +5439,9 @@ function claimIntentInFlight() {
     // #308 (R7): session-authed alert history — reachable even while the
     // team is suspended (API-key routes 403 by design).
     if (!sessionTokenRef.current || !tid) return
+    // Captured BEFORE the first await — this is what makes the guard below a
+    // question about THIS read rather than about the current selection.
+    const orgAtCall = orgIdRef.current
     try {
       // #3501: same-origin proxy; the `__Host-session` cookie authenticates.
       const res = await fetch(`${API_BASE}/v1/team/alerts?org_id=${encodeURIComponent(tid)}`)
@@ -5458,19 +5461,27 @@ function claimIntentInFlight() {
         // written against them land in the NEW org's key. Same guard discipline
         // as the members/graphs loaders.
         //
-        // ⛔ THE STRICT FORM IS THE CORRECT ONE, and this comment replaces one
-        // that argued the opposite from a false premise — worth spelling out,
-        // because the weakening looks like ordinary defensive coding and has
-        // already been propagated once by a peer lane that read it as such.
-        // `completeLogin` has ONE call site, and the #1912 first-healthy pin sets
-        // `orgIdRef` before it ("pin the first HEALTHY team BEFORE completeLogin");
-        // the guard immediately above its `loadAlerts(t.org_id)` call RETURNS when
-        // both are truthy and differ, so that call is only ever REACHED when
-        // `orgIdRef.current === t.org_id`. A null `orgIdRef` there is therefore the
-        // LOGOUT path (`orgIdRef.current = null`), where a late response must be
-        // discarded — not "a fresh login". Adding `orgIdRef.current &&` opens that
-        // logout window and buys nothing (review finding 1).
-        if (orgIdRef.current !== tid) return
+        // ⛔ CAPTURE-AND-COMPARE, the same `_teamAtCall` idiom loadAll,
+        // loadGraphs, loadRepos and loadBranches already use — NOT a comparison
+        // of the live ref against `tid`. Two earlier forms were both wrong, and
+        // this replaces both:
+        //
+        //  * `orgIdRef.current !== tid` wrongly DISCARDS a legitimate read when
+        //    no Organization is current yet. That is reachable: the org-creation
+        //    wizard calls `loadAlerts(t.org_id)` after `await loadTeams()`, and
+        //    `loadTeams` only pins when it actually got a selectable row — so on
+        //    a failed/empty `/v1/organizations` a first-timer's read is dropped,
+        //    with no recovery (`loadAlerts` is not in the `[currentOrgId]` effect
+        //    and is not polled).
+        //  * `orgIdRef.current && orgIdRef.current !== tid` fixes that by also
+        //    ALLOWING the null case — which lets a response that lands AFTER a
+        //    logout (`orgIdRef.current = null`) write into the next state.
+        //
+        // Capturing the org at call time and comparing after the awaits gets both
+        // right: the guard now means exactly what it says — "did the Organization
+        // change under this read?" — so logout (A -> null) discards, a switch
+        // (A -> B) discards, and a first-org read (null -> null) is allowed.
+        if (orgIdRef.current !== orgAtCall) return
         setAlerts(feed.alerts)
         setAlertsSaturated(feed.saturated)
         setAlertsUnavailable(feed.unavailable)
@@ -5479,15 +5490,15 @@ function claimIntentInFlight() {
         // applies here as on the success branch: stamping A's failed read onto B's
         // state makes B's closed bell say "the alerts could not be loaded" about a
         // read B never made — a claim about the wrong Organization (review finding).
-        // Strict form, for the reason given on the success branch.
-        if (orgIdRef.current !== tid) return
+        // Same capture-and-compare guard as the success branch.
+        if (orgIdRef.current !== orgAtCall) return
         setAlertsUnavailable(true)
       }
     } catch {
       // Best-effort — alert history never blocks the dashboard — but the panel
       // must be able to say it could not look. Guarded for the same reason as the
       // arms above: the read may have started before an Organization switch.
-      if (orgIdRef.current !== tid) return
+      if (orgIdRef.current !== orgAtCall) return
       setAlertsUnavailable(true)
     }
   }

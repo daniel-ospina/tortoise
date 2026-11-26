@@ -982,6 +982,57 @@ test('#14694: the refusal is stated ONCE when its OWN detail is open', () => {
   assert.equal(hits.length, 1, 'the refusal must be stated exactly once, not inline AND in the chrome')
 })
 
+test('#14694: dismissing from the detail does not drop focus to <body>', () => {
+  // Review finding 2. The Dismiss button that was just clicked is removed with the
+  // detail, and a removed active element drops focus to `<body>` — a lost tab
+  // position. The open/back pair was closed; this is the same defect one step on.
+  const { container } = renderBell({ alerts: [alert({ label: 'dismiss me' })] })
+  fireEvent.click(bell(container))
+  fireEvent.click(container.querySelector('.notif-open'))
+  const dismissBtn = [...container.querySelectorAll('.notif-detail-actions button')]
+    .find((b) => /Dismiss/i.test(b.textContent))
+  assert.ok(dismissBtn, 'precondition: the dismiss control exists')
+  dismissBtn.focus()
+  fireEvent.click(dismissBtn)
+  assert.equal(container.querySelector('.notif-detail'), null, 'precondition: the detail closed')
+  assert.notEqual(document.activeElement, document.body,
+    'focus must not fall to <body> when the detail is dismissed out from under it')
+})
+
+test('#14694: a confirmed acknowledgement keeps focus in the panel', () => {
+  // Review finding 2, the other half: the Acknowledge button is REPLACED by
+  // `ACKED_NOTE` when the write lands, so a focused button leaves the DOM and
+  // focus falls to `<body>` while the detail stays open.
+  const row = alert({ label: 'ack me' })
+  function Harness() {
+    const [acked, setAcked] = React.useState(false)
+    const current = { ...row, acked }
+    return (
+      <NotificationBell
+        alerts={[current]}
+        userId={USER}
+        orgId={ORG}
+        canAcknowledge
+        onAcknowledge={() => setAcked(true)}
+        now={NOW}
+        storage={fakeStorage()}
+      />
+    )
+  }
+  const { container } = render(<Harness />)
+  fireEvent.click(bell(container))
+  fireEvent.click(container.querySelector('.notif-open'))
+  const ackBtn = [...container.querySelectorAll('.notif-detail-actions button')]
+    .find((b) => /Acknowledge for everyone/.test(b.textContent))
+  assert.ok(ackBtn, 'precondition: the acknowledge control exists')
+  ackBtn.focus()
+  fireEvent.click(ackBtn)
+  assert.ok(container.querySelector('.notif-detail'), 'precondition: the detail stays open')
+  assert.doesNotMatch(container.textContent, /Acknowledge for everyone/)
+  assert.notEqual(document.activeElement, document.body,
+    'focus must not fall to <body> when the control is replaced by its receipt')
+})
+
 test('#14694: opening a detail TAKES focus, it does not drop it to <body>', () => {
   // Review finding 5. Opening unmounts the whole list — including the
   // `.notif-open` button that had focus — and `DetailView` took none, so

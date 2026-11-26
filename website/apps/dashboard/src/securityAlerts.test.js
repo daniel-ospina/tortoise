@@ -412,35 +412,44 @@ test('#14686: an in-flight alerts read cannot land on the wrong Organization', (
   assert.ok(start !== -1, 'loadAlerts must exist in main.jsx')
   const end = main.indexOf('\n  }', start)
   const body = main.slice(start, end)
-  // ⛔ THE STRICT FORM IS THE CORRECT ONE, and the comment that used to sit here
-  // argued the opposite from a false premise. Worth spelling out, because the
-  // weakening it justified looks like ordinary defensive coding and has already
-  // been propagated once by a peer lane that read it as such.
+  // ⛔ THE GUARD IS CAPTURE-AND-COMPARE — `_teamAtCall`, the idiom loadAll,
+  // loadGraphs, loadRepos and loadBranches already use in this file. TWO earlier
+  // forms were wrong here and this pin forbids both, because each is reachable
+  // and each has already been proposed once:
   //
-  // `completeLogin` has ONE call site, and the #1912 first-healthy pin sets
-  // `orgIdRef` before it ("pin the first HEALTHY team BEFORE completeLogin"). The
-  // guard immediately above its `loadAlerts(t.org_id)` call RETURNS when both are
-  // truthy and differ, so that call is only ever REACHED when
-  // `orgIdRef.current === t.org_id`. A null `orgIdRef` there is therefore the
-  // LOGOUT path (`orgIdRef.current = null`), where a late response must be
-  // discarded — not "a fresh login". `orgIdRef.current &&` opens that logout
-  // window and buys nothing, so the pin FORBIDS it.
+  //  * `orgIdRef.current !== tid` DISCARDS a legitimate read when no Organization
+  //    is current yet. The org-creation wizard calls `loadAlerts(t.org_id)` after
+  //    `await loadTeams()`, and `loadTeams` only pins when it actually got a
+  //    selectable row — so on a failed/empty `/v1/organizations` a first-timer's
+  //    read is dropped with no recovery (`loadAlerts` is not in the
+  //    `[currentOrgId]` effect and is not polled).
+  //  * `orgIdRef.current && orgIdRef.current !== tid` fixes that by also allowing
+  //    the null case, which lets a response landing AFTER a logout
+  //    (`orgIdRef.current = null`) write into the next state.
   //
-  // (b) is a different claim and still holds: EVERY write must be guarded, not
-  // just the success one — a `match` anywhere in the function is satisfied by a
-  // guard sitting in the success branch alone, while the failure arms stamp the
-  // previous Organization's failed read onto the new one's state.
-  assert.match(body, /if \(orgIdRef\.current !== tid\) return/,
-    'a response for an Organization that is no longer current must be discarded')
+  // Capturing at call time answers the actual question — "did the Organization
+  // change under this read?" — so logout (A -> null), a switch (A -> B) discard,
+  // and a first-org read (null -> null) is allowed.
+  const captureAt = body.indexOf('const orgAtCall = orgIdRef.current')
+  assert.ok(captureAt !== -1, 'loadAlerts must capture the Organization at call time')
+  // Anchor on the actual request, not on the word `await` — an earlier version of
+  // this assertion matched "await" inside this very comment and failed for the
+  // wrong reason.
+  const firstRequestAt = body.search(/await fetch\(/)
+  assert.ok(firstRequestAt !== -1, 'loadAlerts must still make the request')
+  assert.ok(captureAt < firstRequestAt,
+    'the capture must happen BEFORE the request — after it, it records a state the response can already have changed')
+  assert.doesNotMatch(body, /if \(orgIdRef\.current !== tid\) return/,
+    'comparing the live ref to `tid` discards a legitimate first-Organization read')
   assert.doesNotMatch(body, /if \(orgIdRef\.current && orgIdRef\.current !== tid\) return/,
-    'the falsy-tolerant form is a regression: `null` is the LOGOUT path, not a fresh login')
-  // (b) …and where it has to be: before EACH write. A guard anywhere in the body
-  //     is satisfied by one in the success branch, which is the mutant that stayed
-  //     green.
-  assert.match(body, /if \(orgIdRef\.current !== tid\) return\s*\n\s+setAlerts\(feed\.alerts\)/,
+    'the falsy-tolerant form re-opens the logout window')
+  // …and where it has to be: before EACH write. A guard anywhere in the body is
+  // satisfied by one in the success branch alone, while the failure arms stamp
+  // the previous Organization's failed read onto the new one's state.
+  assert.match(body, /if \(orgIdRef\.current !== orgAtCall\) return\s*\n\s+setAlerts\(feed\.alerts\)/,
     'the success write must be discarded when the Organization changed mid-read')
   const failureGuards = body.match(
-    /if \(orgIdRef\.current !== tid\) return\s*\n\s+setAlertsUnavailable\(true\)/g) || []
+    /if \(orgIdRef\.current !== orgAtCall\) return\s*\n\s+setAlertsUnavailable\(true\)/g) || []
   assert.equal(failureGuards.length, 2,
     'BOTH failure arms (non-2xx and throw) must be guarded — not only the success branch')
 })

@@ -213,6 +213,18 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
   React.useEffect(() => {
     if (detailRef.current) detailRef.current.focus()
   }, [])
+  // The Acknowledge button is REPLACED by `ACKED_NOTE` when the write lands, so a
+  // focused button is removed from the DOM and an active element that is removed
+  // drops focus to `<body>` — the same lost-tab-position defect as the open/back
+  // pair, one step further along (review finding 2). Only reclaim when focus was
+  // actually dropped: on an already-acked row this effect and the one above both
+  // run on mount, and the effect above must keep the view itself.
+  const backRef = React.useRef(null)
+  React.useEffect(() => {
+    if (!alert || !alert.acked) return
+    if (document.activeElement && document.activeElement !== document.body) return
+    if (backRef.current) backRef.current.focus()
+  }, [alert && alert.acked])
   return (
     // `role="group"` is NOT decoration: a bare `<div>` has implicit `role=generic`,
     // which is on WAI-ARIA 1.2's *Name prohibited* list (§5.2.8.6), so the
@@ -223,7 +235,8 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
     // (review finding F4).
     <div className="notif-detail" role="group" aria-label={DETAIL_TITLE}
          ref={detailRef} tabIndex={-1}>
-      <button type="button" className="ghost small notif-back" onClick={onBack}>
+      <button type="button" className="ghost small notif-back" onClick={onBack}
+              ref={backRef}>
         ← {DETAIL_BACK}
       </button>
       <h3>{detail.entry.label}</h3>
@@ -297,7 +310,15 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
  *    everything" facts, carried through rather than dropped by the move;
  *  * `userId` / `orgId` — the identity the local ledger is keyed by;
  *  * `canAcknowledge` + `onAcknowledge` — the owner/admin org-wide dismissal;
- *  * `ackPending` (episode) / `ackError` ({episode, message}) — its write state;
+ *  * `ackPending` (episode) / `ackError` ({episode, orgId, label, message}) —
+ *    its write state. `orgId` and `label` are REQUIRED in practice, not
+ *    decorative: the refusal is scoped to the Organization it names (a response
+ *    still in flight when a team switch cleared the state would otherwise be
+ *    announced over another Organization's ledger) and it quotes the alert it is
+ *    about. A caller that supplies only `{episode, message}` builds a refusal the
+ *    chrome will never render — and because `DetailView` states it only for a
+ *    row still in the feed, the sentence would vanish exactly in the 404 case it
+ *    exists for;
  *  * `now` — injectable clock (tests); defaults to the moment the panel opened;
  *  * `storage` — injectable store (tests); defaults to `localStorage`.
  */
@@ -394,7 +415,15 @@ export function NotificationBell({
     persist(dismiss(ledger.state, entry.key, freshClock(), entry.alert))
     // The detail view of a notification that is no longer in the ledger has
     // nothing left to show; go back to the list.
-    if (detailKey === entry.rowKey) setDetailKey(null)
+    if (detailKey === entry.rowKey) {
+      setDetailKey(null)
+      // #14694 (review finding 2): the Dismiss button that was just clicked is
+      // removed from the DOM with the detail, and a removed active element drops
+      // focus to `<body>` — a lost tab position. Escape still escapes (the
+      // document handler), so this is not stranding, but the open/back pair was
+      // closed and this is the same defect one step further along.
+      if (panelRef.current) panelRef.current.focus()
+    }
   }
   const handleUnsnooze = (episodeKey) => persist(unsnooze(ledger.state, episodeKey))
   const handleRestore = (entry) => persist(undismiss(ledger.state, entry.key))
