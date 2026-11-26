@@ -1728,6 +1728,22 @@ _CONFIRM_PREDICATE = (
     r"|see|saw|seen|look|list)(?:ing|ed|s|es|d)?\b"
 )
 
+# ⛔ THE OBJECT HAS TWO SPELLINGS IN THIS REPO'S OWN COPY, and only one was
+# graded. Every form keyed on the plural `\btools\b`, while
+# `docs/quickstart-cloud.md:135` names the thing the user must look at as "the
+# client's MCP/tool list" — so the SINGULAR `tool list` escaped all seven forms
+# (#14717, measured at `8c3bb0d692`): both
+# "Confirm the tool list is complete. Restart your client, …" and
+# "Restart your client after confirming the tool list is complete." were GREEN,
+# and the second one INVERTS the order this pin exists to enforce — the pin's
+# own docs ship the spelling its patterns cannot see. Defined ONCE and appended
+# wherever the object is graded, so a third spelling has one home rather than
+# nine (nine copies of `\btools\b` is how this gap opened).
+# ⛔ The plural branch is listed FIRST and covers `tools list` on its own; the
+# second branch exists only for the singular head, and `list` is deliberately
+# not a `_DOC_NOUN` ("the tools list" is the session's own list, not a page).
+_TOOLS_OBJECT = r"(?:\btools\b|\btool\s+list\b)"
+
 
 def _inversion_form(pattern: str) -> re.Pattern[str]:
     """A graded form. Case carries no meaning in this prose, so every form is
@@ -1761,7 +1777,12 @@ _PRE_CUE_ONLY = _inversion_form(
     # `\`tortoise_*\` tools` defeated it: "Please list the `tortoise_*` tools you
     # see" was GREEN while its plain twin is a declared RED row (measured) — the
     # same one-inserted-word defect the adverb slot above records as fixed.
-    r"list\w*\s+(?:the\s+|all\s+|your\s+)?(?:[\w`*_.\u2019-]+\s+){0,2}?tools\b"
+    # …and the OBJECT ITSELF is the docs' two spellings, not the plural alone —
+    # `_TOOLS_OBJECT` is what grades `tool list` here (#14717). The two arms are
+    # independent: the modifier slot admits `\`tortoise_*\`` before EITHER
+    # spelling, and the object fragment admits the singular head.
+    r"list\w*\s+(?:the\s+|all\s+|your\s+)?"
+    r"(?:[\w`*_.\u2019-]+\s+){0,2}?" + _TOOLS_OBJECT
     + _NOT_A_DOC
     + r"|"
     # (f.2) every other verb: the object must be a PRESENCE PREDICATE on
@@ -1778,7 +1799,7 @@ _PRE_CUE_ONLY = _inversion_form(
     # list" (18 of 24 probed), each one a refusal of correct copy — the failure
     # mode that gets a pin deleted (#3429). A noun list cannot be completed; a
     # predicate list can, because a presence claim has a closed vocabulary.
-    r"(?:confirm|check|verify|see|look|ensure)\w*\b[^\n]*?\btools\b"
+    r"(?:confirm|check|verify|see|look|ensure)\w*\b[^\n]*?" + _TOOLS_OBJECT
     # …and a documentation noun immediately after `tools` is not a presence
     # claim even when a copula follows it ("Ensure the tools table is up to
     # date" — the one shape the predicate arm alone would still refuse). The
@@ -1890,15 +1911,15 @@ _INVERSION_FORMS = (
         r"(?:(?:\w+ly|very|so|too|quite|rather|first|already|just|also)\s+)*"
         r"(?!(?:see(?:s)?|saw|seen|look(?:ing|s|ed)?|list(?:ing|s|ed)?)\b"
         r"(?!.*?\b(?:confirm|check|verif(?:y|ies|ied)|ensur(?:e|es|ed))\w*\b"
-        r"[^\n]*?\b(?:tools|they|it)\b)))"
+        r"[^\n]*?\b(?:tools|tool\s+list|they|it)\b)))"
         r"(?:\w+-)?"
         + _CONFIRM_PREDICATE
-        + r"[^\n]*?\btools\b" + _NOT_A_DOC
+        + r"[^\n]*?" + _TOOLS_OBJECT + _NOT_A_DOC
     ),
     # (b) a participle that places the confirmation before the restart:
     #     "Restart your client, having first confirmed the tools are there".
     _inversion_form(r"\bhaving\b[^\n]*?" + _CONFIRM_PREDICATE
-                    + r"[^\n]*?\btools\b" + _NOT_A_DOC),
+                    + r"[^\n]*?" + _TOOLS_OBJECT + _NOT_A_DOC),
     # (c) an ADVERSATIVE clause leading with the pre-restart marker:
     #     "Restart your client, but first confirm the tools are actually there".
     #     A BARE leading "first" is deliberately not graded — "Restart your
@@ -1907,7 +1928,7 @@ _INVERSION_FORMS = (
     _inversion_form(
         r"^(?:but|however|though|yet)\b[^\n]*?\b(?:first|beforehand)\b[^\n]*?"
         + _CONFIRM_PREDICATE
-        + r"[^\n]*?\btools\b" + _NOT_A_DOC
+        + r"[^\n]*?" + _TOOLS_OBJECT + _NOT_A_DOC
     ),
     # (d) a marker trailing the object, unambiguous about the order:
     #     "… confirm the tools are actually there beforehand". `first` is the
@@ -1923,7 +1944,7 @@ _INVERSION_FORMS = (
     #     confirmed, and reding it turned a declared-GREEN row RED under a
     #     one-word change (measured; its adversative twin below still reds).
     _inversion_form(
-        _CONFIRM_PREDICATE + r"[^\n]*?\btools\b" + _NOT_A_DOC + r"[^\n]*?"
+        _CONFIRM_PREDICATE + r"[^\n]*?" + _TOOLS_OBJECT + _NOT_A_DOC + r"[^\n]*?"
         r"(?:\b(?:beforehand|before restarting|before you restart)\b"
         r"|\bfirst\b(?=[\s.,;:!?)\]}\"'`*_—–…]*$))"
     ),
@@ -1932,7 +1953,7 @@ _INVERSION_FORMS = (
     #     already there" = confirm first). Measured GREEN before this form.
     _inversion_form(
         r"^(?:but|however|though|yet)\b[^\n]*?" + _CONFIRM_PREDICATE
-        + r"[^\n]*?\btools\b" + _NOT_A_DOC + r"[^\n]*?\balready\b"
+        + r"[^\n]*?" + _TOOLS_OBJECT + _NOT_A_DOC + r"[^\n]*?\balready\b"
     ),
     # (e) the restart conditioned on the tools ALREADY being present:
     #     "Restart your client only once the tools are actually there",
@@ -1960,8 +1981,22 @@ _INVERSION_FORMS = (
     #     after it — so none is written (an optional prefix no row can depend on
     #     is dead weight, and it was).
     _inversion_form(
-        r"\bonce\s+(?:[A-Za-z0-9_`*.-]+\s+){0,2}?tools\s+"
-        r"(?:all\s+|both\s+)?(?:are|appear|show|exist|load|listed|visible)\b"
+        r"\bonce\s+(?:[A-Za-z0-9_`*.-]+\s+){0,2}?" + _TOOLS_OBJECT + r"\s+"
+        # ⛔ `is` is REACHABLE again, and required: it was dropped as "an arm no
+        # row could depend on" because a plural `tools\s+` can never be followed
+        # by a singular copula. With the singular `tool list` object graded that
+        # reasoning no longer holds — "… once the tool list is complete" is the
+        # twin of the declared-RED "… once the tools are listed", and leaving
+        # it out is a false PASS of form (e) on the docs' own spelling (#14717).
+        r"(?:all\s+|both\s+)?"
+        # ⛔ Third-person SINGULAR forms are here for the singular head noun, and
+        # only for it: `the tools show` is plural agreement and was already
+        # graded, while "only once the tool list SHOWS `tortoise_*`" was GREEN
+        # with the object widened and no singular verb (#14717, measured).
+        # A verb set that assumes plural agreement silently re-opens the gap the
+        # object widening just closed.
+        r"(?:are|is|appear|appears|show|shows|exist|exists|load|loads"
+        r"|listed|visible)\b"
     ),
     _PRE_CUE_ONLY,
 )
@@ -2033,7 +2068,7 @@ _SESSION_PRESENCE_RE = re.compile(
     r"|show(?:s)?\s+up|load(?:ed|s)|running|live|in\s+the\s+list)\b",
     re.IGNORECASE)
 _INSTALL_SIDE_RE = re.compile(
-    r"\btools\b[^\n]*?\b(?:are|is|get|gets|getting)\s+(?:(?:all|both)\s+)?"
+    _TOOLS_OBJECT + r"[^\n]*?\b(?:are|is|get|gets|getting)\s+(?:(?:all|both)\s+)?"
     r"(?:installed|configured|enabled|set\s+up|added|wired|registered|mounted|provisioned|on\s+the\s+allowlist)\b",
     re.IGNORECASE)
 # ⛔ A TERMINATOR ENDS A STATEMENT ONLY WHEN IT REALLY ENDS ONE. Splitting on a
@@ -2251,7 +2286,7 @@ def _tools_appear_after_cue(quick: str) -> bool:
     # reloaded. The tools appear later." wrongly satisfied the bound. Only the
     # separating whitespace/comma that continues the cue is stripped.
     parts = _STATEMENT_BREAK_RE.split(after.lstrip(" \t,…"), maxsplit=2)
-    return re.search(r"\btools\b", " ".join(parts[:2])) is not None
+    return re.search(_TOOLS_OBJECT, " ".join(parts[:2])) is not None
 
 
 def _restart_cue_order_violation(quick: str) -> str | None:
@@ -3323,6 +3358,43 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Ensure the tools documentation is up to date. Restart your client, then "
      "confirm the tools are actually there.", False),
     ("Restart your client after checking the tools manifest.", False),
+    # ── THE DOCS' OWN SPELLING IS SINGULAR (`docs/quickstart-cloud.md:135` names
+    # "the client's MCP/tool list"), and every form keyed on the plural `tools`,
+    # so `tool list` escaped all seven — including the one that INVERTS the
+    # order (#14717, measured GREEN at `8c3bb0d692`). One row per form, so a
+    # regression can name which arm lost the spelling rather than just "the
+    # singular stopped working"; the GREEN rows are the false-red guards that
+    # make the widening safe (a doc cross-reference and the pin's OWN required
+    # order are not inversions).
+    ("Confirm the tool list is complete. Restart your client, then confirm the "
+     "tools are actually there.", True),                      # (f) pre-cue
+    ("Restart your client after confirming the tool list is complete.", True),
+    ("Restart your client after you have verified the tool list is complete.",
+     True),                                                    # (a), auxiliary
+    ("Restart your client, having first confirmed the tool list is complete.",
+     True),                                                    # (b)
+    ("Restart your client, but first confirm the tool list shows "
+     "`tortoise_*`.", True),                                   # (c)
+    ("Restart your client, but confirm the tool list is already complete.",
+     True),                                                    # (d′)
+    ("Restart your client only once the tool list is complete.", True),
+    # …form (e)'s copula was `are`-only (a singular `is` was unreachable behind a
+    # plural object) and its verbs carried plural agreement only, so both these
+    # stayed GREEN with the object widened and no change here (measured):
+    ("Restart your client only once the tool list shows `tortoise_*`.", True),
+    # …and the widening must not red anything it merely has to READ:
+    ("Restart your client, then confirm the tool list is complete.", False),
+    ("Restart your client. Confirm the tool list is complete.", False),
+    ("See the tool list section for the full list. Restart your client, then "
+     "confirm the tools are actually there.", False),
+    ("Restart your client after checking the tool list documentation.", False),
+    ("Restart your client after checking the tool list reference.", False),
+    # a completive `has stopped` is not a presence claim, exactly as its plural
+    # twin (`… once the tools have stopped appearing`) is declared GREEN above:
+    ("Restart your client only once the tool list has stopped changing.", False),
+    # …nor is a POST-cue confirmation of the tool list (the pin's required order):
+    ("Restart your client after changing the config, then confirm the tool "
+     "list is complete.", False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
