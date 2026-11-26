@@ -146,12 +146,15 @@ All numbers below are **derived** by `score_t6.py` from `out/ingest-receipt.json
 the nearest declared concepts are `product-strategy:architecture` (an Object kind, `subclassOf:
 Document`) and `dev`'s `software`/`infrastructure`/`api`/`database`/`code`. The extractor chose
 **`dev:code` for all seven**, whose own kindDef is *"Source code that implements features"*. A runtime
-service is not source code. Measured extras in the type axis — **precision, not traceability**. ⛔ Every row in the table
-below IS stated in the text; the bundle reports **2 of 35 entity names that are NOT**
-(`the seven-component dependency graph`, `ownership accountability convention`) separately, as
-A4's own count in §3. Do not read this table as A4's evidence — an earlier revision's "all
-traceable to text" clause let a reader take it that way, and `VERIFICATION-independent.md:32`
-states the opposite figure in the same bundle:
+service is not source code. Measured extras in the type axis — **precision, not traceability**. ⛔ Read the table below as
+over-typing evidence ONLY. It is not A4's evidence, and **two of its five rows are the bundle's
+own untraceable names**: `the seven-component dependency graph` and `ownership accountability
+convention` do not appear in the corpus text, which is why **2 of the 35 entity names the
+extractor created are untraceable** (A4's own count in §3, and the figure
+`VERIFICATION-independent.md:32` calls "the two untraceable names"). The other three rows are
+stated in the text and are over-typed anyway; an earlier revision of this paragraph claimed
+traceability for all of them and a later one claimed it for "every row", so neither should be
+restored:
 
 | node | typed as | why it is over-typed |
 |---|---|---|

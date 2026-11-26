@@ -1189,29 +1189,52 @@ def test_the_D2_evidence_cell_cites_fields_that_EXIST():
         "A5's probes no longer carry `walk_root_is_entity`, so the cell's "
         "retrieval citation is stale")
 
-def test_the_A1_caveat_states_the_untraceable_figure_it_sits_beside():
-    """Reds if the A1 precision caveat re-claims total traceability (8th review, N1).
+def test_the_A1_caveat_cannot_claim_the_table_is_traceable():
+    """Reds if the A1 caveat asserts traceability of the table it sits beside.
 
-    The sentence said the measured extras were "all traceable to text", while the
-    bundle's own artifact names **2 of 35** entity names as untraceable and
-    `VERIFICATION-independent.md:32` says "the two untraceable names" — two shipped
-    documents disagreeing, with the caveat reading as A4's support. Mutants that
-    flipped the clause stayed green.
+    ⛔ THIS PARAGRAPH HAS NOW BROKEN TWICE IN TWO DIFFERENT SCOPES (8th and 9th
+    fresh-context reviews). It first said the over-typed extras were "precision,
+    all traceable to text" while `A4_no_invention.untraceable_entities` names TWO
+    of them — `the seven-component dependency graph` and `ownership
+    accountability convention` — and `VERIFICATION-independent.md:32` says "the
+    two untraceable names". The 8th-cycle fix moved the qualifier from "the
+    extras" to "every row in the table below IS stated in the text" — and TWO OF
+    THE TABLE'S OWN FIVE ROWS ARE THOSE TWO NAMES, so the sentence refuted itself
+    in its next clause.
+
+    The discriminating power a docstring claims has to be the power its
+    assertions have: the first version of this arm asserted only that the figure
+    string was PRESENT, so it could not see the blanket claim beside it
+    (measured: `Every row in the table below IS stated in the text` ->
+    `... is a verbatim corpus phrase` stayed green). It now pins the TRUE
+    relationship — that the untraceable names are rows of this table — and
+    rejects the blanket shape outright.
     """
     a4 = _score()["A4_no_invention"]
     untraceable = a4["untraceable_counts"]["all_entity_names"]
     checked = a4["entity_names_checked"]
-    assert sorted(u["name"] for u in a4["untraceable_entities"]) == [
-        "ownership accountability convention",
-        "the seven-component dependency graph"], a4["untraceable_entities"]
-    flat = " ".join(_report().split())
-    assert f"**{untraceable} of {checked} entity names that are NOT**" in flat, (
-        f"the A1 caveat does not state A4's own count ({untraceable} of {checked})")
-    for name in ("the seven-component dependency graph",
-                 "ownership accountability convention"):
-        assert f"`{name}`" in flat, f"the caveat does not name {name!r}"
+    names = sorted(u["name"] for u in a4["untraceable_entities"])
+    assert names == ["ownership accountability convention",
+                     "the seven-component dependency graph"], names
 
+    caveat = _report_paragraph(r"^\*\*\\\* The component type is a caveat")
+    assert caveat, "REPORT.md has no A1 caveat paragraph"
 
+    # (a) the TRUE relationship: these two are rows of the table below it
+    assert "two of its five rows are the bundle's own untraceable names" in caveat, (
+        "the caveat no longer states that two of the TABLE's own rows are the "
+        "untraceable ones — that is the self-refuting residue, and narrowing the "
+        f"qualifier is how it recurred: {caveat[:300]!r}")
+    assert f"**{untraceable} of the {checked} entity names the" in caveat, (
+        f"the caveat does not state A4's own count ({untraceable} of {checked})")
+    for name in names:
+        assert f"`{name}`" in caveat, f"the caveat does not name {name!r}"
+
+    # (b) the blanket claim, in either of the two shapes it has taken
+    assert "IS stated in the text" not in caveat, (
+        "the caveat has re-asserted blanket traceability of the table")
+    assert "all traceable to text" not in caveat, (
+        "the caveat has re-asserted 'all traceable to text'")
 def test_the_remaining_prose_figures_are_the_artifacts_figures():
     """Reds on the three figures that sat outside every pin (3rd review, P3).
 
