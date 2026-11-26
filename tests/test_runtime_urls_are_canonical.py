@@ -23,7 +23,9 @@ So the assertions here are on the ARTIFACT (the invite email's own body, the
 The siblings named on #11767 are pinned too: the CORS allowlist that must KEEP
 the retired origin with a recorded removal trigger, the two Supabase edge
 functions whose public allowlists already carry both hosts, and the appeal URL
-whose host moved while its dead `#appeal` fragment did not (#11939).
+whose host moved while its `#appeal` fragment did not — the fragment has since
+been given a target by #11939 (`website/docs.html`), and
+`tests/test_own_site_fragment_targets.py` is the guard for that class.
 
 ⛔ #11767's items 4 and 5 are IN THIS FILE'S SURFACE: the dashboard landing
 pages, the blog origin, and the dashboard's docs links used to spell the retired
@@ -841,7 +843,7 @@ def test_supabase_edge_function_allowlists_agree():
         "front the same marketing pages")
 
 
-# ── The appeal URL — host moved, fragment did NOT (that is #11939) ────────────
+# ── The appeal URL — host moved, and #11939 fixed the fragment it kept ────────
 
 
 def test_appeal_url_default_is_the_canonical_origin(monkeypatch):
@@ -864,15 +866,19 @@ def test_appeal_url_still_follows_the_override(monkeypatch):
     assert abuse.appeal_url() == "https://x.example/appeal"
 
 
-def test_appeal_url_documents_the_dead_fragment_rather_than_implying_it_works():
-    """#11767 §6.1: `#appeal` has no `id="appeal"` on the docs page — it is a
-    pre-existing defect filed as #11939, deliberately NOT fixed here. The
-    docstring must say so, so a host flip is never read as a working appeal
-    link."""
+def test_appeal_url_documents_the_live_fragment_and_names_its_guard():
+    """#11939: `#appeal` had no `id="appeal"` on the docs page, so the docstring
+    said the fragment was DEAD and deliberately unfixed. The section now exists,
+    so the pin inverts rather than retires: the docstring must not still claim
+    the fragment is dead, and it must name the guard that keeps `id="appeal"`
+    from being deleted quietly (a fragment is resolved by the browser, never
+    sent to the server, so no fetch or status check can see it).
+    """
     import inspect
 
     from tortoise import abuse
 
     doc = inspect.getdoc(abuse.appeal_url) or ""
     assert "11939" in doc
-    assert "DEAD" in doc.upper()
+    assert "DEAD" not in doc.upper()
+    assert "test_own_site_fragment_targets" in doc
