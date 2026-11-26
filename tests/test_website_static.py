@@ -5890,7 +5890,11 @@ def _nth_includes_index_one(argument: str) -> bool:
     `:nth-child(2n+1)` / `:nth-child(-n+3)` fail-open that a `b = 1` regex left
     (#14683 independent review, measured).
     """
-    text = "".join(argument.split()).lower()
+    # An `of S` FILTER narrows which children are counted but does not change
+    # that index 1 is still index 1, so it is stripped before parsing: reading
+    # `1 of .doc-grid` as unparseable left a real reset of the ground
+    # uncollected (#14683 independent review, measured).
+    text = "".join(argument.split(" of ")[0].split()).lower()
     if not text:
         return False
     if text == "odd":
@@ -5918,7 +5922,19 @@ def _nth_includes_index_one(argument: str) -> bool:
 #: flex-direction: column`), and a trailing `!important` sets priority, never
 #: the value — grading the raw text false-RED both with a message claiming the
 #: hatch sets no alignment at all (#14683 independent review, measured).
-_TOP_ALIGNING_JUSTIFY = frozenset({"flex-start", "start"})
+_TOP_ALIGNING_JUSTIFY = frozenset({
+    "flex-start", "start",
+    # `space-between` pins the first item to main-start, so it does not centre
+    # either — the auto-margin pair is what centres, and it is required here
+    # exactly as under `flex-start` (#14683 independent review: classifying it
+    # as "does not top-align" silenced the grading, and classifying it as
+    # unclassifiable RED a page that HAS the pair).
+    "space-between",
+    # css-align-3 §4.1: `left`/`right` behave as `start` when the property's
+    # axis is not parallel with the left-right axis — "currently, the only case
+    # ... is in a column flexbox", which is the only context this reader grades.
+    "left", "right",
+})
 
 #: The values this reader can POSITIVELY say do not top-align a column flex box.
 #: Anything outside both of these sets is UNCLASSIFIED (`normal`, `initial`,
@@ -5929,7 +5945,7 @@ _TOP_ALIGNING_JUSTIFY = frozenset({"flex-start", "start"})
 #: path — the absence problem, i.e. RED — which is the same fail-closed doctrine
 #: `_beat_ground_margin_candidates` states for unmodelled conditions.
 _NOT_TOP_ALIGNING_JUSTIFY = frozenset({
-    "center", "safe center", "unsafe center", "end", "flex-end", "right",
+    "center", "safe center", "unsafe center", "end", "flex-end",
     "space-around", "space-evenly",
 })
 #: ⛔ `space-between` is NOT in the set above, and must not be: it pins the
@@ -7177,6 +7193,8 @@ class TestShortViewportCentringIsGradedPerBlock:
                 ("#beat-hero > :nth-child(2n-1)", "margin-top: 0", "first"),
                 ("#beat-hero > :nth-child(-n+3)", "margin-top: 0", "first"),
                 ("#beat-hero > :nth-child(odd)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-child(1 of .doc-grid)", "margin-top: 0",
+                 "first"),
                 ("#beat-hero > :FIRST-CHILD", "margin-top: 0", "first"),
                 ("#beat-hero > :nth-LAST-child(1)", "margin-bottom: 0", "last"),
                 ("#beat-hero > :nth-child( 1 )", "margin-top: 0", "first")):
@@ -7251,14 +7269,25 @@ class TestShortViewportCentringIsGradedPerBlock:
         It was in the "positively non-top-aligning" set, which skipped the
         margin grading, so `justify-content: space-between` with the two `auto`
         rules deleted returned `[]` over a page whose copy is spread and pinned
-        at the top (#14683 independent review, measured).
+        at the top. Classifying it as UNCLASSIFIABLE instead was the opposite
+        error — it RED a page that has the pair, because the unclassified arm
+        reports unconditionally. It belongs with `flex-start`: the arm does not
+        centre, the pair does (#14683 independent review, both directions
+        measured).
         """
-        page = self._page(hatch=self.ALIGNED_HATCH.replace(
+        without_pair = self._page(hatch=self.ALIGNED_HATCH.replace(
             "justify-content: flex-start", "justify-content: space-between"))
-        problems = _short_viewport_centring_problems(page)
+        problems = _short_viewport_centring_problems(without_pair)
         assert problems, (
             "`space-between` left no problem at all — the margin grading was "
             "skipped for an arm that top-pins its first item")
+        assert "no `margin-top: auto` fires" in problems[0], problems
+
+        with_pair = self._page(hatch=self.CENTRED_HATCH.replace(
+            "justify-content: flex-start", "justify-content: space-between"))
+        assert _short_viewport_centring_problems(with_pair) == [], (
+            "`space-between` WITH the auto pair reds — the auto margins absorb "
+            "the free space, so that page centres exactly like the shipped one")
 
     def test_a_commented_out_beat_section_is_not_a_beat(self):
         """A comment is dead to the browser, so it is not a beat (#14683 F1).
