@@ -162,7 +162,9 @@ export function storageKey({ userId, orgId } = {}) {
 
 /** A complete, empty store. */
 export function emptyState() {
-  return { v: 1, snoozed: {}, dismissed: {}, dismissedLast: {}, dismissedFirst: {} }
+  return {
+    v: 1, snoozed: {}, snoozedAt: {}, dismissed: {}, dismissedLast: {}, dismissedFirst: {},
+  }
 }
 
 /** The server's episode gap, mirrored from `tortoise/abuse.py` `EPISODE_GAP_S`
@@ -233,6 +235,20 @@ export function readState(storage, key, now = new Date()) {
     const untilMs = Number(until)
     if (Number.isFinite(untilMs) && untilMs > nowMs) snoozed[episode] = untilMs
   }
+  // WHICH row the reader snoozed — its newest measurement at the moment of the
+  // click. Same sibling-map discipline as `dismissedLast`/`dismissedFirst`, and
+  // the same prune rule: it only survives while its `snoozed` entry does.
+  // ⛔ WITHOUT THIS the incident bound in `effectiveSnoozedUntil` has no anchor
+  // and falls back to a gap-sized clamp — which still bounds the damage, but
+  // cannot tell "the row the reader snoozed" from "a different suspension that
+  // shares its constant customer message".
+  const snoozedAt = {}
+  for (const [episode, at] of Object.entries(
+    isPlainObject(parsed.snoozedAt) ? parsed.snoozedAt : {},
+  )) {
+    const atMs = Number(at)
+    if (episode in snoozed && Number.isFinite(atMs) && atMs > 0) snoozedAt[episode] = atMs
+  }
   const dismissed = {}
   const dismissedEntries = Object.entries(
     isPlainObject(parsed.dismissed) ? parsed.dismissed : {},
@@ -277,7 +293,10 @@ export function readState(storage, key, now = new Date()) {
       dismissedFirst[episode] = firstMs
     }
   }
-  return { state: { v: 1, snoozed, dismissed, dismissedLast, dismissedFirst }, persisted: true }
+  return {
+    state: { v: 1, snoozed, snoozedAt, dismissed, dismissedLast, dismissedFirst },
+    persisted: true,
+  }
 }
 
 /** Write the store. Returns true only when the write is CONFIRMED. */
@@ -293,16 +312,28 @@ export function writeState(storage, key, state) {
 
 // ── Transitions (pure: state in, state out) ────────────────────────────────
 
-/** Snooze one episode for `ms`. A non-positive duration is a no-op. */
-export function snooze(state, episode, ms, now = new Date()) {
+/** Snooze one episode for `ms`. A non-positive duration is a no-op.
+ *
+ *  `alert` is the row the reader actually snoozed, and it is stored as
+ *  `snoozedAt` exactly as `dismiss` stores the row's own `at` as its watermark.
+ *  It is what lets `effectiveSnoozedUntil` answer "is this the row the reader
+ *  snoozed, or a DIFFERENT fact that shares its constant message?" — the same
+ *  question `_episode_acknowledged` answers server-side. Omitting it is not an
+ *  error (a caller with no row in hand): the bound then falls back to the
+ *  gap-sized clamp, which is bounded but cannot be exact.
+ */
+export function snooze(state, episode, ms, now = new Date(), alert = null) {
   const base = state || emptyState()
   const duration = Number(ms)
   if (!episode || !Number.isFinite(duration) || duration <= 0) return base
   const nowMs = now instanceof Date ? now.getTime() : Date.parse(now)
-  return {
+  const next = {
     ...base,
     snoozed: { ...base.snoozed, [episode]: nowMs + duration },
   }
+  const atMs = atMsOf(alert)
+  if (atMs > 0) next.snoozedAt = { ...(base.snoozedAt || {}), [episode]: atMs }
+  return next
 }
 
 /** End an episode's snooze early (the ledger's "Unsnooze"). */
@@ -311,7 +342,9 @@ export function unsnooze(state, episode) {
   if (!episode || !(episode in (base.snoozed || {}))) return base
   const snoozed = { ...base.snoozed }
   delete snoozed[episode]
-  return { ...base, snoozed }
+  const snoozedAt = { ...(base.snoozedAt || {}) }
+  delete snoozedAt[episode]
+  return { ...base, snoozed, snoozedAt }
 }
 
 /** Dismiss one notification locally.
@@ -369,12 +402,64 @@ export function undismiss(state, episode) {
 
 // ── Reading the state for one episode ──────────────────────────────────────
 
-/** The snooze deadline (ms) for an episode, or 0 when it is not snoozed. */
+/** The snooze deadline STORED for a decision key, or 0 when it is not snoozed.
+ *
+ *  ⛔ This is the raw record, NOT the answer to "does this snooze cover this
+ *  row". Suppression goes through `effectiveSnoozedUntil` — a bare deadline is
+ *  the exact shape of the P1 this pair exists to close.
+ */
 export function snoozedUntil(state, episode, now = new Date()) {
   const until = state && state.snoozed ? Number(state.snoozed[episode]) : 0
   if (!Number.isFinite(until) || until <= 0) return 0
   const nowMs = now instanceof Date ? now.getTime() : Date.parse(now)
   return until > nowMs ? until : 0
+}
+
+/** The snooze deadline that actually COVERS one row (ms), or 0.
+ *
+ *  ⛔ THE INCIDENT BOUND, client side, and the counterpart of `isDismissed`'s.
+ *  A snooze is keyed on the DECISION identity (`entryKeyOf`), and for an INCIDENT
+ *  that identity is constant: every `suspend` renders the same customer message,
+ *  so all suspensions share one key. A bare deadline on that key therefore hides
+ *  a genuinely NEW suspension for as long as the deadline runs — measured on the
+ *  pre-fix tree, a one-week snooze left a suspension that happened the next day
+ *  uncounted, with the bell reading ZERO. That is the direction
+ *  `abuse.py::_episode_acknowledged` rejects in so many words: *"The other
+ *  direction (letting an old acknowledgement cover whatever turns up next) would
+ *  silently hide a genuinely new bout."*
+ *
+ *  The rule is the server's own window test: the snooze covers the row the reader
+ *  snoozed (delta 0) and a measurement within `EPISODE_GAP_MS` of it, because two
+ *  measurements inside that gap are the SAME bout. Anything after it is a new
+ *  fact and re-opens.
+ *
+ *  An ACTIVITY row keeps the whole period: its identity is a stable measurement
+ *  (`type|surface:…`), so a long snooze cannot swallow a different bout — the
+ *  recorded decision ("Snooze stays identity-wide because it is bounded by the
+ *  period the reader chose") is unchanged for it.
+ *
+ *  A store written before `snoozedAt` existed has no anchor. The bound then
+ *  clamps to the gap after THIS row's own newest measurement: still never a week
+ *  of hiding, just not exact about which row the reader had in hand. The cap runs
+ *  in the safe direction — it can only let a row come BACK, never hide one.
+ */
+export function effectiveSnoozedUntil(state, entry, now = new Date()) {
+  if (!entry) return 0
+  const until = snoozedUntil(state, entry.key, now)
+  if (!until || !entry.isIncident) return until
+  const nowMs = now instanceof Date ? now.getTime() : Date.parse(now)
+  const atMs = Number(entry.atMs) || 0
+  const anchor = Number(state && state.snoozedAt ? state.snoozedAt[entry.key] : 0) || 0
+  if (anchor > 0) {
+    if (!atMs) return until
+    const delta = atMs - anchor
+    return delta >= 0 && delta <= EPISODE_GAP_MS ? until : 0
+  }
+  // No anchor: nothing on the server side says which row the reader snoozed, so
+  // fall back to the gap after this row's own measurement.
+  if (!atMs) return until
+  const cap = atMs + EPISODE_GAP_MS
+  return cap > nowMs ? Math.min(until, cap) : 0
 }
 
 /** The server timestamp of a row (ms), or 0 when it carries none. */
@@ -820,7 +905,9 @@ export function buildLedger({ alerts, state, now = new Date(), days = OLD_AFTER_
       dismissed.push(entry)
       continue
     }
-    const until = snoozedUntil(state, entry.key, now)
+    // ⛔ NOT `snoozedUntil` (#14694 review P1, the line the finding cited): a bare
+    // stored deadline on a key that every suspension shares hides a NEW one.
+    const until = effectiveSnoozedUntil(state, entry, now)
     if (until) {
       snoozed.push({ ...entry, untilMs: until, untilLabel: untilLabel(until, now) })
       continue

@@ -360,6 +360,55 @@ test('#14694: an INCIDENT cannot be snoozed past the episode gap', () => {
   )
 })
 
+test('#14694: a week-long snooze on an OLD suspension does not hide a NEW one', () => {
+  // The reviewer's measured scenario, end-to-end through the REAL store rather
+  // than through `buildLedger` alone: the feed carries a suspension that happened
+  // 25 h AFTER the one the reader snoozed. `suspend`'s customer message is a
+  // constant, so both rows share one decision key — a bare deadline on that key
+  // hid the new suspension and the bell read ZERO. The store now records WHICH
+  // row was snoozed, so the new fact re-opens inside the episode window and the
+  // badge counts it.
+  const key = 'suspend|Organization suspended by an operator'
+  const oldAt = new Date(NOW.getTime() - 25 * HOUR).toISOString()
+  const seeded = fakeStorage({
+    [storageKey({ userId: USER, orgId: ORG })]: JSON.stringify({
+      v: 1,
+      snoozed: { [key]: NOW.getTime() + 7 * 24 * HOUR },
+      snoozedAt: { [key]: new Date(oldAt).getTime() },
+      dismissed: {},
+      dismissedLast: {},
+      dismissedFirst: {},
+    }),
+  })
+  const suspension = (at) => ({
+    type: 'suspend',
+    label: 'Organization suspended',
+    message: 'Organization suspended by an operator',
+    register: 'alert',
+    at,
+    first_at: at,
+    episode: `suspend||${at}`,
+    acked: false,
+  })
+
+  const fresh = renderBell({ alerts: [suspension(NOW.toISOString())], storage: seeded })
+  assert.equal(
+    bell(fresh.container).getAttribute('aria-label'),
+    'Notifications — 1 unresolved',
+    'a NEW suspension must not be hidden behind an old snooze',
+  )
+  fireEvent.click(bell(fresh.container))
+  assert.ok(
+    rows(fresh.container).some((r) => /Organization suspended/.test(r.textContent)),
+    'and it must be reachable in the ledger, not merely counted',
+  )
+
+  // Non-vacuity: the row the reader actually snoozed is STILL suppressed, so this
+  // is a bound on the incident window and not a removal of snooze.
+  const same = renderBell({ alerts: [suspension(oldAt)], storage: seeded })
+  assert.equal(bell(same.container).getAttribute('aria-label'), 'Notifications')
+})
+
 test('#14686: a snooze that runs out while the panel sits OPEN comes back on its own', () => {
   // The render clock was frozen at the last interaction and there was no timer, so
   // a row snoozed at 09:00 was still hidden at 14:00 in the same tab (review

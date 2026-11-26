@@ -509,7 +509,11 @@ export function NotificationBell({
   }
 
   const handleSnooze = (entry, ms) => {
-    persist(snooze(ledger.state, entry.key, ms, freshClock()))
+    // `entry.alert` travels for the same reason `handleDismiss` passes it: the
+    // store records WHICH row was snoozed, so a later row that merely shares the
+    // constant customer message of an `incident` is not covered by this one
+    // (#14694 review P1 — a bare deadline hid a genuinely NEW suspension).
+    persist(snooze(ledger.state, entry.key, ms, freshClock(), entry.alert))
     // #14694 (review finding): a snooze from the LIST removes the focused
     // `<select>` from the DOM (the row moves into the Snoozed group), and a
     // removed active element drops focus to `<body>` with the panel still open.
