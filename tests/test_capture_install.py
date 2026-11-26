@@ -1409,6 +1409,49 @@ def test_pi_install_re_asserts_a_farm_recreated_identical_second_producer(home):
         capture_install.PI_EXTENSION_NAME]
 
 
+def test_pi_install_dry_run_re_assert_mutates_nothing(home):
+    """The RE-ASSERT arm is the one path in this module that DELETES a live
+    producer, so its ``dry_run`` gate is the only thing between a preview and a
+    deleted capture producer. Every other refusal here is evaluated outside
+    ``if not dry_run`` by construction; this unlink cannot be, so it needs its
+    own proof rather than the argument that the surrounding code is careful
+    (#14695 review round 1, P2 — measured: deleting the ``if dry_run:`` return
+    made a ``--dry-run`` unlink the live producer, and the whole suite stayed
+    green at 291 passed).
+
+    No other test reaches this shape: the plain dry-run test exercises
+    ``active`` with NO ``retired`` copy present, which returns at an earlier
+    arm, so it never exercises this gate.
+
+    Mutation: delete the ``if dry_run: return ...`` above ``active.unlink()``
+    (a preview silently changes what the box captures)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    body = "// agent-infra producer\nexport default 1\n"
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.write_text(body)
+    recreated = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    recreated.write_text(body)
+
+    res = install_capture("pi", home=home, dry_run=True)
+
+    assert res.ok, res.error
+    # Nothing was touched: the live producer still exists and the preserved
+    # bytes are intact.
+    assert recreated.read_text() == body, "a dry run removed the live producer"
+    assert retired.read_text() == body, "a dry run lost the preserved bytes"
+    assert res.changed_artifacts == (), res.changed_artifacts
+    # ...but the step the real run performs is named.
+    assert any("[dry-run] would re-assert" in a for a in res.actions), res.actions
+
+    # And the real run on the SAME shape does perform it, so the preview is not
+    # a different story from what happens.
+    real = install_capture("pi", home=home)
+    assert real.ok, real.error
+    assert not recreated.exists(), "the re-created duplicate is still registered"
+    assert any("re-asserted" in a for a in real.actions), real.actions
+
+
 def test_pi_install_refuses_a_symlinked_preservation_target(home):
     """The re-assert path deletes the live copy, so the PRESERVATION TARGET must
     be a real, distinct file. `_sha256_file` follows symlinks: a `retired` that
@@ -2544,6 +2587,50 @@ def test_retire_pi_entry_refuses_to_overwrite_a_preserved_copy(home):
     assert preserved.read_text() == "// PRESERVED OLD BYTES\n", (
         "the only preserved copy was overwritten")
     assert live.exists(), "the live producer was moved despite the refusal"
+
+
+def test_retire_pi_entry_does_not_half_retire_a_two_entry_directory(home):
+    """A refusal must describe an UNTOUCHED disk (#14695 review round 1, P2).
+
+    The directory branch retires ``index.ts`` and ``index.js``, and it used to
+    interleave check-and-rename per name. With BOTH present and an existing
+    ``index.js.disabled`` it renamed ``index.ts`` first and then refused on
+    ``index.js`` — so a retirement LANDED while the caller returned
+    ``(False, [], msg)`` with no action naming it (the #10241 doctrine, which
+    this module enforces on every other path). The same function serves both the
+    second producer's plane and the legacy plane, so both were affected.
+
+    Why this survived: the sibling collision test
+    (``test_pi_install_refuses_to_overwrite_a_preserved_entry_point``) puts only
+    ONE entry point in the directory, so it never exercises the ordering.
+
+    Mutation: restore the per-name interleaved check-and-rename — this row REDs
+    because ``index.ts`` is gone from the live directory despite the refusal."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "index.ts").write_text("// ts entry\n")
+    (producer / "index.js").write_text("// js entry\n")
+    # The obstacle is on the SECOND name only, so a per-name loop renames the
+    # first one before it ever looks at it.
+    (producer / "index.js.disabled").write_text("// DO NOT LOSE ME\n")
+
+    # The preview must refuse too: the refusal is evaluated by the same code
+    # that performs the renames.
+    planned = capture_install._retire_pi_entry(producer, dry_run=True)
+    assert planned and "overwrite preserved bytes" in planned, planned
+
+    error = capture_install._retire_pi_entry(producer)
+    assert error and "overwrite preserved bytes" in error, error
+
+    # ⛔ The whole point: the refusal left NOTHING retired. A caller that gets
+    # an error may not have a change on disk to discover by inspection.
+    assert (producer / "index.ts").exists(), (
+        "the retirement half-ran: index.ts was renamed away by a refusing call")
+    assert not (producer / "index.ts.disabled").exists(), (
+        "a refusing call left a retired entry point behind, named by no action")
+    assert (producer / "index.js.disabled").read_text() == "// DO NOT LOSE ME\n", (
+        "the only preserved copy was overwritten")
 
 
 def test_legacy_obstacle_names_a_symlinked_retired_copy(home):

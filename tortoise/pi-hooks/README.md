@@ -260,8 +260,9 @@ The two surfaces a human actually **copies into a shell** — the install snippe
 above and the dashboard's `PI_CAPTURE_INSTALL`
 (`website/apps/dashboard/src/harnesses.js`, pinned by `harnesses.test.js` and the
 wizard snapshots) — shipped the disproven dotfile rule as an instruction until
-review round 8 of #14342: following them retired nothing. Both now perform the
-entry-point retirement and the second producer's, in the installer's order. If
+review round 8 of #14342: following them retired nothing. Both now name
+`tortoise install pi`, which performs the entry-point retirement and the second
+producer's, in that order — neither surface re-implements it. If
 the routine changes, change all of them in one commit — a snippet that drifts
 from this section is the false claim, not a stale measurement.
 

@@ -2115,6 +2115,22 @@ def _retire_pi_entry(path: Path, *, dry_run: bool = False) -> str | None:
                             "renaming its files would leave that manifest "
                             "pointing at nothing. Move the directory aside by "
                             "hand.")
+            # ⛔ CHECK EVERY COLLISION BEFORE RENAMING ANY ENTRY (#14695 review
+            # round 1, P2). This loop used to interleave check-and-rename per
+            # name: with `index.ts` present and an existing `index.js.disabled`
+            # it renamed `index.ts` and THEN refused on `index.js`. The
+            # retirement lands on disk while the caller returns
+            # `(False, [], msg)`, so no action names it — the #10241 "a failure
+            # that reports zero actions over a modified disk" doctrine this
+            # module enforces everywhere else, skipped by the one branch that
+            # can retire MORE THAN ONE entry. Reproduced on both the second
+            # producer's plane and the legacy plane, which share this function.
+            #
+            # The fix is the ORDER, not a partial receipt: with no rename
+            # performed until every refusal has been cleared, a refusal always
+            # describes an untouched disk, so a receipt is never owed for work
+            # that happened.
+            entries_to_retire: list[Path] = []
             for name in ("index.ts", "index.js"):
                 entry = path / name
                 # ⛔ `exists`, NOT `is_file` — PI USES `fs.existsSync` (#14342
@@ -2135,8 +2151,10 @@ def _retire_pi_entry(path: Path, *, dry_run: bool = False) -> str | None:
                         # already has.
                         return (f"{preserved} already exists — retiring "
                                 f"{entry} would overwrite preserved bytes")
-                    if not dry_run:
-                        entry.rename(preserved)
+                    entries_to_retire.append(entry)
+            if not dry_run:
+                for entry in entries_to_retire:
+                    entry.rename(path / f"{entry.name}.disabled")
             return None
         # ⛔ THE PLAIN-FILE BRANCH MUST REFUSE LIKE ITS SIBLINGS (#14342 round
         # 25, finding 1). The symlink branch above and the directory-entry
