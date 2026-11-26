@@ -419,10 +419,11 @@ test('the INCIDENT GATE: what HAPPENED after a dismissal is not covered by it', 
   // The INCIDENT register applies the same window test as ACTIVITY before its own
   // watermark gate (`abuse.py`: `matched = overlap or (0 <= delta <= gap_s)`
   // first, the `acked_through` check AFTER). Reproduced against
-  // `abuse._episode_acknowledged`: an older flag row is NOT covered by a newer
-  // acknowledgement, on the same rule and on a different one. The two rows share
-  // a client-visible key because a flag's message is a constant that omits the
-  // rule — so without the window test, dismissing one rule's row hid another's.
+  // `abuse._episode_acknowledged`: an older row is NOT covered by a newer
+  // acknowledgement, on the same rule and on a different one. The two rows share a
+  // client-visible key whenever their messages match — which is what a flag's
+  // constant message did until #14702 put the measured numbers in it — so without
+  // the window test, dismissing one row hid another's fact.
   const oldFlag = alert({
     message: 'Suspicious activity flagged on this Organization',
     at: new Date(NOW.getTime() - 3 * DAY).toISOString(),

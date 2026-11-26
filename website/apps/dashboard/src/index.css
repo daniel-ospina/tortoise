@@ -1363,8 +1363,10 @@ tr.graph-delete-arm td { background: rgba(248, 113, 113, 0.06); }
 }
 .notif-detail-fields dt { color: var(--text-dim, #94a3b8); }
 .notif-detail-fields dd { margin: 0; }
-/* The honest "nothing else was recorded" panel. Deliberately styled as a NOTICE,
-   not an error: it reports a limit of the record, not a failure of the read. */
+/* The honest "no further detail in the feed" notice, and the "machine detail we
+   do not display" one beside it. Deliberately styled as a NOTICE, not an error:
+   it reports a limit of what the FEED carries, not a failure of the read and not
+   a claim about the record (the record can hold detail the server withholds). */
 .notif-nodetail {
   background: rgba(255,255,255,0.03); border: 1px solid var(--border, #334155);
   border-radius: 8px; padding: 8px 10px; margin: 8px 0; font-size: 12px;

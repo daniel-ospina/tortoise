@@ -483,9 +483,11 @@ export function isDismissed(state, episode, alert = null) {
   // (0 <= delta <= gap_s)` first, `if not matched: continue`, and the incident
   // `acked_through` check AFTER it). This function used to test the watermark for
   // the INCIDENT register and never consult the window at all — so dismissing a
-  // NEWER incident covered an OLDER, never-dismissed one, because the two share a
-  // client-visible key (`entryKeyOf` is `type|message`, and a flag's message is a
-  // constant that omits the rule). Measured against the shipped module and
+  // NEWER incident covered an OLDER, never-dismissed one, because the two shared a
+  // client-visible key (`entryKeyOf` is `type|message`; a flag's message WAS a
+  // constant that omitted the rule until #14702 put the measurements into it — the
+  // collision this gate still bounds is the scope-only `read_velocity` one).
+  // Measured against the shipped module and
   // reproduced against `abuse._episode_acknowledged`: the server answers "not
   // covered" for the older row on BOTH a different rule and the same rule, and
   // this file answered "covered". That is a hidden incident — the register this
