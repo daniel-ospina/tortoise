@@ -412,36 +412,37 @@ test('#14686: an in-flight alerts read cannot land on the wrong Organization', (
   assert.ok(start !== -1, 'loadAlerts must exist in main.jsx')
   const end = main.indexOf('\n  }', start)
   const body = main.slice(start, end)
-  // ⛔ BOTH HALVES ARE LOAD-BEARING, and they are different claims.
+  // ⛔ THE STRICT FORM IS THE CORRECT ONE, and the comment that used to sit here
+  // argued the opposite from a false premise. Worth spelling out, because the
+  // weakening it justified looks like ordinary defensive coding and has already
+  // been propagated once by a peer lane that read it as such.
   //
-  // (a) `orgIdRef.current &&` — the guard must discard a KNOWN-but-different
-  //     Organization, never a NOT-YET-KNOWN one. `completeLogin` calls
-  //     `loadAlerts(t.org_id)` and does NOT call `setCurrentOrgId`, and it only
-  //     bails above when `orgIdRef.current` is truthy AND differs, so on a fresh
-  //     login `orgIdRef` is still null when this response lands. Written without
-  //     the falsy allowance, `null !== tid` reads as "stale" and the SIGN-IN'S OWN
-  //     feed load is dropped: an empty bell until the next team switch, which is
-  //     the very defect this change removes. Asserted in both directions, because
-  //     the falsy-blind form still "has a guard" and reads as correct.
-  // (b) EVERY WRITE, not just the success one — a `match` anywhere in the function
-  //     is satisfied by a guard sitting in the success branch alone: that mutant
-  //     stayed GREEN while the failure arms stamped the previous Organization's
-  //     failed read onto the new one's state ("the alerts could not be loaded"
-  //     about a read the new org never made). So the guard is pinned where it has
-  //     to be — immediately before each write — and both failure arms are counted.
-  assert.match(body, /if \(orgIdRef\.current && orgIdRef\.current !== tid\) return/,
+  // `completeLogin` has ONE call site, and the #1912 first-healthy pin sets
+  // `orgIdRef` before it ("pin the first HEALTHY team BEFORE completeLogin"). The
+  // guard immediately above its `loadAlerts(t.org_id)` call RETURNS when both are
+  // truthy and differ, so that call is only ever REACHED when
+  // `orgIdRef.current === t.org_id`. A null `orgIdRef` there is therefore the
+  // LOGOUT path (`orgIdRef.current = null`), where a late response must be
+  // discarded — not "a fresh login". `orgIdRef.current &&` opens that logout
+  // window and buys nothing, so the pin FORBIDS it.
+  //
+  // (b) is a different claim and still holds: EVERY write must be guarded, not
+  // just the success one — a `match` anywhere in the function is satisfied by a
+  // guard sitting in the success branch alone, while the failure arms stamp the
+  // previous Organization's failed read onto the new one's state.
+  assert.match(body, /if \(orgIdRef\.current !== tid\) return/,
     'a response for an Organization that is no longer current must be discarded')
+  assert.doesNotMatch(body, /if \(orgIdRef\.current && orgIdRef\.current !== tid\) return/,
+    'the falsy-tolerant form is a regression: `null` is the LOGOUT path, not a fresh login')
   // (b) …and where it has to be: before EACH write. A guard anywhere in the body
   //     is satisfied by one in the success branch, which is the mutant that stayed
   //     green.
-  assert.match(body, /if \(orgIdRef\.current && orgIdRef\.current !== tid\) return\s*\n\s+setAlerts\(feed\.alerts\)/,
+  assert.match(body, /if \(orgIdRef\.current !== tid\) return\s*\n\s+setAlerts\(feed\.alerts\)/,
     'the success write must be discarded when the Organization changed mid-read')
   const failureGuards = body.match(
-    /if \(orgIdRef\.current && orgIdRef\.current !== tid\) return\s*\n\s+setAlertsUnavailable\(true\)/g) || []
+    /if \(orgIdRef\.current !== tid\) return\s*\n\s+setAlertsUnavailable\(true\)/g) || []
   assert.equal(failureGuards.length, 2,
     'BOTH failure arms (non-2xx and throw) must be guarded — not only the success branch')
-  assert.doesNotMatch(body, /if \(orgIdRef\.current !== tid\) return/,
-    "the falsy-blind form drops the LOGIN path's own read — `orgIdRef` is null there")
 })
 
 // ── The durable write path (main.jsx) ───────────────────────────────────────

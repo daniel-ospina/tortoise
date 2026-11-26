@@ -197,6 +197,16 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
   const error = ackError && alert && ackError.episode === (alert && alert.episode)
     ? ackError.message
     : ''
+  // #14686 (review finding 5): opening the detail UNMOUNTS the whole list, and the
+  // `.notif-open` button that had focus goes with it — so focus fell to `<body>`
+  // and a keyboard user's next Tab restarted at the top of the document.
+  // `goBack()` already restores focus deliberately; the OPEN direction is the half
+  // that was never handled. Moving focus into the view closes the pair, and it is
+  // also what keeps the panel's Escape handling reachable.
+  const detailRef = React.useRef(null)
+  React.useEffect(() => {
+    if (detailRef.current) detailRef.current.focus()
+  }, [])
   return (
     // `role="group"` is NOT decoration: a bare `<div>` has implicit `role=generic`,
     // which is on WAI-ARIA 1.2's *Name prohibited* list (§5.2.8.6), so the
@@ -205,7 +215,8 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
     // itself already uses (`.notif-panel`, `role="group"` + `aria-label`), and it
     // is what makes the name real rather than merely present in the DOM
     // (review finding F4).
-    <div className="notif-detail" role="group" aria-label={DETAIL_TITLE}>
+    <div className="notif-detail" role="group" aria-label={DETAIL_TITLE}
+         ref={detailRef} tabIndex={-1}>
       <button type="button" className="ghost small notif-back" onClick={onBack}>
         ← {DETAIL_BACK}
       </button>
@@ -480,9 +491,23 @@ export function NotificationBell({
   // unmounts `DetailView`, which was the only place the sentence rendered: the
   // panel silently reverted to the bare ledger and the reader was told nothing.
   // That is exactly the unactionable outcome this change exists to remove, so
-  // the ledger branch states it too — the message outlives the row it is about
-  // (review finding F1).
-  const ackNote = ackError && !detailAlert && ackError.orgId === orgId
+  // the panel states it too — the message outlives the row it is about.
+  //
+  // Three conditions, each for a different defect:
+  //  * `ackError.orgId === orgId` — the refusal names an Organization, and a
+  //    response still in flight when a switch cleared it can land afterwards;
+  //  * the message OR the label must exist, or there is nothing to say;
+  //  * ⛔ `!(detailAlert && …)` — "is the OPEN detail this episode", NOT "is any
+  //    detail open" (review finding 3). Gated on `!detailAlert`, the refusal was
+  //    hidden whenever a DIFFERENT row's detail was open: `DetailView` renders it
+  //    only for a matching episode, so both renders went empty and the sentence
+  //    vanished on the reader's very next click. Drawn in the panel CHROME, above
+  //    the branch, so exactly one place owns it in every state — the detail inline
+  //    when the detail IS that episode, the chrome otherwise.
+  const ackNote = ackError
+    && ackError.orgId === orgId
+    && (ackError.label || ackError.message)
+    && !(detailAlert && detailAlert.episode === ackError.episode)
     ? ackError
     : null
 
@@ -553,6 +578,20 @@ export function NotificationBell({
             {count ? <span className="dim small">{count} unresolved</span> : null}
           </div>
 
+          {/* A refusal outlives the row it is about: the feed re-read that follows
+              a 404 drops the episode, so `DetailView` — the only place this
+              sentence used to render — unmounts under the reader. It lives in the
+              CHROME, above the branch below, so it is on screen in every state
+              that does not already state it inline (`DetailView` owns it when the
+              open detail IS the episode it names); a different row's detail open
+              used to hide it entirely (review finding 3). */}
+          {ackNote ? (
+            <p className="error small notif-note" role="alert">
+              {ackNote.label ? <><strong>{ackNote.label}</strong> — </> : null}
+              {ackNote.message}
+            </p>
+          ) : null}
+
           {detailAlert ? (
             <DetailView
               alert={detailAlert}
@@ -566,16 +605,6 @@ export function NotificationBell({
             />
           ) : (
             <>
-              {/* A refusal outlives the row it is about: the feed re-read that
-                  follows a 404 drops the episode, so `DetailView` — the only place
-                  this sentence used to render — unmounts under the reader. Stated
-                  here it is still on screen after the read that caused it. */}
-              {ackNote ? (
-                <p className="error small notif-note" role="alert">
-                  {ackNote.label ? <><strong>{ackNote.label}</strong> — </> : null}
-                  {ackNote.message}
-                </p>
-              ) : null}
               {/* The three "we cannot see everything" facts, stated where the
                   reader is, never as "no notifications" (which is a claim about
                   the Organization's state that a failed read cannot support). */}

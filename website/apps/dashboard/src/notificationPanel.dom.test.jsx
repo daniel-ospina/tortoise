@@ -926,6 +926,80 @@ test('#14686: a refusal does not follow the reader into another Organization', (
     'the same refusal must render on the Organization it belongs to')
 })
 
+test('#14694: a refusal is not hidden by ANOTHER row\'s detail being open', () => {
+  // Review finding 3. `DetailView` states the refusal inline only when the open
+  // detail IS the episode it names. Gating the other render on "no detail is
+  // open" left BOTH renders empty the moment the reader clicked a different row —
+  // the sentence vanished on their next action, which is the same
+  // unreadable-refusal defect one click later.
+  const refused = alert({ label: 'refused row', at: new Date(NOW.getTime() - 5 * MIN).toISOString() })
+  const other = alert({ label: 'another row', at: new Date(NOW.getTime() - 9 * MIN).toISOString() })
+  const { container } = renderBell({
+    alerts: [refused, other],
+    canAcknowledge: true,
+    onAcknowledge: () => {},
+    ackError: {
+      episode: refused.episode,
+      orgId: ORG,
+      label: 'refused row',
+      message: 'That alert is no longer in the feed — reload to refresh.',
+    },
+  })
+  fireEvent.click(bell(container))
+  const target = [...container.querySelectorAll('.notif-open')]
+    .find((b) => /another row/.test(b.getAttribute('aria-label') || ''))
+  assert.ok(target, 'precondition: the other row is openable')
+  fireEvent.click(target)
+  assert.ok(container.querySelector('.notif-detail'), 'precondition: a detail IS open')
+  const note = [...container.querySelectorAll('.notif-note')]
+    .find((p) => /no longer in the feed/.test(p.textContent))
+  assert.ok(note, 'the refusal must stay visible — DetailView states it only for its OWN episode')
+})
+
+test('#14694: the refusal is stated ONCE when its OWN detail is open', () => {
+  // The other half of the same condition: with the note in the chrome, dropping
+  // the `detailAlert.episode` test would state the sentence TWICE — once inline by
+  // `DetailView`, once above it — which reads as two failures, not two views of
+  // one.
+  const refused = alert({ label: 'refused row' })
+  const { container } = renderBell({
+    alerts: [refused],
+    canAcknowledge: true,
+    onAcknowledge: () => {},
+    ackError: {
+      episode: refused.episode,
+      orgId: ORG,
+      label: 'refused row',
+      message: 'Only an owner or admin can acknowledge an alert.',
+    },
+  })
+  fireEvent.click(bell(container))
+  fireEvent.click(container.querySelector('.notif-open'))
+  assert.ok(container.querySelector('.notif-detail'), 'precondition: the detail is open')
+  const hits = [...container.querySelectorAll('p')]
+    .filter((p) => /Only an owner or admin can acknowledge an alert\./.test(p.textContent))
+  assert.equal(hits.length, 1, 'the refusal must be stated exactly once, not inline AND in the chrome')
+})
+
+test('#14694: opening a detail TAKES focus, it does not drop it to <body>', () => {
+  // Review finding 5. Opening unmounts the whole list — including the
+  // `.notif-open` button that had focus — and `DetailView` took none, so
+  // `document.activeElement` became `BODY` and a keyboard user's next Tab
+  // restarted at the top of the document. `goBack()` already restores focus, so
+  // the OPEN direction was the unhandled half of the pair.
+  const { container } = renderBell({ alerts: [alert({ label: 'focus me' })] })
+  fireEvent.click(bell(container))
+  const openBtn = container.querySelector('.notif-open')
+  openBtn.focus()
+  fireEvent.click(openBtn)
+  const detail = container.querySelector('.notif-detail')
+  assert.ok(detail, 'precondition: the detail is open')
+  assert.notEqual(document.activeElement, document.body,
+    'focus must not fall to <body> when the list unmounts under it')
+  assert.equal(document.activeElement, detail,
+    'focus must move INTO the detail view, so the next Tab starts inside it')
+})
+
 // ── 6. The feed's "we could not look" facts survive the move ────────────────
 
 test('#14686: a failed read is not "you have no notifications"', () => {

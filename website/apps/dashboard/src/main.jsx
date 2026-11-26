@@ -5458,18 +5458,19 @@ function claimIntentInFlight() {
         // written against them land in the NEW org's key. Same guard discipline
         // as the members/graphs loaders.
         //
-        // ⛔ `orgIdRef.current &&` is load-bearing, not defensive noise: this
-        // guard must DISCARD a KNOWN-but-different org, never a NOT-YET-KNOWN
-        // one. `completeLogin` calls `loadAlerts(t.org_id)` and does NOT call
-        // `setCurrentOrgId` — it only bails above when `orgIdRef.current` is
-        // truthy AND differs (`if (t?.org_id && orgIdRef.current && ...)`), so
-        // on a fresh login `orgIdRef` is still null here (logout sets it null at
-        // `setCurrentOrgId(null)`'s sibling). Without the falsy allowance this
-        // `null !== tid` reads as "stale" and the sign-in's own feed load is
-        // dropped — an empty bell until the next team switch, which is the
-        // defect this PR exists to fix. The same convention the guard three
-        // lines up the call stack already uses.
-        if (orgIdRef.current && orgIdRef.current !== tid) return
+        // ⛔ THE STRICT FORM IS THE CORRECT ONE, and this comment replaces one
+        // that argued the opposite from a false premise — worth spelling out,
+        // because the weakening looks like ordinary defensive coding and has
+        // already been propagated once by a peer lane that read it as such.
+        // `completeLogin` has ONE call site, and the #1912 first-healthy pin sets
+        // `orgIdRef` before it ("pin the first HEALTHY team BEFORE completeLogin");
+        // the guard immediately above its `loadAlerts(t.org_id)` call RETURNS when
+        // both are truthy and differ, so that call is only ever REACHED when
+        // `orgIdRef.current === t.org_id`. A null `orgIdRef` there is therefore the
+        // LOGOUT path (`orgIdRef.current = null`), where a late response must be
+        // discarded — not "a fresh login". Adding `orgIdRef.current &&` opens that
+        // logout window and buys nothing (review finding 1).
+        if (orgIdRef.current !== tid) return
         setAlerts(feed.alerts)
         setAlertsSaturated(feed.saturated)
         setAlertsUnavailable(feed.unavailable)
@@ -5478,17 +5479,15 @@ function claimIntentInFlight() {
         // applies here as on the success branch: stamping A's failed read onto B's
         // state makes B's closed bell say "the alerts could not be loaded" about a
         // read B never made — a claim about the wrong Organization (review finding).
-        // `orgIdRef.current &&` for the same reason as the success branch: a read
-        // that lands before an Organization is KNOWN (the login path) is the login's
-        // own, not a stale one.
-        if (orgIdRef.current && orgIdRef.current !== tid) return
+        // Strict form, for the reason given on the success branch.
+        if (orgIdRef.current !== tid) return
         setAlertsUnavailable(true)
       }
     } catch {
       // Best-effort — alert history never blocks the dashboard — but the panel
       // must be able to say it could not look. Guarded for the same reason as the
       // arms above: the read may have started before an Organization switch.
-      if (orgIdRef.current && orgIdRef.current !== tid) return
+      if (orgIdRef.current !== tid) return
       setAlertsUnavailable(true)
     }
   }
