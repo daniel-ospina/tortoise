@@ -1118,6 +1118,24 @@ def test_the_quote_breakdown_in_the_report_is_the_claim_layer():
         == audit["quotes_total"], (
         "the audit's three buckets no longer sum to its own quotes_total, so "
         "the trio §7 states is not a partition of what it audited")
+    # ⛔ THE DECIDER'S FOURTH BUCKET MUST BE IN THE SAME PARAGRAPH (#14723 review,
+    # cycle 2, P2). §7 named the decider as `11 / 27 / 9` and stopped, omitting
+    # `summary_in_one_turn` (3) — so the one paragraph that exists to reconcile the
+    # two reads stated a partition summing to 47 of 50, and the §3/A4 table that
+    # DOES carry the 3 sat far away, where no assertion compared the two. The
+    # paraphrase pin above cannot catch it: `**3**` appears in §3, so a whole-report
+    # `in flat` check is satisfied by a section §7 never consults.
+    paras = [p for p in _report().split("\n\n") if want in " ".join(p.split())]
+    assert len(paras) == 1, (
+        f"§7's quote breakdown appears in {len(paras)} paragraphs, expected 1 — "
+        "a second copy could disagree with the first")
+    assert (f"**{cl['summary_in_one_turn']}**" in paras[0]
+            or f"{cl['summary_in_one_turn']} summaries" in paras[0]), (
+        "§7 states the decider's buckets WITHOUT the summary bucket "
+        f"({cl['summary_in_one_turn']}): the partition it names then sums to "
+        f"{cl['verbatim'] + cl['paraphrase'] + cl['invented']} of "
+        f"{cl['quotes_total']}, and the missing bucket is the one that tells the "
+        "TURN read from the SENTENCE read")
 
 
 def test_the_orphan_second_measurement_agrees_with_the_primary():
