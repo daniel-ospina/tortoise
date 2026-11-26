@@ -1765,8 +1765,13 @@ _INVERSION_FORMS = (
     #     FALSE RED on the wider first cut of this form).
     #     The auxiliary is spelled out AND contracted: "… after you've verified
     #     the tools …" was GREEN (measured) while the uncontracted twin was RED.
+    #     One inserted ADVERB between the auxiliary and the predicate defeated
+    #     the whole form — "… after you have first verified the tools …" was
+    #     GREEN (measured) while its bare twin is a declared RED row, the same
+    #     one-inserted-word class `c30589f4df458` closed one form over.
     _inversion_form(
         r"\b(?:after|once|when|if)\s+(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
+        r"(?:(?:first|already|just|also)\s*,?\s+)?"
         + _CONFIRM_PREDICATE
         + r"[^\n]*?\btools\b"
     ),
@@ -1784,10 +1789,16 @@ _INVERSION_FORMS = (
         + r"[^\n]*?\btools\b"
     ),
     # (d) a marker trailing the object, unambiguous about the order:
-    #     "… confirm the tools are actually there beforehand".
+    #     "… confirm the tools are actually there beforehand". `first` and
+    #     `already` are the SAME order claim one word over and were GREEN
+    #     (measured) — "… confirm the tools are actually there first" is a
+    #     one-word substitution of a declared RED row. Form (c) excludes only a
+    #     BARE LEADING `first` (whose forward reading "Restart your client first
+    #     and confirm …" is a real alternative); it says nothing about the
+    #     trailing position, where the order is not ambiguous.
     _inversion_form(
         _CONFIRM_PREDICATE + r"[^\n]*?\btools\b[^\n]*?"
-        r"\b(?:beforehand|before restarting|before you restart)\b"
+        r"\b(?:beforehand|before restarting|before you restart|first|already)\b"
     ),
     # (e) the restart conditioned on the tools ALREADY being present:
     #     "Restart your client only once the tools are actually there",
@@ -2053,7 +2064,8 @@ def _restart_cue_order_violation(quick: str) -> str | None:
         if merged and re.match(r"(?i)^and\b", clause.lstrip('—–-:;(\'" \t')):
             merged[-1] = f"{merged[-1]}, {clause}"
         elif (merged and (introducer := _SEQUENCER_TAIL_RE.search(merged[-1]))
-                and not _ADVERSATIVE_LEAD_RE.match(clause)):
+                and not _ADVERSATIVE_LEAD_RE.match(
+                    clause.lstrip(_PRE_CUE_PREFIX))):
             # ⛔ A SEQUENCER THAT INTRODUCES THE NEXT CLAUSE MAY SIT ON EITHER
             # SIDE OF ITS OWN COMMA, and both sides detach the clause it
             # introduces — after which the skip below cannot see it. A comma
@@ -2064,13 +2076,23 @@ def _restart_cue_order_violation(quick: str) -> str | None:
             # …", "… and afterwards, …", "…, then afterwards, …" — because the
             # match here only ever admitted a clause that was NOTHING BUT the
             # sequencer, so an introducer sharing its clause with the cue text
-            # was invisible. The introducer is re-attached to the clause it
-            # introduces (never dropped, and never swallowing more of the cue
-            # than the sequencer run itself), so `_FORWARD_SEQUENCER_RE` sees it.
-            merged[-1] = f"{introducer.group('seq').strip(' \t,')}, {clause}"
+            # was invisible. The introducer is APPENDED as its own clause, not
+            # substituted for `merged[-1]`: substituting ERASES everything left
+            # of the sequencer, and with it any inversion that clause carried
+            # (measured — "…, but first confirm the tools are actually there AND
+            # THEN, run …" went GREEN, a false PASS of form (c), and the same
+            # append-free shape defeated forms (a) and (d)). `_PRE_CUE_PREFIX`
+            # is stripped before the adversative test because the docs are
+            # markdown — "**but first confirm …**" and "(but first …)" are the
+            # same word to a reader and were GREEN (measured).
+            merged.append(f"{introducer.group('seq').strip(' \t,')}, {clause}")
         else:
             merged.append(clause)
-    post_clauses = merged
+    # Post-cue clauses get the SAME decoration strip the pre-cue side gets
+    # (`:2025`). Without it form (c)'s `^` anchor never sees a bolded, quoted or
+    # parenthesised adversative, so "and then, **but first confirm the tools are
+    # actually there**, run …" stayed GREEN (measured).
+    post_clauses = [c.strip().lstrip(_PRE_CUE_PREFIX).strip() for c in merged]
     for clause in pre_clauses:
         if _confirmation_scopes_the_config(clause):
             continue
@@ -2348,6 +2370,34 @@ def test_3232_generic_restart_lines_are_exact():
     # contracted auxiliary: the uncontracted twin was graded, this was not:
     ("Restart your client after you've verified the tools are actually there.",
      True),
+    # ── cycle 18: an ORTHOGRAPHIC or POSITIONAL one-word change defeated a form,
+    #    each measured GREEN where its twin is the declared RED row above ─────
+    # the introducer must be APPENDED, not substituted for the clause it follows:
+    # substituting erased that clause and with it the inversion it carried.
+    ("Restart your client, but first confirm the tools are actually there and "
+     "then, run `tortoise mcp-status`.", True),
+    ("Restart your client after confirming the tools are actually there and "
+     "then, run `tortoise mcp-status`.", True),
+    ("Restart your client, confirm the tools are actually there beforehand and "
+     "then, run `tortoise mcp-status`.", True),
+    # markdown decoration is not a hedge — `_PRE_CUE_PREFIX` before the
+    # adversative test AND before form (c)'s `^` anchor:
+    ("Restart your client and then, **but first confirm the tools are actually "
+     "there**, run `tortoise mcp-status`.", True),
+    ("Restart your client and then, (but first confirm the tools are actually "
+     "there), run `tortoise mcp-status`.", True),
+    # one inserted ADVERB between the auxiliary and the predicate (form (a)):
+    ("Restart your client after you have first verified the tools are actually "
+     "there.", True),
+    ("Restart your client after you have already verified the tools are actually "
+     "there.", True),
+    ("Restart your client after you first confirm the tools are there.", True),
+    # the pre-restart marker one word over (form (d)): `first` / `already`
+    # trailing the object are the same order claim as `beforehand`.
+    ("Restart your client, confirm the tools are actually there first.", True),
+    ("Restart your client, but confirm the tools are actually there first.",
+     True),
+    ("Restart your client, but confirm the tools are already there.", True),
     # a determiner/modifier other than a bare `the` in form (e):
     ("Restart your client once all the tools appear.", True),
     ("Restart your client once your tools appear.", True),
