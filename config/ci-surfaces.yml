@@ -2998,6 +2998,7 @@ surfaces:
   # `id="appeal"` from `docs.html` in a website-only PR would merge green and only `main`'s push
   # matrix would red afterwards. ⛔ Deleting the row again is caught, not silent:
   # `test_the_own_site_fragment_guard_is_selected_by_every_tree_it_scans` reds naming the tree.
+  - test_14691_structure_evidence.py
 
   # #14592 Phase A: the REST read parity suite (`/v1/objects`, `/v1/subjects`,
   # `/v1/sources`, `/v1/entities/{id}/relations`, `/v1/entities/{id}/belief`).
@@ -16103,6 +16104,20 @@ durations:
   test_14033_state_cue_gap.py: 2.0
   test_9559_blocked_release_conditions.py: 0.7
   test_capstone_state_value_13038.py: 0.2
+  # #14691 (new file, PR #14723): the ENTRY RULE applies — the value is the header's flat
+  # `DEFAULT_FAST_WEIGHT`, not a local reading (a hand-picked number is this host's wall clock,
+  # and `fast_pool()` feeds the shard balancer). `--integrity` cannot see a missing row, so this
+  # line is what records the weight; the file shipped its first cut with no row at all and the
+  # required `manifest-integrity` leg redded. What it covers, hermetically apart from the repo-wide
+  # session gate every `tests/` file inherits: the T6 bundle's five assertion verdicts read back
+  # out of its own committed `out/*.json` receipts (A1's typed counts, A2's ownership population
+  # being present AND inverted, A3's two parents / five children, A4's declared-structure
+  # traceability, A5's text leg vs structure leg), the corpus's coverage of every declared
+  # structure name and pair, the two door findings (`expand_relationships` silent on structural
+  # edges, the bare-kind full scan answering an empty list), and `REPORT.md`'s headline numbers
+  # being the artifacts' numbers. No graph, no docker, no network, no model call — it imports the
+  # bundle's scorer by path and reads committed JSON.
+  test_14691_structure_evidence.py: 2.0
   test_embedding_boundary_8419_8430.py: 5.0
   test_extractor_cost_measure.py: 18.2
   test_longmem_ingest_profile.py: 0.1

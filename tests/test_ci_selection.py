@@ -11541,6 +11541,19 @@ ROWED_BY_THIS_FOLD = (
     # named here, which a review caught. ⛔ The row is the flat `DEFAULT_FAST_WEIGHT`, not a local
     # reading (`#3400/#4348`).
     "test_own_site_fragment_targets.py",
+    # #14691 (PR #14723) — the T6 structure bundle's falsifiers. A file this fold ADDED,
+    # and its first cut shipped with NO surface row and NO `durations:` row at all: the
+    # required `manifest-integrity` leg redded (`manifest drift:
+    # ['test_14691_structure_evidence.py']`), and the larger half is the `#13826` shape
+    # recorded above — selection is surface->membership, so a file in no surface is
+    # selected by no diff class and these 11 falsifiers would have run in NO CI leg,
+    # leaving the bundle's five verdicts guarded by nothing but prose. Listed here for
+    # the reason every row above states: the ENTRY-RULE pin iterates this EXPLICIT
+    # tuple, so a file nobody listed has no `durations:` row and nothing reds. ⛔ The row
+    # is the flat `DEFAULT_FAST_WEIGHT`, not a local reading — the refresher samples
+    # push-to-main runs, so a file a PR ADDS cannot have a junit figure yet
+    # (`#3400/#4348`).
+    "test_14691_structure_evidence.py",
 )
 
 
