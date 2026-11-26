@@ -11159,8 +11159,12 @@ def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
     # ⛔ NOT justified by the block's prose: this PR's own restructure replaced the `flat `2.0 s``
     # `DEFAULT_FAST_WEIGHT` spelling with ``row in `durations` — `core`-registered``, and NONE OF
     # THE ROWS THIS FIXTURE GRADES spells its weight with a unit — those four notes each say the row
-    # `takes the header's flat `DEFAULT_FAST_WEIGHT``, and the one unit-bearing figure in
-    # `tests/test_7879_record_chain.py`'s note is labelled `NOT as the weight`.
+    # `takes the header's flat `DEFAULT_FAST_WEIGHT``, and `tests/test_7879_record_chain.py`'s note
+    # labels its own locally-measured seconds as context rather than the weight, so no unit-bearing
+    # reading in it is that row's weight. ⛔ NO COUNT AND NO INVENTED QUOTATION: an earlier spelling
+    # of this clause said `the one unit-bearing figure` (the note carries more than one — measured)
+    # and wrapped the note's own words in backticks the manifest does not carry, which is the
+    # invented-quotation defect this PR fixed at two other sites (#14623).
     # ⛔ THAT SCOPE IS THE REPAIR, not a hedge: the sentence said "no `durations` row note carries a
     # number with a unit", a claim about EVERY row in the map — which the map falsifies in bulk,
     # because quoting a row's own reading WITH its unit is a normal spelling here (MEASURED on
