@@ -495,6 +495,23 @@ test('#14686: an in-flight alerts read cannot land on the wrong Organization', (
   assert.ok(body.indexOf('if (orgAtCall && orgAtCall !== tid) return')
     < body.search(/await fetch\(/),
     'the target check must precede the request — after it, the read has already ' + 'been authorised and fetched for the wrong Organization')
+  // ⛔ AND IT MUST BE THE ONLY PRE-REQUEST RETURN. The point of the target check is to
+  // refuse a STALE read without refusing a first-Organization read (`orgAtCall` null is
+  // a real read for the org being selected). A pin matching only its text is satisfied
+  // by adding `if (!orgAtCall) return` after it — which re-breaks `completeLogin`/the
+  // wizard read into a false all-clear with no recovery — and stays green (measured).
+  // Counting the returns up to the request makes the POSITIVE half testable.
+  assert.equal(
+    (body.slice(captureAt, body.search(/await fetch\(/)).match(/\breturn\b/g) || []).length,
+    1,
+    'the target check is the ONLY pre-request guard: a first-Organization read must land',
+  )
+  // ⛔ AND THE SUCCESS WRITE APPEARS EXACTLY ONCE. `guard then write` is satisfied by a
+  // write ABOVE the guard followed by the guarded one — which writes the previous
+  // Organization's rows exactly as the guard exists to prevent, every pin green
+  // (measured). One occurrence is the property; adjacency alone is not.
+  assert.equal((body.match(/setAlerts\(feed\.alerts\)/g) || []).length, 1,
+    'the success write must appear exactly once — a write above the guard defeats it')
 })
 
 // ── The durable write path (main.jsx) ───────────────────────────────────────
