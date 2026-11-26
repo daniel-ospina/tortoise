@@ -4103,20 +4103,39 @@ def test_the_PRODUCER_and_the_SCORER_share_ONE_error_predicate():
             f"the producer answered {call!r} while the scorer says failed={expected}")
 
 
+def _arm_start(flat_src: str) -> int:
+    """Index of `verify_independent._call`'s MCP-error `if` in normalised source."""
+    return flat_src.index('if getattr(res, "isError", None) is True')
+
+
+def _arm_end(flat_src: str) -> int:
+    """Index of the SUCCESS return that closes that arm, so the slice is the arm."""
+    return flat_src.index('return {"tool": tool, "args": args, "ok": True',
+                          _arm_start(flat_src))
+
+
 def test_the_PEER_probe_keeps_the_MCP_error_arm():
     r"""Reds if `verify_independent._call` loses the MCP `isError` arm.
 
     ⛔ #14723 review, cycle 3, P2. `verify_independent.py` deliberately does NOT
-    import `score_t6.call_failed`: it is run standalone from `/tmp` against a
-    checkout it resolves itself, so it must not depend on the bundle being
-    importable. Its error arm is therefore a MIRROR of `run_readback.py`'s rather
-    than the shared predicate — and a mirror the tree did not read CAN drift. The
-    consequence of drift is the round-6 defect returning in a THIRD file: a failed
-    MCP call recorded as `{"ok": True, "reply": ["Error: …"]}`, i.e. a timeout
-    published as a silent door in a probe `REPORT.md` calls "re-runnable".
+    import `score_t6.call_failed`: that predicate decides over a CALL DICT, while
+    the flag this arm reads lives on the MCP RESULT OBJECT (`res.isError`) that has
+    not become a dict yet. Its error arm is therefore a MIRROR of
+    `run_readback.py`'s rather than the shared predicate — and a mirror the tree
+    did not read CAN drift. The consequence of drift is the round-6 defect
+    returning in a THIRD file: a failed MCP call recorded as
+    `{"ok": True, "reply": ["Error: …"]}`, i.e. a timeout published as a silent
+    door in a probe `REPORT.md` calls "re-runnable".
 
     Measured before this test: `rg -l 'verify_independent' tests/ tools/` is EMPTY
     — no test opened the file at all — so deleting the arm left 96 passed.
+
+    ⛔ AND AN EARLIER CUT OF THIS ARM BOUND THE FILE, NOT THE ARM (#14723 review,
+    cycle 4, P2). It asserted `'"ok": False' in src` over the WHOLE file, which
+    has TWO failure envelopes (`_call`'s MCP-error arm and its `except` arm) — so
+    flipping the arm's own envelope to `"ok": True`, or dropping its `ok` key,
+    left this test GREEN on the `except` arm's copy. It now slices the arm out
+    first; measured, all three of those mutations RED.
     """
     src = (BUNDLE / "verify_independent.py").read_text()
     # ⛔ NORMALISED, because the predicate is LINE-WRAPPED in both files
@@ -4130,9 +4149,13 @@ def test_the_PEER_probe_keeps_the_MCP_error_arm():
     assert 'getattr(res, "is_error", None) is True' in flat_src, (
         "verify_independent._call keeps only one spelling of the MCP error flag; "
         "the snake_case one is what some client versions set")
-    assert '"ok": False' in src, (
-        "verify_independent._call no longer returns a failure ENVELOPE, so a "
-        "consumer reading `ok` cannot see the error it just detected")
+    assert '"ok": False' in flat_src[_arm_start(flat_src):_arm_end(flat_src)], (
+        "verify_independent._call's MCP-error arm no longer returns a failure "
+        "ENVELOPE, so a consumer reading `ok` sees True for the error it "
+        "detected. ⛔ SLICED TO THE ARM ON PURPOSE: this file carries a SECOND "
+        "failure envelope (`except`), so a whole-file search passes while the "
+        "arm's own envelope is wrong (measured: flipping the arm to "
+        "`ok: True` left this green before the slice)")
     # ⛔ AND THE MIRROR IS CHECKED AGAINST THE FILE IT MIRRORS. Pinning only the
     # probe's copy would let `run_readback.py`'s arm move while the probe keeps
     # mirroring a spelling the producer abandoned — drift in either direction is
