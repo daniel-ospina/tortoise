@@ -1665,8 +1665,6 @@ QUICKSTART = REPO_ROOT / "docs" / "quickstart-cloud.md"
 # PARAGRAPH" (#14679 review at `b5b1ee005941`, measured). `your|the` is the whole
 # definite-article variation; a doc that drops the possessive is not a different
 # instruction, it is the same one spelled the way the docs already spell it.
-_RESTART_CUE = "Restart your client"
-_RESTART_CUE_ALT = "restart the client"
 _RESTART_CUE_TEXT = r"restart\s+(?:your|the)\s+client"
 # ⛔ THE CUE IS FOUND CASE-INSENSITIVELY. Every form is IGNORECASE because "case
 # carries no meaning in this prose", but the cue itself was matched with `in`, so
@@ -1945,7 +1943,15 @@ _PRE_CUE_VERB = (
     # (`verifies|verified|ensuring|validating|made sure|making certain`), so the
     # comment's claim of ONE DEFINITION was false of the code (#14679 review
     # cycle 48). The morphology is now written out.
-    r"(?:\w+-)?(?:confirm|check|verif(?:y|ies|ied|ying)|ensur(?:e|es|ed|ing)"
+    # \u26d4 AN EMPHATIC `Do` IS THE SAME ONE-INSERTED-WORD DEFECT, and it defeated
+    # form (f) ENTIRELY: `Do make sure the tools are actually there. Restart your
+    # client, then run a query.` measured GREEN while the bare `Make sure \u2026`
+    # twin is a declared-RED row, and a `Do ` prefix over the declared-RED set
+    # flipped 119 rows to GREEN (#14679 review at `f16e32451480`, measured). The
+    # file's own `_SEQUENCER_FRAGMENT_RE` already lists `do|does` among the words
+    # that "carry no imperation", so the two arms disagreed about one closed class
+    # exactly as they did for `always`.
+    r"(?:(?:do|does)\s+)?(?:\w+-)?(?:confirm|check|verif(?:y|ies|ied|ying)|ensur(?:e|es|ed|ing)"
     r"|see|look|validat(?:e|es|ed|ing)"
     r"|mak(?:e|es|ed|ing)\s+(?:sure|certain)|made\s+(?:sure|certain)"
     r"|be\s+(?:sure|certain))\w*\b"
@@ -5260,6 +5266,14 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # form (b), and `_SESSION_AND_CONJUNCT_RE`'s `load(?:ed|s)`, by
     # `_SESSION_PRESENCE_RE` — both measured: removing each alone changes no row,
     # though removing the presence copy flips `installed and they are loaded`).
+    # ⛔ AND `_DOC_NOUN`'s UNEXERCISED ALTERNATIVES (cycle 54, measured): of its 26
+    # alternatives, `catalog`, `catalogue`, `inventory`, `tour`, `cheat-sheet`,
+    # `cheatsheet`, `matrix`, `screenshot`, `diagram`, `index`, `chapter` and
+    # `listing` appear in no row, so removing any one of them is undetectable by
+    # the suite. Declared rather than enumerated into rows: the arm's DIRECTION is
+    # a wider exclusion, i.e. a false GREEN — the false-RED direction this list
+    # exists to keep out — and the block above already states that "a noun list
+    # cannot be completed".
     # ⛔ AND `always` FROM THE ADVERB FAMILY (cycle 50): it carries its own rows,
     # while `often` is LIVE but row-less (measured: removing it alone flips 0
     # rows) and declared here rather than left silent. `never`/`ever` are NOT
@@ -6472,6 +6486,23 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Look for the tortoise_* tools, then restart your client.", False),
     ("Look for the tools section below for the full list. Restart your client, "
      "then confirm the tools are actually there.", False),
+    # ── cycle 54 — the EMPHATIC `Do`, and the `going to` arm pinned ──
+    # ⛔ AN EMPHATIC `Do` INSERTED BEFORE THE PRE-CUE IMPERATIVE defeated form (f)
+    # completely — the same one-inserted-word defect this file closed for `First`,
+    # `Please first`, `Always` and `You must` (#14679 review at `f16e32451480`,
+    # measured; a `Do ` prefix flipped 119 of 392 declared-RED rows GREEN, 52
+    # after this fix, and those 52 are prefixings that make the line ungrammatical).
+    ("Do make sure the tools are actually there. Restart your client, then run "
+     "a query.", True),
+    ("Do confirm the tools are actually there. Restart your client, then run a "
+     "query.", True),
+    ("Please do confirm the tools are actually there. Restart your client, then "
+     "run a query.", True),
+    ("Restart your client, then do confirm the tools are actually there.", False),
+    # ⛔ `be going to|going to` in the modal slot was exercised by NO row, so a
+    # regression in it was invisible; its contracted form is what carries it.
+    ("You're going to confirm the tools are actually there. Restart your client, "
+     "then run a query.", True),
     # ── cycle 50b — the ANAPHOR and the doc's own token are the object too ──
     # ⛔ `_TOOLS_OBJECT` graded only `tools` / `tool list` / `tools list`, so a
     # PRONOUN standing for the tools — and the token `docs/quickstart-cloud.md:135`
