@@ -437,7 +437,11 @@ measurement. It is also the process fact worth carrying back: the pre-dispatch c
 `5a441859d7f953a91d493d9606b8c8404018a40eac35b658a75e4fbe6200f192`; the file in this tree hashes
 `19f8ed1a7636aa9a38abb5e3670f926b0a2968a82f6a39c571329aff2406f190`, because a later commit renamed
 one unused loop variable (`element_kind` → `_element_kind`) to clear a `B007` finding on the
-required `agent-infra-ci / lint` leg. **The rename is inert** — mechanically verified by renaming
+`agent-infra-ci / lint` leg — **not a required context** (`main`'s protection, the active
+ruleset and `.mergify.yml` require `python-ci-gate`, `docs`, `pricing-artifact`,
+`test-isolation`, `license-surface`, `legal-e2e` and `ai-review-gate`; `agent-infra-ci` is in
+`python-ci-gate`'s `needs:` in no spelling), but the repo keeps `ruff check .` at a zero
+baseline for new code, so the rename was taken rather than left as debt. **The rename is inert** — mechanically verified by renaming
 it back and diffing against `d4fc8fe`: zero differences — so the artifact's numbers stand and only
 the binding is stale. It is stated here rather than silently regenerated, because regenerating a
 784 KB receipt would rewrite every number downstream of it to fix a comment-sized defect.

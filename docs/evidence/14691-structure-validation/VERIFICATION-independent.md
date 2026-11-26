@@ -110,7 +110,7 @@ structure element traces to corpus text. The point layer does not. Audit of the
 (`out/t6-quote-audit.json` `not_in_corpus: 12`; `out/t6-score.json`
 `claim_layer.invented: 12`), and it is the number that governs. An earlier
 revision of this section said **"10 … overlap < 0.5"**, which was wrong twice:
-os overlaps are `0.636, 0.875, 0.958, 1.0, 1.0, 1.0, 0.941, 1.0, 1.0, 1.0`, so
+Its audited rows' overlaps are `0.636, 0.875, 0.958, 1.0, 1.0, 1.0, 0.941, 1.0, 1.0, 1.0`, so
 **no** audited row falls below 0.5, and `10` is the length of a **capped example
 array**, not a count under any threshold. Corrected rather than dropped, because
 a number a reader can check against the artifact it cites must be the artifact's
