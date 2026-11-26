@@ -10149,12 +10149,24 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
 #: for the same reason `_unquoted_block` refuses an odd quote count, because it cannot be read
 #: reliably.
 _H_14544_EXEMPTION_OPEN_RE = re.compile(r"The one cause this paragraph does NOT claim")
-#: `neither of which … #14544` AND the paraphrase a fold would reach for instead, `#14544` never
+#: `neither of which` AT ALL, plus the paraphrase a fold would reach for instead — `#14544` never
 #: touched it. The anaphor form was the shipped defect; the paraphrase is the same claim spelled
 #: without the pronoun, so banning only the pronoun would grade the wording rather than the claim.
+#: ⛔ THE BAN IS UNBOUNDED IN DISTANCE AND APPLIED TO THE WHOLE BLOCK, and both are load-bearing
+#: (measured at `d1f14298`, #14623 review round 4). The pre-fix form required `#14544` within 80
+#: characters AFTER `which`, so the claim shipped GREEN in two shapes: label-first — “And `#14544`'s
+#: cut touched neither of which.” — and the same anaphor with its label padded past the window. A
+#: DISTANCE WINDOW on a pronoun form is escapable by padding, so the form itself is what is refused
+#: here: `neither of which` names nothing, which is the defect. ⛔ AND THE SUBJECT IS THE BLOCK, not
+#: the bounded paragraph: bounding the BAN at the next `⛔` made the graded region TEXT-CONTROLLED —
+#: one `⛔` inserted before “The weight is not restated here:” truncated it, and the RETIRED SENTENCE
+#: returned verbatim after the bound with this arm reporting GREEN. A ban that the graded text can
+#: move out from under is not a ban, so every NEGATIVE claim here reads the whole block; the
+#: POSITIVE ones stay paragraph-bounded, where a lost claim reds instead of passing.
 _H_14544_UNTOUCHED_ANAPHOR_RE = re.compile(
-    r"neither\s+of\s+which[\s\S]{0,80}?#14544"
-    r"|#14544[`]?['\u2019]?(?:s)?\s+(?:[a-z]+\s+){0,3}(?:never|not)\s+(?:\w+\s+){0,2}touch(?:ed|es|ing)?",
+    r"neither\s+of\s+which"
+    r"|#14544[`]?['\u2019]?(?:s)?[\s\S]{0,40}?(?:never|not|did\s+not|didn['\u2019]?t|has\s+not)"
+    r"\s+(?:\w+\s+){0,3}touch(?:ed|es|ing)?",
     re.IGNORECASE)
 #: The POSITIVE half: the paragraph must state the row's provenance as `#14544`'s own edit, with the
 #: POLARITY pinned — `row IS `#14544`'s own edit`, never `is NOT`. Without the polarity the pattern
@@ -10162,10 +10174,26 @@ _H_14544_UNTOUCHED_ANAPHOR_RE = re.compile(
 #: without the direction at all a fold could satisfy the anaphor ban by simply DELETING the row
 #: clause, which loses the correction rather than making it. The window is generous on purpose: a
 #: reflow inside a TRUE clause reds this arm (a false block) rather than letting a false claim
-#: through, and the clause runs 39 characters today.
+#: through, and the clause runs 39 characters today. `which is` and `durations`-first spellings are
+#: accepted because a TRUE rewording that this pattern refused was measured as a false block (#14623
+#: review round 4, P3): “the `durations` entry for it, which is `#14544`'s own edit”.
 _H_14544_ROW_PROVENANCE_RE = re.compile(
-    r"row\s+in\s+`durations`[\s\S]{0,400}?row\s+IS[\s#]{0,8}`#14544`['\u2019]s\s+own\s+edit",
+    r"(?:row\s+in\s+`durations`|`durations`[\s#]{0,3}(?:row|entry))[\s\S]{0,400}?"
+    r"(?:row|entry)[\s\S]{0,60}?(?:IS|is|which\s+is)\s+`#14544`['\u2019]s\s+own\s+edit",
     re.IGNORECASE)
+#: The SCOPE half: the paragraph must state that ONE half — the REGISTRATION — is exempt, with the
+#: polarity pinned. Measured at `d1f14298`: inverting it to “Both halves stay exempt” (the commit's
+#: own subject reversed) left this arm GREEN, because nothing graded the sentence that scopes the
+#: exemption. Without this, the paragraph can grant the exemption to the row it exists to implicate.
+_H_14544_SCOPE_RE = re.compile(
+    r"REGISTRATION\s+is\s+the\s+ONLY\s+half\b", re.IGNORECASE)
+#: The CONCLUSION half: the paragraph's own payoff sentence — a packing change attributed to that row
+#: is a cause it does NOT exclude. Measured at `d1f14298`: flipping `NOT` -> nothing (i.e. “…is a
+#: cause this paragraph DOES exclude”, the exact reading `#14612` deletes) left this arm GREEN — it
+#: graded the anaphor ban and the provenance tokens and never the sentence that draws the
+#: conclusion, so a paragraph stating the OPPOSITE of the correction was certified clean.
+_H_14544_CONCLUSION_RE = re.compile(
+    r"cause\s+this\s+paragraph\s+does\s+NOT\s+exclude", re.IGNORECASE)
 
 
 def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
@@ -10199,7 +10227,10 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
         "the bounded `#14544` paragraph no longer names `tests/test_dod_5090_probe.py`, so this "
         "arm grades a paragraph that is no longer about the row it exists to correct — re-point "
         "the bound")
-    anaphor = _H_14544_UNTOUCHED_ANAPHOR_RE.search(paragraph)
+    # ⛔ THE BAN READS THE WHOLE BLOCK, not `paragraph`: a bound that the graded text can move past
+    # (one `⛔`) is a bound the claim walks out of — measured at `d1f14298`, the retired sentence
+    # returned verbatim after a single inserted marker with this arm GREEN.
+    anaphor = _H_14544_UNTOUCHED_ANAPHOR_RE.search(header)
     assert anaphor is None, (
         "the `#14544` exemption paragraph binds its two nouns with `neither of which `#14544` "
         f"touched` ({anaphor.group(0)!r}). The registration half is TRUE, the `durations` ROW half "
@@ -10207,10 +10238,25 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
         "is the cut, and that weight is the shard-layout input. State the REGISTRATION as the "
         "exempt half and the row as `#14544`'s OWN edit, and do not restate the weight (the "
         "no-per-file-weight rule above binds the figure).")
-    assert _H_14544_ROW_PROVENANCE_RE.search(paragraph), (
+    provenance = _H_14544_ROW_PROVENANCE_RE.search(paragraph)
+    assert provenance is not None, (
         "the `#14544` exemption paragraph no longer records that the `durations` row is `#14544`'s "
         "OWN edit — deleting the row clause instead of correcting it loses the fact that the "
         "weight is that cut's input, which is why the old sentence was false")
+    # ⛔ THE SCOPE AND THE CONCLUSION are graded too, because both are claims the paragraph can
+    # contradict while every assertion above stays satisfied — measured GREEN at `d1f14298` for each.
+    scope = _H_14544_SCOPE_RE.search(paragraph)
+    assert scope is not None, (
+        "the `#14544` exemption paragraph no longer scopes the exemption to the REGISTRATION "
+        "(`The REGISTRATION is the ONLY half exempt`) — the paragraph then reads as exempting both "
+        "nouns, which is the false reading `#14612` deletes: `#14544` DID rewrite the `durations` "
+        "row, so the row half is not exempt from being a packing cause")
+    conclusion = _H_14544_CONCLUSION_RE.search(paragraph)
+    assert conclusion is not None, (
+        "the `#14544` exemption paragraph no longer states its conclusion — that a packing change "
+        "attributed to that row is a cause this paragraph does NOT exclude. Without it the "
+        "paragraph can state the anaphor-free OPPOSITE (`DOES exclude`) and still satisfy the "
+        "provenance clause, which is the exact false sentence `#14612` deletes")
     # NON-VACUITY: the retired sentence trips the anaphor arm, and the same paragraph with the
     # provenance removed trips the positive one — so neither assertion is decoration.
     retired = (
@@ -10226,24 +10272,52 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
         "the provenance pattern reads the RETIRED sentence as stating the row's provenance, so the "
         "positive direction proves nothing: the old clause says `neither of which `#14544` "
         "touched`, which is the opposite claim")
-    # ⛔ POLARITY, measured rather than assumed: flipping `row IS` to `row is NOT` in the LIVE
-    # paragraph must lose the match. Without this the pattern certified the false sentence it exists
-    # to delete, because it bound `#14544`'s own edit` without reading the word before it.
-    flipped = paragraph.replace("row IS", "row is NOT", 1)
-    assert flipped != paragraph, (
-        "the live `#14544` paragraph no longer says `row IS`, so the polarity check below grades "
-        "nothing — re-point it at the sentence the block uses")
-    assert not _H_14544_ROW_PROVENANCE_RE.search(flipped), (
+    # ⛔ POLARITY, measured rather than assumed: NEGATING the copula inside the LIVE match must lose
+    # the match. Without this the pattern certified the false sentence it exists to delete, because
+    # it bound `#14544`'s own edit` without reading the word before it. The negation is driven off
+    # the MATCH rather than off a literal `row IS`, so a TRUE rewording of the same clause ('that
+    # `durations` entry IS …', '…, which is …') still gets graded instead of reddening on a spelling.
+    negated = re.sub(
+        r"(?:\bwhich\s+is\b|\bIS\b|\bis\b)", "is NOT", provenance.group(0), count=1)
+    assert negated != provenance.group(0), (
+        "the matched provenance clause carries no copula to negate, so the polarity check below "
+        f"grades nothing — re-point it at: {provenance.group(0)!r}")
+    assert not _H_14544_ROW_PROVENANCE_RE.search(negated), (
         "the provenance pattern still matches when the clause is NEGATED (`row is NOT `#14544`'s "
-        "own edit`) — it reads the row's name and the words `own edit` without the polarity, so a "
-        "fold that restored the false reading would keep this arm GREEN")
-    # …and the anaphor ban reads the paraphrase too, not only the pronoun form it was cut for.
+        f"own edit`, measured on {negated!r}) — it reads the row's name and the words `own edit` "
+        "without the polarity, so a fold that restored the false reading would keep this arm GREEN")
+    # …and the SCOPE and CONCLUSION pins read their polarity the same way: each mutant is the live
+    # paragraph with that ONE claim inverted, so a pattern that lost its polarity direction reds here
+    # instead of certifying the inversion.
+    scope_inverted = paragraph.replace(
+        "The REGISTRATION is the ONLY half", "Both halves stay exempt", 1)
+    assert scope_inverted != paragraph, (
+        "the live `#14544` paragraph no longer scopes the exemption with `The REGISTRATION is the "
+        "ONLY half`, so the inversion check below grades nothing — re-point it")
+    assert not _H_14544_SCOPE_RE.search(scope_inverted), (
+        "the scope pattern still matches when the scope is INVERTED (`Both halves stay exempt`) — "
+        "it grades the word `exempt` rather than which half, so a fold that exempted the row again "
+        "would keep this arm GREEN")
+    conclusion_inverted = paragraph.replace(
+        "this paragraph does NOT exclude", "this paragraph DOES exclude", 1)
+    assert conclusion_inverted != paragraph, (
+        "the live `#14544` paragraph no longer draws the conclusion with `this paragraph does NOT "
+        "exclude`, so the inversion check below grades nothing — re-point it")
+    assert not _H_14544_CONCLUSION_RE.search(conclusion_inverted), (
+        "the conclusion pattern still matches when the conclusion is INVERTED (`… is a cause this "
+        "paragraph DOES exclude`) — it grades `exclude` without the polarity, so a fold that "
+        "restored the false reading `#14612` deletes would keep this arm GREEN")
+    # …and the anaphor ban reads the paraphrase too, not only the pronoun form it was cut for, in
+    # BOTH orders and at any distance — the two shapes measured GREEN at `d1f14298` are fixtures now.
     for paraphrase in (
             "`#14544` never touched that row",
-            "`#14544`'s cut did not touch the row"):
+            "`#14544`'s cut did not touch the row",
+            "And `#14544`'s cut touched neither of which.",
+            "neither of which " + "x" * 95 + " `#14544` touched"):
         assert _H_14544_UNTOUCHED_ANAPHOR_RE.search(paraphrase), (
             f"the anaphor ban misses the paraphrase {paraphrase!r} — it grades the pronoun rather "
-            "than the claim, so the same false reading returns in other words")
+            "than the claim, or bounds a pronoun form by DISTANCE (escapable by padding), so the "
+            "same false reading returns in other words")
 
 
 def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
