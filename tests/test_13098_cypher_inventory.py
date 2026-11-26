@@ -1330,6 +1330,104 @@ def test_a_plain_directory_destination_is_NOT_refused_by_the_metadata_guard(
     assert target.is_file(), "the document was not written to a legitimate destination"
 
 
+def test_a_metadata_probe_that_never_answers_is_bounded_and_REFUSED(
+    tmp_path, monkeypatch, capsys
+):
+    """A git that never answers must REFUSE, not hang `--render` forever.
+
+    ⛔ THE COMMENT WAS A CLAIM WITH NO CODE BEHIND IT (#14625 review, P3). The refusal
+    block counted "a timeout" among the failures that refuse, but no `timeout=` was
+    passed, so a hung git hung the tool: measured at `9e477cdb` with a `git` that
+    sleeps, an external `timeout 40` returned **124** — no refusal printed, nothing
+    written, and no bound of the tool's own. A probe that never finishes protects
+    nothing; it just moves the fail-open from "wrote over the metadata" to "never
+    returned".
+
+    Pinned at the exception boundary rather than with a sleeping subprocess, so the
+    arm costs no wall clock: the subject is the `TimeoutExpired` exit path, and
+    `timeout=` being passed at all is asserted separately below.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "doc.md"
+    seen: dict = {}
+    real_run = subprocess.run
+
+    def _hangs(argv, *args, **kwargs):
+        # ⛔ ONLY THE METADATA PROBE. `census.subprocess` IS the module, so patching its
+        # `run` reaches EVERY subprocess in `main()` — including the tracked-path probe,
+        # which answers first and has no timeout arm of its own. Delegating everything
+        # but `rev-parse` keeps this arm about the one bound it pins.
+        if list(argv[:2]) == ["git", "rev-parse"]:
+            seen.update(kwargs)
+            raise subprocess.TimeoutExpired(
+                cmd=argv, timeout=kwargs.get("timeout"))
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(census.subprocess, "run", _hangs)
+    rc = census.main(["--render", str(target)])
+    assert "timeout" in seen, (
+        "the metadata probe passed no `timeout=` — the refusal below claims a timeout "
+        "REFUSES, so an unbounded probe lets a hung git hang `--render`")
+    assert seen["timeout"] == census._GIT_PROBE_TIMEOUT_S, (
+        f"the probe's bound must be the module's own; got {seen['timeout']}")
+    assert rc == 2, (
+        f"a timed-out probe must exit 2 (could not run), got {rc} — `TimeoutExpired` "
+        "is not an `OSError`, so without its own arm it raises out of `main()`")
+    assert not target.exists(), "the write landed on a probe that never answered"
+    err = capsys.readouterr().err
+    assert "GIT METADATA" in err and "did not answer" in err, (
+        f"the timeout refusal must say what it could not rule out; stderr:\n{err}")
+
+
+def test_a_git_that_never_answers_makes_could_not_run_not_drift(tmp_path, monkeypatch, capsys):
+    """A hung `git` anywhere in the pipeline answers 2 — never the DRIFT code 1.
+
+    ⛔ BOUNDING THE METADATA PROBE ALONE WAS NOT ENOUGH (#14625 review, P3, measured)
+    and this arm is why. `--render` runs the TRACKED-path probe first, and both
+    `--check` and the default verb run the census's own `git ls-files`, so a hung git
+    still hung the tool even after the metadata probe carried a `timeout=` — an
+    external `timeout 90` returned **124**. Worse, an uncaught `TimeoutExpired` is not
+    in the `(OSError, CalledProcessError)` tuples that guard the census, so it would
+    exit **1**, which this tool reserves for `the pins drifted`: a lane on a wedged box
+    would be told to re-cut 25 correct pins.
+
+    Every git call is made to hang at once; all three verbs must answer 2.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+
+    def _hangs(argv, *_a, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(census.subprocess, "run", _hangs)
+    target = tmp_path / "doc.md"
+    for argv, label in (
+        (["--check"], "--check"),
+        ([], "the default verb"),
+        (["--render", str(target)], "--render"),
+    ):
+        rc = census.main(argv)
+        assert rc == 2, (
+            f"{label} answered {rc} on a hung git; 1 is the DRIFT verdict, so anything "
+            "but 2 sends a lane to re-cut pins that a wedged box could not measure")
+    assert not target.exists(), "the write landed although no git call answered"
+    err = capsys.readouterr().err
+    assert "could not" in err.lower(), (
+        f"each refusal must read as 'could not run'; stderr:\n{err}")
+
+
 def test_the_metadata_guard_is_not_defeated_by_an_inherited_GIT_DIR(
     tmp_path, monkeypatch, capsys
 ):
@@ -3736,6 +3834,20 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # declared twice printed "25 pinned counts match" at rc 0 because the dict
         # comprehension kept the last value. Deleting the duplicate check reds this arm.
         "test_check_REFUSES_a_duplicated_pin_instead_of_letting_the_last_win",
+        # ⛔ AND THE BOUND THE REFUSAL COMMENT ALREADY CLAIMED (#14625 review, P3):
+        # "a timeout — REFUSES" had no `timeout=` behind it, so a hung git hung
+        # `--render` (measured at `9e477cdb`: external `timeout 40` -> 124, no refusal,
+        # no write). Deleting the `timeout=` kwarg reds this arm; deleting the
+        # `TimeoutExpired` arm makes it error rather than refuse.
+        "test_a_metadata_probe_that_never_answers_is_bounded_and_REFUSED",
+        # ⛔ AND THE BOUNDS THAT ARM ALONE DOES NOT COVER (#14625 review, P3): bounding
+        # the metadata probe left the TRACKED-path probe and the census's own
+        # `git ls-files` unbounded, so a hung git still hung `--render` (measured:
+        # external `timeout 90` -> 124) and an uncaught `TimeoutExpired` would exit 1,
+        # the DRIFT code. Deleting `timeout=` from `surface_files` or from the tracked
+        # probe reds this arm, and so does dropping `TimeoutExpired` from either
+        # census handler.
+        "test_a_git_that_never_answers_makes_could_not_run_not_drift",
         "test_the_renderer_refuses_the_all_surface_combination",
         # ⛔ THE TWO ROUND-4 RESIDUALS (#14625): a combination that silently dropped
         # the write, and a directory destination refused with a false cause. Both are
@@ -3816,7 +3928,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 40, (
+    assert len(split_arms) == 42, (
         f"expected EXACTLY 40 named split arms; got {len(split_arms)} — either a "
         "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
@@ -3839,7 +3951,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # deliberately — a red a reviewer reads rather than slack that a silently-added arm
     # rides. Counted over `defined`, so the 9 decorated arms are inside it too.
     test_functions = {n for n in defined if n.startswith("test_")}
-    assert len(test_functions) == 99, (
+    assert len(test_functions) == 101, (
         f"expected EXACTLY 99 test functions in this module; got "
         f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
