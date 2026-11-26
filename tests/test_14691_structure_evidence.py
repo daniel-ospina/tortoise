@@ -2877,7 +2877,12 @@ _PROSE_ALLOWED = (
     (r"(?m)^#{1,4} \d+(?:\.\d+)?", "a heading number"),
     (r"[\w./-]+\.(?:py|md|yml|json|sh|toml):\d+(?:-\d+)?", "a source line reference"),
     (r"#\d{3,}", "an issue/PR reference"),
-    (r"\b[0-9a-f]{7,40}\b", "a commit sha"),
+    # ⛔ A SHA MUST LOOK LIKE ONE (#14691 review, round 4, finding 11).
+    # `\b[0-9a-f]{7,40}\b` also matched any bare 7+ digit integer, so a sentence
+    # carrying two invented numbers ("1234567 sources, 9876543 nodes") passed as
+    # "a commit sha" — measured green. Requiring one hex LETTER keeps a 40-hex sha
+    # and makes a plain integer a claim that must be backed by an artifact.
+    (r"\b(?=[0-9a-f]{7,40}\b)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b", "a commit sha"),
     (r"\b20\d\d-\d\d-\d\d\b", "a date"),
     (r"\b\d\d:\d\d(?:[–-]\d\d:\d\d)?\b", "a wall-clock time"),
     (r"\b\d+\.\d+\.\d+\.\d+(?::\d+)?\b", "an address/port"),
@@ -2887,9 +2892,13 @@ _PROSE_ALLOWED = (
      "an assertion/finding/witness id"),
     (r"[<≥] ?\d+\.\d+", "a threshold comparison (`< 0.6`)"),
     (r"docs/evidence/\d+[\w-]*/", "a sibling bundle's path"),
-    (r"\bnode_count: \d+, edge_count: \d+\b",
-     "the PEER probe's own node/edge counts for Lumen Core, which this bundle "
-     "does not produce (VERIFICATION §2, stated as the peer's measurement)"),
+    # ⛔ EXACT figures, not a shape (#14691 review, round 4, finding 4): `\d+`
+    # let `3800 / 4400` through while the row cites a raw-data artifact that
+    # carries neither. This is the peer lane's own probe output and appears in no
+    # artifact of this bundle, so it is allowed verbatim or not at all.
+    (r"node_count: 38, edge_count: 44\b",
+     "the PEER probe's own node/edge counts for Lumen Core (VERIFICATION §2, "
+     "attributed there to the probe, not to this bundle's artifacts)"),
 )
 
 
@@ -2935,3 +2944,227 @@ def test_no_FIGURE_in_the_two_documents_is_free():
         "these numbers appear in REPORT.md / VERIFICATION-independent.md and in "
         "no committed artifact — a claim nothing in the bundle supports: "
         f"{unsupported}. Pin the figure to its field, or drop it.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Round 4 of review — the ten paths a fresh reviewer measured as still free on
+# 7bf32ccdb7 (each ONE mutation, whole file, restored byte-for-byte).
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _verification() -> str:
+    return (BUNDLE / "VERIFICATION-independent.md").read_text()
+
+
+def _independent() -> dict:
+    return json.loads((BUNDLE / "out" / "t6-independent-verification.json").read_text())
+
+
+def _audit() -> dict:
+    return json.loads((BUNDLE / "out" / "t6-quote-audit.json").read_text())
+
+
+def _surface() -> dict:
+    return json.loads((BUNDLE / "out" / "tool-surface.json").read_text())
+
+
+def test_the_VERIFICATION_verdict_line_is_the_score_artifact():
+    r"""Reds if the "independent" document states a verdict the artifact denies.
+
+    ⛔ #14691 review, round 4, P1-1. Measured green on `7bf32ccdb7`: changing
+    `A2 FAIL` → `A2 PASS` in the verdict line left **63 passed**. That is the one
+    sentence a reader takes as the second measurement's conclusion, and it says
+    the bundle's central defect does not exist — the exact fail-open the
+    `#14606` review was filed for.
+    """
+    verdicts = _score()["verdicts"]
+    stated = re.search(
+        r"\bA1 (\w+) · A2 (\w+) · A3 (\w+) · A4 (\w+) · A5 (\w+)", _verification())
+    assert stated, "VERIFICATION-independent.md states no A1..A5 verdict line"
+    for key, word in zip(("A1", "A2", "A3", "A4", "A5"), stated.groups(),
+                          strict=True):
+        assert word == verdicts[key], (
+            f"VERIFICATION's verdict line says {key} {word} where "
+            f"out/t6-score.json says {key} {verdicts[key]}: {stated.group(0)!r}")
+
+
+def test_the_isError_envelope_branch_is_LOAD_BEARING():
+    r"""Reds if the MCP error-envelope arm is deleted and nothing else notices.
+
+    ⛔ #14691 review, round 4, P2-2. The suite pinned plain-text and `{"error":…}`
+    shapes, so DELETING the `isError`/`content`-item branch of `is_error_reply`
+    (score_t6.py:124-129) left 63 passed — the branch was only ever exercised
+    through a path that another arm already covered. This arm calls the branch's
+    own shape directly, so the guard has to exist to pass.
+    """
+    module = _load_score_module()
+    text = {"type": "text", "text": "boom"}
+    for envelope in ({"content": [text], "isError": True},
+                     {"content": [text], "is_error": True},
+                     {"content": [text, {"isError": True}], "isError": False}):
+        assert module.is_error_reply(envelope) is True, envelope
+        assert module.measured_empty({"tool": "t", "reply": envelope}) is False, (
+            envelope)
+        assert module.call_failed({"tool": "t", "reply": envelope}) is True, envelope
+    # …and a SUCCESSFUL envelope is still an ANSWER, so the arm above is not
+    # satisfied by a guard that simply calls everything an error.
+    assert module.is_error_reply({"content": [text], "isError": False}) is False
+    assert module.measured_empty({"tool": "t", "reply":
+                                  {"content": [text], "isError": False}}) is True
+
+
+def test_the_peer_probe_counts_are_the_exact_measured_numbers():
+    r"""Reds if the peer probe's node/edge counts are changed to other digits.
+
+    ⛔ #14691 review, round 4, finding 4 (P3). The §2 probe row cites
+    `node_count: 38, edge_count: 44` for `Lumen Core` and points at
+    `out/t6-independent-verification.json` as raw data — which carries neither.
+    The generic coverage arm allowed ANY digits there, so `3800 / 4400` stayed
+    green. The figures are still not derivable from this bundle (they are the peer
+    lane's probe output), so the pin is verbatim, and it says so.
+    """
+    assert "node_count: 38, edge_count: 44" in _verification(), (
+        "VERIFICATION's probe row no longer states the peer's 38/44 counts")
+    others = set(re.findall(r"node_count: (\d+), edge_count: (\d+)", _verification()))
+    assert others == {("38", "44")}, others
+
+
+def test_the_peer_A3_block_is_the_receipt_and_the_corpus():
+    r"""Reds if the peer artifact's A3 figures drift from the receipt/corpus.
+
+    ⛔ #14691 review, round 4, finding 5 (P3). `out/t6-independent-verification.json`
+    is a second lane's measurement, and its `A3` block was read by nothing:
+    `hasPart_rows_in_receipt` 8 → 13 and `children` 5 → 2 both stayed green. The
+    block restates the primary record's A3, so it is derivable from the receipt's
+    edges and the corpus's declared products, and is pinned that way here.
+    """
+    receipt = _receipt()
+    declared = _corpus()["_declared_structure"]
+    iv = _independent()["A3"]
+    rows = [e for d in receipt["documents"]
+            for e in ((d["result"].get("relation_write") or {}).get("edges") or [])
+            if e.get("predicate") == "hasPart"]
+    assert iv["hasPart_rows_in_receipt"] == len(rows), (
+        f'peer A3 says {iv["hasPart_rows_in_receipt"]} hasPart rows; the receipt '
+        f"has {len(rows)}")
+    assert iv["distinct_hasPart_pairs"] == len(
+        {(str(e.get("src_id")), str(e.get("dst_id"))) for e in rows}), (
+        "peer A3's distinct-pair count is not the receipt's")
+    assert set(iv["products"]) == set(declared["products"])
+    assert set(iv["children"]) == set(declared["features"])
+
+
+def test_the_tool_surface_SCHEMAS_are_tool_specific():
+    r"""Reds if `out/tool-surface.json`'s per-tool schema content is blanked.
+
+    ⛔ #14691 review, round 4, finding 6 (P3). The names were pinned; the SCHEMAS
+    were not — setting every `params`/`required` to junk stayed green, and so did
+    flattening all 39 descriptions to `"a tool"`. The readback cites this artifact
+    as the advertised surface, so its content is the claim.
+    """
+    surface = _surface()
+    assert len(surface) == 39, len(surface)
+    descriptions = [v["description"] for v in surface.values()]
+    assert len(set(descriptions)) == len(descriptions), (
+        "two tools share a description — the schema content is not tool-specific")
+    for name, entry in surface.items():
+        assert set(entry) == {"description", "required", "params"}, (name,
+                                                                    sorted(entry))
+        assert len(entry["description"]) >= 25, (name, entry["description"])
+        assert entry["params"], f"{name} advertises no params"
+        assert isinstance(entry["params"], list) and isinstance(
+            entry["required"], list), name
+        assert set(entry["required"]) <= set(entry["params"]), (
+            f"{name} requires a param it does not advertise")
+        assert len(set(entry["params"])) == len(entry["params"]), name
+    assert sum(len(v["params"]) for v in surface.values()) == 256, (
+        "the advertised parameter population drifted")
+    assert sum(len(v["required"]) for v in surface.values()) == 30, (
+        "the advertised required-parameter population drifted")
+
+
+def test_the_VERIFICATION_corpus_row_is_the_receipt():
+    r"""Reds if the peer document's corpus figures drift from the receipt.
+
+    ⛔ #14691 review, round 4, finding 7 (P3). `5 documents, 30 turns` → `35 turns`
+    stayed green: `35` is a real number elsewhere in the bundle, so the generic
+    coverage arm could not see it, and nothing recomputed the turn count.
+    """
+    receipt = _receipt()
+    chars = _score()["corpus_chars"]
+    turns = sum(int(d["turns"]) for d in receipt["documents"])
+    line = next((ln for ln in _verification().splitlines()
+                 if ln.startswith("| Corpus |")), None)
+    assert line, "VERIFICATION's corpus row is gone"
+    assert f"{chars:,} characters" in line, line
+    assert f"{len(receipt['documents'])} documents" in line, line
+    assert f"{turns} turns" in line, line
+
+
+def test_the_W3_hasPart_counts_are_the_peer_artifact():
+    r"""Reds if the W3 narrative's row/pair counts are changed to other real values.
+
+    ⛔ #14691 review, round 4, finding 8 (P3). `**8** hasPart rows` → `**13**`
+    stayed green: 13 is a real count elsewhere (§7). The paragraph describes the
+    peer lane's own measurement, so it is pinned to that artifact's A3 block.
+    """
+    iv = _independent()["A3"]
+    text = _verification()
+    assert f'holds **{iv["hasPart_rows_in_receipt"]}** `hasPart` rows' in text, (
+        "W3's hasPart row count is not the peer artifact's")
+    assert f'for **{iv["distinct_hasPart_pairs"]}** distinct product→feature pairs' \
+        in text, "W3's distinct-pair count is not the peer artifact's"
+
+
+def test_the_readback_LAYERS_taxonomy_is_the_receipts_overview():
+    r"""Reds if the readback's cached overview taxonomy drifts from the receipt.
+
+    ⛔ #14691 review, round 4, finding 9 (P3). `readback.json.layers` re-states a
+    whole `tortoise_graph_overview` reply — a SECOND copy of the §2 taxonomy, read
+    by nothing: `Object: 24 → 84`, `Subject: 11 → 91` stayed green (file size
+    preserved by shortening another key). A second copy that nobody pins is a copy
+    that will disagree.
+    """
+    cached = _readback()["layers"]["tortoise_graph_overview:{}"]
+    assert cached["ok"] is True, "the cached overview is not a successful call"
+    assert cached["reply"]["taxonomy"] == _receipt()["graph_overview_after"][
+        "taxonomy"], (
+        "readback's cached taxonomy is not the receipt's overview taxonomy")
+
+
+def test_the_graph_ops_claim_is_the_receipts_five_totals():
+    r"""Reds if the amplification paragraph rounds the receipt's graph_ops away.
+
+    ⛔ #14691 review, round 4, finding 12 (P3). The sentence said
+    `graph_ops.total` was "in the low thousands per capture" — an adjective, so
+    no numeric arm could see it, and "low ten-thousands" (false: the five totals
+    are 1,177 / 684 / 880 / 728 / 853) stayed green. Stated as the receipt's own
+    five numbers instead, so the sentence is checkable and one of them drifting
+    reds it.
+    """
+    totals = [d["result"]["graph_ops"]["total"] for d in _receipt()["documents"]]
+    spelled = " / ".join(f"{t:,}" for t in totals)
+    assert f"`{spelled}`" in _report(), (
+        f"REPORT's graph_ops sentence is not the receipt's five totals ({spelled})")
+    assert f"`{totals[0]:,}`" in _report(), totals
+
+
+def test_the_audited_overlap_list_is_the_audit_artifact():
+    r"""Reds if any audited overlap is swapped for another REAL overlap.
+
+    ⛔ #14691 review, round 4, finding 13 (P3). `0.636` → `0.875` in the printed
+    list stayed green: both are real rows of `out/t6-quote-audit.json`, so the
+    coverage arm was satisfied. The list is the artifact's own sequence, so it is
+    pinned row by row.
+    """
+    overlaps = [row["overlap"] for row in _audit()["audited"]]
+    listed = re.search(
+        r"Its audited rows' overlaps are\n`([\d., ]+)`, so", _verification())
+    if listed is None:
+        listed = re.search(r"audited rows' overlaps are\s*`([\d., ]+)`",
+                           _verification())
+    assert listed, "VERIFICATION no longer prints the audited overlap list"
+    shown = [float(x) for x in listed.group(1).split(",")]
+    assert shown == overlaps, (
+        f"VERIFICATION's overlap list is not the audit artifact's: {shown} vs "
+        f"{overlaps}")

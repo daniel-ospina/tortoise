@@ -114,8 +114,9 @@ The graph installs its own pack set (starter): `agent-ops`, `dev`, `portfolio`, 
 | **amplification** | **≈138×** |
 | cost | **not reported** — `cost_usd: 0.0` beside `calls_without_cost: 19` on every call, exactly as in #14606 |
 
-Doc-01 also records a `graph_ops.total` in the low thousands per capture (the receipt's own field); the amplification, not the wall clock, is
-the unit economics.
+Doc-01 also records a `graph_ops.total` of `1,177` (the receipt's own field; the
+five captures record `1,177 / 684 / 880 / 728 / 853`); the amplification, not the
+wall clock, is the unit economics.
 
 ---
 
@@ -623,6 +624,34 @@ refusal acts on that list. The arm `test_a_CARRIED_but_empty_overview_section_is
 reds on the pre-fix guard — measured, reverting the guard to key-presence fails it while the rest of
 the suite stays green — and it still ACCEPTS the receipt's own `empty_before`, so a carried section
 is refused without refusing a real run on a fresh graph.
+
+### 8.6 What the round after the 9th closed (ten paths a fresh reviewer re-measured as FREE)
+
+A reviewer at `7bf32ccdb7` re-ran the prior rounds' mutants against this head and
+measured ten still green. Each is now pinned by an arm that reds on its own
+mutation, and each arm names that mutation:
+
+| Was free | Now pinned by | Reds on |
+|---|---|---|
+| the verdict line in `VERIFICATION-independent.md` (`A2 FAIL` → `PASS`) | `test_the_VERIFICATION_verdict_line_is_the_score_artifact` | the doc's A1..A5 words vs `t6-score.json.verdicts` |
+| the `isError` envelope branch of `is_error_reply` (deleting it) | `test_the_isError_envelope_branch_is_LOAD_BEARING` | the branch's own shape, plus a success envelope that must still ANSWER |
+| `node_count` / `edge_count` accepted any digits | `test_the_peer_probe_counts_are_the_exact_measured_numbers` | `38/44` → `3800/4400` |
+| the peer artifact's `A3` block (`hasPart_rows_in_receipt`, `children`) | `test_the_peer_A3_block_is_the_receipt_and_the_corpus` | 8 → 13 rows; children 5 → 2 |
+| `out/tool-surface.json` schema content | `test_the_tool_surface_SCHEMAS_are_tool_specific` | every `params` → `["junk"]`; blanked descriptions; the 256/30 populations |
+| `5 documents, 30 turns` in the peer document | `test_the_VERIFICATION_corpus_row_is_the_receipt` | `30` → `35` (a real number elsewhere) |
+| `**8** hasPart rows for **5** pairs` | `test_the_W3_hasPart_counts_are_the_peer_artifact` | `8` → `13` |
+| the cached overview taxonomy in `readback.json.layers` | `test_the_readback_LAYERS_taxonomy_is_the_receipts_overview` | `Object: 24` → `84` |
+| `graph_ops.total` "in the low thousands" (an adjective) | `test_the_graph_ops_claim_is_the_receipts_five_totals` | now the receipt's own five totals |
+| the printed audited-overlap list | `test_the_audited_overlap_list_is_the_audit_artifact` | `0.636` → `0.875` (both real rows) |
+| a bare integer read as "a commit sha" | the `_PROSE_ALLOWED` sha pattern | `1234567 sources, 9876543 nodes` in §6 |
+
+The generic coverage arm (`test_no_FIGURE_in_the_two_documents_is_free`) is a
+**floor, not a substitute for a pin**: it proves a number is carried by some
+artifact, never that it belongs to the field quoting it — which is why six of the
+ten above were green under it. A future round that finds an unpinned cell should
+add a pin, not widen an allowlist.
+
+---
 
 ## 9. Mandate-preflight disclosure
 
