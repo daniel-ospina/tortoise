@@ -1574,7 +1574,16 @@ def _point_rate_message(details: dict, *, sustained: bool) -> str:
                 # NOT "half": the ratio is a knob (`TORTOISE_ABUSE_TIER_FLOOR_
                 # RATIO`), and hard-coding the default's word would misdescribe
                 # every deployment that changed it (round-3 review).
-                measured += " (a share of this Organization's allowance)"
+                # #14687 round-4 review: the PERIOD is stated too. The allowance
+                # the level derives from is `included_write_ops_per_month`, while
+                # the number beside it is a one-hour weight sum, so a customer
+                # told only "a share of this Organization's allowance" reads it as
+                # a per-window allowance and the comparison silently asserts a
+                # dimension it does not have. Naming the period keeps the
+                # sentence true of the row it renders (the recorded `threshold`
+                # IS the share of the monthly number, and `.env.example` states
+                # the same mismatch on the operator surface).
+                measured += " (a share of this Organization's monthly allowance)"
         measured += "."
     elif units is not None:
         measured = f"{surface} reached {units:,} units."
@@ -1691,9 +1700,13 @@ def _alert_dict(row: dict) -> dict:
         # #14687: same plumbing as EVENT_FLAG, with the route that the
         # tier-relative floor makes TRUE. Before it, "if you need a higher
         # limit" was copy on an alert about a 500-unit level, which is not a
-        # limit; the level is now a share of the org's own allowance, so asking
-        # for a higher one is the remedy that actually exists. ("a share", not
-        # "half": the ratio is the `TORTOISE_ABUSE_TIER_FLOOR_RATIO` knob.)
+        # limit; the level is now a share of the org's own monthly write-op
+        # allowance, so asking for a higher one is the remedy that actually
+        # exists. ("a share", not "half": the ratio is the
+        # `TORTOISE_ABUSE_TIER_FLOOR_RATIO` knob — and the PERIOD is named
+        # because the allowance is monthly while the measured sum is one
+        # hour of weight; see `point_threshold`'s docstring and the customer
+        # clause above, which say the same.)
         EVENT_REVIEW: _point_rate_message(details, sustained=True),
         EVENT_SUSPEND: "Organization suspended by an operator",
         # Round 6 (reviewer C): `recovery_velocity` is in ALERT_TYPES and is

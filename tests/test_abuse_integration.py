@@ -1600,11 +1600,19 @@ class TestAlertRegistersAndAcks:
         a share of the org's allowance — but that only holds when the tier floor
         actually contributed. On the absolute detector constant (selfhost, no tier
         registry, a cold start, ratio 0) the same sentence would be the untruth
-        this change exists to remove, so the route follows the recorded fact."""
+        this change exists to remove, so the route follows the recorded fact.
+
+        #14687 round-4 review: the clause must name the PERIOD as well as the
+        share. The allowance behind the level is
+        `included_write_ops_per_month` while `count` is a one-hour weight sum, so
+        "a share of this Organization's allowance" told the customer the level was
+        a per-window allowance — the comparison's one dimension it does not have.
+        RED before this fix: the clause carried no period at all."""
         tier = _alert_dict({"event_type": "review_needed", "details": {
             "count": 51_000, "threshold": 25_000, "window_s": 3600,
             "surface": "Memory writes", "tier_relative": True}})
-        assert "a share of this Organization's allowance" in tier["message"], tier
+        assert ("a share of this Organization's monthly allowance"
+                in tier["message"]), tier
         assert "contact support@premiselabs.co" in tier["message"], tier
         absolute = _alert_dict({"event_type": "review_needed", "details": {
             "count": 900, "threshold": 500, "window_s": 3600,
