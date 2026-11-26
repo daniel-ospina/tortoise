@@ -608,7 +608,7 @@ def a2_edges() -> dict:
         "ownership": ownership, "dependency": dependency, "other": other,
         "ownership_door": {
             "door": "tortoise_get_entity(id, type='governance') -> "
-                    "sdk._get_owned_entities -> MATCH (s:Subject)<-[:ownedBy]-(e)",
+                    "sdk._get_owned_entities -> MATCH (s)<-[:ownedBy]-(e)",
             "owners_asked": sorted(ownership_door),
             "rows_returned": {k: len(v) for k, v in ownership_door.items()},
             "total_rows": sum(len(v) for v in ownership_door.values()),
@@ -1250,7 +1250,7 @@ def _door_findings() -> list[dict]:
                          "rows_returned": {n: 0 for n in sorted(asked_owners)},
                          "code_path": "mcp_server.tortoise_get(type='governance') "
                                       "-> sdk._get_owned_entities: "
-                                      "MATCH (s:Subject)<-[:ownedBy]-(e) "
+                                      "MATCH (s)<-[:ownedBy]-(e) "
                                       "(sdk.py:62739-62758), i.e. the DECLARED "
                                       "orientation — the edges point the other way"},
         })
