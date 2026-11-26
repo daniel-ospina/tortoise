@@ -250,9 +250,10 @@ is **per-surface**, not uniform (#3615):
   which its `SessionStart` counterpart runs in the background), `tortoise
   session capture` / `tortoise sessions import`, and the SDK's client
   transmission (`POST /v1/sessions/commit`, the hosted route — the SDK's `TortoiseSDK.commit_session` wrapper that used to call it was deleted by `#4282`).
-- **The hosted MCP tool `tortoise_session_capture` is not gated by this
+- **The hosted MCP tool `tortoise_mine_knowledge_from_session` is not gated by this
   variable** — it executes on the server, which cannot read the client host's
-  `TORTOISE_CAPTURE`. It carries the server-side recording policy
+  `TORTOISE_CAPTURE` (it is the live door `tortoise_session_capture` was retired
+  into, #11609). It carries the server-side recording policy
   (`session_recording`, default-ON) instead. This is **decided, not open**
   (#3662, Option 1): an explicit, agent-invoked capture is itself the agreement
   to record the session — the client's switch cannot travel with the request,
@@ -319,9 +320,11 @@ reports the current consent state.
 **Meeting transcripts:** the manual mining flow (transcript → meeting/decision/
 friction events + draft Points) is a local CLI/SDK path — see the
 meeting-transcripts section of [quickstart-selfhosted.md](quickstart-selfhosted.md).
-Over hosted HTTP the `tortoise_mine_conversations` tool is stdio-only for
-security (#1090); run `tortoise serve` locally and connect your agent to it
-(stdio) to use it, or mine with the CLI against a local DB.
+Over hosted HTTP the `tortoise_mine_knowledge_from_session` and
+`tortoise_mine_knowledge_from_directory` tools are stdio-only for
+security (#1090) — the flow `tortoise_mine_conversations` was retired into
+(#11609); run `tortoise serve` locally and connect your agent to it
+(stdio) to use them, or mine with the CLI against a local DB.
 
 ### The saved backlog: sessions captured without a provider key
 
@@ -377,8 +380,9 @@ empty. One path does **not** write the ledger yet, so on it the report stays
 silent until the session is imported explicitly: the Pi capture extension.
 
 **This is a local record, not the server's verdict.** A session extracted by
-another path since it was deferred — the hosted MCP `tortoise_session_capture`,
-or `TortoiseSDK.capture_session` (deleted by #4282) — is not visible in the local ledger, so a
+another path since it was deferred — the hosted MCP `tortoise_mine_knowledge_from_session`
+(the successor to `tortoise_session_capture`, #11609), or `TortoiseSDK.capture_session`
+(deleted by #4282) — is not visible in the local ledger, so a
 `not-processed` entry can be stale until the next `--process` replays it.
 
 ## 4. Use the REST API
@@ -442,7 +446,7 @@ Running Tortoise yourself and moving to hosted? The primary path is **`tortoise 
    ```
 
    Re-importing the same artifact is idempotent (`{"imported":false,"already":true}`); a failed/tampered artifact is quarantined (422) and never touches the live graph.
-5. **Verify parity** — the import response's `restored` counts should match your source graph; `tortoise team info` and `tortoise context` confirm the team and its memory digest, and the MCP tools `tortoise_check_structure` (chain integrity) and `tortoise_graph_overview(section="structure")` (counts: total points + per-gate breakdown — `tortoise_summarize_structure` retired into it, #4282) confirm the imported graph. Once hosted reaches parity, decommission the daemon at your leisure.
+5. **Verify parity** — the import response's `restored` counts should match your source graph; `tortoise team info` and `tortoise context` confirm the team and its memory digest, and the MCP tool `tortoise_graph_overview` confirms the imported graph — `section="structure_check"` (chain integrity; `tortoise_check_structure` retired into it, #11609) and `section="structure"` (counts: total points + per-gate breakdown — `tortoise_summarize_structure` retired into it, #4282). Once hosted reaches parity, decommission the daemon at your leisure.
 
 ### Fallback: manual replay
 

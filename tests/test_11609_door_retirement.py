@@ -1143,6 +1143,8 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: Documents whose every `tortoise_*` mention is an instruction to CALL it.
     CALL_INSTRUCTION_DOCS: ClassVar[tuple[str, ...]] = (
         "docs/how-to/provision-a-graph-per-end-user.md",
+        "docs/quickstart-cloud.md",
+        "docs/quickstart-selfhosted.md",
     )
 
     #: ⛔ WHAT THIS GUARD READS: MARKDOWN STRUCTURE, NOT ENGLISH (#14237, rounds 2-5).
