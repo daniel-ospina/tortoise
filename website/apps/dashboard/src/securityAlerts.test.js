@@ -399,6 +399,21 @@ test('#14694: main.jsx WIRES the fourth feed fact — the component cannot close
   assert.match(mount, /feedLoaded=\{alertsLoaded\}/,
     'the mount must pass the REAL settled fact — `true` reinstates the defect, and '
     + 'omitting it leaves the default `false` on forever')
+  // ⛔ THE STORAGE IDENTITY IS WIRED HERE AND NOWHERE ELSE. Every DOM test passes
+  // `orgId`/`userId` itself, so none of them can see the mount — the same gap
+  // `feedLoaded` had above, with a worse blast radius: `storageKey` degrades to
+  // `tortoise.notifications.v1:anonymous:no-org`, which is ONE key shared by every
+  // Organization and every user on the browser. A dismissal or snooze taken in
+  // Organization A would then hide Organization B's alerts, and two people on one
+  // browser would inherit each other's decisions — with all 1171 tests green.
+  // Measured: deleting either prop leaves the whole suite passing without these
+  // two lines.
+  assert.match(mount, /orgId=\{currentOrgId \|\| ''\}/,
+    'the mount must pass the CURRENT Organization — without it every org shares one '
+    + 'storage key, so a snooze or dismissal leaks across Organizations')
+  assert.match(mount, /userId=\{sessionMetaRef\.current\?\.id \|\| sessionMetaRef\.current\?\.email \|\| ''\}/,
+    'the mount must pass the signed-in user — without it two people on one browser '
+    + 'inherit each other\'s dismissals')
   // Every SETTLE arm sets it: a failed read is a settled one (`unavailable` says
   // which kind), so all three arms — 2xx, non-2xx, throw — must set it, and a
   // fourth would mean an arm was added without deciding this question.

@@ -562,44 +562,6 @@ export function NotificationBell({
     if (bellRef.current) bellRef.current.focus()
   }
 
-  // Outside click + Escape. `pointerdown` (not `click`) so the panel closes before
-  // the underlying control activates, and the press that dismisses is not also
-  // the press that presses something behind it.
-  //
-  // ESCAPE IS HANDLED ON THE DOCUMENT TOO, not only on the panel: from the detail
-  // view, focus can be on `<body>` by the time the key is pressed, and a keydown
-  // that starts outside the panel's subtree never reaches a handler bound inside it
-  // — the panel stayed open with no Escape route and the keyboard user was stranded
-  // (review finding). The in-panel handler below covers the common case; this one
-  // covers the case where focus has left.
-  React.useEffect(() => {
-    if (!open) return undefined
-    const onPointerDown = (e) => {
-      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false)
-    }
-    const onKeyDown = (e) => {
-      if (e.key !== 'Escape') return
-      // The in-panel handler already handled this key; it runs first and closes or
-      // goes back, so this arm only fires when the keydown did NOT originate inside
-      // the panel (focus on `<body>`). Cheap to double-handle: both paths are
-      // idempotent on state.
-      if (rootRef.current && rootRef.current.contains(e.target)) return
-      if (detailKey) {
-        setDetailKey(null)
-        if (panelRef.current) panelRef.current.focus()
-      } else {
-        setOpen(false)
-        if (bellRef.current) bellRef.current.focus()
-      }
-    }
-    document.addEventListener('pointerdown', onPointerDown)
-    document.addEventListener('keydown', onKeyDown)
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown)
-      document.removeEventListener('keydown', onKeyDown)
-    }
-  }, [open, detailKey])
-
   const ledgerView = buildLedger({ alerts, state: ledger.state, now: clock })
   const entries = [...ledgerView.current]
   if (showOlder) entries.push(...ledgerView.older)
@@ -628,6 +590,57 @@ export function NotificationBell({
   ]
   const detailEntry = detailKey ? everyEntry.find((e) => e.rowKey === detailKey) || null : null
   const detailAlert = detailEntry ? detailEntry.alert : null
+  // ⛔ WHAT IS ON SCREEN, not what was clicked. `detailKey` can outlive the row it
+  // names: the parent re-reads `/v1/team/alerts` after every acknowledgement, so a
+  // 404 drops the episode from the feed while `detailKey` still points at it. Both
+  // Escape handlers used to branch on `detailKey`, so on that state the panel was
+  // already rendering the bare LEDGER (`{detailAlert ? …}` below) while the key
+  // still took the "go back from the detail" arm — the first press did nothing
+  // visible and moved focus to the container, and only the second closed it.
+  // Branching on `detailAlert` makes the key do what the screen shows.
+
+  // Outside click + Escape. `pointerdown` (not `click`) so the panel closes before
+  // the underlying control activates, and the press that dismisses is not also
+  // the press that presses something behind it.
+  //
+  // ESCAPE IS HANDLED ON THE DOCUMENT TOO, not only on the panel: from the detail
+  // view, focus can be on `<body>` by the time the key is pressed, and a keydown
+  // that starts outside the panel's subtree never reaches a handler bound inside it
+  // — the panel stayed open with no Escape route and the keyboard user was stranded
+  // (review finding). The in-panel handler below covers the common case; this one
+  // covers the case where focus has left.
+  //
+  // DECLARED AFTER `detailAlert` on purpose: the handler's behaviour depends on
+  // whether a detail is on screen, so `detailAlert` belongs in the dependency list.
+  // Declared above it, the effect would keep the closure from the render where the
+  // row still existed and the stale-detail bug would survive the fix.
+  React.useEffect(() => {
+    if (!open) return undefined
+    const onPointerDown = (e) => {
+      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false)
+    }
+    const onKeyDown = (e) => {
+      if (e.key !== 'Escape') return
+      // The in-panel handler already handled this key; it runs first and closes or
+      // goes back, so this arm only fires when the keydown did NOT originate inside
+      // the panel (focus on `<body>`). Cheap to double-handle: both paths are
+      // idempotent on state.
+      if (rootRef.current && rootRef.current.contains(e.target)) return
+      if (detailAlert) {
+        setDetailKey(null)
+        if (panelRef.current) panelRef.current.focus()
+      } else {
+        setOpen(false)
+        if (bellRef.current) bellRef.current.focus()
+      }
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open, detailAlert])
   // A refusal that names an episode NO LONGER IN THE FEED. The parent re-reads
   // `/v1/team/alerts` on every refusal (`main.jsx` acknowledgeAlert), so a 404 —
   // "that alert is no longer in the feed" — resolves `detailEntry` to null and
@@ -718,7 +731,10 @@ export function NotificationBell({
               // Inside the panel, Escape must also RESTORE FOCUS — the bell's own
               // handler cannot fire while focus is in here, so the panel closed and
               // left `document.activeElement` on `<body>` (review finding).
-              if (detailKey) goBack()
+              // Branch on what is ON SCREEN (`detailAlert`), for the reason stated
+              // where it is derived: a `detailKey` whose row the feed dropped must
+              // not swallow the first press.
+              if (detailAlert) goBack()
               else closePanel()
             }
           }}
