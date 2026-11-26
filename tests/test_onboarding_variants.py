@@ -2089,6 +2089,21 @@ _MODAL_TO_VERB = (
 
 _PRE_CUE_PREFIX = " \t,.;:—–-…('\"`*>#_[]{}"
 
+# ⛔ A MARKDOWN LIST MARKER IS NOT PART OF THE CLAUSE, and an ORDINAL one cannot
+# be reached by `_PRE_CUE_PREFIX`, which is a character set: `lstrip` on `(1)`
+# leaves `1)`, and on `1)` leaves `1)`. The leftover reached form (f)'s `^` anchor
+# and defeated it, so the pre-cue half was blind to the whole ordinal family while
+# the dash bullet (which `_PRE_CUE_PREFIX` *does* carry) was graded:
+#
+#     RED    -  Confirm …\n   - Restart …      (control)
+#     GREEN  1) Confirm …\n   2) Restart …     (measured)
+#     GREEN  (1) Confirm …\n  (2) Restart …    (measured)
+#
+# Stripped as a MARKER (`marker` + whitespace), so a bare number in prose is
+# untouched.
+_PRE_CUE_LIST_MARKER_RE = re.compile(
+    r"^(?:[-*+>]|\(\d{1,2}\)|\d{1,2}[.)])\s+")
+
 
 _INVERSION_FORMS = (
     # (a) a connective whose own clause carries a CONFIRMATION PREDICATE acting
@@ -2663,7 +2678,23 @@ _STATEMENT_BREAK_RE = re.compile(
     # DOTTED TOKEN FOLLOWED BY A SPACE still splits (`e.g.: quit and reopen`
     # splits at `e.g.`), which is the same window truncation the colon doctrine
     # already accepts, not extra protection.
-    r"(?:[;—–…]\s*|:\s+|(?:(?<=\s)-(?!-)\s+|(?<=\s)--\s+|^-\s*)"
+    r"(?:[;—–…]\s*|:\s+|(?:(?<=\s)[-*+](?![-*+])\s+|(?<=\s)--\s+|^[-*+]\s*)"
+    # ⛔ A MARKDOWN LIST MARKER IS A STATEMENT BOUNDARY — the same doctrine the
+    # leading `^-` arm has always applied, which is why the DASH bullet split and
+    # its four twins did not. The dash-only arm left `*`, `>`, `+` and both
+    # ordinal spellings inside one statement, where the NEXT step's marker stayed
+    # attached to the pre-cue clause as a trailing decoration (`… there. *`) and
+    # defeated form (f)'s anchor:
+    #
+    #     RED    - Confirm the tools are actually there.\n- Restart …   (control)
+    #     GREEN  * Confirm …\n* Restart …                              (measured)
+    #     GREEN  > Confirm …\n> Restart … / + Confirm …\n+ Restart …  (measured)
+    #     GREEN  1) Confirm …\n2) Restart … / (1) Confirm …           (measured)
+    #
+    # `\s+` (not `\s*`) after the emphasis-capable markers keeps `**bold**` and
+    # `*emphasis*` inside their clause; `(?![-*+])` keeps `**` from splitting.
+    r"|(?<=\s)>\s+|^>\s*"
+    r"|(?<=\s)(?:\(\d{1,2}\)|\d{1,2}[.)])\s+"
     r"|\.\s+(?=[A-Z\"'`(\[*_>])"
     r")")
 
@@ -2787,9 +2818,10 @@ _FORWARD_SEQUENCER_RE = re.compile(r"^(?:then|and|next|afterwards?)\b", re.IGNOR
 # in the class.
 _SEQUENCER_FRAGMENT_RE = re.compile(
     r"^(?:\s*(?:then|next|afterwards?|which|only|just|also|and|but|so|please"
-    r"|kindly|you|we|must|should|need|needs|have|has|to|be|sure|make|makes"
+    r"|kindly|you|we|must|should|can|could|will|would|may|might|shall"
+    r"|need|needs|have|has|to|be|sure|make|makes"
     r"|first|firstly|now|once|finally|lastly|subsequently|still|too"
-    r"|before|after|until|prior|when)\b\s*,?\s*)+$", re.IGNORECASE)
+    r"|before|after|until|unless|prior|when)\b\s*,?\s*)+$", re.IGNORECASE)
 
 # ⛔ A CUE GOVERNED BY A TEMPORAL SUBORDINATE INVERTS WHAT FOLLOWS IT. In
 # "Before you restart your client, confirm the tools are actually there" the
@@ -2862,8 +2894,22 @@ _NEGATED_CUE_LEAD_RE = re.compile(
     r"(?:\s+not|n['\u2019]t)"
     r"|\b(?:had|'d|\u2019d)\s+better\s+not"
     r"|\bcannot)\s*$", re.IGNORECASE)
+# ⛔ `unless` IS `until`, SPELLED DIFFERENTLY — and it was in NEITHER this set
+# nor form (a)'s or (e)'s, so the whole negated-cue arm was unreachable for the
+# most idiomatic English spelling of "not … until":
+#
+#     RED    Don't restart your client until you have confirmed the tools …   (control)
+#     GREEN  Don't restart your client unless you have confirmed the tools …  (measured)
+#
+# One word, doc-level: replacing only the cue paragraph with the `unless` spelling
+# left `_restart_cue_order_violation` returning None, so the pin PASSED on an
+# inversion it exists to red (measured, #14679 review cycle 46). The file already
+# treats `if|unless|until` as one class one arm over (`_AND_SUBORDINATE_HALF_RE`),
+# and its own doctrine is that a connective spelled differently is the same
+# connective — "`following` AND `upon` ARE `after`", "`whenever` IS `when`".
+# Non-vacuity: adding it flips the finding to RED and moves no other row.
 _DEFERRING_CONNECTIVE_RE = re.compile(
-    r"^(?:until|before|by\s+the\s+time|prior\s+to)\b", re.IGNORECASE)
+    r"^(?:until|unless|before|by\s+the\s+time|prior\s+to)\b", re.IGNORECASE)
 
 # …and a clause that ENDS on one introduces the NEXT clause, whichever side of
 # its own comma the sequencer sits on. `_FORWARD_SEQUENCER_RE` can only see an
@@ -3109,8 +3155,23 @@ def _cue_governing_clause(statements: list[str]) -> tuple[list[str], str]:
     shows up as a deliberate row flip instead of a surprise.
     """
     for statement in reversed(statements):
-        clauses = [c.strip().lstrip(_PRE_CUE_PREFIX).strip()
-                   for c in re.split(r"[,;]", statement) if c.strip()]
+        # ⛔ STRIP THE DECORATION *BEFORE* FILTERING EMPTIES, or a bare markdown
+        # marker becomes the governing clause and DISARMS the whole pre-cue
+        # half: `"*"` survives `if c.strip()` and then `lstrip(_PRE_CUE_PREFIX)`
+        # (which carries `*` and `>`) empties it, and `_SEQUENCER_FRAGMENT_RE`
+        # cannot match the empty string, so the walk-back loop cannot pop it.
+        # The function then returned `['']` — TRUTHY — as the governing clause,
+        # which is the exact violation of its own docstring ("a clause with no
+        # content word in it … is a FRAGMENT, not an instruction"):
+        #
+        #     RED    - Confirm the tools are actually there.\n- Restart …   (control)
+        #     GREEN  * Confirm the tools are actually there.\n* Restart …   (measured)
+        #     GREEN  > Confirm …\n> Restart …                              (measured)
+        #
+        # `>` blockquotes are used 19 times in `docs/quickstart-cloud.md` itself.
+        clauses = [c for c in (_PRE_CUE_LIST_MARKER_RE.sub(
+            "", raw.strip().lstrip(_PRE_CUE_PREFIX).strip()).strip()
+                               for raw in re.split(r"[,;]", statement)) if c]
         # ⛔ SEARCH A DECORATION-FREE COPY, exactly as the post-cue side does: a
         # decorated sequencer (`**then**`, `*then*`, `` `then` ``) is the same
         # word to a reader, and matching the raw clause left
@@ -5433,6 +5494,55 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      False),
     # …and the presence-only shape stays GREEN, declared above `_NEGATED_CUE_LEAD_RE`.
     ("Don't restart your client until the tools appear.", False),
+    # ⛔ CYCLE 46 — FOUR CLOSED-VOCABULARY GAPS, each a GREEN twin of a row that
+    # was already RED, each measured GREEN before its fix and closed at the root.
+    #
+    # 1. `unless` sat in NO connexion list — not this one, not form (a)'s, not
+    #    form (e)'s — so the whole negated-cue arm was unreachable for the most
+    #    idiomatic English spelling of "not … until". The `until` twin above was
+    #    RED; this one was GREEN, doc-level (the pin PASSED an inverted
+    #    paragraph). It is `_AND_SUBORDINATE_HALF_RE`'s own `if|unless|until`
+    #    class, one arm over.
+    ("Don't restart your client unless you have confirmed the tools are "
+     "actually there.", True),
+    ("Never restart your client unless you've confirmed the tools are actually "
+     "there.", True),
+    #    …while the presence-only `unless` row above stays GREEN: the arm is
+    #    monotone and fires only on a deferring connective AND a confirmation.
+    #
+    # 2. A BARE markdown marker survived `if c.strip()` and was then emptied by
+    #    `lstrip(_PRE_CUE_PREFIX)` (which carries `*` and `>`). `_SEQUENCER_
+    #    FRAGMENT_RE` cannot match the empty string, so the walk-back could not
+    #    pop it and the function returned `['']` — TRUTHY — as the governing
+    #    clause, disarming the entire pre-cue half. The dash twin was RED.
+    ("* Confirm the tools are actually there.\n"
+     "* Restart your client, and the tools appear in the client's MCP/tool list.",
+     True),
+    ("> Confirm the tools are actually there.\n"
+     "> Restart your client, and the tools appear in the client's MCP/tool list.",
+     True),
+    # 3. `_SEQUENCER_FRAGMENT_RE`'s own declared "modal subjects" class was seven
+    #    modals short, so `then you can restart` was not recognised as a fragment
+    #    and BECAME the governing clause, hiding the imperative it sequences. The
+    #    pinned `then you must` twin was already RED — same class, same commit's
+    #    doctrine, two lists disagreeing.
+    ("Confirm the tools are actually there, then you can restart your client.",
+     True),
+    ("Confirm the tools are actually there, then you could restart your client.",
+     True),
+    # 4. `+` and BOTH ordinal spellings were not statement breaks, so the NEXT
+    #    step's marker stayed attached to the pre-cue clause as a trailing
+    #    decoration (`… there. +`) and defeated form (f)'s `^` anchor. `-` and
+    #    `1.` were RED, so this was a marker family asserted, never measured.
+    ("+ Confirm the tools are actually there.\n"
+     "+ Restart your client, and the tools appear in the client's MCP/tool list.",
+     True),
+    ("1) Confirm the tools are actually there.\n"
+     "2) Restart your client, and the tools appear in the client's MCP/tool list.",
+     True),
+    ("(1) Confirm the tools are actually there.\n"
+     "(2) Restart your client, and the tools appear in the client's MCP/tool list.",
+     True),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
