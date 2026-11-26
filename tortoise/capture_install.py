@@ -2072,7 +2072,15 @@ def _retire_pi_entry(path: Path, *, dry_run: bool = False) -> str | None:
                             "hand.")
             for name in ("index.ts", "index.js"):
                 entry = path / name
-                if entry.is_file() or entry.is_symlink():
+                # ⛔ `exists`, NOT `is_file` — PI USES `fs.existsSync` (#14342
+                # round 23, finding 2). A DIRECTORY named `index.ts` IS the
+                # entry point Pi resolves, and `is_file()` skipped it: the
+                # receipt then claimed "(index.ts/index.js → *.disabled)" over
+                # an untouched disk, and `--dry-run` reported `ok=True` where
+                # the real run refused — the two moods disagreeing.
+                # `is_symlink()` stays in the test because a DANGLING link has
+                # no target but is still a name to retire.
+                if os.path.exists(entry) or entry.is_symlink():
                     preserved = path / f"{name}.disabled"
                     if os.path.lexists(preserved):
                         # `Path.rename` OVERWRITES on POSIX: renaming over a
@@ -2235,20 +2243,19 @@ def _seam_state_clause(*, dry_run: bool, wrote: bool) -> str:
     return "The capture seam was ALREADY in place"
 
 
-#: The post-retirement ACTION line's clause.
+#: The post-retirement ACTION line's clauses.
 #:
-#: ⛔ WHY THIS ONE MAY SAY "STILL" WHILE THE ERROR BESIDE IT SOMETIMES SAYS
-#: "could not be VERIFIED" (#14342 round 22, finding 3, resolved here).
-#: This line is emitted only for an action that ALREADY LANDED: the entry point
-#: was found and renamed, so `_retire_pi_entry` READ the shape and acted on it.
-#: The guess branches of `_pi_loadability_is_guessed` are the UNREADABLE manifest
-#: and the CONSERVATIVE suffix-named-symlink rule — and in both of those
-#: `_retire_pi_entry` returns its own error instead of landing, so this clause is
-#: never reached with them. An earlier cut of this fix asked
-#: `_pi_loadability_is_guessed` about the pre-rename or post-rename path here;
-#: both are dead branches (the pre-rename path no longer EXISTS, and the
-#: post-rename one is a plain file), so the branch was removed rather than left
-#: as unreachable code that reads like a guarantee it does not provide.
+#: ⛔ TWO OF THEM, because the assertion that produces the error beside this
+#: action has two epistemics (#14342 round 23, finding 1). A previous cut
+#: hard-coded the measured one and justified it as unreachable — that claim was
+#: FALSE (a suffix-named symlink is renamed to a NON-SUFFIXED SYMLINK TO A
+#: DIRECTORY, and with an unreadable `package.json` the guess is exactly what
+#: the error reports), so the action asserted "STILL an extension Pi loads"
+#: beside an error saying "could not be VERIFIED", over a shape where real Pi
+#: registers nothing. Both clauses are now selected from the SAME predicates
+#: that produced the error, so the two cannot diverge.
+_GUESSED_LOADED = ("whether it is still loaded COULD NOT be verified — it may "
+                   "still register")
 _STILL_LOADED = "it is STILL an extension Pi loads"
 
 
@@ -2547,11 +2554,22 @@ def _disable_pi_second_producer(
         # rename DID land, so the receipt says what landed. A failure that
         # reports zero actions over a modified disk is the report that doctrine
         # exists to prevent (#14342 review, final round finding 3).
+        # ⛔ ONE RESULT, ONE EPISTEMIC STATE (#14342 round 23, finding 1). The
+        # clause is asked of the SAME paths the assertion above asked, so the
+        # action and the error cannot contradict each other. A previous cut
+        # hard-coded the measured clause and justified it as unreachable — that
+        # was WRONG: a suffix-named SYMLINK to a directory is renamed to
+        # `reflect-hook.ts.disabled`, which is a non-suffixed SYMLINK TO A
+        # DIRECTORY (not a plain file), and with an unreadable `package.json`
+        # the guess is exactly what the error reports.
+        _guessed = _pi_loadability_is_guessed(retired)
+        if not _guessed and was_directory:
+            _guessed = _pi_loadability_is_guessed(active)
+        _clause = (_GUESSED_LOADED if _guessed else _STILL_LOADED)
         landed = (f"retired the entry point inside {active} (index.ts/index.js "
-                  f"→ *.disabled) — but {_STILL_LOADED}"
+                  f"→ *.disabled) — but {_clause}"
                   if was_directory else
-                  f"retired {active} → {retired} — but "
-                  f"{_STILL_LOADED}")
+                  f"retired {active} → {retired} — but {_clause}")
         return True, [landed], still
     if was_directory:
         detail = (f"retired the entry point inside {active} (index.ts/index.js "

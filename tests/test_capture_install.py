@@ -2149,19 +2149,23 @@ def test_dry_run_does_not_claim_a_mechanism_on_an_unreadable_target(home):
         "COULD NOT be verified" in real_err, real_err
 
 
-def test_install_refuses_when_the_legacy_index_entry_is_a_directory(home):
-    """ROUND-22 P1, on the plane where the index test is actually load-bearing.
+def test_a_legacy_index_entry_that_is_a_directory_IS_retired(home):
+    """ROUND-23 P2, on the plane where the transcription is load-bearing.
 
-    A suffix-named symlink is caught earlier by the conservative rule, so the
-    `.is_file()`/`fs.existsSync` transcription only decides NON-suffixed shapes:
-    a REAL legacy directory whose `index.ts` is itself a directory containing
-    `index.js`. Measured with real Pi: `resolveExtensionEntries` tests
-    `fs.existsSync(indexTs)`, so that directory IS the entry point and Pi
-    registers it — while `.is_file()` counted nothing and the install went
-    GREEN after the rename over `['.tortoise-capture.disabled/index.ts',
-    'tortoise-capture.ts']`.
+    `resolveExtensionEntries` tests `fs.existsSync(indexTs)`, so a DIRECTORY
+    named `index.ts` (containing its own `index.js`) IS the legacy entry point
+    and Pi registers it. The predicate learned that in round 22, but
+    `_retire_pi_entry` still gated on `is_file() or is_symlink()` and renamed
+    NOTHING — while the receipt claimed "retired the legacy extension's entry
+    point inside … (files preserved)". Measured: `--dry-run` returned `ok=True`
+    on the same tree the real run refused, i.e. the two moods disagreed in the
+    false-PASS direction.
 
-    Mutation: `.exists()` -> `.is_file()` in the predicate's index test — REDs.
+    With the fourth transcription fixed the retirement SUCCEEDS, so the correct
+    assertion is the safety property, not a refusal.
+
+    Mutation: `.exists()` -> `.is_file()` in `_retire_pi_entry`'s index gate —
+    the rename stops happening and this row REDs on `ok`.
     """
     ext_dir = home / ".pi" / "agent" / "extensions"
     ext_dir.mkdir(parents=True)
@@ -2172,9 +2176,90 @@ def test_install_refuses_when_the_legacy_index_entry_is_a_directory(home):
 
     res = install_capture("pi", home=home)
 
-    assert not res.ok, (
-        f"GREEN over two live producers: {res.actions} / "
+    assert res.ok, res.error
+    # The entry point was ACTUALLY retired — the receipt says so, and the disk
+    # agrees: no plain `index.ts`, the preserved name is in place.
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    assert not (disabled / "index.ts").exists(), (
+        "the receipt claimed a retirement that did not happen")
+    assert (disabled / "index.ts.disabled").exists()
+    # The safety property, through the oracle.
+    assert _registered_producers(ext_dir) == [capture_install.PI_EXTENSION_NAME], (
+        f"one producer must register after the retirement; got "
         f"{_registered_producers(ext_dir)}")
+
+
+def test_dry_run_and_real_run_agree_when_the_index_entry_is_a_directory(home):
+    """The two moods must not disagree (#14342 round 23, findings 2 and 3).
+
+    Before the fix: dry `ok=True` / real `ok=False` on this tree — a dry-run
+    false PASS on the plane whose whole job is previewing the real run. The
+    same class the reviewer's S5/N1 mutants showed was unpinned.
+
+    Mutation: `.exists()` -> `.is_file()` in the dry-run post-rename model, or
+    drop its `index.js` clause — this row REDs on the disagreement.
+    """
+    # BOTH index names, each as a DIRECTORY: the post-rename model has an
+    # `index.ts` clause and an `index.js` clause and a mutant can survive in
+    # either one, so both planes are exercised.
+    for index_name in ("index.ts", "index.js"):
+        sub_home = home / index_name.replace(".", "-")
+        ext_dir = sub_home / ".pi" / "agent" / "extensions"
+        ext_dir.mkdir(parents=True)
+        target = home / f"checkout-{index_name}" / "hook"
+        (target / index_name).mkdir(parents=True)
+        (target / index_name / "nested.js").write_text("// nested\n")
+        (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).symlink_to(
+            target, target_is_directory=True)
+        assert capture_install._pi_entry_is_loadable(
+            ext_dir / capture_install.PI_SECOND_PRODUCER_NAME) is True, (
+            "premise: the link IS loadable before the run")
+
+        dry = install_capture("pi", home=sub_home, dry_run=True)
+        real = install_capture("pi", home=sub_home)
+
+        assert dry.ok == real.ok, (
+            f"the moods disagree on a `{index_name}`-as-directory target: dry "
+            f"ok={dry.ok} ({dry.error!r}) vs real ok={real.ok} "
+            f"({real.error!r})")
+
+
+def test_the_landed_action_and_its_error_never_contradict(home):
+    """ROUND-23 finding 1 — one `InstallResult`, one epistemic state.
+
+    A suffix-named SYMLINK to a directory is renamed to
+    `reflect-hook.ts.disabled`, which is a NON-SUFFIXED SYMLINK TO A DIRECTORY
+    (not a plain file), so with an unreadable `package.json` the post-state
+    assertion is a guess. The action line hard-coded "it is STILL an extension
+    Pi loads" beside an error saying "could not be VERIFIED" — and real Pi
+    registers nothing there.
+
+    Mutation: hard-code the action clause to `_STILL_LOADED` — this row REDs.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "hook"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// resolvable entry point\n")
+    manifest = target / "package.json"
+    manifest.write_text('{"pi": {"extensions": ["index.ts"]}}')
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).symlink_to(
+        target, target_is_directory=True)
+    os.chmod(manifest, 0o000)
+    try:
+        res = install_capture("pi", home=home)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    action = " ".join(res.actions)
+    error = res.error or ""
+    assert action, "a landed rename reported no action"
+    if "could not be VERIFIED" in error:
+        assert "STILL an extension Pi loads" not in action, (
+            f"the action asserts the registration its own error declines to "
+            f"assert: action={action!r} error={error!r}")
 
 
 def test_oracle_counts_a_legacy_index_entry_that_is_a_directory(home):
