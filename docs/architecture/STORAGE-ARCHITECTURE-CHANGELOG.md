@@ -2771,7 +2771,7 @@ and distinct-door figures TWICE each, and the read-site total and the cell-occur
 read sites `FORTY-THREE` → `FORTY-FOUR`, customer-callable `EIGHTEEN` → `NINETEEN`, distinct doors
 `FIFTEEN` → `SIXTEEN` (nine MCP tools, TWO SDK methods, five REST routes — the new door is
 `GET /v1/entities/{entity_id}/relations`), cell occurrences `21` → `22`, then `22` → `23` where row 45's cell names its SECOND door (`MCP tortoise_search` — a CELL-OCCURRENCE move only: the distinct door set is 16 either way and the accepted-pair pin is 28 either way). Derived, not hand-counted:
-`_rows()` 44, `_customer_callable_doors()` 16 over 22 cells, `_door_reaches()` accepting 28 pairs
+`_rows()` 44, `_customer_callable_doors()` 16 over 23 cells, `_door_reaches()` accepting 28 pairs
 (was 27 — the new row accepts exactly ONE, its own door, and no older row's set moved; the worst-row
 bound stays 4). `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 states the same figures and enumerates the same
 readers, so it moves with it, including its `Outside this nineteen` list marker.
