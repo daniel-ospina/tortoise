@@ -2041,6 +2041,125 @@ def test_a_damaged_git_directory_is_NOT_a_permit_for_the_TRACKING_probe(
         "git merely disowns is could-not-answer, not a permit")
 
 
+def test_a_tracking_probe_answers_about_the_INDEX_so_HEAD_is_asked_before_a_permit(
+    tmp_path, monkeypatch, capsys
+):
+    """…and `not tracked` from a checkout with NO INDEX is not a permit either.
+
+    ⛔ `git ls-files --error-unmatch` ANSWERS ABOUT THE INDEX. Its rc 1 is the
+    documented non-match, but an ABSENT index answers 1 too, with an error line
+    byte-identical to the honest one, while HEAD still names the path — and the state
+    that produces it is not exotic: a fresh clone with `git read-tree` not yet run, a
+    checkout whose index was deleted, a damaged index a lane cleared to "fix" git. #14625
+    review round 7 measured `--render` overwriting a COMMITTED file at rc 0 that way, so
+    the permit now confirms the answer against HEAD, and this arm pins that: with the
+    HEAD probe reverted to the pre-fix `return None`, this reds.
+
+    The premise is MEASURED on the real git in front of it — both halves, the index's `1`
+    and HEAD's name — or the arm would fail for a git-version reason it does not name.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    keeper = repo / "docs-keep.md"
+    keeper.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", keeper.name], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=a",
+         "commit", "-qm", "tracked"],
+        check=True,
+    )
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    (repo / ".git" / "index").unlink()
+    answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", keeper.name],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert answer.returncode == 1, (
+        "the premise: an ABSENT index answers 1 (not 128); got "
+        f"rc={answer.returncode} stderr={answer.stderr!r} — without this the arm grades "
+        "a different refusal than the one it describes")
+    in_head = subprocess.run(
+        ["git", "ls-tree", "--name-only", "HEAD", "--", keeper.name],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert in_head.returncode == 0 and keeper.name in in_head.stdout, (
+        "the premise: HEAD still names the path after the index is gone; got "
+        f"rc={in_head.returncode} stdout={in_head.stdout!r}")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", keeper.relative_to(repo).as_posix()])
+    assert rc == 2, (
+        f"`not tracked` from an ABSENT index is not a permit for a COMMITTED path; got "
+        f"{rc} — an absent index answers the same thing about a file a commit names")
+    err = capsys.readouterr().err
+    assert "IS in" in err, (
+        "the refusal must name the second question it asked (HEAD), so reverting the "
+        f"HEAD probe reds this arm rather than being covered by a later guard:\n{err}")
+    assert keeper.read_bytes() == before, (
+        "the committed file was overwritten: an index-shaped answer is not content-shaped")
+
+
+def test_a_DANGLING_git_entry_is_NOT_a_permit_for_the_tracking_probe(
+    tmp_path, monkeypatch, capsys
+):
+    """…and a `.git` that EXISTS but cannot be RESOLVED is a damage state, not a plain dir.
+
+    ⛔ THE STRUCTURAL HALF OF THE PERMIT USED `Path.exists()`, WHICH FOLLOWS THE LINK
+    (#14625 review, round 7). A `.git` that is a symlink to a gitdir on a volume that is
+    not mounted — `.git-real` intact, its index still tracking the destination — makes
+    git answer `fatal: not a git repository` at 128, which is the stderr half of the
+    permit, while `exists()` reads False. Measured: `--render` overwrote the TRACKED file
+    at rc 0. `lexists` asks the question that was meant, and this arm pins it: with
+    `lexists` reverted to `exists`, this reds.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    keeper = repo / "docs-keep.md"
+    keeper.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", keeper.name], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=a",
+         "commit", "-qm", "tracked"],
+        check=True,
+    )
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    real_git_dir = repo / ".git-real"
+    (repo / ".git").rename(real_git_dir)
+    os.symlink(str(tmp_path / "gitdir-on-an-unmounted-volume"), repo / ".git")
+    assert repr(repo / ".git") and (repo / ".git").exists() is False, (
+        "the premise: a DANGLING symlink makes `exists()` False while the entry is "
+        "present — without that, this arm would grade `lexists` on a name that is "
+        "simply absent")
+    assert os.path.lexists(repo / ".git"), "…and `lexists` sees it"
+    answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", keeper.name],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert answer.returncode == 128 and "not a git repository" in answer.stderr, (
+        "the premise: git answers 128 + 'not a git repository' through a dangling "
+        f".git; got rc={answer.returncode} stderr={answer.stderr!r}")
+    assert (real_git_dir / "index").is_file(), (
+        "the premise: the real index is INTACT and still tracks the file, so the write "
+        "is restorable damage rather than an empty directory")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", keeper.relative_to(repo).as_posix()])
+    assert rc == 2, (
+        f"a dangling `.git` must not permit the write, got {rc} — the entry EXISTS, it "
+        "simply cannot be resolved, and that is a damage state")
+    err = capsys.readouterr().err
+    assert "for tracking" in err, (
+        f"the TRACKING probe must refuse this; stderr:\n{err}")
+    assert keeper.read_bytes() == before, (
+        "the tracked file was overwritten through a `.git` that git could not resolve")
+
+
 def test_the_tracking_probe_still_PERMITS_both_honest_answers(tmp_path, monkeypatch):
     """…and the fail-closed arm above does not over-block either honest permit.
 
@@ -4157,6 +4276,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # every non-zero probe passes the first two and walls off `--render /tmp/x.md`.
         "test_a_tracking_probe_that_cannot_answer_is_REFUSED_not_read_as_untracked",
         "test_a_damaged_git_directory_is_NOT_a_permit_for_the_TRACKING_probe",
+        "test_a_tracking_probe_answers_about_the_INDEX_so_HEAD_is_asked_before_a_permit",
+        "test_a_DANGLING_git_entry_is_NOT_a_permit_for_the_tracking_probe",
         "test_the_tracking_probe_still_PERMITS_both_honest_answers",
         "test_the_renderer_reports_a_write_failure_as_could_not_run",
         # ⛔ THE OTHER THREE "COULD NOT RUN" SIBLINGS. The set named only the probe
@@ -4231,8 +4352,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 47, (
-        f"expected EXACTLY 47 named split arms; got {len(split_arms)} — either a "
+    assert len(split_arms) == 49, (
+        f"expected EXACTLY 49 named split arms; got {len(split_arms)} — either a "
         "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
@@ -4242,7 +4363,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 47` reds a name PRUNED from the literal and `missing` reds a
+    # `len(split_arms) == 49` reds a name PRUNED from the literal and `missing` reds a
     # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
@@ -4275,8 +4396,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # 103 -> 106 (`split_arms` 44 -> 47 with them): the refusal arm, the structural-term
     # arm that keeps a git-disowned checkout out of the permit, and the over-block
     # counterweight. All three carry a #13098 split invariant and are named above.
-    assert len(test_functions) == 106, (
-        f"expected EXACTLY 106 test functions in this module; got "
+    assert len(test_functions) == 108, (
+        f"expected EXACTLY 108 test functions in this module; got "
         f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")

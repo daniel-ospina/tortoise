@@ -1193,7 +1193,7 @@ def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
     DESTINATION (`rel` when it is inside `ROOT`, otherwise the destination's own
     directory and basename).
 
-    ⛔ TWO ANSWERS PERMIT, AND "NON-ZERO" IS NOT ONE OF THEM. Git's own contract keeps
+    ⛔ THREE ANSWERS PERMIT, AND "NON-ZERO" IS NOT ONE OF THEM. Git's own contract keeps
     the ANSWER (`0` tracked / `1` not tracked — `ls-files --error-unmatch`'
     documented non-match) apart from COULD NOT ANSWER (`128`: a corrupt index, an
     unreadable index, an index that is a directory, a `.git` git disowns). Reading every
@@ -1201,8 +1201,18 @@ def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
     — the verb §7 tells every lane to run — overwrote a TRACKED file in another
     checkout at rc 0 whenever that checkout's index was one git could not read. The only
     `128` that permits is git's own `not a git repository` about a path with no
-    repository anywhere above it, which is exactly what the metadata guard below has
-    always refused otherwise (#14625 review, reproduced through the fix).
+    repository anywhere above it — and no dangling `.git` on any ancestor either — which
+    is exactly what the metadata guard below has always refused otherwise (#14625
+    review, reproduced through the fix).
+
+    ⛔ AND `1` IS NOT SUFFICIENT ON ITS OWN (#14625 review, round 7). It is an answer
+    about the INDEX, so it permits only after `_path_in_HEAD` returns `False`: an absent
+    or dangling index answers `1` with the documented non-match line while a commit
+    still names the path, and reading that as "untracked" overwrote a COMMITTED file at
+    rc 0 (measured). A `None` from that probe — an unreadable HEAD, any unexpected exit
+    — REFUSES. In short: `0` refuses; `1` + `_path_in_HEAD` `False` permits; the one
+    permitting `128` is `not a git repository` with no repository above; everything else
+    is a refusal.
 
     Returns 2 (could not run / refused) when git cannot be asked at all — an absent
     `git` binary raises `FileNotFoundError`, and an uncaught one would exit 1, the
@@ -1214,19 +1224,29 @@ def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
     probe_dir = target.parent
     while not probe_dir.is_dir() and probe_dir != probe_dir.parent:
         probe_dir = probe_dir.parent
-    if rel is not None:
-        probe_cwd, probe_path, label = ROOT, rel, rel
-    else:
-        probe_cwd, label = probe_dir, str(target)
-        # ⛔ THE FULL PATH FROM THE NEAREST EXISTING ANCESTOR, not `target.name`
-        # (#14625 review, round 5, P3): a destination whose parent directories do not
-        # exist yet asked about its BASENAME in a directory that is not its parent, so a
-        # peer repo tracking `sub/deep/x.md` answered "untracked" for `peer/sub/deep/x.md`
-        # after `sub/` was removed, and `--render` landed a generated document on a
-        # TRACKED path at rc 0. The invariant is about the path, so the probe names the
-        # whole remainder — `git ls-files` matches an index entry whose work-tree file is
-        # absent, which is exactly this case.
-        probe_path = target.relative_to(probe_dir).as_posix()
+    probe_cwd, label = probe_dir, (rel if rel is not None else str(target))
+    # ⛔ THE FULL PATH FROM THE NEAREST EXISTING ANCESTOR, not `target.name`
+    # (#14625 review, round 5, P3): a destination whose parent directories do not
+    # exist yet asked about its BASENAME in a directory that is not its parent, so a
+    # peer repo tracking `sub/deep/x.md` answered "untracked" for `peer/sub/deep/x.md`
+    # after `sub/` was removed, and `--render` landed a generated document on a
+    # TRACKED path at rc 0. The invariant is about the path, so the probe names the
+    # whole remainder — `git ls-files` matches an index entry whose work-tree file is
+    # absent, which is exactly this case.
+    probe_path = target.relative_to(probe_dir).as_posix()
+    # ⛔ AND THE PROBE ALWAYS FOLLOWS THE DESTINATION, `rel` OR NOT (#14625 review,
+    # round 7, P0): this used to ask `ROOT`'s repository for any destination INSIDE
+    # `ROOT` — `(ROOT, rel)` — which is the same repository only while the destination
+    # is in the toplevel work tree. Measured, with the REAL census: `--render
+    # .worktrees/<lane>/docs/LANE-DOC.md` from the main checkout answers `ls-files` rc 1
+    # and an empty `HEAD` listing at ROOT, and the file — committed in the LINKED
+    # WORKTREE's repository, which has its own index — was overwritten at rc 0, 21 bytes
+    # to 147,894, with no stderr. The same shape reaches a nested repository and a
+    # submodule's gitlink under `ROOT`, and `.worktrees/` is exactly how this fleet keeps
+    # live lanes, so the shortcut was a live fail-open, not a hypothetical one. The
+    # index that matters is the one the DESTINATION belongs to — which is what the
+    # comment above this function has said since the peer-checkout fix; the code now
+    # does it for both branches.
     # ⛔ A PROBE THAT CANNOT RUN IS "COULD NOT RUN" (2), never 1. An absent `git`
     # binary raises FileNotFoundError here, and nothing catches it: the interpreter
     # then exits 1, which this tool reserves for the DRIFT verdict — so a lane reads
