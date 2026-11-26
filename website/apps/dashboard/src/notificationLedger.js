@@ -162,8 +162,23 @@ export function storageKey({ userId, orgId } = {}) {
 
 /** A complete, empty store. */
 export function emptyState() {
-  return { v: 1, snoozed: {}, dismissed: {} }
+  return { v: 1, snoozed: {}, dismissed: {}, dismissedLast: {} }
 }
+
+/** The server's episode gap, mirrored from `tortoise/abuse.py` `EPISODE_GAP_S`
+ *  (`3 * 3600`). It is the width of the window in which two measurements of the
+ *  same identity are the SAME bout rather than two.
+ *
+ *  ⚠️ Mirrored, not invented: `_episode_acknowledged` applies exactly this gap
+ *  (`overlap or (0 <= delta <= gap_s)`), and its docstring states the choice it
+ *  encodes — *"let the acknowledgement LAPSE: the row returns as CURRENT … The
+ *  other direction (letting an old acknowledgement cover whatever turns up next)
+ *  would silently hide a genuinely new bout behind a week-old dismissal, which is
+ *  the worse failure for a security panel."* A client that dropped the bound
+ *  would take precisely that rejected direction, so this constant exists to keep
+ *  the local layer under the server's own rule. Pinned against abuse.py by
+ *  `notificationLedger.test.js` ("the gap mirrors the server's EPISODE_GAP_S"). */
+export const EPISODE_GAP_MS = 3 * 3600 * 1000
 
 /** How many dismissals to retain. The feed itself is bounded (20 episodes), so a
  *  store far larger than that is residue from old feeds; keeping a few hundred
@@ -231,7 +246,22 @@ export function readState(storage, key, now = new Date()) {
       const atMs = Number(at)
       dismissed[episode] = Number.isFinite(atMs) ? atMs : 0
     })
-  return { state: { v: 1, snoozed, dismissed }, persisted: true }
+  // The acknowledged window's END per dismissal, for the ACTIVITY bound in
+  // `isDismissed`. Kept in a SIBLING map rather than reshaping `dismissed` into
+  // objects on purpose: `dismissed` is a numeric watermark that the newest-first
+  // cap above sorts on, and every existing stored value (and every test) reads as
+  // a number. A store written before this field existed simply has no entry here
+  // and falls back to the watermark — see `isDismissed`.
+  const dismissedLast = {}
+  for (const [episode, last] of Object.entries(
+    isPlainObject(parsed.dismissedLast) ? parsed.dismissedLast : {},
+  )) {
+    const lastMs = Number(last)
+    if (episode in dismissed && Number.isFinite(lastMs) && lastMs > 0) {
+      dismissedLast[episode] = lastMs
+    }
+  }
+  return { state: { v: 1, snoozed, dismissed, dismissedLast }, persisted: true }
 }
 
 /** Write the store. Returns true only when the write is CONFIRMED. */
@@ -285,9 +315,15 @@ export function dismiss(state, episode, now = new Date(), alert = null) {
   const base = state || emptyState()
   if (!episode) return base
   const nowMs = now instanceof Date ? now.getTime() : Date.parse(now)
+  // `dismissed` is the watermark (the row's own `at`); `dismissedLast` is the
+  // same instant kept as the acknowledged window's END, which is what the
+  // ACTIVITY gap test needs. Both come from the same server timestamp, so a
+  // skewed browser clock cannot hide either register.
+  const lastMs = atMsOf(alert)
   return {
     ...base,
-    dismissed: { ...base.dismissed, [episode]: atMsOf(alert) || nowMs },
+    dismissed: { ...base.dismissed, [episode]: lastMs || nowMs },
+    dismissedLast: { ...(base.dismissedLast || {}), [episode]: lastMs },
   }
 }
 
@@ -297,7 +333,9 @@ export function undismiss(state, episode) {
   if (!episode || !(episode in (base.dismissed || {}))) return base
   const dismissed = { ...base.dismissed }
   delete dismissed[episode]
-  return { ...base, dismissed }
+  const dismissedLast = { ...(base.dismissedLast || {}) }
+  delete dismissedLast[episode]
+  return { ...base, dismissed, dismissedLast }
 }
 
 // ── Reading the state for one episode ──────────────────────────────────────
@@ -313,6 +351,16 @@ export function snoozedUntil(state, episode, now = new Date()) {
 /** The server timestamp of a row (ms), or 0 when it carries none. */
 function atMsOf(alert) {
   const raw = alert && alert.at
+  if (!raw) return 0
+  const ms = new Date(raw).getTime()
+  return Number.isNaN(ms) ? 0 : ms
+}
+
+/** The START of a row's episode (ms). `group_alert_episodes` adds `first_at`;
+ *  a feed that predates it (or a single-window row) falls back to `at`, which
+ *  makes the episode a point and therefore always inside its own gap. */
+function firstMsOf(alert) {
+  const raw = (alert && alert.first_at) || (alert && alert.at)
   if (!raw) return 0
   const ms = new Date(raw).getTime()
   return Number.isNaN(ms) ? 0 : ms
@@ -335,17 +383,49 @@ function atMsOf(alert) {
  * Organization` (a message with no rule token, so EVERY flag rule shares it)
  * hid a suspension that happened a week later.
  *
- * An ACTIVITY (measurement) row keeps no bound, and that asymmetry is the
- * server's: a velocity row re-reported every five minutes is the SAME ongoing
- * measurement, so one dismissal covering all of it is the point. It is bounded
- * in practice by the store's dismissal cap.
+ * ⛔ BOTH registers are bounded, and the bounds are DIFFERENT — mirroring
+ * `_episode_acknowledged`, not approximating it:
+ *
+ *   • INCIDENT (`alert` register) — the watermark test: an incident that
+ *     HAPPENED after the dismissal is not covered. Each row is a new FACT, and
+ *     folding it into the dismissed episode hides it.
+ *
+ *   • ACTIVITY (measurement) — the server's GAP test: a bout whose START is
+ *     within `EPISODE_GAP_MS` of the dismissed window's END is the same ongoing
+ *     measurement, so one dismissal covers it; a bout that starts LATER than
+ *     that gap is a genuinely new bout and renders as CURRENT. There is no
+ *     incident-style watermark here because a velocity row legitimately re-reports
+ *     every five minutes with a newer `at`.
+ *
+ * ⚠️ THIS FUNCTION USED TO RETURN `true` UNCONDITIONALLY FOR ACTIVITY, on the
+ * stated grounds that "that asymmetry is the server's". It is not: the server
+ * applies the window test to BOTH registers and only skips the *incident* gate
+ * for activity (`abuse.py` `_episode_acknowledged`). Dropping the gap arm was the
+ * one direction that module's docstring explicitly rejects — *"letting an old
+ * acknowledgement cover whatever turns up next would silently hide a genuinely
+ * new bout behind a week-old dismissal, which is the worse failure for a
+ * security panel"* — so an unbounded activity dismissal made the bell read ZERO
+ * unresolved while a current measurement episode sat in the feed. Bounded now.
+ *
+ * An unmeasurable row (no `at`/`first_at` on either side) stays DISMISSED: there
+ * is nothing to compare server-time against, and resurfacing a row the reader
+ * already cleared on the strength of a missing field is the worse error.
  */
 export function isDismissed(state, episode, alert = null) {
   if (!(state && state.dismissed && episode in state.dismissed)) return false
-  if (!alert || registerOf(alert) !== REGISTER_ALERT) return true
+  if (!alert) return true
   const dismissedThrough = Number(state.dismissed[episode]) || 0
-  const happenedAt = atMsOf(alert)
-  return !(happenedAt && happenedAt > dismissedThrough)
+  if (registerOf(alert) === REGISTER_ALERT) {
+    const happenedAt = atMsOf(alert)
+    return !(happenedAt && happenedAt > dismissedThrough)
+  }
+  // ACTIVITY — the server's gap arm. A store written before `dismissedLast`
+  // existed falls back to the watermark, which is the same server instant.
+  const ackedLast =
+    Number((state.dismissedLast || {})[episode]) || dismissedThrough
+  const episodeStart = firstMsOf(alert)
+  if (!episodeStart || !ackedLast) return true
+  return episodeStart - ackedLast <= EPISODE_GAP_MS
 }
 
 /** The server's opaque episode key — the key the ack route takes. */
@@ -705,6 +785,13 @@ export const DISMISSED_HIDE = 'Hide dismissed'
 export const DISMISSED_LOCAL_NOTE = 'dismissed for you'
 export const ACK_FOR_EVERYONE = 'Acknowledge for everyone'
 export const ACKED_NOTE = 'acknowledged for the Organization'
+//: The ACKNOWLEDGED group is READ-ONLY on purpose: the server has no
+//: un-acknowledge route, so a row states the fact (and when it was accepted)
+//: rather than offering a Restore it cannot honour. It exists so an ORG-WIDE
+//: decision — the one that is cross-device and irreversible — is reviewable; the
+//: local, reversible decisions already have their own groups.
+export const ACKED_TOGGLE = (n) => `Acknowledged for everyone (${n})`
+export const ACKED_HIDE = 'Hide acknowledged'
 export const SAVE_FAILED =
   'Your browser did not save that — it will be forgotten when this page '
   + 'reloads.'

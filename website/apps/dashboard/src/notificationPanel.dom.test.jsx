@@ -442,6 +442,65 @@ test('#14686: Escape from the DETAIL view returns to the ledger and keeps focus 
   assert.equal(document.activeElement, bell(container))
 })
 
+test('#14694: dismissing from the LIST keeps focus inside the panel, not on <body>', () => {
+  // The LIST is the primary "close it" path the owner asked for, and the activated
+  // control lives inside the `<li>` that `buildLedger` moves out of `entries` the
+  // moment the write lands — so React unmounts it and the browser drops focus to
+  // `<body>` with the panel still open. The detail path had this hand-off; the list
+  // path did not (review finding).
+  const { container } = renderBell({ alerts: [alert({ message: 'dismiss me from the list' })] })
+  fireEvent.click(bell(container))
+  const dismissBtn = [...container.querySelectorAll('.notif-actions button')]
+    .find((b) => /Dismiss/.test(b.textContent))
+  dismissBtn.focus()
+  assert.equal(document.activeElement, dismissBtn, 'precondition: focus is where the reader put it')
+  fireEvent.click(dismissBtn)
+  assert.ok(container.querySelector('.notif-panel'), 'the panel stays open')
+  assert.notEqual(document.activeElement, document.body,
+    'a removed active element must not drop focus to <body>')
+  assert.equal(document.activeElement, container.querySelector('.notif-panel'))
+})
+
+test('#14694: snoozing from the LIST keeps focus inside the panel, not on <body>', () => {
+  // Same defect, the sibling control: `handleSnooze` restored focus on no path at
+  // all, so the snooze `<select>` unmounted and took the reader's place with it.
+  const { container } = renderBell({ alerts: [alert({ message: 'snooze me from the list' })] })
+  fireEvent.click(bell(container))
+  const select = container.querySelector('.notif-snooze')
+  select.focus()
+  assert.equal(document.activeElement, select, 'precondition: focus is where the reader put it')
+  fireEvent.change(select, { target: { value: '1h' } })
+  assert.notEqual(document.activeElement, document.body,
+    'a removed active element must not drop focus to <body>')
+  assert.equal(document.activeElement, container.querySelector('.notif-panel'))
+})
+
+test('#14694: an ACKNOWLEDGED episode stays REVIEWABLE after the detail closes', () => {
+  // The one ORG-WIDE, cross-device, IRREVERSIBLE decision had no reviewable record:
+  // once the detail closed the row vanished from every list, so a mis-click removed
+  // a live incident from every colleague's dashboard and no screen anywhere said it
+  // had happened. Dismiss and Snooze (local, reversible) each have a group; the
+  // irreversible one needs it most.
+  const acked = alert({ message: 'already acknowledged', acked: true, episode: 'flag||acked' })
+  const { container } = renderBell({ alerts: [acked] })
+  fireEvent.click(bell(container))
+  // Collapsed by DEFAULT: the group is a disclosure, not page content — the
+  // owner's complaint was that alerts sat in the flow, and a second always-open
+  // list would rebuild it.
+  assert.equal(container.querySelector('.notif-list-muted'), null)
+  const toggle = [...container.querySelectorAll('.notif-more')]
+    .find((b) => /Acknowledged for everyone/.test(b.textContent))
+  assert.ok(toggle, 'an acknowledged episode must be reachable from the ledger')
+  fireEvent.click(toggle)
+  const group = container.querySelector('.notif-list-muted')
+  assert.ok(group, 'the acknowledged group opens')
+  assert.match(group.textContent, /Suspicious activity/, 'the row is identified')
+  assert.match(group.textContent, /acknowledged for the Organization/)
+  // READ-ONLY on purpose: the server has no un-acknowledge route, so offering a
+  // Restore here would be a control that cannot honour itself.
+  assert.doesNotMatch(group.textContent, /Restore/)
+})
+
 test('#14686: a row we could not classify says so, and does not claim to be an activity row', () => {
   // `registerOf` fail-quiets an unknown register into the activity register, so a
   // two-valued chip labelled an unclassified row "activity" — a measurement that

@@ -10,9 +10,13 @@
 // anything kept there is logic that regresses silently.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   DETAIL_NO_DETAIL,
+  EPISODE_GAP_MS,
   KIND_ACTIVITY,
   KIND_INCIDENT,
   KIND_UNCLASSIFIED,
@@ -408,6 +412,104 @@ test('the INCIDENT GATE: what HAPPENED after a dismissal is not covered by it', 
     buildLedger({ alerts: [grown], state: measuredState, now: NOW }).unresolved,
     0,
     'a measurement re-reported later is one ongoing measurement',
+  )
+})
+
+test('the ACTIVITY bound: a bout that STARTS beyond the server gap is a NEW bout', () => {
+  // The server bounds BOTH registers (`_episode_acknowledged`): an overlap, or a
+  // start within `EPISODE_GAP_S` of the acknowledged window's end, is the same
+  // bout — a LONGER gap is a genuinely later bout that renders as current. The
+  // client used to return `true` unconditionally for activity, which hid a new
+  // measurement behind an old dismissal: the one direction `abuse.py`'s docstring
+  // names as the worse failure for a security panel ("letting an old
+  // acknowledgement cover whatever turns up next would silently hide a genuinely
+  // new bout behind a week-old dismissal").
+  const measured = alert({
+    type: 'read_velocity',
+    register: 'activity',
+    message: 'Read volume crossed the threshold.',
+  })
+  const state = dismiss(emptyState(), entryKeyOf(measured), NOW, measured)
+
+  // INSIDE the gap (2 h): the same ongoing measurement re-reported.
+  const soon = {
+    ...measured,
+    at: new Date(NOW.getTime() + 2 * HOUR).toISOString(),
+    first_at: new Date(NOW.getTime() + 2 * HOUR).toISOString(),
+    episode: 'read_velocity||soon',
+  }
+  assert.equal(
+    buildLedger({ alerts: [soon], state, now: NOW }).unresolved,
+    0,
+    'within the gap is still the same bout',
+  )
+
+  // BEYOND the gap (5 days): a genuinely later bout, visible again.
+  const muchLater = {
+    ...measured,
+    at: new Date(NOW.getTime() + 5 * DAY).toISOString(),
+    first_at: new Date(NOW.getTime() + 5 * DAY).toISOString(),
+    episode: 'read_velocity||much-later',
+  }
+  assert.equal(
+    buildLedger({ alerts: [muchLater], state, now: NOW }).unresolved,
+    1,
+    'a bout starting beyond the gap is NOT covered by the old dismissal',
+  )
+
+  // The bound reads the episode's START, not its newest row: a bout that began
+  // inside the gap but is still firing hours later is ONE bout, and stays
+  // dismissed — otherwise a long-running measurement would resurrect itself on
+  // every five-minute report.
+  const longRunning = {
+    ...measured,
+    first_at: new Date(NOW.getTime() + 1 * HOUR).toISOString(),
+    at: new Date(NOW.getTime() + 20 * HOUR).toISOString(),
+    episode: 'read_velocity||long',
+  }
+  assert.equal(
+    buildLedger({ alerts: [longRunning], state, now: NOW }).unresolved,
+    0,
+    'a bout that STARTED inside the gap is still the same bout however long it runs',
+  )
+})
+
+test('a dismissal written before `dismissedLast` existed still works', () => {
+  // The field is new; a store already on a reader's disk has only the numeric
+  // watermark. It must degrade to the previous (still-bounded) behaviour rather
+  // than resurface every cleared row or throw.
+  const measured = alert({
+    type: 'read_velocity',
+    register: 'activity',
+    message: 'Read volume crossed the threshold.',
+  })
+  const key = entryKeyOf(measured)
+  const legacy = { v: 1, snoozed: {}, dismissed: { [key]: NOW.getTime() } }
+  assert.equal(isDismissed(legacy, key, measured), true, 'the watermark stands in for the window end')
+
+  // …and the reload path keeps it: `readState` must not drop the record.
+  const storage = fakeStorage()
+  const sk = storageKey({ userId: 'u', orgId: 'o' })
+  writeState(storage, sk, legacy)
+  const back = readState(storage, sk, NOW)
+  assert.equal(isDismissed(back.state, key, measured), true)
+})
+
+test('the ACTIVITY gap MIRRORS the server constant, and the pin bites', () => {
+  // A client constant that silently drifts from `tortoise/abuse.py` is how the
+  // client and the server end up disagreeing about what "the same bout" means —
+  // which is the defect this bound was added to close. Pin it to the source.
+  const here = dirname(fileURLToPath(import.meta.url))
+  const abuseSrc = readFileSync(
+    join(here, '..', '..', '..', '..', 'tortoise', 'abuse.py'),
+    'utf8',
+  )
+  const match = abuseSrc.match(/^EPISODE_GAP_S\s*=\s*(\d+)\s*\*\s*(\d+)/m)
+  assert.ok(match, 'EPISODE_GAP_S is defined in tortoise/abuse.py')
+  assert.equal(
+    EPISODE_GAP_MS,
+    Number(match[1]) * Number(match[2]) * 1000,
+    'EPISODE_GAP_MS must equal the server\'s EPISODE_GAP_S',
   )
 })
 

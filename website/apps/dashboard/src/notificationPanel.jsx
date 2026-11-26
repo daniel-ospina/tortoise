@@ -43,7 +43,9 @@
 import React from 'react'
 
 import {
+  ACKED_HIDE,
   ACKED_NOTE,
+  ACKED_TOGGLE,
   ACK_FOR_EVERYONE,
   BELL_LABEL,
   DETAIL_ACTION,
@@ -362,6 +364,7 @@ export function NotificationBell({
   const [showOlder, setShowOlder] = React.useState(false)
   const [showSnoozed, setShowSnoozed] = React.useState(false)
   const [showDismissed, setShowDismissed] = React.useState(false)
+  const [showAcked, setShowAcked] = React.useState(false)
   // The clock is a VALUE, refreshed when the panel opens and after every action,
   // so a snooze that ran out while the panel was closed is over the moment it is
   // reopened — without a timer, and without the render being non-deterministic.
@@ -430,8 +433,25 @@ export function NotificationBell({
     setOpenedAt(freshClock())
   }
 
+  // Focus hand-off for the LIST path. The activated control (the snooze
+  // `<select>`, or a row's Dismiss button) lives inside the `<li>` that
+  // `buildLedger` moves out of `current`/`older` the moment the write lands, so
+  // React unmounts it and the browser drops focus to `<body>` — with the panel
+  // still open. Focus goes back to the panel, which is where the reader still is;
+  // Escape continues to close from anywhere via the document handler.
+  const restoreListFocus = () => {
+    if (panelRef.current) panelRef.current.focus()
+  }
+
   const handleSnooze = (entry, ms) => {
     persist(snooze(ledger.state, entry.key, ms, freshClock()))
+    // #14694 (review finding): a snooze from the LIST removes the focused
+    // `<select>` from the DOM (the row moves into the Snoozed group), and a
+    // removed active element drops focus to `<body>` with the panel still open.
+    // The reader's next Tab then restarts at the top of the document, behind the
+    // panel. The list is the primary "close it" path the owner asked for, so it
+    // needs the same focus hand-off the detail path already had.
+    restoreListFocus()
   }
   const handleDismiss = (entry) => {
     persist(dismiss(ledger.state, entry.key, freshClock(), entry.alert))
@@ -445,7 +465,11 @@ export function NotificationBell({
       // document handler), so this is not stranding, but the open/back pair was
       // closed and this is the same defect one step further along.
       if (panelRef.current) panelRef.current.focus()
+      return
     }
+    // The same hand-off for the LIST path (review finding 3): the Dismiss button
+    // is inside the row that just left `entries`.
+    restoreListFocus()
   }
   const handleUnsnooze = (episodeKey) => persist(unsnooze(ledger.state, episodeKey))
   const handleRestore = (entry) => persist(undismiss(ledger.state, entry.key))
@@ -528,16 +552,18 @@ export function NotificationBell({
   // (`rowKey` — the server's `episode`): what the reader clicked is the row on
   // screen. Resolving by the decision identity would open whichever episode of
   // that identity happened to come first in the feed.
-  // ⛔ `acked` IS in this set on purpose, even though those rows are not listed.
-  // An acknowledgement is written to the server and the parent then re-reads the
-  // feed, so the row the reader is looking at moves to the `acked` bucket mid-read.
-  // Leaving that bucket out meant `detailEntry` went null and the panel silently
-  // replaced the open detail with the bare ledger — the acknowledgement was
-  // recorded and the reader was told nothing, while `ACKED_NOTE` (the sentence
-  // written to say exactly that) sat in a branch that could never render. Keeping
-  // the row resolvable makes both branches live: the row only resolves here while
-  // its detail is already open, so no unlisted row becomes openable from the list
-  // (review finding).
+  // ⛔ `acked` IS in this set on purpose. An acknowledgement is written to the
+  // server and the parent then re-reads the feed, so the row the reader is
+  // looking at moves to the `acked` bucket mid-read. Leaving that bucket out meant
+  // `detailEntry` went null and the panel silently replaced the open detail with
+  // the bare ledger — the acknowledgement was recorded and the reader was told
+  // nothing, while `ACKED_NOTE` (the sentence written to say exactly that) sat in
+  // a branch that could never render. Keeping the row resolvable makes both
+  // branches live.
+  // (#14694 review finding: the bucket is also RENDERED now, behind
+  // `ACKED_TOGGLE`, so this set is no longer the only reader — an acknowledged
+  // episode stays reviewable after "Back to notifications" instead of vanishing
+  // from every list the moment the detail closes.)
   const everyEntry = [
     ...ledgerView.current,
     ...ledgerView.older,
@@ -783,6 +809,43 @@ export function NotificationBell({
                           >
                             {RESTORE}
                           </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              ) : null}
+              {/* ACKNOWLEDGED — the one decision that is ORG-WIDE, cross-device
+                  and IRREVERSIBLE, so it is the one that most needs to be
+                  reviewable. Dismiss and Snooze (local, reversible) each have a
+                  group; without this one, an "Acknowledge for everyone" click
+                  removed a live incident from every colleague's dashboard and no
+                  screen anywhere said it had happened. `ACKED_NOTE` only lives
+                  while the detail stays open, which is not a record.
+
+                  READ-ONLY by design: the server has no un-acknowledge route, so
+                  there is no Restore here — the row states the fact and when it
+                  was accepted. (#14694 review finding.) */}
+              {ledgerView.acked.length ? (
+                <div className="notif-group">
+                  <button
+                    type="button"
+                    className="ghost small notif-more"
+                    onClick={() => setShowAcked(!showAcked)}
+                  >
+                    {showAcked ? ACKED_HIDE : ACKED_TOGGLE(ledgerView.acked.length)}
+                  </button>
+                  {showAcked ? (
+                    <ul className="notif-list notif-list-muted">
+                      {ledgerView.acked.map((entry) => (
+                        <li key={entry.rowKey} className="notif-row">
+                          <span className="notif-snoozed-text">
+                            <strong>{entry.label}</strong>
+                            <span className="dim small"> · {ACKED_NOTE}</span>
+                            {entry.stamp ? (
+                              <span className="dim small"> · {entry.stamp}</span>
+                            ) : null}
+                          </span>
                         </li>
                       ))}
                     </ul>
