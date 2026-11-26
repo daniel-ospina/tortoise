@@ -10161,29 +10161,76 @@ _H_14544_EXEMPTION_OPEN_RE = re.compile(r"The one cause this paragraph does NOT 
 #: and the RETIRED SENTENCE returned verbatim after the bound with this arm reporting GREEN. A ban
 #: that the graded text can move out from under is not a ban, so every NEGATIVE claim here reads the
 #: whole block; the POSITIVE ones stay paragraph-bounded, where a lost claim reds instead of passing.
-#: ⛔ IT IS NOT A UNIVERSAL BAN AND SAYS SO. Three spellings are graded — the bare pronoun form
-#: (`neither of which`), the ACTIVE form (`#14544` … never/not/didn't/has not … touch…, within 400
-#: characters), and the PASSIVE form (`<that|the|its> <row|entry> … was/were/is/are/has/had not …
-#: touch… … `#14544`, label within 80 characters). Those bounds are STATED because they are real:
-#: measured at `49a6dd89`, padding the active form past 400 characters or the passive label past 80
-#: escapes both, and a pronoun paraphrase (`it was never touched by `#14544``) and a noun this list
-#: does not name are NOT read. A phrase-level guard cannot be widened into honesty — the next noun
-#: or the next verb form is always one edit away — so the graded set is what is claimed, and this
-#: paragraph is the record of what is not. The PASSIVE arm needs its BE verb on purpose: without it,
-#: "the row … does not touch the shard layout, and `#14544`'s cut is separate" reds, which is honest
-#: prose (the subjects differ) and would make the arm a false block.
-_H_14544_UNTOUCHED_ANAPHOR_RE = re.compile(
-    r"neither\s+of\s+which"
-    # ACTIVE: `#14544` … (never|not|did not|didn't|has not) … touch…, within 400 characters.
-    r"|#14544[`]?['\u2019]?(?:s)?[\s\S]{0,400}?(?:never|not|did\s+not|didn['\u2019]?t|has\s+not)"
-    r"\s+(?:\w+\s+){0,3}touch(?:ed|es|ing)?"
-    # PASSIVE: `<that|the|its> <row|entry> … was/were/is/are/has/had not touched … `#14544`` — the
-    # same claim with the label at the END, which no `#14544`-first arm can reach. The BE verb is
-    # required so an ACTIVE sentence about a different subject does not red this.
-    r"|\b(?:that|the|its)\b[\s\S]{0,40}?\b(?:row|entry)\b[\s\S]{0,400}?"
-    r"(?:was|were|is|are|has|had)\s+(?:never|not)\s+(?:\w+\s+){0,2}touch(?:ed|es|ing)?"
-    r"[\s\S]{0,80}?#14544",
+#: ⛔ IT IS NOT A UNIVERSAL BAN AND SAYS SO. Graded, in the whole block and per SENTENCE: (1) the
+#: bare pronoun form `neither of which`, in a sentence that names this row (so a TRUE `neither of
+#: which` about two shard figures is not refused — measured RED, #14623 review round 5 F4); (2) a
+#: NEGATED change attributed to the cut — `#14544 … never/not/didn't/does not/has not … touch /
+#: change / move / rewrite / re-read / edit / alter / affect / modify / shift`, the cut named
+#: first and the verb within 80 characters (padding the cut past 400 escapes it — measured at
+#: `49a6dd89`); (3) the same claim PASSIVE, row/weight first — `<row|durations|weight> … was/were/
+#: has/had not … touched` — graded only in a sentence that also names the cut, so "the row was not
+#: touched by the reaper" is NOT this claim (measured, #14623 round 4/5); (4) the required claims
+#: stated the other way round (`both halves … exempt`, `paragraph DOES exclude`).
+#: ⛔ THE BOUNDS ARE STATED BECAUSE THEY ARE REAL: a noun or verb outside that list, and a
+#: formulation that names no subject at all, are NOT read. A phrase-level guard cannot be widened
+#: into honesty — the next noun or verb form is always one edit away — so the graded set is what is
+#: claimed here, and this paragraph is the record of what is not. The unit is the SENTENCE because
+#: the block is JOINED into one string by `_emission_block_header`: a `⛔`-bounded region is
+#: truncatable by one character (measured `d1f14298`, the retired sentence returned verbatim with
+#: this arm GREEN), and the alternative to a sentence is a character window, which the padding
+#: measurements above show is escapable in both directions.
+_H_14544_SENTENCES_RE = re.compile(r"(?<=[.!?])\s+")
+_H_14544_ANAPHOR_RE = re.compile(r"neither\s+of\s+which", re.IGNORECASE)
+#: The subjects that make a sentence a claim about THIS row: the cut, and the row / weight it carries.
+_H_14544_ROW_SUBJECT_RE = re.compile(r"#14544|`durations`|\brow\b|\bweight\b", re.IGNORECASE)
+#: …and the ACTOR, which the PASSIVE form needs in the same sentence or it grades unrelated prose.
+_H_14544_ACTOR_RE = re.compile(r"#14544|that\s+cut|the\s+cut", re.IGNORECASE)
+_H_14544_NEGATION = (
+    r"(?:\bnever\b|\bnot\b|did\s+not|didn['\u2019]?t|does\s+not|doesn['\u2019]?t"
+    r"|has\s+not|hasn['\u2019]?t|had\s+not|was\s+not|wasn['\u2019]?t|is\s+not|isn['\u2019]?t"
+    r"|were\s+not|weren['\u2019]?t)")
+_H_14544_CHANGE_VERB = (
+    r"(?:touch|chang|mov|rewr|re-read|reread|edit|alter|affect|modif|shift)")
+#: ACTIVE order: the cut named FIRST, then a negation, then the change verb.
+_H_14544_NEGATED_ACTOR_CHANGE_RE = re.compile(
+    r"(?:#14544|that\s+cut|the\s+cut)[\s\S]{0,400}?" + _H_14544_NEGATION
+    + r"[\s\S]{0,80}?" + _H_14544_CHANGE_VERB,
     re.IGNORECASE)
+#: PASSIVE order: the row or the weight FIRST, then a negation, then the change verb. The caller
+#: also requires `_H_14544_ACTOR_RE` in the SENTENCE (so a true sentence about another actor — the
+#: reaper, a retime — is not this claim), which is the same guard the peer arm put on its BE verb.
+_H_14544_NEGATED_ROW_CHANGE_RE = re.compile(
+    r"(?:`durations`|\brow\b|\bweight\b)[\s\S]{0,20}?" + _H_14544_NEGATION
+    + r"[\s\S]{0,40}?" + _H_14544_CHANGE_VERB,
+    re.IGNORECASE)
+#: The required claims stated the OTHER way round, beside the true one — measured GREEN at
+#: `148ab7c` (#14623 review round 5, F1d/F1e): keep `The REGISTRATION is the ONLY half exempt` and
+#: add "though both halves are exempt"; keep the true conclusion and add "this paragraph DOES
+#: exclude it". Keeping a true sentence beside its inverse satisfies every positive pin.
+_H_14544_INVERTED_RE = re.compile(
+    r"both\s+halves|paragraph\s+DOES\s+exclude", re.IGNORECASE)
+
+
+def _h_14544_banned_claim(block: str) -> str | None:
+    """The first SENTENCE in `block` that states the retired claim, or `None`.
+
+    The graded set, and what it does not cover, are stated on the constants above rather than left
+    implicit: a phrase guard that claimed to grade `any distance`, `both orders` or `any noun` would
+    be false one edit later (measured — `49a6dd89`'s comment claimed a distance the regex did not
+    read, and #14623 round 5 shipped a false sentence GREEN through the same gap).
+    """
+    for sentence in _H_14544_SENTENCES_RE.split(block):
+        if (_H_14544_ANAPHOR_RE.search(sentence)
+                and _H_14544_ROW_SUBJECT_RE.search(sentence)):
+            return sentence.strip()
+        if _H_14544_NEGATED_ACTOR_CHANGE_RE.search(sentence):
+            return sentence.strip()
+        if (_H_14544_NEGATED_ROW_CHANGE_RE.search(sentence)
+                and _H_14544_ACTOR_RE.search(sentence)):
+            return sentence.strip()
+    return None
+
+
 #: The POSITIVE half: the paragraph must state the row's provenance as `#14544`'s own edit, with the
 #: POLARITY pinned — `row IS `#14544`'s own edit`, never `is NOT`. Without the polarity the pattern
 #: certified the exact false sentence this PR deletes (measured: `IS` -> `is NOT` kept it GREEN), and
@@ -10195,7 +10242,7 @@ _H_14544_UNTOUCHED_ANAPHOR_RE = re.compile(
 #: review round 4, P3): “the `durations` entry for it, which is `#14544`'s own edit”.
 _H_14544_ROW_PROVENANCE_RE = re.compile(
     r"(?:row\s+in\s+`durations`|`durations`[\s#]{0,3}(?:row|entry))[\s\S]{0,400}?"
-    r"(?:row|entry)[\s\S]{0,60}?(?:IS|is|which\s+is)\s+`#14544`['\u2019]s\s+own\s+edit",
+    r"(?:IS|is|which\s+is)\s+`#14544`['\u2019]s\s+own\s+edit",
     re.IGNORECASE)
 #: The SCOPE half: the paragraph must state that ONE half — the REGISTRATION — is exempt, with the
 #: polarity pinned. Measured at `d1f14298`: inverting it to “Both halves stay exempt” (the commit's
@@ -10227,6 +10274,16 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     Both directions are graded, because either alone is satisfiable the wrong way: banning the
     anaphor while saying nothing about the row lets a fold DELETE the correction, and requiring the
     provenance while permitting the anaphor lets the old sentence return verbatim.
+
+    ⛔ WHAT THIS ARM DOES NOT DO: it does not certify the paragraph is TRUE. It grades the claim
+    SHAPES that have actually shipped (the anaphor, and a negated touch/change in either order,
+    attributed to the cut or to the row/weight), the INVERSE of each required claim, and the
+    POLARITY of the four claims the paragraph must state (provenance, scope, conclusion,
+    no-restated-weight). A noun, verb or formulation outside that set is not read, and no phrase
+    guard could read it — the graded set and its bounds are stated on the constants above, so this
+    docstring is not a promise the arm cannot keep. The residual is named rather than papered over:
+    a NEW false claim in other words passes, which is why the paragraph does not carry figures and
+    why the row's provenance is also recorded on the row itself.
     """
     header = _unquoted_block(_emission_block_header(cs.MANIFEST.read_text(encoding="utf-8")))
     opening = _H_14544_EXEMPTION_OPEN_RE.search(header)
@@ -10243,17 +10300,26 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
         "the bounded `#14544` paragraph no longer names `tests/test_dod_5090_probe.py`, so this "
         "arm grades a paragraph that is no longer about the row it exists to correct — re-point "
         "the bound")
-    # ⛔ THE BAN READS THE WHOLE BLOCK, not `paragraph`: a bound that the graded text can move past
+    # ⛔ THE BAN READS THE WHOLE BLOCK, per SENTENCE: a bound that the graded text can move past
     # (one `⛔`) is a bound the claim walks out of — measured at `d1f14298`, the retired sentence
-    # returned verbatim after a single inserted marker with this arm GREEN.
-    anaphor = _H_14544_UNTOUCHED_ANAPHOR_RE.search(header)
-    assert anaphor is None, (
-        "the `#14544` exemption paragraph binds its two nouns with `neither of which `#14544` "
-        f"touched` ({anaphor.group(0)!r}). The registration half is TRUE, the `durations` ROW half "
-        "is FALSE: `e66997b81e76` (`#14544`) rewrote that row's weight in the commit whose subject "
-        "is the cut, and that weight is the shard-layout input. State the REGISTRATION as the "
-        "exempt half and the row as `#14544`'s OWN edit, and do not restate the weight (the "
-        "no-per-file-weight rule above binds the figure).")
+    # returned verbatim after a single inserted marker with this arm GREEN — and a character window
+    # is escapable by padding in BOTH directions (measured at `148ab7c`, `49a6dd89`).
+    banned = _h_14544_banned_claim(header)
+    assert banned is None, (
+        "the `#14544` paragraph states the retired claim again (or its paraphrase), in the sentence "
+        f"{banned!r}: `neither of which` re-binds whatever nouns precede it, and a NEGATED change "
+        "attributed to the cut or to the row/weight states the same falsehood without the pronoun. "
+        "The registration half is TRUE, the `durations` ROW half is FALSE: `e66997b81e76` "
+        "(`#14544`) rewrote that row's weight in the commit whose subject is the cut, and that "
+        "weight is the shard-layout input. State the REGISTRATION as the exempt half and the row "
+        "as `#14544`'s OWN edit, and do not restate the weight (the no-per-file-weight rule above "
+        "binds the figure).")
+    assert _H_14544_INVERTED_RE.search(header) is None, (
+        "the block states a required claim the OTHER way round — “both halves [are] exempt” or "
+        f"“this paragraph DOES exclude”: {_H_14544_INVERTED_RE.search(header).group(0)!r}. Keeping "
+        "the true sentence beside its inverse satisfies every positive pin while asserting the "
+        "reading `#14612` deletes (measured GREEN at `148ab7c`, #14623 review round 5); drop the "
+        "inverse")
     provenance = _H_14544_ROW_PROVENANCE_RE.search(paragraph)
     assert provenance is not None, (
         "the `#14544` exemption paragraph no longer records that the `durations` row is `#14544`'s "
@@ -10281,7 +10347,7 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
         "move a bin, because the file's pool entry comes from the `eval` registration ALONE and the "
         "bin is held by the `tests/test_dod_5090_probe.py` row in `durations` — neither of which "
         "`#14544` touched.")
-    assert _H_14544_UNTOUCHED_ANAPHOR_RE.search(retired), (
+    assert _h_14544_banned_claim(retired) is not None, (
         "the anaphor pattern no longer reads the sentence it was cut for, so this arm passes over "
         f"any spelling of it — re-point it at: {retired!r}")
     assert not _H_14544_ROW_PROVENANCE_RE.search(retired), (
@@ -10293,11 +10359,19 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # it bound `#14544`'s own edit` without reading the word before it. The negation is driven off
     # the MATCH rather than off a literal `row IS`, so a TRUE rewording of the same clause ('that
     # `durations` entry IS …', '…, which is …') still gets graded instead of reddening on a spelling.
-    negated = re.sub(
-        r"(?:\bwhich\s+is\b|\bIS\b|\bis\b)", "is NOT", provenance.group(0), count=1)
-    assert negated != provenance.group(0), (
+    # ⛔ THE LAST COPULA, not the first: in “…, which is the bin's input and which is `#14544`'s own
+    # edit” the first copula belongs to another clause, and negating it refused a TRUE sentence
+    # (measured RED, #14623 review round 5, F3b).
+    copulas = list(re.finditer(r"\bwhich\s+is\b|\bIS\b|\bis\b", provenance.group(0)))
+    assert copulas, (
         "the matched provenance clause carries no copula to negate, so the polarity check below "
         f"grades nothing — re-point it at: {provenance.group(0)!r}")
+    last = copulas[-1]
+    negated = (provenance.group(0)[:last.start()] + "is NOT"
+               + provenance.group(0)[last.end():])
+    assert negated != provenance.group(0), (
+        "the polarity check did not change the matched clause, so it grades nothing — re-point it "
+        f"at: {provenance.group(0)!r}")
     assert not _H_14544_ROW_PROVENANCE_RE.search(negated), (
         "the provenance pattern still matches when the clause is NEGATED (`row is NOT `#14544`'s "
         f"own edit`, measured on {negated!r}) — it reads the row's name and the words `own edit` "
@@ -10329,10 +10403,11 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # arm certifies `that row was never touched by `#14544`` as CLEAN (measured at `148ab7c1`, when
     # this comment already claimed "both orders"). The two orders are separate alternatives
     # above, and each is asserted here rather than assumed.
-    # ⛔ AND THE NOUN AND DISTANCE BOUNDS ARE FIXTURES, not prose promises: the passive arm reads
-    # `<row|entry>` (the two nouns the block itself uses for the same thing), the active arm reads
-    # 400 characters and the passive label 80. Widening past those is NOT claimed — the residual is
-    # declared above, and a phrase guard that claimed it would be false one noun later.
+    # ⛔ AND THE NOUN AND DISTANCE BOUNDS ARE FIXTURES, not prose promises: the ACTIVE arm reads a
+    # cut-to-verb distance of 400 characters, the PASSIVE row-to-verb one 20 (and needs the cut in
+    # the sentence), and the pronoun form is scoped by subject rather than by distance. Widening
+    # past those is NOT claimed — the residual is declared above, and a phrase guard that claimed
+    # it would be false one noun later.
     for paraphrase in (
             "`#14544` never touched that row",
             "`#14544`'s cut did not touch the row",
@@ -10342,30 +10417,41 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "And `#14544`'s cut touched neither of which.",
             "neither of which " + "x" * 95 + " `#14544` touched",
             "`#14544`'s cut took the file off `core`, and that row was never touched",
-            "`#14544`" + "y" * 399 + " never touched that row"):
-        assert _H_14544_UNTOUCHED_ANAPHOR_RE.search(paraphrase), (
-            f"the anaphor ban misses the paraphrase {paraphrase!r} — it grades the pronoun rather "
-            "than the claim, bounds a pronoun form by a DISTANCE the fixture exceeds, or reads only "
-            "ONE ORDER of the claim, so a false reading labelled at the other end passes clean")
+            # INSIDE the ACTIVE bound (398 pad + the label's own backtick = 400): the bound is a
+            # fixture, and padding PAST it is the declared residual, not a graded case.
+            "`#14544`" + "y" * 398 + " never touched that row",
+            # the negated-change VERBS the round-5 review shipped GREEN: `touch` was not enough
+            "`#14544` never rewrote the weight of that row.",
+            "The weight never moved when that cut landed.",
+            "`#14544` did not at any single point touch that row.",
+            # NOT honest prose, though it reads like it: it asserts the row's weight `was never
+            # re-read` in the same sentence that names the cut which DID re-read it — the claim is
+            # false, and refusing it is the guard working (the alternative, dropping the row-first
+            # arm, leaves “the weight never moved when that cut landed” GREEN).
+            "the row's weight was never re-read, and `#14544` cut its cases"):
+        assert _h_14544_banned_claim(paraphrase) is not None, (
+            f"the retired-claim ban misses the paraphrase {paraphrase!r} — it grades the pronoun "
+            "rather than the claim, bounds it by a DISTANCE the fixture exceeds, reads only ONE "
+            "ORDER of the claim, or reads only the verb `touch`, so a false reading in other words "
+            "passes clean")
     # …and it must NOT red honest prose: an ACTIVE sentence whose subject is not the row, and the
     # paragraph's own TRUE statements, are not this claim. Without these the arm is a false block.
     for honest in (
             "the row was not touched by the reaper",
-            "the row's weight was never re-read, and `#14544` cut its cases",
             "another row's weight was retimed; the retime does not touch the shard layout, and "
             "`#14544`'s cut is separate",
             "`#14544`'s removal of the file from the `core` surface cannot move a bin"):
-        assert not _H_14544_UNTOUCHED_ANAPHOR_RE.search(honest), (
+        assert _h_14544_banned_claim(honest) is None, (
             f"the anaphor ban REDS honest prose ({honest!r}) — the passive arm is missing its BE "
             "verb or the active arm ignores its subject, so the guard refuses a true sentence "
             "rather than the claim")
     # …and the LIVE block must stay clean of all of them, or the ban is a false red rather than a
     # grade: the shapes above are the claim, this is the prose the repository actually ships.
-    live_anaphor = _H_14544_UNTOUCHED_ANAPHOR_RE.search(_emission_block_header(
+    live_anaphor = _h_14544_banned_claim(_emission_block_header(
         cs.MANIFEST.read_text(encoding="utf-8")))
     assert live_anaphor is None, (
-        "the block now contains an `untouched`/`neither of which` reading, so the ban above reds the "
-        f"live prose rather than a fold's: {live_anaphor.group(0)!r}")
+        "the block now contains a retired-claim reading, so the ban above reds the live prose "
+        f"rather than a fold's: {live_anaphor!r}")
 
 
 def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
