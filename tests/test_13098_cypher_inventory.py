@@ -1366,18 +1366,23 @@ def test_a_metadata_probe_that_never_answers_is_bounded_and_REFUSED(
         # which answers first and has no timeout arm of its own. Delegating everything
         # but `rev-parse` keeps this arm about the one bound it pins.
         if list(argv[:2]) == ["git", "rev-parse"]:
-            seen.update(kwargs)
+            # ⛔ NOT `seen.update(...)`: `tools/sdk_privatise.py --check` is a RATCHET over
+            # untyped `.update(` receivers and adding one raises it (measured: 11912 ->
+            # 11913 at this head, `seen.update` 103 -> 104). A test helper is not worth a
+            # ratchet exception, so the kwargs are stored under one key.
+            seen["kwargs"] = kwargs
             raise subprocess.TimeoutExpired(
                 cmd=argv, timeout=kwargs.get("timeout"))
         return real_run(argv, *args, **kwargs)
 
     monkeypatch.setattr(census.subprocess, "run", _hangs)
     rc = census.main(["--render", str(target)])
-    assert "timeout" in seen, (
+    passed = seen["kwargs"]
+    assert "timeout" in passed, (
         "the metadata probe passed no `timeout=` — the refusal below claims a timeout "
         "REFUSES, so an unbounded probe lets a hung git hang `--render`")
-    assert seen["timeout"] == census._GIT_PROBE_TIMEOUT_S, (
-        f"the probe's bound must be the module's own; got {seen['timeout']}")
+    assert passed["timeout"] == census._GIT_PROBE_TIMEOUT_S, (
+        f"the probe's bound must be the module's own; got {passed['timeout']}")
     assert rc == 2, (
         f"a timed-out probe must exit 2 (could not run), got {rc} — `TimeoutExpired` "
         "is not an `OSError`, so without its own arm it raises out of `main()`")
