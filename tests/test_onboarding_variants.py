@@ -2370,8 +2370,10 @@ def _negated_observation_only(clause: str) -> bool:
     # (#14679 review cycle 36, measured). Deleting the span instead does not help
     # — form (a) needs the predicate in the connective's own clause, so the
     # sentence stays GREEN either way; the suffix must be asked directly. The
-    # observation VERB is what the skip is scoped to, so this is a predicate test,
-    # not a form match (a form would need an object that the deletion removed).
+    # observation VERB is what the skip is scoped to, so this is a predicate test
+    # rather than a form match — what stops form (a) on the deletion shape is the
+    # requirement that the predicate sit in the connective's OWN clause, which is
+    # the reason stated two lines above.
     if re.search(r"\b(?:confirm|check|verif(?:y|ies|ied|ying)"
                  r"|ensur(?:e|es|ed|ing))\w*\b", clause[neg.end():]):
         return False
@@ -2801,11 +2803,28 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     # rationale ("unambiguously forward") is falsified by exactly that shape
     # (#14679 review cycle 36, measured). The governance is known here, so the
     # statement after the break is graded in its place.
+    # ⛔ ONE STATEMENT, NOT THE REST OF THE PARAGRAPH. The first cut of this
+    # fallback took `_rest[1]` whole, so it graded PAST the statement break and
+    # ahead of the merge above — and a statement that comes AFTER the governor's
+    # step (`Before you restart your client: write the config. Afterwards,
+    # confirm the tools …`) went RED, as did a sequencer-led one whose comma twin
+    # is declared GREEN (#14679 review cycle 37, measured). Splitting to the
+    # first statement and letting the loop's own `_FORWARD_SEQUENCER_RE` skip run
+    # keeps both forward shapes GREEN.
     if cue_under_inverting_subordinate and not ",".join(post_clauses).strip():
         _rest = _STATEMENT_BREAK_RE.split(after.lstrip(" \t,…"), maxsplit=1)
         if len(_rest) > 1 and _rest[1].strip():
-            post_clauses = [c.strip().lstrip(_PRE_CUE_PREFIX).strip()
-                            for c in _rest[1].split(",")]
+            _stmt = _STATEMENT_BREAK_RE.split(_rest[1], maxsplit=1)[0]
+            _stmt = _stmt.lstrip(_PRE_CUE_PREFIX).strip()
+            # ⛔ A SEQUENCER-LED STATEMENT STAYS ONE CLAUSE. Splitting it on its
+            # comma detaches the introducer (`then`) into its own clause, after
+            # which the loop's `_FORWARD_SEQUENCER_RE` skip has nothing to skip
+            # and the confirmation behind it is graded standalone — RED, while the
+            # comma twin of the same sentence is GREEN (#14679 review cycle 37,
+            # measured).
+            post_clauses = ([_stmt] if _FORWARD_SEQUENCER_RE.match(_stmt)
+                            else [c.strip().lstrip(_PRE_CUE_PREFIX).strip()
+                                  for c in _stmt.split(",")])
     for clause in post_clauses:
         # A clause led by a FORWARD sequencer continues the cue's own
         # predication in the forward direction: "then once the tools are listed
@@ -3706,6 +3725,38 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # GREEN. Measured before it was dropped as a wrong expectation.
     ("Restart your client: after confirming the tools are actually there, run "
      "`tortoise mcp-status`.", False),
+    # ── CYCLE 37 (#14679's review at `e8adfb7b`): the governor fallback above
+    # graded PAST the statement break and ahead of the merge, so copy that
+    # legitimately follows the governor's own step went RED. These are its
+    # regression guards (both are one-glyph edits of declared-GREEN twins):
+    ("Before you restart your client: write the config. Afterwards, confirm the "
+     "tools are actually there.", False),
+    ("Before you restart your client: then, confirm the tools are actually "
+     "there.", False),
+    # ── CYCLE 37 RESIDUALS, pinned RED so they are visible rather than claimed
+    # away. Each is measured and each needs a decision, not another widening:
+    # (a) an inserted `, then` splits the clause and re-opens the negated-
+    #     observation false PASS closed two rows above:
+    ("Restart your client after seeing no errors, then confirming the tools "
+     "are actually there.", False),
+    # (b) `be|make sure` is a confirmation with no confirmation VERB, so it is
+    #     missed by both the suffix arm and form (f)'s verb slot:
+    ("Restart your client after seeing no errors and make sure the tools are "
+     "actually there.", False),
+    # (c) a comma-free run-on where the config check follows the object: form
+    #     (d)'s clause-final `first` fires and `_confirmation_scopes_the_config`
+    #     cannot see the config noun, so a file-side check goes RED (its comma
+    #     twin is GREEN):
+    ("Restart your client if you see no tools in the list and check the config "
+     "path first.", True),
+    # (d) A BREAK GLYPH AFTER THE CUE HIDES AN EXPLICIT INVERSION MARKER. This is
+    #     the largest measured residual and it is PRE-EXISTING: 55 declared-RED
+    #     rows have a GREEN twin for each of `;` `:` ` - ` `—` `–` (275 shapes).
+    #     The truncated post-cue window is what buys the forward shapes above, so
+    #     closing it is a design decision (it flips 3 forward rows RED for 55
+    #     recovered), not a patch. One representative is pinned here:
+    ("Restart your client; having first confirmed the tools are actually there.",
+     False),
     ("Delete the old entry: but first confirm the tools are actually there. "
      "Restart your client, then confirm the tools are actually there.", True),
     # ── the session-presence vetoes share the file's OWN presence vocabulary.
