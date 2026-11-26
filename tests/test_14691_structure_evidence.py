@@ -95,14 +95,12 @@ def _measured(reply, what: str):
     the exact shape the review used — kept the whole suite green, because nothing
     read those replies through this distinction. It reds now: this arm.
     """
-    payload = reply
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except (TypeError, ValueError):
-            payload = None
-    if isinstance(payload, dict) and (payload.get("ok") is False
-                                      or "error" in payload):
+    # ⛔ ONE IMPLEMENTATION, NOT TWO (#14691 review, round 5, P1). This helper
+    # used to re-decide the error-vs-empty question itself, and it decided only the
+    # `{"ok": false}`/`{"error": …}` shapes — so the producer's plain-text failure
+    # reply read as an ANSWER here even after the scorer learned better. It now
+    # asks the scorer, so a shape the scorer learns is a shape this arm sees.
+    if _load_score_module().is_error_reply(reply):
         raise AssertionError(
             f"{what} is an error envelope, not a measured answer: {reply!r} — a "
             "door that FAILED must never grade the same as a door that answered "
@@ -3168,3 +3166,173 @@ def test_the_audited_overlap_list_is_the_audit_artifact():
     assert shown == overlaps, (
         f"VERIFICATION's overlap list is not the audit artifact's: {shown} vs "
         f"{overlaps}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Round 5 of review — the corroboration table, the graph under test, and four
+# artifacts' second copies (each ONE mutation, whole file, restored byte-for-byte).
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _verification_rows() -> dict[str, list[str]]:
+    """The corroboration table's rows, keyed by their label column."""
+    rows: dict[str, list[str]] = {}
+    for line in _verification().splitlines():
+        if not line.startswith("| **"):
+            continue
+        cells = [c.strip() for c in line.split("|")[1:-1]]
+        if len(cells) != 4:
+            continue
+        rows[cells[0].replace("*", "")] = cells
+    return rows
+
+
+def test_the_corroboration_TABLE_verdicts_and_agreements_are_the_artifact():
+    r"""Reds if a corroboration row's verdict or its Agree cell is flipped.
+
+    ⛔ #14691 review, round 5, P2. The table's *Agree?* and *Primary record*
+    columns were read by NOTHING. Measured on `ae2bcfc864`: `✅ agree` →
+    `❌ DISAGREE` and `PASS half — 5/5` → `FAIL — 0/5` each left 73 passed. The
+    table is the document's whole conclusion — nine rows that say whether the
+    second measurement corroborates the first — so both columns are pinned here:
+    the verdict word to the artifact, the Agree cell to the row's own verdict.
+    """
+    totals = _score()["A2_edges"]["totals"]
+    verdicts = _score()["verdicts"]
+    rows = _verification_rows()
+    assert len(rows) >= 9, sorted(rows)
+    for label, cells in rows.items():
+        verdict_cell, agree = cells[1], cells[3]
+        head = label.split()[0].strip("*")
+        plain = verdict_cell.replace("*", "").strip()
+        word = next((w for w in ("PASS", "FAIL", "PARTIAL")
+                     if plain.upper().startswith(w)), None)
+        assert word, (label, verdict_cell)
+        if head == "A2" and "containment" in label:
+            expected = "PASS"          # 5/5 present; orientation is not at stake
+        elif head == "A2" and "dependency" in label:
+            expected = "PASS"          # 7/7 oriented correctly
+        elif head == "A2":
+            expected = "FAIL" if totals["asymmetric_rows_inverted"] else "PASS"
+        else:
+            expected = verdicts[head]
+        assert word == expected, (
+            f"corroboration row {label!r} says {word} where the artifact says "
+            f"{expected}: {verdict_cell[:70]!r}")
+        # ⛔ A4 is the ONE row that cannot agree: the peer probe ran no
+        # traceability check, so its ✅ would assert a corroboration it did not
+        # make (the row's own text says "not independent").
+        want = "⚠️" if head == "A4" else "✅"
+        assert agree.startswith(want), (
+            f"corroboration row {label!r} agrees with {agree!r}; expected {want}"
+            f" — a disagreement marker in a row whose verdict is {word} reverses "
+            "the document's conclusion")
+
+
+def test_the_document_names_the_graph_under_test_and_never_the_forbidden_one():
+    r"""Reds if the peer document's graph row drifts off the measured graph.
+
+    ⛔ #14691 review, round 5, P2. The *Graph under test* row is the first thing a
+    reader checks the numbers against, and REPORT's identical row is pinned while
+    this one was not: rewriting it to `live-v5` — the production graph the bundle
+    is explicitly forbidden to touch — left 73 passed.
+    """
+    graph = _score()["graph"]
+    assert graph and graph != "live-v5"
+    line = next((ln for ln in _verification().splitlines()
+                 if ln.startswith("| Graph under test |")), None)
+    assert line, "VERIFICATION has no Graph-under-test row"
+    assert f"`{graph}`" in line, line
+    assert "live-v5" not in _verification(), (
+        "the peer document names the forbidden production graph")
+
+
+def test_the_tool_surface_SCHEMAS_cannot_be_ROTATED_between_tools():
+    r"""Reds if one tool's params/required are swapped for another's.
+
+    ⛔ #14691 review, round 5, P3. The per-tool SHAPES were pinned but not their
+    attribution: rotating `(params, required)` between tools preserves the 256/30
+    populations and every shape, so it stayed green. The digest binds each schema
+    to its own tool name.
+    """
+    surface = _surface()
+    blob = json.dumps({name: {"params": entry["params"],
+                              "required": entry["required"]}
+                       for name, entry in surface.items()}, sort_keys=True)
+    digest = hashlib.sha256(blob.encode()).hexdigest()
+    assert digest == (
+        "e1a66647e3596dae734b915cbf302cb8983db11aa795f237689a4d6a78e35ff3"), (
+        "the tool-surface schema attribution drifted — a rotation between tools "
+        "keeps every shape and both populations, so the digest is what reds")
+
+
+def test_the_readback_RESOLVED_map_is_its_own_elements():
+    r"""Reds if `readback.json.resolved` stops resolving the elements it cites.
+
+    ⛔ #14691 review, round 5, P3. The prose cites `resolved`, and nothing read it:
+    truncating the map to one entry left 73 passed. Every element the artifact
+    resolved must still be resolved, with the id the element carries.
+    """
+    readback = _readback()
+    resolved = readback["resolved"]
+    assert resolved, "readback.json resolved no element at all"
+    assert len(resolved) >= len(readback["elements"]), (
+        f"resolved carries {len(resolved)} entries for "
+        f"{len(readback['elements'])} elements")
+    # TWO declared components were genuinely NOT resolved by name, and the
+    # artifact says so in `unresolved_elements` — that is D2's finding, not a
+    # pin to loosen. An element must be in exactly one of the two places.
+    unresolved = set(readback["unresolved_elements"])
+    for element in readback["elements"]:
+        key = element["name"].lower()
+        if f'{element["element_kind"]}:{element["name"]}' in unresolved:
+            assert key not in resolved, (
+                f'{element["name"]} is listed unresolved but IS resolved')
+            continue
+        assert key in resolved, f"readback.json no longer resolves {element['name']}"
+        assert resolved[key]["id"] == element["root_id"], element["name"]
+    assert readback["graph_name"] == _score()["graph"], (
+        "readback.json was measured against a different graph than the score")
+
+
+def test_the_peer_surface_booleans_are_the_SURFACE_artifacts():
+    r"""Reds if the peer artifact's `*_listed` booleans are flipped to True.
+
+    ⛔ #14691 review, round 5, P3. `tortoise_recall_listed` /
+    `tortoise_get_governance_listed` are the row's whole point (both tools EXECUTE
+    while the advertised surface lists neither). Flipping them to `True` left 73
+    passed — which would delete the product finding.
+    """
+    iv = _independent()["tool_surface"]
+    surface = _surface()
+    for name in ("tortoise_recall", "tortoise_get_governance"):
+        key = f"{name}_listed"
+        assert iv[key] is (name in surface), (
+            f"peer artifact says {key}={iv[key]!r}; out/tool-surface.json "
+            f"{'lists' if name in surface else 'does not list'} {name}")
+    assert iv["advertised_tools"] == len(surface)
+
+
+def test_the_witness_rows_are_EPISTEMIC_and_the_D4_witness_is_isolated():
+    r"""Reds if a witness row's mechanism is rewritten to a structural predicate.
+
+    ⛔ #14691 review, round 5, P3. `explore[0].mechanism` `IMPL` → `hasPart` stayed
+    green: D4's claim is that the door reports EPISTEMIC edges and no structural
+    one, so a structural predicate in a witness row would invert the finding.
+    """
+    witness = _readback()["link_witness"]
+    assert len(witness) == 7, sorted(witness)
+    epistemic = {"supports", "contradicts", "refines", "IMPL", "NAND"}
+    rows_total = 0
+    for name, entry in witness.items():
+        rows = _rows(entry["expand_relationships"]["reply"])
+        rows_total += len(rows)
+        for row in rows:
+            assert row.get("predicate") in epistemic, (name, row.get("predicate"))
+            assert row.get("mechanism") in epistemic, (name, row.get("mechanism"))
+    assert rows_total == 1, (
+        f"the witnesses returned {rows_total} epistemic rows in total; D4's claim "
+        "is that exactly one connected witness answers and six are isolated")
+    silent = [n for n, e in witness.items()
+              if not _rows(e["expand_relationships"]["reply"])]
+    assert len(silent) == 6, silent

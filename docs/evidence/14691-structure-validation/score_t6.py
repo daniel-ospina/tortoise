@@ -108,11 +108,25 @@ def is_error_reply(reply) -> bool:
     claim about the product the measurement never made. Every reader that decides
     emptiness or ownership from a reply must ask this first.
     """
+    # ⛔ A PLAIN-TEXT ERROR IS STILL AN ERROR (#14691 review, round 5, P1).
+    # The producer's own failure text — `["Error: timeout while expanding
+    # relationships"]` — is not JSON, so this returned False and the door read as
+    # ANSWERED-EMPTY: a failed call published as the product defect D4, with the
+    # artifact re-deriving byte-identically. Measured on `ae2bcfc864`: replacing all
+    # seven witness replies with that shape left 73 passed and D4 standing.
+    _ERROR_TEXT = re.compile(
+        r"^\s*(?:error|exception|traceback|failed|failure|timeout|refused|"
+        r"unavailable|unauthori[sz]ed)\b", re.IGNORECASE)
     while isinstance(reply, str):
         try:
             reply = json.loads(reply)
         except (ValueError, TypeError):
-            return False
+            return bool(_ERROR_TEXT.match(reply))
+    # a row list of PLAIN STRINGS (never dicts) carrying failure text is an
+    # error envelope, not rows
+    if (isinstance(reply, list) and reply
+            and all(isinstance(item, str) for item in reply)):
+        return any(_ERROR_TEXT.match(item) for item in reply)
     if isinstance(reply, dict):
         # ⛔ THE MCP SPEC'S OWN ERROR SHAPE (#14691 review, 6th round, P2-1).
         # MCP 2025-06-18 reports a tool EXECUTION error inside the RESULT as
