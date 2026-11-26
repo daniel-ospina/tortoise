@@ -1271,7 +1271,7 @@ def test_the_example_BUCKETS_are_the_bands_their_names_claim():
 
 
 def test_each_door_finding_ANSWER_is_the_artifacts_answer_in_SUBSTANCE():
-    """Reds if a REPORT answer keeps its leading "No" and reverses its claim.
+    r"""Reds if a REPORT answer keeps its leading "No" and reverses its claim.
 
     ⛔ #14691 review, 6th cycle, finding 4 (P2). `_polarity` reads the FIRST word,
     so measured green on 43fbd256: D6's answer
@@ -1430,6 +1430,150 @@ def test_report_figures_across_the_sections_are_the_artifacts_figures():
          "§7's dev:code typing count")
     line(r"^\| `out/tool-surface\.json` \|",
          f"({len(tools)} tools)", "§8's advertised-tool count")
+
+
+def test_the_reports_number_TABLES_are_the_artifacts_tables():
+    r"""Reds if a row of REPORT.md's number TABLES drifts from its artifact.
+
+    ⛔ #14691 review, 6th cycle, finding 1 (P1) pinned the HEADING figures and §2's
+    `doc-01` cost row, and left the tables that carry the same numbers. Measured
+    on head 1de0815 by mutating ONE number per REPORT.md line and re-running this
+    suite: **91 of 121 numeric lines stayed GREEN**, among them four rows of §2's
+    per-document cost table, the whole post-write overview block, §3/A1's kind
+    table, §3/A2's declared-side cells, §3/A4's "0 of 28 declared" and §5/A5's
+    rank column — every one of them a figure a reader takes as the measurement.
+
+    Each cell below is DERIVED from the committed artifact named beside it, so a
+    scorer change reds here and the prose gets updated with it.
+    """
+    score, receipt = _score(), _receipt()
+    tokens = score["extraction_tokens"]
+    a1, a2 = score["A1_type_coverage"], score["A2_edges"]
+    a4, a5 = score["A4_no_invention"], score["A5_retrieval"]
+    corpus_decl = _corpus()["_declared_structure"]
+    after = receipt["graph_overview_after"]
+
+    def cell(pattern, expected, why):
+        got = _report_line(pattern)
+        assert got, f"REPORT.md has no line matching {pattern!r} ({why})"
+        assert expected in got, (
+            f"{why}: REPORT.md does not carry the artifact's {expected!r} — {got!r}")
+
+    def para(pattern, expected, why):
+        """A claim whose sentence WRAPS: grade the whole paragraph, not a line."""
+        got = _report_paragraph(pattern)
+        assert got, f"REPORT.md has no paragraph matching {pattern!r} ({why})"
+        assert expected in got, (
+            f"{why}: REPORT.md does not carry the artifact's {expected!r} — {got!r}")
+
+    # §1 — the graph under test, bound to the receipt's own record of where it ran
+    cell(r"^\| Graph under test \|", f"`{receipt['graph_name']}`",
+         "§1's graph name")
+    cell(r"^\| Graph under test \|",
+         f"`{receipt['db_uri'].rsplit('/', 1)[0].rsplit('@', 1)[-1]}`",
+         "§1's host:port")
+
+    # §1 — the corpus's declared structure, counted from the fixture itself
+    para(r"^\*\*4,295 characters",
+         (f"{len(corpus_decl['ownership'])} ownership pairs, "
+          f"{len(corpus_decl['dependencies'])} dependency pairs, "
+          f"{len(corpus_decl['serves'])} serves pairs"),
+         "§1's declared pair counts")
+
+    # §2 — EVERY row of the per-document table, not only doc-01's
+    written_total = 0
+    for doc in receipt["documents"]:
+        doc_id = doc["doc_id"]
+        by_doc = tokens["by_doc"][doc_id]
+        rel = doc["result"].get("relation_write") or {}
+        edges = len(rel.get("edges") or [])
+        written_total += edges
+        cell(rf"^\| {doc_id} \|",
+             (f"| {round(doc['ack_seconds'], 1)} | {by_doc['calls']} | "
+              f"{by_doc['prompt_tokens']:,} | {by_doc['completion_tokens']:,} | "
+              f"{len(doc['result'].get('points') or [])} |"),
+             f"§2's {doc_id} cost row")
+    acks = [d["ack_seconds"] for d in receipt["documents"]]
+    cell(r"^\| \*\*total\*\* \|",
+         (f"| **{round(sum(acks) / len(acks), 1)} avg** | **{tokens['calls']}** | "
+          f"**{tokens['prompt_tokens']:,}** | **{tokens['completion_tokens']:,}** | "
+          f"{sum(len(d['result'].get('points') or []) for d in receipt['documents'])} "
+          f"| **{written_total}** |"),
+         "§2's total row")
+    assert written_total == score["edge_count"], (
+        "the receipt's written relations do not sum to the scorer's edge_count: "
+        f"{written_total} vs {score['edge_count']}")
+
+    # §2 — the post-write overview block, quoted from the receipt
+    cells = ", ".join(f'"{k}": {v}' for k, v in after["taxonomy"].items())
+    cell(r'^"taxonomy":', f'"taxonomy":  {{{cells}}}', "§2's post-write taxonomy")
+    cell(r'^"structure":',
+         f'"operators": {after["structure"]["operators"]}, '
+         f'"total": {after["structure"]["total"]}', "§2's post-write structure")
+    kinds = ", ".join(
+        f'{{"kind": "{k["kind"]}", "count": {k["count"]}}}'
+        for k in after["pointkinds"])
+    cell(r'^"pointkinds":', kinds, "§2's post-write point kinds")
+    sessions = [s for s in after["sources"] if s.get("sourceKind") == "agentSession"]
+    per_source = [s["points"] for s in sessions]
+    cell(r'^"sources":',
+         f'{len(sessions)} agentSession sources, {min(per_source)}\u2013'
+         f'{max(per_source)} points each', "§2's post-write source population")
+
+    # §3 — EVERY row of A1's kind table
+    for role, row in a1["per_type"].items():
+        star = "*" if role == "component" else ""
+        cell(rf"^\| {role} \| \d",
+             f"| {role} | {row['declared']} | {row['present']} | "
+             f"{row['right_kind']}{star} |", f"§3/A1's {role} row")
+
+    # §3 — A2's DECLARED-side cells (the oriented side is pinned above)
+    cell(r"^\| product → feature", a2["totals"]["containment_present"],
+         "§3/A2's hasPart row")
+    cell(r"^\| person → team", a2["totals"]["membership_present"],
+         "§3/A2's membership row")
+    cell(r"^\| person → role", a2["totals"]["role_links_present"],
+         "§3/A2's role-link row")
+    cell(r"^\| dependent → dependency", a2["totals"]["dependency_present_and_correct"],
+         "§3/A2's dependency row")
+    ownedby_rows = sum(
+        1 for doc in receipt["documents"]
+        for e in (((doc.get("result") or {}).get("relation_write") or {})
+                  .get("edges") or []) if e.get("predicate") == "ownedBy")
+    cell(r"^\| thing → owner",
+         f"{a2['totals']['ownership_present']}** ({ownedby_rows} rows)",
+         "§3/A2's ownership declared-side cell")
+    produces = [o for o in a2["other"] if o["edge"]["predicate"] == "produces"]
+    produced = f"{len(produces)}/{len(produces)}"
+    inverted = sum(1 for o in produces if o["orientation"] == "INVERTED")
+    cell(r"^\| team → component", produced, "§3/A2's produces declared-side cell")
+    cell(r"^\| team → component",
+         f"**{len(produces) - inverted}/{len(produces)} — every",
+         "§3/A2's produces oriented cell")
+
+    # §3/A4 — the traceability sentence's declared denominator
+    wording = _report_paragraph(r"^\*\*As the issue words it\*\*")
+    assert wording, "REPORT.md has no A4 'as the issue words it' paragraph"
+    declared_untraceable = (
+        f"{len(a4['declared_structure_untraceable'])} of {a1['declared']} declared "
+        "structure elements untraceable")
+    assert declared_untraceable in wording, (
+        "§3/A4's declared traceability does not state the artifact's count "
+        f"{declared_untraceable!r}: {wording[:200]!r}")
+
+    # §5 — the rank column of A5's table, per probe
+    for probe in a5["probes"]:
+        ranks = [probe["first_rank_in_search"].get(e) for e in probe["expected"]]
+        unique = sorted({r for r in ranks if r is not None})
+        row = _report_line(
+            rf"(?i)^\| {re.escape(probe['query'].rstrip('?').lower())[:40]}")
+        assert row, f"REPORT.md has no A5 row for {probe['element']}"
+        cells = [c.strip() for c in row.strip().strip("|").split("|")]
+        text = cells[3]
+        stated = sorted(int(n) for n in re.findall(r"\d+", text))
+        assert stated == unique, (
+            f"§5's rank cell for {probe['element']} is {text.strip()!r} while the "
+            f"artifact's first ranks are {unique} (expected {probe['expected']})")
 
 
 def test_the_second_measurements_CORROBORATION_fields_are_pinned():
