@@ -1519,9 +1519,9 @@ test('#14686: two same-identity rows have DISTINCT accessible names', () => {
 test('#10156: a payload with a usable value RENDERS, and an unusable one SAYS so', () => {
   // `detailOf` has three states and the ledger suite covers all three — but the
   // RENDER of `shown`/`undisplayable` had no test at all, so both branches could be
-  // deleted with the suite green. The feed carries no `details` today (#14692 is
-  // where shipping one is decided), which is exactly why the render that will show
-  // it must not be silently removable (review finding).
+  // deleted with the suite green. `details` SHIPS now (#14702, from the #14692
+  // finding) with `count`/`threshold`/`window_s`/`surface` — so the render is live
+  // on real rows, not a future one, and it must not be silently removable.
   const shown = renderBell({
     alerts: [alert({ message: 'with payload', details: { country: 'ES', ip: '203.0.113.9', key_name: 'prod' } })],
   })
@@ -1534,6 +1534,30 @@ test('#10156: a payload with a usable value RENDERS, and an unusable one SAYS so
   assert.ok(!shownDetail.textContent.includes(DETAIL_NO_DETAIL),
     'a row WITH detail must not claim none was recorded')
   shown.unmount()
+
+  // ⛔ THE REAL SHIPPED SHAPE (#14702), not only the identity fields: the payload
+  // `tests/test_abuse_integration.py` asserts against the live route. This is the
+  // row the owner was looking at when he said «because I have no details it's just
+  // noise» — it must render its numbers, and must NOT print either "no detail" or
+  // "machine detail we do not display" (round-4 review, P1).
+  const measured = renderBell({
+    alerts: [alert({
+      message: 'measured payload',
+      details: { count: 2309, threshold: 500, window_s: 3600, surface: 'Memory writes' },
+    })],
+  })
+  fireEvent.click(bell(measured.container))
+  fireEvent.click(measured.container.querySelector('.notif-open'))
+  const measuredDetail = measured.container.querySelector('.notif-detail').textContent
+  for (const fact of ['Memory writes', '2,309', '500', '1 hour']) {
+    assert.ok(measuredDetail.includes(fact), `${fact} must reach the customer`)
+  }
+  assert.ok(!measuredDetail.includes(DETAIL_UNDISPLAYABLE))
+  assert.ok(!measuredDetail.includes(DETAIL_NO_DETAIL),
+    'the measurements ARE the detail — claiming none is the P1')
+  // The internal rule token never travels, even though the row may carry it.
+  assert.ok(!measuredDetail.includes('point_create'))
+  measured.unmount()
 
   // A payload whose only values we cannot display must SAY that, not show an empty
   // block and not claim there was no detail at all.

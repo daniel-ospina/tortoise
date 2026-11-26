@@ -408,9 +408,19 @@ function firstMsOf(alert) {
  *    anything that HAPPENS afterwards re-opens the episode."
  *
  * Without this bound the local layer was the direction that gate explicitly
- * rejects: one dismissal of `flag|Suspicious activity flagged on this
- * Organization` (a message with no rule token, so EVERY flag rule shares it)
- * hid a suspension that happened a week later.
+ * rejects: one dismissal of a row whose customer message carries no rule token
+ * (so every rule of that type shares that sentence) hid a DIFFERENT fact that
+ * happened a week later.
+ *
+ * ⚠️ The example this used to give — "a `flag` dismissal hid a suspension" — is
+ * false at BOTH ends at this head, and is kept here only so the next reader does
+ * not re-derive it: `flag` is an ACTIVITY row since #14702
+ * (`EVENT_FLAG: REGISTER_ACTIVITY`, `abuse.py`), and its message is no longer a
+ * constant (it embeds surface/count/threshold/window_s), so it never shared a key
+ * with a `suspend` row in the first place. The COLLISION the gate bounds still
+ * exists — `entryKeyOf` is still `type|message`, so two rows that render the same
+ * sentence still share one decision key (`read_velocity` rows name only the
+ * scope) — which is why the window test stays load-bearing.
  *
  * ⛔ BOTH registers are bounded, and the bounds are DIFFERENT — the same two
  * rules `_episode_acknowledged` applies, mirrored exactly:
@@ -561,14 +571,22 @@ export function episodeOf(alert) {
  *     match to any row, and that the sentence was removed for exactly that
  *     reason. So two different keys crossing the same threshold in the same
  *     scope are ONE local identity;
- *   * the incident types — `flag` / `review_needed`, whose subject server-side
- *     is the RULE (`_alert_subject`), and the customer-facing message is a
- *     constant with no rule token. Every flag rule is therefore one local
- *     identity.
+ *   * the incident types — `suspend` / `auth_ip`, whose subject server-side is
+ *     the RULE (`_alert_subject`) while the customer-facing message can repeat
+ *     across rules. Two rules that render the same sentence are therefore one
+ *     local identity.
+ *
+ *     ⚠️ `flag` / `review_needed` USED to be listed here. #14702 moved both to
+ *     the ACTIVITY register (`EVENT_FLAG`/`EVENT_REVIEW: REGISTER_ACTIVITY`,
+ *     `abuse.py`) and put the measured numbers into their message, so two flag
+ *     rules now differ both in their sentence and in their identity. The
+ *     collision survives for rows whose message is still shared — a
+ *     `read_velocity` row names only the scope — which is what keeps
+ *     `isDismissed`'s window test load-bearing rather than vestigial.
  *
  * Consequence, stated rather than hidden: two SEPARATE bouts of the same type
- * (over different rules, in the flag case) share one local identity, so a
- * dismissal taken on one is CONSIDERED for the other. What stops that from being
+ * (over different rules, wherever two rules render the same sentence) share one
+ * local identity, so a dismissal taken on one is CONSIDERED for the other. What stops that from being
  * "a new incident silently suppressed" is `isDismissed`, which applies the
  * server's window test to BOTH registers before anything else: a row that does
  * not intersect the acknowledged window and does not start inside the forward gap
@@ -737,10 +755,12 @@ export function buildLedger({ alerts, state, now = new Date(), days = OLD_AFTER_
   // and stay two rows.
   //
   // ⛔ THIS REPLACES THE IDENTITY COLLAPSE, and the reason is the failure the
-  // collapse could not survive: the server's identity for a `flag` is type + RULE
-  // while the customer message is a constant that deliberately omits the rule
-  // (`_alert_subject` vs `_alert_dict`), so two genuinely different episodes
-  // collide on the client key. Collapsing to one row per identity meant that once
+  // collapse could not survive. The server's identity is type + RULE
+  // (`_alert_subject`) while this key is `type|message` (`_alert_dict`), so
+  // whenever two episodes render the SAME SENTENCE two genuinely different
+  // episodes collide on the client key — which is what `flag` rows did until
+  // #14702 put the measured numbers into their message, and what `read_velocity`
+  // rows still do by naming only the scope. Collapsing to one row per
   // today's bout was acknowledged, an OLDER unacknowledged one was neither listed
   // nor counted — an alert made invisible and uncountable on the security surface
   // — and "prefer the unacknowledged one" only moves which row disappears. With a
@@ -807,16 +827,91 @@ export const KIND_ACTIVITY =
 export const KIND_UNCLASSIFIED =
   'We could not classify this alert. Treat it as needing review.'
 
+//: The `details` keys this view renders, in the order a reader needs them: what
+//: was measured, against what level, over what period — then who/where, which
+//: only an `auth_ip` row carries.
+//:
+//: Mirrors `_CUSTOMER_DETAIL_KEYS` in `tortoise/abuse.py` MINUS `tier_relative`:
+//: that one is a boolean recording whether the alert level was a share of the
+//: Organization's own allowance, not a measurement — rendering `true` would be
+//: machine detail, and the row's own sentence already states it in words.
+const DETAIL_FIELDS = [
+  ['surface', 'Measured'],
+  ['count', 'Measured count'],
+  ['threshold', 'Alert level'],
+  ['window_s', 'Over'],
+  ['country', 'From'],
+  ['ip', 'IP address'],
+  ['key_name', 'API key'],
+]
+
+/** `3600` → "1 hour", `900` → "15 minutes", `45` → "45 seconds".
+ *
+ *  Mirrors `_human_window` in `tortoise/abuse.py` — hours first, so a whole hour
+ *  never renders as "60 minutes" — because the row's own sentence states the same
+ *  window in these units. A raw second count here would be a second vocabulary
+ *  for one fact, and the two would eventually disagree.
+ */
+export function windowLabel(value) {
+  const s = Number(value)
+  if (!Number.isFinite(s) || s <= 0) return ''
+  if (s % 3600 === 0) {
+    const hours = s / 3600
+    return `${hours} hour${hours === 1 ? '' : 's'}`
+  }
+  if (s % 60 === 0) {
+    const minutes = s / 60
+    return `${minutes} minute${minutes === 1 ? '' : 's'}`
+  }
+  return `${s} second${s === 1 ? '' : 's'}`
+}
+
+/** One `details` value as the string this view renders, or '' to OMIT it.
+ *
+ *  An absent fact is omitted, never filled in — the rule the server's own
+ *  sentence follows ("never a placeholder 0", `_point_rate_message`). A value of
+ *  the wrong shape is omitted for the same reason: an invented number on a
+ *  security surface is worse than an absent one.
+ */
+function detailValue(key, value) {
+  if (value === undefined || value === null || value === '') return ''
+  if (key === 'window_s') return windowLabel(value)
+  if (key === 'count' || key === 'threshold') {
+    const n = Number(value)
+    // Thousands separators, matching the server's `{units:,}` in the row's own
+    // sentence ("reached 2,309 units").
+    return Number.isFinite(n) ? n.toLocaleString('en-US') : ''
+  }
+  return String(value)
+}
+
 /** The facts the feed records for one alert, and whether a further detail
  *  payload travels with it.
  *
- *  ⚠️ FINDING (#14686, recorded on the issue): `GET /v1/team/alerts` carries NO
- *  per-event context. `_alert_dict` (`tortoise/abuse.py`) emits `type`, `label`,
- *  `at`, `message`, `register`; `group_alert_episodes` adds `count`, `first_at`,
- *  `episode`, `truncated`; `_alert_feed` adds `acked`. There is no key id, no IP,
- *  no country beyond what the message string already embeds, and no rule. So
- *  "click for details" can only ever show what is derived below — which is why
- *  the missing-detail case is a REQUIRED state of this view and not an edge case.
+ *  ⚠️ FINDING (#14686, recorded on the issue — ANSWERED by #14687/#14702, which
+ *  are in this branch's base): when this view was designed, `GET /v1/team/alerts`
+ *  carried NO per-event context. `_alert_dict` (`tortoise/abuse.py`) emitted
+ *  `type`, `label`, `at`, `message`, `register`; `group_alert_episodes` added
+ *  `count`, `first_at`, `episode`, `truncated`; `_alert_feed` added `acked`. The
+ *  store's `details` column was read by `_alert_subject` and then STRIPPED before
+ *  it reached the customer.
+ *
+ *  #14702 ships it: `_alert_dict` now emits `details: _customer_details(...)`,
+ *  i.e. the subset `_CUSTOMER_DETAIL_KEYS` allows — `count`, `threshold`,
+ *  `window_s`, `surface` (and `tier_relative`, a BOOLEAN about which threshold
+ *  applied rather than a measurement). `rule` is deliberately excluded. Pinned
+ *  end-to-end against the real route by `tests/test_abuse_integration.py`.
+ *
+ *  ⛔ SO THE ALLOW-LIST BELOW MUST CONTAIN THOSE FIELDS. It once held only
+ *  `country`/`ip`/`key_name`, so a shipped payload landed in `'undisplayable'`
+ *  and this view told the customer "no further detail" — and that the feed "does
+ *  not include the measured rate" — while holding the numbers. That is the
+ *  owner's complaint («because I have no details it's just noise») restored
+ *  verbatim, so it is a P1, not copy polish (round-4 review).
+ *
+ *  The missing-detail case is STILL a required state — a row written before
+ *  #14702, or a type that records none of those fields — it is just no longer the
+ *  ordinary one.
  */
 export function detailOf(alert, now = new Date()) {
   const entry = entryOf(alert, now)
@@ -856,18 +951,16 @@ export function detailOf(alert, now = new Date()) {
     // explanation went with the file; it is stated in BOTH places now.
     ...(entry.truncated ? [{ label: 'Older occurrences', value: `not visible — ${TRUNCATED_NOTE}` }] : []),
   ]
-  // Only fields a customer can act on are surfaced. `details`, if it ever
-  // arrives, also carries our internal vocabulary (`scope`, `id`, `rule`), which
-  // every reviewer of this surface has agreed must not reach the customer — so
-  // the allow-list is explicit rather than "whatever the server sent".
+  // Only fields a customer can act on are surfaced. `details` also carries our
+  // internal vocabulary (`rule`, and the `tier_relative` boolean), so the
+  // allow-list is explicit rather than "whatever the server sent" — but it is the
+  // SHIPPED customer-safe subset, not the empty one it started as (see the note
+  // above `detailOf`: dropping the measurements made this view claim there were
+  // no details while holding them).
   const shown = extra
-    ? [
-        ['country', 'From'],
-        ['ip', 'IP address'],
-        ['key_name', 'API key'],
-      ]
-        .filter(([k]) => extra[k] !== undefined && extra[k] !== null && extra[k] !== '')
-        .map(([k, label]) => ({ label, value: String(extra[k]) }))
+    ? DETAIL_FIELDS
+        .map(([key, label]) => ({ label, value: detailValue(key, extra[key]) }))
+        .filter((f) => f.value !== '')
     : []
   // An EMPTY payload carries nothing, so it must not be reported as carrying
   // machine detail the dashboard hides (review finding: `{}` said exactly that).
@@ -961,13 +1054,19 @@ export const DETAIL_NO_DETAIL = 'No further detail was recorded for this alert.'
 export const DETAIL_UNDISPLAYABLE =
   'This alert carries machine detail that the dashboard does not display.'
 //: Scoped to the FEED on purpose. "Nothing else about this event was recorded"
-//: would be false for a `flag` row — the server records `rule` (it is load-bearing
-//: for episode identity) and simply does not ship it here. What is true is that the
-//: dashboard's alert feed does not carry the per-event records.
+//: would be false — the server records `rule` (load-bearing for episode identity)
+//: and simply does not ship it. What is true is what the feed carries: the
+//: description above, plus any measurements rendered above this line, and NOT the
+//: raw event records behind them.
+//:
+//: ⛔ This used to say the feed "does not include … the measured rate". Since
+//: #14702 it does — `count`/`window_s`/`surface` are in the payload and rendered
+//: by the allow-list — so that clause was a false statement about a payload we
+//: were holding (round-4 review, P1).
 export const DETAIL_NO_DETAIL_LEAD =
-  'The alert feed carries the description above; it does not include the '
-  + 'per-event records (which key, which source, the measured rate). Ask '
-  + 'support@premiselabs.co if you need them.'
+  'The alert feed carries the description above and any measurements shown '
+  + 'here; it does not carry the raw event records behind them. Ask '
+  + 'support@premiselabs.co if you need those.'
 export const STORAGE_UNAVAILABLE =
   'Your browser blocked local notification storage, so snooze and dismiss '
   + 'cannot be remembered here. Server-side dismissals still apply on reload.'

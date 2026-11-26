@@ -6629,9 +6629,10 @@ function claimIntentInFlight() {
     // Organization's unresolved count, lists its episodes, and lets a decision
     // taken on one be written under the other's key: `snoozedUntil` has no
     // incident gate by design (a bounded personal snooze does not need one), and
-    // a flag row's message is a constant every flag rule shares — so snoozing a
-    // stale org-A flag row would hide org B's own flag rows for the period
-    // (review finding F2).
+    // an activity row's message can be shared across rules — a `read_velocity`
+    // row names only the scope, and a `flag` row's message repeated across rules
+    // until #14702 put the measured numbers in it — so snoozing a stale org-A row
+    // could hide org B's own rows for the period (review finding F2).
     setAlerts([])
     setAlertsSaturated(false)
     setAlertsUnavailable(false)

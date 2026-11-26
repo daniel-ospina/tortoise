@@ -38,6 +38,7 @@ import {
   undismiss,
   unsnooze,
   untilLabel,
+  windowLabel,
   writeState,
 } from './notificationLedger.js'
 
@@ -66,6 +67,15 @@ const MIN = 60 * 1000
 const HOUR = 60 * MIN
 const DAY = 24 * HOUR
 
+/** A synthetic INCIDENT-register row.
+ *
+ *  `register: 'alert'` is what `registerOf` honours FIRST (a server stamp beats
+ *  the type), so this stands for any incident row. The `type: 'flag'` token is
+ *  kept only as a stable fixture id: at this head a REAL `flag` row is an ACTIVITY
+ *  row (`EVENT_FLAG: REGISTER_ACTIVITY`, `abuse.py`) whose message carries the
+ *  measured numbers (#14702), so do not read this fixture as a description of one
+ *  — the register stamp is the whole reason it is an incident.
+ */
 function alert(over = {}) {
   return {
     type: 'flag',
@@ -377,7 +387,9 @@ test('the INCIDENT GATE: what HAPPENED after a dismissal is not covered by it', 
   const state = dismiss(emptyState(), key, NOW, seen)
   assert.equal(buildLedger({ alerts: [seen], state, now: NOW }).unresolved, 0, 'what was seen is dismissed')
 
-  // A re-suspension after an appeal: same type, same (constant) message, later.
+  // A LATER fact that renders the same sentence: same type, same message, so the
+  // same `entryKeyOf`. (Synthetic — see the `alert()` fixture's note: a real
+  // `flag` row is an activity row whose message now carries the numbers.)
   const later = alert({
     message: 'Suspicious activity flagged on this Organization',
     at: new Date(NOW.getTime() + 2 * HOUR).toISOString(),
@@ -876,4 +888,47 @@ test('a payload with nothing displayable is NOT reported as "nothing was recorde
   const detail = detailOf(alert({ details: { rule: 'point_create' } }), NOW)
   assert.equal(detail.detailState, 'undisplayable')
   assert.deepEqual(detail.extra, [])
+})
+
+test('the SHIPPED payload renders its measurements instead of claiming there are none', () => {
+  // ⛔ The payload #14702 actually ships, taken verbatim from
+  // `tests/test_abuse_integration.py` (which asserts it against the real route) —
+  // not invented. The allow-list used to hold only country/ip/key_name, so this
+  // exact row fell to 'undisplayable' and the detail view told the owner there was
+  // no detail WHILE HOLDING IT: the complaint («because I have no details it's just
+  // noise») restored verbatim (round-4 review, P1).
+  const shipped = { count: 2309, threshold: 500, window_s: 3600, surface: 'Memory writes' }
+  const detail = detailOf(alert({ details: shipped }), NOW)
+  assert.equal(detail.detailState, 'shown', 'the measurements are customer-safe')
+  assert.deepEqual(detail.extra, [
+    // Thousands separators and a human window, matching the row's own sentence
+    // (`_point_rate_message` says "reached 2,309 units in the last 1 hour").
+    { label: 'Measured', value: 'Memory writes' },
+    { label: 'Measured count', value: '2,309' },
+    { label: 'Alert level', value: '500' },
+    { label: 'Over', value: '1 hour' },
+  ])
+  // `rule` is internal and `tier_relative` is a boolean about WHICH threshold
+  // applied — neither may leak, even though both travel in the row.
+  const full = detailOf(
+    alert({ details: { ...shipped, rule: 'point_create', tier_relative: true } }), NOW,
+  )
+  assert.ok(!JSON.stringify(full.extra).includes('point_create'))
+  assert.ok(!JSON.stringify(full.extra).includes('tier_relative'))
+})
+
+test('windowLabel speaks the same units as the row sentence it sits beside', () => {
+  // Mirrors `_human_window` (`tortoise/abuse.py`): hours FIRST, so a whole hour
+  // never renders as "60 minutes", and proper plurals.
+  assert.equal(windowLabel(3600), '1 hour')
+  assert.equal(windowLabel(7200), '2 hours')
+  assert.equal(windowLabel(900), '15 minutes')
+  assert.equal(windowLabel(60), '1 minute')
+  assert.equal(windowLabel(45), '45 seconds')
+  assert.equal(windowLabel(1), '1 second')
+  // An absent or nonsensical window is OMITTED, never rendered as "0 seconds" —
+  // an invented number on a security surface is worse than an absent one.
+  assert.equal(windowLabel(0), '')
+  assert.equal(windowLabel(null), '')
+  assert.equal(windowLabel('nonsense'), '')
 })

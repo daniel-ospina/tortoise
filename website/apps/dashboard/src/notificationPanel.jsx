@@ -267,11 +267,12 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
           </React.Fragment>
         ))}
       </dl>
-      {/* THE HONEST EMPTY CASE. `GET /v1/team/alerts` carries no per-event context
-          — no key id, no IP, no rule (see `detailOf`'s finding note), so this is
-          the ordinary state of every alert today, not an edge case. Saying it in
-          words is the difference between "noise" and "a notification I know the
-          limits of". */}
+      {/* THE HONEST EMPTY CASE. A row written before #14702 (or a type that
+          records none of the shipped fields) carries no per-event detail, so
+          this is still an ordinary state — saying it in words is the difference
+          between "noise" and "a notification I know the limits of". The
+          MEASUREMENTS #14702 ships are rendered as `detail.extra` above, which
+          is why this block is no longer the common path. */}
       {detail.detailState === 'none' ? (
         <div className="notif-nodetail">
           <p>{DETAIL_NO_DETAIL}</p>
