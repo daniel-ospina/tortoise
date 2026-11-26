@@ -841,8 +841,8 @@ false reassurance:
   body — which is the shape `#10602` recorded. So a recurrence of *this* P0
   shows up as `mcp`, never as `rest`.
 
-The same field is on the MCP health tool (`tortoise_health`, or
-`tortoise_overview(section="health")`) — the surface `#10602` itself was
+The same field is on the MCP health tool
+(`tortoise_graph_overview(section="health")`) — the surface `#10602` itself was
 measured on — and in `monitoring.serve_health`'s **`/health`** body.
 
 ⛔ Do not go looking for this JSON shape on `serve_health`'s **`/metrics`**: that
