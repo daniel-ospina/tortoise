@@ -10263,9 +10263,17 @@ _H_14544_NEGATED_ACTOR_CHANGE_RE = re.compile(
     + _H_14544_PARTITIVE
     # ⛔ THE ROW NOUN MUST BE THE HEAD, not a premodifier of a different head (#14623 review round 11,
     # P3): with the bare alternation, "does not move the `durations` row's BIN" matched `durations`
-    # as the object and red the paragraph's own TRUE bin claim. Requiring the head noun (optionally
-    # with `durations` in front) and rejecting a possessive after it fixes both halves.
-    + r"(?:`durations`\s+)?(?:rows?|entr(?:y|ies)|weight)(?![\u2019']s\b)",
+    # as the object and red the paragraph's own TRUE bin claim.
+    # ⛔ AND THE EXCLUSION IS NARROW, ON PURPOSE (#14623 review round 13, P2): a blanket
+    # `(?!['’]s)` could not tell the paragraph's TRUE "row's bin" / "row's registration" from the
+    # RETIRED "row's weight" / "row's fields", so the claim in possessive form shipped CLEAN. Only
+    # the possessed nouns the paragraph's own true sentences name are excluded; every other
+    # possessive is still the claim.
+    # ⛔ THE TRAILING `\b` MATTERS (#14623 review round 13, P2): without it `rows?` matched
+    # `rowboat`, `entr(?:y|ies)` matched `entrypoints` and `weight` matched `weights`/`weighted`, so
+    # the block's own pluralised shard-weight sentence was refused.
+    + r"(?:`durations`\s+)?(?:rows?|entr(?:y|ies)|weight)\b"
+    + r"(?![\u2019']s\s+(?:bins?|registrations?)\b)",
     re.IGNORECASE)
 #: PASSIVE order: `row|row(s)|entry|entries|durations|weight` FIRST, then a negation, then the
 #: change verb. Two guards — the caller also requires `_H_14544_ACTOR_RE` in the SENTENCE, and the
@@ -10780,6 +10788,11 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "`#14544` did not touch a couple of the `durations` rows.",
             "`#14544` did not touch half of the `durations` rows.",
             "`#14544` did not touch every one of the `durations` rows.",
+            # ⛔ A POSSESSIVE OF THE ROW'S OWN CONTENT IS STILL THE CLAIM (#14623 round 13, P2): a
+            # blanket possessive rejection let these ship CLEAN. Only `row's bin` / `row's
+            # registration` — the nouns the paragraph's TRUE claims name — are excluded.
+            "`#14544` did not touch the `durations` row's weight.",
+            "`#14544` did not touch that row's fields.",
             # ⛔ `\bnot\b` DOES NOT FIRE INSIDE `cannot` — the block's OWN auxiliary, folded to name
             # the row, shipped CLEAN at three preceding heads.
             "`#14544`'s removal of the file from the `core` surface cannot touch the `durations` row.",
@@ -10849,7 +10862,13 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             # the bin the paragraph says the cut cannot move, and a head-blind object red it
             # (#14623 review round 11, P3).
             "`#14544`'s cut does not move the `durations` row's bin.",
-            "`#14544`'s cut does not touch the `durations` row's registration."):
+            "`#14544`'s cut does not touch the `durations` row's registration.",
+            # ⛔ THE HEAD NOUN NEEDS ITS WORD BOUNDARY (#14623 round 13, P2): without it `rows?`
+            # matched `rowboat`, `entr(?:y|ies)` matched `entrypoints` and `weight` matched
+            # `weights`, refusing the block's own shard-weight subject matter.
+            "`#14544` did not touch the weights of shard a and shard b.",
+            "`#14544` did not touch the entrypoints of the pipeline.",
+            "`#14544` did not touch the rowboat shard."):
         assert _h_14544_banned_claim(honest) is None, (
             f"the anaphor ban REDS honest prose ({honest!r}) — the passive arm is missing its BE "
             "verb or the active arm ignores its subject, so the guard refuses a true sentence "
