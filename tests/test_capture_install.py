@@ -1775,7 +1775,7 @@ def test_legacy_symlink_already_current_guessed_arm_says_may(home):
         pytest.skip("root ignores file permissions, so the read would succeed")
     # First run with NO legacy shape: the seam lands and is current afterwards.
     assert install_capture("pi", home=home).ok
-    ext_dir, _disabled, _target, manifest = (
+    _ext_dir, _disabled, _target, manifest = (
         _legacy_symlink_with_unreadable_manifest(home))
     try:
         res = install_capture("pi", home=home)
