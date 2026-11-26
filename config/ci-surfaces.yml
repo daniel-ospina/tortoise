@@ -57,7 +57,7 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `bbef0b8840d7` folded in — the verb
+# reader of the prose can see. On THIS tree — `origin/main` `e29f954f4516` folded in — the verb
 # packs eleven shards at 827.6 s (a–k), so `ceil(827.6/60 x 2)` = 28 m governs (a shard's
 # job-level wall clock is the SLOWEST shard's) — and the same emission prints
 # `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.6 = 2.0300) on every one of
@@ -65,7 +65,7 @@ version: 1
 # IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s own
 # partition must be re-derived on `main`, never read out of this sentence.
 # ⛔ THE POOL DELTA IS RE-COUNTED ON THE RESOLVED TREE, not carried: `fast_pool()` holds **1341**
-# files at this head against **1340** on `origin/main` `bbef0b8840d7`, both counted by loading each
+# files at this head against **1340** on `origin/main` `e29f954f4516`, both counted by loading each
 # tree's OWN manifest through `fast_pool()` — and the set difference is exactly ONE entry:
 # `tests/test_14582_creation_hook.py` (`core`, flat 2.0 s), this PR's own (#14582) suite. `main`
 # carries nothing this tree lacks. ⛔ Every OTHER row the emission names is `main`'s at this head,
