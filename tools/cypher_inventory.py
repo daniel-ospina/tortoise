@@ -470,6 +470,32 @@ def _looks_like_git_metadata(directory: Path) -> bool:
     )
 
 
+def _plainly_outside_any_repository(target: Path, stderr_text: str) -> bool:
+    """True only when git's `not a git repository` is the WHOLE answer, not a symptom.
+
+    ⛔ "NOT A REPOSITORY" IS NOT THE SAME AS "NOT IN A REPOSITORY", and the gap is
+    damage a repository survives. Measured on git 2.43 with `git ls-files --error-unmatch`:
+    a checkout whose `.git/HEAD` was removed answers `fatal: not a git repository (or any
+    of the parent directories): .git` at rc 128 **with its index and object store
+    intact** — so a file it tracks is one `git checkout` away from coming back, while the
+    stderr string alone reads exactly like a plain directory. The same is true of a
+    `gitdir:` pointer at a directory that is not a git dir.
+
+    So the string is one half of the permit and the filesystem is the other: git says
+    `not a git repository` AND no ancestor carries a `.git` entry AND none looks like git
+    metadata. That is the same discrimination the metadata guard has always made (it was
+    its first P1), now named once instead of phrased twice — the tracked-path guard read
+    a non-zero exit as permission while the metadata guard refused it, in one file
+    (#14625 review).
+    """
+    if "not a git repository" not in stderr_text:
+        return False
+    ancestors = (target.parent, *target.parent.parents)
+    if any((parent / ".git").exists() for parent in ancestors):
+        return False
+    return not any(_looks_like_git_metadata(parent) for parent in ancestors)
+
+
 def surface_files(prefixes: tuple[str, ...]) -> list[str]:
     """Tracked Python files under the given prefixes — bounded by the git index.
 
@@ -1123,8 +1149,18 @@ def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
     Answers the invariant `--render`'s output is never committed — the same one for a
     destination inside `ROOT` and for one in another checkout, so the probe follows the
     DESTINATION (`rel` when it is inside `ROOT`, otherwise the destination's own
-    directory and basename). A destination in no repository at all answers
-    "untracked" (git exits 128), which is the documented permit for a plain path.
+    directory and basename).
+
+    ⛔ TWO ANSWERS PERMIT, AND "NON-ZERO" IS NOT ONE OF THEM. Git's own contract keeps
+    the ANSWER (`0` tracked / `1` not tracked — `ls-files --error-unmatch`'
+    documented non-match) apart from COULD NOT ANSWER (`128`: a corrupt index, an
+    unreadable index, an index that is a directory, a `.git` git disowns). Reading every
+    non-zero exit as "untracked" made an unanswerable probe the permit, so `--render`
+    — the verb §7 tells every lane to run — overwrote a TRACKED file in another
+    checkout at rc 0 whenever that checkout's index was one git could not read. The only
+    `128` that permits is git's own `not a git repository` about a path with no
+    repository anywhere above it, which is exactly what the metadata guard below has
+    always refused otherwise (#14625 review, reproduced through the fix).
 
     Returns 2 (could not run / refused) when git cannot be asked at all — an absent
     `git` binary raises `FileNotFoundError`, and an uncaught one would exit 1, the
@@ -1196,7 +1232,28 @@ def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
             file=sys.stderr,
         )
         return 2
-    return None
+    # ⛔ ONLY GIT'S *ANSWER* IS A PERMIT (#14625 review, P2, carried from the prior
+    # round: the guard whose damage git CAN restore failed OPEN on an unanswerable probe
+    # while its metadata sibling, whose damage git cannot restore, failed CLOSED). rc 1
+    # is the documented non-match; the one 128 that means "nothing here at all" is
+    # git's own `not a git repository` about a path with no repository above it. Every
+    # other exit — the three measured could-not-answer states at 128, a git that exits
+    # with anything else — is a refusal, never a write.
+    stderr_text = tracked.stderr or ""
+    if tracked.returncode == 1 or _plainly_outside_any_repository(target, stderr_text):
+        return None
+    first = stderr_text.strip().splitlines()
+    print(
+        f"render: could not probe {label} for tracking: git exited "
+        f"{tracked.returncode}"
+        + (f": {first[0]}" if first else "")
+        + ".\nA probe that cannot say whether the path is tracked is REFUSED rather "
+        "than read as permission: a false refusal costs a re-run with another path, "
+        "a false permit overwrites a file git may have to restore.\n"
+        "Pick another path (the default is gitignored).",
+        file=sys.stderr,
+    )
+    return 2
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1400,10 +1457,12 @@ def main(argv: list[str] | None = None) -> int:
         # index: `--git-dir` and `--git-common-dir` one call, because a linked
         # worktree's refs are shared with the main checkout, so the common dir is a
         # second answer. ⛔ A probe that CANNOT be answered is refused below rather than
-        # read as harmless: the tracked-path probe's "not a repo" pass is not the same
-        # case, because a tracked path cannot exist outside a repository while git
-        # metadata can (measured at `bf0dbcf9`: forcing the probe to exit 128 made the
-        # guard a no-op and `--render` wrote over a `--separate-git-dir` repo's config).
+        # read as harmless (measured at `bf0dbcf9`: forcing the probe to exit 128 made
+        # the guard a no-op and `--render` wrote over a `--separate-git-dir` repo's
+        # config). ⛔ AND ITS SIBLING ABOVE NOW REFUSES TOO, for the same reason: the
+        # tracked probe's "not a repo" pass was the one place in this file where
+        # *could not answer* was read as a verdict, and a checkout git disowns answers
+        # that string with its index intact (#14625 review, P2).
         #
         # ⛔ AND THE PROBE ALONE IS NOT THE INVARIANT — it is the DIRECTORY case of it.
         # A LINKED WORKTREE'S `.git` IS A REGULAR FILE holding `gitdir: …`, and it is
@@ -1506,12 +1565,7 @@ def main(argv: list[str] | None = None) -> int:
                 # marker, so it is permitted (measured, round 5: rc 0, 23 -> 145,745
                 # bytes — git cannot restore that one either). Stated rather than
                 # implied, because the refusal message above claims the class.
-                ancestors = (target.parent, *target.parent.parents)
-                plainly_outside = (
-                    "not a git repository" in stderr_text
-                    and not any((parent / ".git").exists() for parent in ancestors)
-                    and not any(_looks_like_git_metadata(parent) for parent in ancestors)
-                )
+                plainly_outside = _plainly_outside_any_repository(target, stderr_text)
                 if not plainly_outside:
                     first = stderr_text.strip().splitlines()
                     print(

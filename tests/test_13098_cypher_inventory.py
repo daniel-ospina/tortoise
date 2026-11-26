@@ -1261,9 +1261,21 @@ def test_an_unanswerable_git_metadata_probe_is_REFUSED_not_read_as_harmless(
     outside.mkdir()
     target = outside / "doc.md"
 
-    def _unanswerable(*_a, **_k):
+    def _unanswerable(cmd, **_k):
+        # ⛔ ONLY THE METADATA PROBE IS MADE UNANSWERABLE (#14625 review, P2). The
+        # TRACKED-path probe runs first and, since the fix this arm's neighbour names,
+        # refuses a non-zero exit of its own — so a blanket fake would be caught one
+        # guard EARLIER and this arm would grade the wrong refusal (it reds on the
+        # "GIT METADATA" message below). Answering that probe honestly is what keeps
+        # this arm the only executable assertion for the metadata guard's own
+        # could-not-answer path.
+        if list(cmd[:2]) == ["git", "ls-files"]:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=1, stdout="",
+                stderr="error: pathspec 'doc.md' did not match any file(s) known to git\n",
+            )
         return subprocess.CompletedProcess(
-            args=[], returncode=128, stdout="",
+            args=cmd, returncode=128, stdout="",
             stderr="fatal: unable to read repository\n",
         )
 
@@ -1898,6 +1910,170 @@ def test_the_renderer_reports_a_probe_failure_as_could_not_run(monkeypatch, caps
     err = capsys.readouterr().err
     assert "could not probe" in err, f"the refusal must say what failed; stderr:\n{err}"
     assert not target.exists(), "the refusal must happen before anything is written"
+
+
+def test_a_tracking_probe_that_cannot_answer_is_REFUSED_not_read_as_untracked(
+    tmp_path, monkeypatch, capsys
+):
+    """…and a non-zero exit is NOT the permit: only git's own ANSWER is.
+
+    ⛔ THE SIBLING OF THE ARM ABOVE, AND THE ONE THAT WAS MISSING (#14625 review, P2).
+    `FileNotFoundError` was graded; a `git` that RUNS and CANNOT ANSWER was not — and
+    the guard read every non-zero exit as "this path is untracked". That is a different
+    statement from "git could not read the index": the documented non-match is exit
+    **1**, while three measured states answer **128** with neither 0 nor 1 — a corrupt
+    `.git/index`, an unreadable one, and an index that is a directory (git 2.43). So
+    `--render` over a TRACKED path in a peer checkout whose index is unreadable WROTE at
+    exit 0 — the self-locking corruption this refusal describes, from the verb §7 tells
+    every lane to run — while the metadata guard 300 lines down refused its own
+    unanswerable probe. The fake names `128` + a corrupt-index stderr, i.e. the class,
+    not the one state that happens to be reproduced here.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    target = repo / "docs" / "unanswerable.md"
+    target.parent.mkdir(parents=True)
+    real_run = census.subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        if list(cmd[:2]) == ["git", "ls-files"]:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=128, stdout="",
+                stderr="fatal: .git/index: index file smaller than expected\n",
+            )
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(census.subprocess, "run", fake_run)
+    rc = census.main(["--render", target.relative_to(repo).as_posix()])
+    assert rc == 2, (
+        f"a tracking probe that cannot answer must exit 2 (could not run), got {rc} — "
+        "0 means it was read as 'untracked', which is how the write landed")
+    err = capsys.readouterr().err
+    assert "for tracking" in err and "could not probe" in err, (
+        f"the refusal must name the TRACKING probe that could not answer; stderr:\n{err}")
+    assert "exited 128" in err, (
+        f"the refusal must carry git's own exit code so a reader can tell 1 from 128; "
+        f"stderr:\n{err}")
+    assert not target.exists(), (
+        "the guard must refuse before writing — an unanswerable probe is not a "
+        "verdict, and the write it permits is unrecoverable when the path IS tracked")
+
+
+def test_a_damaged_git_directory_is_NOT_a_permit_for_the_TRACKING_probe(
+    tmp_path, monkeypatch, capsys
+):
+    """…and `not a git repository` from a checkout git DISOWNS is not a permit either.
+
+    ⛔ THE STRING ALONE IS NOT AN ANSWER, which is the lesson the METADATA guard's first
+    P1 already recorded ("not a repository" is not the same as "not metadata") and the
+    tracked-path probe had not learned. Measured on git 2.43: a checkout whose
+    `.git/HEAD` was removed — index and object store INTACT — answers
+    `fatal: not a git repository (or any of the parent directories): .git` at **128**,
+    byte-identical in shape to a plain directory, while `docs-keep.md` is still in
+    `.git/index` and one `git checkout` would bring it back. A stderr-only permit
+    therefore reopens the same clobber from the other side, so the permit needs the
+    structural half the metadata guard already had.
+
+    ⛔ AND THE REFUSAL IS ASSERTED TO COME FROM THE TRACKING PROBE: with the structural
+    term removed, the metadata guard one screen later refuses this destination anyway,
+    so a code-only assertion would stay green while the tracking probe had permitted the
+    write. The message is what pins the branch.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    keeper = repo / "docs-keep.md"
+    keeper.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", keeper.name], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=a",
+         "commit", "-qm", "tracked"],
+        check=True,
+    )
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    assert (repo / ".git" / "index").is_file(), (
+        "the premise is a DAMAGED repository, not a destroyed one: the index must still "
+        "be there holding the tracked path, or nothing could be restored and the arm "
+        "would grade an empty directory")
+    (repo / ".git" / "HEAD").unlink()
+    # ⛔ THE PREMISE IS MEASURED, NOT ASSUMED: this arm is about a repository answer that
+    # LOOKS like "no repository", so the real git must produce both halves — the code
+    # AND the string — or the arm would fail for a git-version reason it does not name.
+    damaged = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", keeper.name],
+        cwd=repo, capture_output=True, text=True,
+    )
+    assert damaged.returncode == 128 and "not a git repository" in damaged.stderr, (
+        "the premise: a disowned checkout answers 128 + 'not a git repository'; got "
+        f"rc={damaged.returncode} stderr={damaged.stderr!r} — the permit this arm "
+        "guards is not reachable on this git")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", keeper.relative_to(repo).as_posix()])
+    assert rc == 2, (
+        f"a git-disowned checkout must not permit the write, got {rc} — the path is "
+        "TRACKED in an index that is still there")
+    err = capsys.readouterr().err
+    assert "for tracking" in err, (
+        "the TRACKING probe must refuse this, not the metadata guard behind it — "
+        f"otherwise deleting its structural term reds nothing; stderr:\n{err}")
+    assert keeper.read_bytes() == before, (
+        "the tracked file was overwritten: 'not a git repository' from a repository "
+        "git merely disowns is could-not-answer, not a permit")
+
+
+def test_the_tracking_probe_still_PERMITS_both_honest_answers(tmp_path, monkeypatch):
+    """…and the fail-closed arm above does not over-block either honest permit.
+
+    ⛔ THE COUNTERWEIGHT, AND IT IS TWO-SIDED BECAUSE THE FIX HAS TWO PERMIT ARMS — git's
+    documented non-match (**1**, a path simply not in the index) and git's own `not a git
+    repository` (**128**) for a destination with no repository anywhere above it.
+    Refusing every non-zero probe reds the first half; refusing every 128 reds the second
+    — and the second is the shape §7's own one-off comparison uses (`--render /tmp/x.md`),
+    so over-blocking it turns a refusal into a wall on the common case.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # HALF 1 — git answered `1`: the path is in a repository and is NOT tracked.
+    inside = repo / "docs" / "untracked.md"
+    inside.parent.mkdir(parents=True)
+    answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", inside.relative_to(repo).as_posix()],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert answer.returncode == 1, (
+        f"the premise: an untracked path answers 1, not {answer.returncode} — the "
+        "non-match arm of the permit cannot be graded on this git")
+    rc = census.main(["--render", inside.relative_to(repo).as_posix()])
+    assert rc == 0, f"an untracked path in a repository is a legitimate destination; got {rc}"
+    assert inside.is_file(), "the document was not written to a legitimate destination"
+    # HALF 2 — git answered `128` + `not a git repository`: no repository at all.
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    assert not any(
+        (parent / ".git").exists() or census._looks_like_git_metadata(parent)
+        for parent in (outside, *outside.parents)
+    ), (
+        "the premise: this half proves the NO-REPOSITORY permit, so no ancestor of "
+        "tmp_path may carry `.git` or look like git metadata")
+    target = outside / "doc.md"
+    rc = census.main(["--render", str(target)])
+    assert rc == 0, (
+        f"a plain directory is a legitimate destination — an honest 'not a "
+        f"repository' must not be refused; got rc={rc}")
+    assert target.is_file(), "the document was not written outside any repository"
 
 
 def test_a_hand_authored_prose_row_is_not_read_as_a_census_row(tmp_path, capsys):
@@ -3957,6 +4133,19 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish",
         "test_a_directory_destination_is_refused_AS_a_directory",
         "test_the_renderer_reports_a_probe_failure_as_could_not_run",
+        # ⛔ AND THE OTHER HALF OF THAT PROBE (#14625 review, P2, the finding this round
+        # was dispatched for): an absent `git` was graded, a `git` that RUNS and CANNOT
+        # ANSWER was not — the guard read every non-zero exit as "untracked", so a
+        # corrupt/unreadable peer index turned a refusal into a write at rc 0, in the one
+        # guard whose damage git CAN restore while its metadata sibling already failed
+        # closed. The first arm is the mutant's target (`return None` for any non-zero);
+        # the second pins the STRUCTURAL term that keeps a git-disowned checkout (HEAD
+        # removed, index intact, stderr says "not a git repository") from being read as a
+        # plain directory; the third is the counterweight, because a fix that refuses
+        # every non-zero probe passes the first two and walls off `--render /tmp/x.md`.
+        "test_a_tracking_probe_that_cannot_answer_is_REFUSED_not_read_as_untracked",
+        "test_a_damaged_git_directory_is_NOT_a_permit_for_the_TRACKING_probe",
+        "test_the_tracking_probe_still_PERMITS_both_honest_answers",
         "test_the_renderer_reports_a_write_failure_as_could_not_run",
         # ⛔ THE OTHER THREE "COULD NOT RUN" SIBLINGS. The set named only the probe
         # and the render-WRITE arm while its own comment claimed "a run that cannot
@@ -4030,8 +4219,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 44, (
-        f"expected EXACTLY 44 named split arms; got {len(split_arms)} — either a "
+    assert len(split_arms) == 47, (
+        f"expected EXACTLY 47 named split arms; got {len(split_arms)} — either a "
         "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
@@ -4070,8 +4259,12 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # applying the message's delta to a tree at 44/103 lands on a self-inconsistent
     # literal.
     test_functions = {n for n in defined if n.startswith("test_")}
-    assert len(test_functions) == 103, (
-        f"expected EXACTLY 103 test functions in this module; got "
+    # ⛔ AND THE ROUND THAT CLOSED THE TRACKED PROBE'S COULD-NOT-ANSWER HOLE TAKES IT
+    # 103 -> 106 (`split_arms` 44 -> 47 with them): the refusal arm, the structural-term
+    # arm that keeps a git-disowned checkout out of the permit, and the over-block
+    # counterweight. All three carry a #13098 split invariant and are named above.
+    assert len(test_functions) == 106, (
+        f"expected EXACTLY 106 test functions in this module; got "
         f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
@@ -4459,8 +4652,15 @@ def test_the_rendered_document_is_not_tracked():
         ["git", "ls-files", "--error-unmatch", rel],
         cwd=ROOT, capture_output=True, text=True,
     )
-    assert tracked.returncode != 0, (
-        f"{rel} is TRACKED again — it is `--render`'s output, not a source (#13098).\n"
+    # ⛔ `== 1`, NOT `!= 0` (#14625 review, P2). `--error-unmatch`'s documented NON-MATCH
+    # is exit 1; a non-zero exit ALSO covers git saying it could not read the index
+    # (128), so `!= 0` was half-blind on the one path whose whole job is to notice a
+    # re-staged copy — it passed just as happily for "this index is unreadable" as for
+    # "this path is not in it". The stderr assertion names the answer as well, so a git
+    # that fails for any other reason reds this arm instead of satisfying it.
+    assert tracked.returncode == 1 and "did not match any file(s) known to git" in tracked.stderr, (
+        f"{rel} is TRACKED again — or this probe could not answer (rc={tracked.returncode}); "
+        "it is `--render`'s output, not a source (#13098).\n"
         f"    git rm --cached {rel}\n"
         "A modify/delete conflict resolved by keeping the incoming copy re-stages "
         "it, and no other arm in this suite reads the tracked path."
