@@ -2652,6 +2652,28 @@ def _cue_governing_clause(statements: list[str]) -> list[str]:
     return []
 
 
+# ⛔ A PRE-CUE IMPERATIVE THAT DEFERS ITS OWN CHECK PAST THE RESTART IS FORWARD.
+# "Check the tools after restarting. Restart your client, then confirm the tools
+# appear." is self-consistent copy and was RED (measured) — form (f) cannot tell
+# it from "Confirm the tools are actually there. Restart your client …".
+# ⛔ AND THE DEFERRAL IS POSITIONAL-AGNOSTIC, not a trailing literal. The first
+# cut matched only `after <the> restart(ing)` at the END of the clause, so every
+# FRONTED spelling of the same relation was a false red (#3429) while its comment
+# stated the rule generally: "Check the tools once your client has restarted.",
+# "After restarting, check the tools are present." and "Once the client restarts,
+# check the tools are present." all came back RED with the "inverts its own
+# restart cue" message over copy that plainly puts the restart FIRST (measured,
+# #14679 review at `18f99499d7`). The phrase is found ANYWHERE in the clause now,
+# because where the deferral sits in the sentence does not change what it defers.
+_DEFERRED_CHECK_RE = re.compile(
+    r"\b(?:after|once|when|following|upon)\s+(?:\w+\s+){0,3}restart(?:ing|s|ed)?\b"
+    r"|\bpost[\s-]restart\b", re.IGNORECASE)
+
+
+def _defers_its_check_past_the_restart(clause: str) -> bool:
+    return _DEFERRED_CHECK_RE.search(clause) is not None
+
+
 def _paragraph_cue_order_violation(para: str) -> str | None:
     flat = " ".join(para.split())
     cue_at = _cue_start(flat)
@@ -2737,15 +2759,18 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     post_clauses = [c.strip().lstrip(_PRE_CUE_PREFIX).strip() for c in merged]
     for clause in pre_clauses:
         if (_confirmation_scopes_the_config(clause)
-                or _negated_observation_only(clause)):
-            continue
-        # ⛔ A PRE-CUE IMPERATIVE THAT DEFERS ITS OWN CHECK PAST THE RESTART IS
-        # FORWARD: "Check the tools after restarting. Restart your client, then
-        # confirm the tools appear." is self-consistent copy and was RED
-        # (measured) — form (f) cannot tell it from "Confirm the tools are
-        # actually there. Restart your client …".
-        if re.search(r"\bafter\s+(?:the\s+)?restart(?:ing|s)?\b", clause,
-                     re.IGNORECASE):
+                or _negated_observation_only(clause)
+                # ⛔ THE DEFERRAL IS A PROPERTY OF THE CLAUSE'S STATEMENT, NOT OF
+                # ITS LAST FRAGMENT. "After restarting, check the tools are
+                # present." puts the deferral in an EARLIER clause of the same
+                # statement, so a per-clause test read the bare imperative and
+                # graded it — a false red (#3429). Checking the FINAL STATEMENT
+                # is the narrow fix: it does not reach back past a statement
+                # break, so "Check the logs after restarting. Confirm the tools
+                # are actually there. Restart your client" still reds the
+                # confirmation it must red (measured).
+                or _defers_its_check_past_the_restart(
+                    pre_statements[-1] if pre_statements else "")):
             continue
         for pattern in _INVERSION_FORMS:
             if pattern.search(clause):
@@ -4101,6 +4126,23 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "there.", False),
     ("Delete the old entry, after which restart your client, then confirm the "
      "tools are actually there.", False),
+    # ── CYCLE 37 (#14679's review at `18f99499d7`): the "a pre-cue imperative that
+    # defers its own check past the restart is FORWARD" exemption matched only a
+    # TRAILING `after <the> restart(ing)`, so every FRONTED spelling of the same
+    # relation was a false red (#3429) with the "inverts its own restart cue"
+    # message over copy that puts the restart first. `_DEFERRED_CHECK_RE` sees the
+    # phrase anywhere in the clause's STATEMENT now — anywhere in the statement,
+    # not anywhere in the paragraph, which the row after these three pins.
+    ("Check the tools once your client has restarted. Restart your client, "
+     "then confirm the tools are actually there.", False),
+    ("After restarting, check the tools are present. Restart your client, "
+     "then confirm the tools are actually there.", False),
+    ("Once the client restarts, check the tools are present. Restart your "
+     "client, then confirm the tools are actually there.", False),
+    # ⛔ …and the exemption must NOT reach back past a STATEMENT BREAK: an
+    # unrelated earlier deferral does not make a later confirmation forward.
+    ("Check the logs after restarting. Confirm the tools are actually there. "
+     "Restart your client, then confirm the tools are actually there.", True),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
