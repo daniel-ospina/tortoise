@@ -893,9 +893,16 @@ _ENDING_BASE = (
 #:   ``**filters`` into ``list_knowledge``, where ``_property_filter_clause``
 #:   reinterprets it as an ``n.ended_scope`` property filter and the arm answers
 #:   ZERO ROWS (the same measurement `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 Q2
-#:   records). The MCP handlers take no ``**kwargs``, so ``tortoise_search`` DOES
-#:   refuse the keyword — but only there, and the question router above is what
-#:   makes the ended population reachable from every door without it.
+#:   records). ⛔ The MCP door is NOT the loud one either: `mcp_server.py::tortoise_search`
+#:   declares no such parameter, but FastMCP builds its argument model with pydantic's
+#:   default `extra="ignore"`, so an undeclared keyword is DROPPED BEFORE the handler
+#:   runs and the call SUCCEEDS on the default population — measured on this tree
+#:   (`func_metadata(tortoise_search).arg_model.model_validate({"query":…,
+#:   "ended_scope": True})` raises nothing and `ended_scope` is absent from the dump).
+#:   So NO customer door fails loudly: the two SDK arms serve the default population or
+#:   zero rows, and the MCP door silently drops the keyword too. A DIRECT in-process
+#:   call is the only path that raises, and it is not a door. The question router above
+#:   is what makes the ended population reachable from every door without the flag.
 _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # "has anything we relied on been withdrawn?" / "have any claims been retired?"
     # An EXISTENCE question about an ending: the auxiliary + quantifier is the
