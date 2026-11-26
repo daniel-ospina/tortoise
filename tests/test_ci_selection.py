@@ -10593,9 +10593,15 @@ _H_14544_INVERTED_RE = re.compile(
     # row" states the exact reading `#14612` deletes and matched no alternative here, so the arm
     # stayed GREEN over it — measured on this tree by substituting that sentence into the live
     # paragraph: GREEN, where the pre-round-24 pin RED'd it. Widening the pin without widening this
-    # ban is the round-15 defect repeated, so the three conjunctions that grant the SECOND half
+    # ban is the round-15 defect repeated, so the ADDITIVE CONJUNCTIONS that grant the SECOND half
     # are banned here, and the non-vacuity loop below reads each of them.
-    r"|so\s+is\s+the\s+row\b|as\s+well\s+as\s+the\s+row\b|row\s+is\s+too\b",
+    # ⛔ `(?:so|as)\s+is` IS ONE CONSTRUCTION, not two spellings (#14623 round 26, P2): the
+    # round-25 ban enumerated `so is the row` and left its twin `as is the row` admitting
+    # "The REGISTRATION alone is exempt, as is the row's weight" — measured GREEN end-to-end by
+    # substituting it into the live paragraph. The family is `as/so is <noun>`; an alternation that
+    # lists one member re-opens the fail-open one word later, which is why both are written as one
+    # pattern rather than as a growing list.
+    r"|(?:so|as)\s+is\s+the\s+row\b|as\s+well\s+as\s+the\s+row\b|row\s+is\s+too\b",
     re.IGNORECASE)
 
 
@@ -10798,7 +10804,10 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     for inverse in ("both halves are exempt", "this paragraph DOES exclude it",
                     "The REGISTRATION is exempt, and so is the row",
                     "The REGISTRATION is exempt as well as the row",
-                    "The REGISTRATION half is exempt, and the row is too"):
+                    "The REGISTRATION half is exempt, and the row is too",
+                    # ⛔ THE TWIN of `so is the row`, pinned so that gap cannot come back: this
+                    # spelling shipped GREEN once already (#14623 round 26, P2).
+                    "The REGISTRATION alone is exempt, as is the row's weight"):
         assert _H_14544_INVERTED_RE.search(inverse), (
             f"the inverted-claim pattern no longer reads {inverse!r}, so the assertion above passes "
             "over any spelling of the reading `#14612` deletes — re-point `_H_14544_INVERTED_RE`")
