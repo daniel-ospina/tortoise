@@ -649,7 +649,8 @@ class RecordWrite:
             # unreachable record OR a failed statement; `plan_refused`
             # (#11783) is a record the projector could not BUILD a plan for at
             # all — no statement ran, so the cause is the record's shape or its
-            # producer, never the store;
+            # producer (a record schema that is not on disk lands here too, and
+            # that one is fixed by a REDEPLOY, not by the producer);
             # `journal_collision` (#9318) is a record that WAS reached
             # and refused to file itself under a journal position it cannot index
             # (a different `event_type`, a different capture time, an identity the
@@ -3908,7 +3909,7 @@ def _journal_collision_cause(
 def _plan_refusal_cause(
         exc: BaseException | None,
         depth: int = 4,
-) -> record_projection.RecordProjectionError | None:
+) -> BaseException | None:
     """The PLAN-BUILD refusal buried in a wrapped failure, or ``None`` (#11783).
 
     `RecordWriter.write` wraps every projection failure in `RecordWriteError`
@@ -3933,15 +3934,25 @@ def _plan_refusal_cause(
     ``isinstance(cause, RecordProjectionError)`` minus two subclasses, and that
     test FOLDED STORE AND CONFIG REFUSALS INTO THE PRODUCER'S BUCKET, because
     the base class is overloaded: the tenant-GUC read-back, a role that bypasses
-    RLS, the cutover guard's own failed `SELECT`, and a record schema that is
-    not on disk are all plain ``RecordProjectionError`` raised AFTER statements
-    ran — a measured fake-connection run returned ``plan_refused`` for
-    "the record's scope could not be verified — the read-back returned no row",
-    i.e. the operator was told to check the producer about a broken role. So the
-    marker is :data:`record_projection.PLAN_BUILD_PHASE_ATTR`, stamped by
+    RLS and the cutover guard's own failed `SELECT` are plain
+    ``RecordProjectionError`` raised AFTER statements ran — a measured
+    fake-connection run returned ``plan_refused`` for "the record's scope could
+    not be verified — the read-back returned no row", i.e. the operator was told
+    to check the producer about a broken role. So the marker is
+    :data:`record_projection.PLAN_BUILD_PHASE_ATTR`, stamped by
     :func:`record_projection.replay` at the ONE call that builds the plan; the
     statement-execution and store/config refusals are raised on the far side of
     that call and are never stamped.
+    ⚠️ AND THE PHASE IS NOT ONE CLASS EITHER (review round 2, measured): the
+    marker is stamped on ANY exception raised inside the plan build, because the
+    plan builders call ``json.dumps`` and a payload carrying an un-serializable
+    value raises ``TypeError`` there — before a statement, and re-raising on
+    every replay. So this walker requires the MARKER, not a
+    ``RecordProjectionError``; the exclusion below is the only type test left.
+    ⚠️ ONE CAUSE HERE IS A DEPLOYMENT FACT: a record SCHEMA that is not on disk
+    raises inside the plan build (``table_columns()`` → the ``CREATE TABLE``
+    scan), so it is stamped and counted on this token — the operator line names
+    the redeploy for it, because one bucket cannot tell every cause apart.
 
     ⛔ ``RecordStatementError`` IS EXCLUDED on top of that, and the exclusion is
     not redundant: it means one PLAN statement failed to EXECUTE — the store was
@@ -3961,7 +3972,6 @@ def _plan_refusal_cause(
     seen: set[int] = set()
     while exc is not None and depth > 0 and id(exc) not in seen:
         if (getattr(exc, record_projection.PLAN_BUILD_PHASE_ATTR, False)
-                and isinstance(exc, record_projection.RecordProjectionError)
                 and not isinstance(
                     exc, (record_projection.JournalPositionCollision,
                           record_projection.RecordStatementError))):
@@ -4644,7 +4654,9 @@ def write_live_record(record: Mapping[str, Any], *,
                 "journal holds the record; the PROJECTION could not BUILD a plan "
                 "for it, so NO statement ran (a record type it does not declare, "
                 "a carrier with no snapshot, an unusable key or endpoint, a "
-                "caller watermark it refuses). ⛔ This is "
+                "caller watermark it refuses, a value the plan cannot serialize, "
+                "or a record schema that is not on disk — that last one is fixed "
+                "by a REDEPLOY, not by the producer). ⛔ This is "
                 "NOT `write_failed`: no statement was executed, so "
                 "there is no statement fault to look for — check "
                 "the cause, which is a producer or a record-shape fact. A "

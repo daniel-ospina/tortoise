@@ -87,7 +87,9 @@ its ``refusal`` token is one of eight. NONE of the eight is exactly a term here:
   executed and failed (a CHECK constraint, a driver error, a dropped
   connection) is ``write_failed``, and so is a refusal raised after the plan
   was built (the tenant-GUC read-back, a role that bypasses RLS, the cutover
-  guard, a schema that is not on disk) — those are store/config facts;
+  guard) — those are store/config facts. ⚠️ One deployment fact lands here
+  anyway: a record schema that is not on disk raises INSIDE the plan build, so
+  the fix for THAT ``plan_refused`` reading is a redeploy, not the producer;
 * ``malformed_dsn`` is a SET-UP defect, refused before any reach is attempted:
   closer to a policy/set-up gap than to an outage, but ``unconfigured`` is
   defined as *no value is configured*, and here a value IS set and is wrong;

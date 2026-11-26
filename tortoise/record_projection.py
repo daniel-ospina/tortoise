@@ -764,9 +764,13 @@ class RecordProjectionError(Exception):
 #:
 #: It exists because the exception CLASS cannot answer that question: the base
 #: :class:`RecordProjectionError` is also what a STORE or CONFIG refusal raises
-#: after the connection is up (the tenant-GUC read-back, the cutover guard, a
-#: schema that is not on disk), and :class:`RecordStatementError` covers a
-#: statement that executed and failed. `record_writer` counts a
+#: after the connection is up (the tenant-GUC read-back, a bypassing role, the
+#: cutover guard), and :class:`RecordStatementError` covers a statement that
+#: executed and failed. ⚠️ A schema that is NOT ON DISK is the one such refusal
+#: that lands on the OTHER side (`table_columns()` runs inside the plan build),
+#: so it is stamped like any other plan-build refusal — the operator line names
+#: the redeploy for it rather than pretending one bucket fits every cause.
+#: `record_writer` counts a
 #: plan-build refusal apart from `write_failed`, and the phase is the fact that
 #: separates them — see the marking site in :func:`replay` for why it is an
 #: attribute set at ONE call site rather than a new class raised at many.
@@ -3925,6 +3929,20 @@ def _record_column_value(table: str, column: str, value: Any, *,
       ⛔ The two are not interchangeable: omitting on a patch would leave the
       record holding a value the node no longer has, i.e. the same divergence in
       the opposite direction.
+
+    ⚠️ THAT SECOND ARM MIRRORS THE LIVE DOOR, WHICH IS THE DOOR THAT WROTE — not
+    the graph's `PointRevised` REPLAY fold, and the two differ on this record
+    type for a PRE-EXISTING reason (`#2946`/`#2795`: that fold is an explicit
+    allow-list of fields — annotator dims, `BELIEF_PROPS`, `tags`, validity,
+    provenance, embedding text — and carries NO generic props, so replaying a
+    `PointRevised` keeps an old value a live update had cleared, whatever its
+    value shape). Measured 2026-11-26, both sides: the live `_update_point(pid,
+    quote={...})` leaves the node with no `quote`, while `proj.apply(PointRevised
+    {quote: {...}})` on the graph's replay engine leaves the previous `quote`
+    intact. So a record-sourced rebuild and a journal replay disagree here — a
+    divergence that exists WITHOUT this arm and is `#2946`'s design question, not
+    this fix's. What this arm guarantees is the narrower, load-bearing thing: the
+    record holds what the write that produced it left behind.
     """
     if table == "point" and column in _POINT_FLATTEN_COLUMNS and isinstance(
             value, Mapping):
@@ -9016,7 +9034,7 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
                            allocate=allocate,
                            carried_positions=carried_positions,
                            derived=derived)
-    except RecordProjectionError as exc:
+    except Exception as exc:
         # ⛔ MARK THE PHASE, NOT THE TYPE (#11783). Everything `replay_plan`
         # raises is raised BEFORE a single statement runs — that is what the
         # call above IS — while the errors raised further down (`_apply_tenant_
@@ -9039,6 +9057,14 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
         # phase boundary cannot be forgotten by a raise site added later — the
         # next refusal to be added inside `replay_plan` is classified correctly
         # with no edit at all.
+        # ⛔ `Exception`, NOT `RecordProjectionError` (review round 2, measured):
+        # the phase is not total over one class either. `_upsert_statement`/
+        # `_patch_statement` call `json.dumps(tail)` INSIDE the plan build, so a
+        # payload carrying an un-serializable value raises `TypeError` here —
+        # before any statement — and narrowing to the projection's own base left
+        # that one counted `write_failed`, i.e. told the operator a replay heals
+        # a record that re-raises. `KeyboardInterrupt`/`SystemExit` are not
+        # `Exception` and are never stamped.
         if not isinstance(exc, (RecordStatementError,
                                 JournalPositionCollision)):
             setattr(exc, PLAN_BUILD_PHASE_ATTR, True)
