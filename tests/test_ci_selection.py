@@ -10550,13 +10550,18 @@ def _h_14544_banned_claim(block: str) -> str | None:
 #: `config/ci-surfaces.yml`, because `_emission_block_header` joins comment line breaks before this
 #: pattern sees the block and the gap below is `[\s\S]`, which spans one either way (no arm is added
 #: for it: an assertion nothing can redden is dead weight). And "the clause runs 39 characters today"
-#: reproduces for NO span of the live clause — the restated-figure class this block exists to
-#: remove, so NO figure is restated in its place: re-derive the span you mean from the pattern and
-#: the block rather than reading a number here. ⛔ That is not fastidiousness: the correction which
-#: replaced "39" first re-stated three span lengths, and one of them (the `durations`-to-copula gap)
-#: was off by one against the anchor it named, so a `+/-1` correction of a figure sentence was itself
-#: a false figure sentence (#14623 round 24, P3). The figure is what rots; the measurement is one
-#: expression away. The window is the pattern's own `{0,400}`
+#: belongs to the restated-figure class this block exists to remove, so NO figure is restated in its
+#: place: re-derive the span you mean from the pattern and the block rather than reading a number
+#: here. ⛔ The sentence it replaced said "reproduces for NO span of the live clause", which was
+#: FALSE at that head: the live clause runs hundreds of characters, so a span of any length below
+#: that exists in it — the quantifier was only true while the parenthetical listing the three spans
+#: this family actually measured was still in the line, and round 24 deleted that parenthetical
+#: while keeping the "NO" it qualified (measured on round 24's shipped sentence by the fix pass, not
+#: by a reviewer — the same overreach, in prose, as a restated figure). ⛔ That is not fastidiousness:
+#: the correction which replaced "39" first re-stated three span lengths, and one of them (the
+#: `durations`-to-copula gap) was off by one against the anchor it named, so a `+/-1` correction of a
+#: figure sentence was itself a false figure sentence (#14623 round 24, P3). The figure is what rots;
+#: the measurement is one expression away. The window is the pattern's own `{0,400}`
 #: gap: code, so it cannot rot. `which is` and `durations`-first spellings are
 #: accepted because a TRUE rewording that this pattern refused was measured as a false block (#14623
 #: review round 4, P3): “the `durations` entry for it, which is `#14544`'s own edit”.
@@ -10800,19 +10805,18 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # this comment already claimed "both orders"). The two orders are separate alternatives
     # above, and each is asserted here rather than assumed.
     # ⛔ AND THE NOUN AND DISTANCE BOUNDS ARE FIXTURES, not prose promises, and they are stated as the
-    # constants actually implement them. ⛔ MEASURED (#14623 review round 16, P3 — round 15 stated the
-    # cut-to-verb span as 482, which is the SHORTEST negation's case only): the ACTIVE arm allows 400
-    # characters from the cut to the negation and 80 from the negation to the change verb, so its
-    # cut-to-verb span is 482 with `not` and 486 with `did not`/`doesn't` — the span is NOT a constant,
-    # only the two gaps are. The PASSIVE arm allows 20 from the row to the negation and 40 from the
-    # negation to the change verb, so its span is 20 + the negation + 40: 67 with `was not` and 69
-    # with `was never`. ⛔ An earlier revision wrote "60 with `was not`", which dropped the
-    # negation's own 7 characters and made the pair arithmetically impossible (two gaps of 20 and
-    # 40 cannot yield spans 9 apart when the negations differ by 2) — the same "a claimed span was
-    # wrong" class the sentence one line up records, so the arithmetic is spelled out rather than
-    # restated as a figure (#14623 round 23, P3). It also needs the cut named in the
-    # sentence at all. The pronoun form is scoped by SUBJECT rather than by distance. Stating the two
-    # gaps rather than one span is the point: a claimed span was wrong within one round.
+    # constants actually implement them. ⛔ Each arm's cut-to-verb span is its TWO GAPS plus the
+    # negation that sits between them, and the gaps are the pattern's own code — `{0,400}` then
+    # `{0,80}` in the ACTIVE arm, `{0,20}` then `{0,40}` in the PASSIVE one. ⛔ NO DERIVED SPAN IS
+    # STATED HERE, deliberately: four successive rounds restated one and EACH was measurably wrong —
+    # the first held only for the shortest negation, the second dropped the negation itself out of
+    # the sum, and the third was off by one against the very gap quoted beside it. The span is
+    # arithmetic; this block's subject is prose that re-states arithmetic, so the gaps are named and
+    # the span is not. Read it off the pattern if you need the number.
+    # The one property that IS asserted: the ACTIVE bound is wide enough for the negated-change
+    # verbs below and the PASSIVE one names the cut in the sentence at all, which the fixtures here
+    # drive in BOTH orders rather than promise. The pronoun form is scoped by SUBJECT rather than by
+    # distance.
     # Widening past those is NOT claimed — the residual is declared above, and a phrase guard that
     # claimed it would be false one noun later.
     for paraphrase in (
@@ -10824,7 +10828,9 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "And `#14544`'s cut touched neither of which.",
             "neither of which " + "x" * 95 + " `#14544` touched",
             "`#14544`'s cut took the file off `core`, and that row was never touched",
-            # INSIDE the ACTIVE bound (398 pad + the label's own backtick = 400): the bound is a
+            # INSIDE the ACTIVE bound, counted from the pattern's own `{0,400}` gap rather than
+            # decomposed here (a "pad + backtick = 400" spelling was measurably one short: the space
+            # before the negation is the addend it omitted). The bound is a
             # fixture, and padding PAST it is the declared residual, not a graded case.
             "`#14544`" + "y" * 398 + " never touched that row",
             # the negated-change VERBS the round-5 review shipped GREEN: `touch` was not enough
