@@ -10944,13 +10944,33 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             f"the anaphor ban REDS honest prose ({honest!r}) — the passive arm is missing its BE "
             "verb or the active arm ignores its subject, so the guard refuses a true sentence "
             "rather than the claim")
+    # ⛔ THE LIVE READ IS MASKED, like the paragraph read above: this block legitimately QUOTES a
+    # dead claim for the record, and a quotation is not a live claim (#14623 review round 18, P2).
+    # Measured before this fix: appending
+    # `⛔ Quoted for the record: "`#14544` touched neither of which." · and it does not now.` to the
+    # live block made THIS assertion red, so the arm refused the block's own retraction — while the
+    # sibling paragraph read at the top of this test already masked, i.e. the two halves of one
+    # commit graded two different subjects. The mask is asserted below rather than trusted.
     # …and the LIVE block must stay clean of all of them, or the ban is a false red rather than a
     # grade: the shapes above are the claim, this is the prose the repository actually ships.
-    live_anaphor = _h_14544_banned_claim(_emission_block_header(
-        cs.MANIFEST.read_text(encoding="utf-8")))
+    live_anaphor = _h_14544_banned_claim(_unquoted_block(_emission_block_header(
+        cs.MANIFEST.read_text(encoding="utf-8"))))
     assert live_anaphor is None, (
         "the block now contains a retired-claim reading, so the ban above reds the live prose "
         f"rather than a fold's: {live_anaphor!r}")
+    # …and the MASK is what keeps that read honest, so it is graded in both directions: the retired
+    # claim is READ unmasked (or this fixture is decoration) and NOT read when it sits inside a
+    # quoted record. Without the second half, narrowing the subject back to the raw header would
+    # leave every assertion above green while the false red came back.
+    quoted_retired = (
+        '⛔ Quoted for the record: "`#14544` touched neither of which." · and it does not now.')
+    assert _h_14544_banned_claim(quoted_retired) is not None, (
+        "the anaphor ban no longer reads the retired claim even UNMASKED, so the quoted-record "
+        "assertion below grades nothing — re-point the ban at the claim before trusting the mask")
+    assert _h_14544_banned_claim(_unquoted_block(quoted_retired)) is None, (
+        "a QUOTED record of the retired claim is being read as a live claim — the quoted-span "
+        "mask has regressed, and the repair this message would push is to delete the block's "
+        "record of why the sentence is gone")
 
 
 def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
