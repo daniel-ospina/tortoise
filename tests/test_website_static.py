@@ -5867,12 +5867,15 @@ def _ground_selector_matches(simple: str, element: GroundElement | None) -> bool
 #:
 #: `(?:0*[nN]\s*\+\s*)?\+?0*1` accepts `1`, `+1`, `01`, `0n+1` and `0n + 1` —
 #: every spelling of the index 1 that a formatter or a human produces.
-_INDEX_ONE = r"(?:0*[nN]\s*\+\s*)?\+?0*1"
+_INDEX_ONE = r"(?:(?:[-+]?\d*[nN]\s*\+\s*)?\+?0*1)"
 _SIDE_PSEUDO_ALIASES = {
-    "first-child": ("first-child", rf"nth-child\(\s*{_INDEX_ONE}\s*\)",
-                    "first-of-type", rf"nth-of-type\(\s*{_INDEX_ONE}\s*\)"),
-    "last-child": ("last-child", rf"nth-last-child\(\s*{_INDEX_ONE}\s*\)",
-                   "last-of-type", rf"nth-last-of-type\(\s*{_INDEX_ONE}\s*\)"),
+    "first-child": (r"(?i:first-child)", rf"(?i:nth-child)\(\s*{_INDEX_ONE}\s*\)",
+                    r"(?i:first-of-type)",
+                    rf"(?i:nth-of-type)\(\s*{_INDEX_ONE}\s*\)"),
+    "last-child": (r"(?i:last-child)",
+                   rf"(?i:nth-last-child)\(\s*{_INDEX_ONE}\s*\)",
+                   r"(?i:last-of-type)",
+                   rf"(?i:nth-last-of-type)\(\s*{_INDEX_ONE}\s*\)"),
 }
 
 
@@ -5883,10 +5886,32 @@ _SIDE_PSEUDO_ALIASES = {
 #: hatch sets no alignment at all (#14683 independent review, measured).
 _TOP_ALIGNING_JUSTIFY = frozenset({"flex-start", "start"})
 
+#: The values this reader can POSITIVELY say do not top-align a column flex box.
+#: Anything outside both of these sets is UNCLASSIFIED (`normal`, `initial`,
+#: `stretch`, `left`, a future value) and must not be treated as "the hatch does
+#: not align this beat": that verdict silences the margin grading, so an
+#: unclassified arm with no `auto` margins returned `[]` over a top-aligned page
+#: (#14683 independent review, measured). Unclassified falls back to the old
+#: path — the absence problem, i.e. RED — which is the same fail-closed doctrine
+#: `_beat_ground_margin_candidates` states for unmodelled conditions.
+_NOT_TOP_ALIGNING_JUSTIFY = frozenset({
+    "center", "safe center", "unsafe center", "end", "flex-end", "right",
+    "space-between", "space-around", "space-evenly",
+})
+
 
 def _justify_content_top_aligns(value: str) -> bool:
     """Is this `justify-content` value the top-aligning arm?"""
     return value.split("!")[0].strip().lower() in _TOP_ALIGNING_JUSTIFY
+
+
+def _justify_content_classified(value: str) -> bool:
+    """Is this value POSITIVELY known to be non-top-aligning?
+
+    Only then may the caller say "the hatch reaches this beat, it just does not
+    top-align it". An unknown value is not evidence of anything.
+    """
+    return value.split("!")[0].strip().lower() in _NOT_TOP_ALIGNING_JUSTIFY
 
 
 def _beats_whose_ground(
@@ -6390,8 +6415,16 @@ def _short_viewport_centring_problems(html: str) -> list[str]:
             # one's.
             top_aligns = bool(values) and _justify_content_top_aligns(
                 values[-1])
+            # Only a value POSITIVELY known to be non-top-aligning may be
+            # recorded as "the hatch reaches it" — an unclassified value
+            # (`normal`, `stretch`, `left`) keeps the fail-closed absence
+            # problem, because "it does not top-align" was a false PASS over a
+            # page with no auto margins (#14683 independent review, measured).
+            named_only = bool(values) and _justify_content_classified(
+                values[-1])
             for beat in _beats_addressed(prelude, beat_ids):
-                named.add(beat)
+                if named_only:
+                    named.add(beat)
                 if top_aligns:
                     arms.setdefault(beat, set()).add(height)
 
@@ -7074,6 +7107,10 @@ class TestShortViewportCentringIsGradedPerBlock:
                  "last"),
                 ("#beat-hero > :nth-child(+1)", "margin-top: 0", "first"),
                 ("#beat-hero > :nth-child(0n+1)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-child(-n+1)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-child(2n+1)", "margin-top: 0", "first"),
+                ("#beat-hero > :FIRST-CHILD", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-LAST-child(1)", "margin-bottom: 0", "last"),
                 ("#beat-hero > :nth-child( 1 )", "margin-top: 0", "first")):
             page = self._page(hatch=(
                 self.CENTRED_HATCH + f"\n      {selector} {{ {declaration}; }}"))
@@ -7124,6 +7161,16 @@ class TestShortViewportCentringIsGradedPerBlock:
         assert any("the hatch never reaches it" in p
                    for p in _short_viewport_centring_problems(unreached)), (
             "a beat no hatch rule names was not reported as unreached")
+
+        # …and an UNCLASSIFIED value (`normal`, `stretch`, `left`) may not be
+        # promoted to "the hatch reaches it": that silence is a false PASS over
+        # a page with no auto margins, so it must keep the fail-closed problem.
+        unclassified = self._page(hatch=self.ALIGNED_HATCH.replace(
+            "justify-content: flex-start", "justify-content: normal"))
+        assert any("the hatch never reaches it" in p
+                   for p in _short_viewport_centring_problems(unclassified)), (
+            "`justify-content: normal` silenced the margin grading — an "
+            "unclassified value is not evidence that the hatch aligns it")
 
     def test_a_commented_out_beat_section_is_not_a_beat(self):
         """A comment is dead to the browser, so it is not a beat (#14683 F1).
