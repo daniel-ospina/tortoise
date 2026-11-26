@@ -6675,6 +6675,28 @@ function claimIntentInFlight() {
         if (prevOrgId) {
           setCurrentOrgId(prevOrgId)
           orgIdRef.current = prevOrgId
+          // #14686 (review finding, P2): the switch-top reset is NOT enough here.
+          // The failed Organization's feed read is fired at the switch top and
+          // runs CONCURRENTLY with the `refreshTeam` call that is about to fail,
+          // so it can LAND before this revert — and then `alerts` holds the
+          // abandoned Organization's rows while the header says `prevOrgId`. The
+          // org guard cannot help: it only decides whether a LATE read lands, not
+          // whether an already-landed one should survive a change of Organization.
+          // If the read below then fails, those rows stay for the session (nothing
+          // polls), and both "we could not look" notices are gated on an EMPTY
+          // feed — so the reader gets the wrong Organization's count and rows with
+          // no notice and no `!` badge, and a snooze taken there is written into
+          // the RESTORED Organization's ledger key.
+          //
+          // Reset exactly as the switch top does, then read once. `unavailable` is
+          // NOT pre-set to true: the read below owns that answer, and it writes the
+          // flag itself when it fails (`loadAlerts`), so the persistent state is
+          // honest either way while the in-flight window behaves the same as the
+          // happy path's.
+          setAlerts([])
+          setAlertsSaturated(false)
+          setAlertsUnavailable(false)
+          loadAlerts(prevOrgId)
           setTeam(null)
           setStaleFired(false) // #1858: the revert re-attaches the previous team — clear the latch so the restored team's skeleton gets a fresh floor (team is already null here, so the reset effect won't fire)
           // #1893 (code-review P1): the revert re-attaches the PREVIOUS
@@ -6686,13 +6708,9 @@ function claimIntentInFlight() {
           // Round-3: reload ALL key-scoped data for the reverted team —
           // otherwise keys/sessions/backups stay wiped until reload.
           await Promise.all([loadAll(''), loadBackups('')]).catch(() => {})
-          // #14686 (review finding, P2): the switch reset above already CLEARED the
-          // feed, and the in-flight read of the failed Organization is discarded by
-          // `loadAlerts`' org guard — so without this read the restored Organization
-          // keeps an empty feed with both flags false: a stale all-clear ("You have
-          // no notifications.") for a team no read has asked about, and `loadAlerts`
-          // is not polled, so it would survive the whole session on a failure path.
-          loadAlerts(prevOrgId)
+          // The feed was reset and re-read at the top of this arm, together with
+          // the org re-attach — that single read is the one that counts, and a
+          // second one here would double-fire for no gain.
         }
         setError(e)
       }

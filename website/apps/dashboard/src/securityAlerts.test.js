@@ -393,14 +393,29 @@ test('#14686: a team switch drops the previous Organization\'s alerts', () => {
   // (review finding, P3).
   assert.match(body, /setAckError\(null\)/,
     'a refusal about the previous Organization\'s episode must not survive the switch')
-  // …and the FAILED-SWITCH REVERT re-reads the team it re-attaches. The reset above
-  // has already cleared the feed, and the failed org's in-flight read is discarded
-  // by the org guard, so without this the restored team keeps an empty feed with
-  // both flags false: a stale all-clear, for the rest of the session (no poll).
+  // …and the FAILED-SWITCH REVERT re-attaches the previous Organization. It must
+  // RESET the feed there, not only re-read it: the failed org's read is fired at
+  // the switch top and runs concurrently with the `refreshTeam` call that fails,
+  // so it can LAND before the revert — leaving that organization's rows on screen
+  // under the restored one's header. The org guard cannot help (it decides whether
+  // a LATE read lands, not whether a landed one survives a change of Organization),
+  // and if the revert's own read then fails, those rows stay for the session and
+  // BOTH "we could not look" notices are gated on an empty feed — wrong rows, no
+  // notice, no `!` badge, and a snooze written into the restored org's key.
   const revertAt = body.indexOf('if (prevOrgId) {')
   assert.ok(revertAt !== -1, 'the failed-switch revert arm must still exist')
-  assert.match(body.slice(revertAt), /loadAlerts\(prevOrgId\)/,
+  const revert = body.slice(revertAt)
+  assert.match(revert, /setAlerts\(\[\]\)/,
+    'the reverted arm must DROP the failed Organization\'s feed, not only re-read')
+  assert.match(revert, /loadAlerts\(prevOrgId\)/,
     'the reverted Organization must be RE-READ, or its bell reports a stale all-clear')
+  // ONE read, taken with the re-attach: a second one further down the arm would
+  // double-fire and could land out of order with the first.
+  assert.equal((revert.match(/loadAlerts\(prevOrgId\)/g) || []).length, 1,
+    'the revert re-reads exactly once')
+  // The reset must come BEFORE that read, or it would discard the response.
+  assert.ok(revert.indexOf('setAlerts([])') < revert.indexOf('loadAlerts(prevOrgId)'),
+    'the reset must precede the read')
 })
 
 test('#14686: an in-flight alerts read cannot land on the wrong Organization', () => {
