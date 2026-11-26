@@ -2262,10 +2262,17 @@ _STATEMENT_BREAK_RE = re.compile(
 # not tell those apart and DISABLED forms (b)/(c)/(d) on every one of them
 # (measured — a false PASS introduced by the fix for the false red). So the rule
 # is scoped to the OBSERVATION verb itself and applied as an explicit skip.
-# ⛔ `see THAT …` IS AN INSTRUCTION, NOT AN OBSERVATION. The distinction this
-# rule draws is verb-class, so the complementizer reading escaped it: "… but
-# first see that no tools are missing" is a pre-restart demand and was GREEN
-# (measured) while its `confirm` twin is a declared-RED row.
+# ⛔ `see THAT …` NEEDS NO LOOKAHEAD — it is excluded BY CONSTRUCTION. An arm
+# `(?!\s+that\b)` did sit here, with a comment claiming it was measured; it was
+# STRUCTURALLY UNREACHABLE (a complementizer can never satisfy the negation word
+# below, so the pattern does not match that shape with or without it — measured
+# at review cycle 34: removing it flips 0 of 344 rows, and the pattern does not
+# match "see that no tools are missing" either way). "… but first see that no
+# tools are missing" is still RED, but through form (c)'s `_CONFIRM_PREDICATE`,
+# which is what actually grades it. An arm no row can depend on is dead weight,
+# and a comment asserting a measurement it cannot have is worse than the dead
+# arm — it is how a reader comes to believe this rule covers something it does
+# not.
 # ⛔ THE NEGATION MUST BE THE VERB'S OWN OBJECT, NOT ONE FOUND FURTHER ALONG.
 # `[^\n]*?` let the match START at the graded claim's own observation-verb
 # predicate (`see|saw|seen` are in `_CONFIRM_PREDICATE`) and run ACROSS the claim
@@ -2274,7 +2281,7 @@ _STATEMENT_BREAK_RE = re.compile(
 # errors in the log" was GREEN while its tail-less twin is a declared RED row
 # (measured, forms (a)/(b)/(c)). The object is now adjacent to the verb.
 _OBSERVATION_NEGATION_RE = re.compile(
-    r"\b(?:see|saw|seen|seeing|notice[sd]?|noticing)\b(?!\s+that\b)\s+"
+    r"\b(?:see|saw|seen|seeing|notice[sd]?|noticing)\b\s+"
     r"(?:any\s+|a\s+)?\b(?:no|none|zero|nothing)\b", re.IGNORECASE)
 
 
@@ -2304,6 +2311,36 @@ def _negated_observation_only(clause: str) -> bool:
 # A clause that opens with one of these continues the cue FORWARD ("restart,
 # then …"), so a subordinator later in it is not a deferral of the restart.
 _FORWARD_SEQUENCER_RE = re.compile(r"^(?:then|and|next|afterwards?)\b", re.IGNORECASE)
+
+# ⛔ A CLAUSE THAT IS NOTHING BUT A SEQUENCER SEQUENCES THE CLAUSE BEFORE IT —
+# it says nothing itself. `_FORWARD_SEQUENCER_RE` above answers "does this
+# clause move forward"; this one answers "does this clause have a verb at all",
+# which is a different question and the one the PRE-cue side was missing.
+# Before this existed, the pre-cue side graded `[-1:]` unconditionally, so the
+# fragment that survived was the literal `then` and no form could match it: the
+# most natural English rendering of the very inversion the pin exists to catch —
+# "Confirm the tools are actually there, then restart your client" — was GREEN
+# at `5c6dda9dc3` (measured, and its `.` and `;` twins with it). The post-cue
+# side already had this machinery (`_SEQUENCER_TAIL_RE`); this is its pre-cue
+# counterpart, and `_cue_governing_clause` is what consumes it.
+_BARE_SEQUENCER_RE = re.compile(
+    r"^(?:and\s+)?(?:then|next|afterwards?|also|and)\b[\s,]*$",
+    re.IGNORECASE)
+
+# ⛔ A CUE GOVERNED BY A TEMPORAL SUBORDINATE INVERTS WHAT FOLLOWS IT. In
+# "Before you restart your client, confirm the tools are actually there" the
+# confirmation is the condition OF the restart, so it happens FIRST — the same
+# order the pin reds in form (a)'s "restart after confirming …". The post-cue
+# side skips form (f) on purpose (a confirmation that follows the cue IS the
+# order the pin requires), so without this the `before` rendering was GREEN
+# (measured at `5c6dda9dc3`, together with its comma/period/semicolon `then`
+# twins). `until`/`prior to` are the same inversion; "after" is NOT (it is the
+# cue's own forward form (a)). `by the time` is the fourth spelling of the same
+# relation and was measured GREEN after the first three were closed (review
+# cycle 34): "By the time you restart your client, confirm the tools are
+# actually there" is still a pre-restart demand.
+_CUE_UNDER_INVERTING_SUBORDINATE_RE = re.compile(
+    r"\b(?:before|by\s+the\s+time|prior\s+to|until)\b[^,;.]*$", re.IGNORECASE)
 
 # …and a clause that ENDS on one introduces the NEXT clause, whichever side of
 # its own comma the sequencer sits on. `_FORWARD_SEQUENCER_RE` can only see an
@@ -2488,6 +2525,44 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     return None
 
 
+def _cue_governing_clause(statements: list[str]) -> list[str]:
+    """The clause that GOVERNS the cue: the last one with a verb in it.
+
+    A clause that is not nothing but a sequencer (`then`, `and then`, `next`,
+    `afterwards`, `also`) is a fragment, not an instruction — `_BARE_SEQUENCER_RE`
+    — so grading it reads the fragment and misses the imperative it sequences.
+    Walking back is what makes the pre-cue side symmetric with the post-cue side,
+    which has carried `_SEQUENCER_TAIL_RE` for the same reason.
+
+    ⛔ THE WALK CROSSES A STATEMENT BOUNDARY, and it must: `.`/`;` are statement
+    breaks, so in "Confirm the tools are actually there. Then restart your
+    client" the surviving statement is the literal `Then` and the imperative
+    lives in the PREVIOUS statement. Popping only within the last statement
+    fixes the comma twin and leaves both other twins GREEN (measured).
+    """
+    clause_lists = [
+        [c.strip().lstrip(_PRE_CUE_PREFIX).strip()
+         for c in re.split(r"[,;]", statement) if c.strip()]
+        for statement in statements
+    ]
+    while clause_lists:
+        if not clause_lists[-1]:
+            clause_lists.pop()
+        # ⛔ SEARCH A DECORATION-FREE COPY, exactly as the post-cue side does: a
+        # decorated sequencer (`**then**`, `*then*`, `` `then` ``) is the same
+        # word to a reader, and matching the raw clause left
+        # "Confirm the tools are actually there, **then** restart your client"
+        # GREEN while its bare twin is RED (measured — the verdict turns on a
+        # markdown marker, which is the failure mode `_PRE_CUE_PREFIX` exists to
+        # close).
+        elif _BARE_SEQUENCER_RE.match(
+                _DECORATION_RE.sub(" ", clause_lists[-1][-1])):
+            clause_lists[-1].pop()
+        else:
+            return clause_lists[-1][-1:]
+    return []
+
+
 def _paragraph_cue_order_violation(para: str) -> str | None:
     flat = " ".join(para.split())
     cue_at = _cue_start(flat)
@@ -2497,15 +2572,13 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     # a pre-cue form (f) inversion went GREEN ("Confirm the tools appear after the
     # v1.2 upgrade. Restart your client …", "Delete the old entry — but first
     # confirm the tools are actually there") while the comma twin was RED.
-    pre_statement = _STATEMENT_BREAK_RE.split(
-        before.lstrip(" \t,.;:—–-"))[-1]
+    pre_statements = [s for s in _STATEMENT_BREAK_RE.split(
+        before.lstrip(" \t,.;:—–-")) if s.strip()]
     # ⛔ AND EACH CLAUSE, not just the statement: the LAST clause is what form (f)
     # anchors on, so a decoration sitting after a comma (`Delete the old entry,
     # **confirm the tools are actually there**. Restart …`) hides the imperative
     # exactly as a leading one does (measured).
-    pre_clauses = [c.strip().lstrip(_PRE_CUE_PREFIX).strip()
-                   for c in re.split(r"[,;]", pre_statement)
-                   if c.strip()][-1:]
+    pre_clauses = _cue_governing_clause(pre_statements)
     # The cue's OWN sentence, on the same reasoning: a `.` OR a `;` ends the
     # window (both begin a new statement — grading past them read a subordinate
     # clause that attaches to the NEXT verb as a deferral of the restart:
@@ -2588,6 +2661,13 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
         for pattern in _INVERSION_FORMS:
             if pattern.search(clause):
                 return clause
+    # ⛔ SEE `_CUE_UNDER_INVERTING_SUBORDINATE_RE`: when "before"/"until" governs
+    # the cue, the confirmation that FOLLOWS it happens first, so form (f) — the
+    # only form that grades a bare confirmation imperative, and the one the
+    # post-cue side otherwise skips by design — must grade it here.
+    cue_under_inverting_subordinate = bool(
+        pre_statements
+        and _CUE_UNDER_INVERTING_SUBORDINATE_RE.search(pre_statements[-1]))
     for clause in post_clauses:
         # A clause led by a FORWARD sequencer continues the cue's own
         # predication in the forward direction: "then once the tools are listed
@@ -2604,7 +2684,7 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
                 or _negated_observation_only(clause)):
             continue
         for pattern in _INVERSION_FORMS:
-            if pattern is _PRE_CUE_ONLY:
+            if pattern is _PRE_CUE_ONLY and not cue_under_inverting_subordinate:
                 continue
             if pattern.search(clause):
                 return clause
@@ -3720,6 +3800,45 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Restart your client, although confirm the tools are already there.", True),
     ("Restart your client and then, although first confirm the tools are "
      "actually there, run `tortoise mcp-status`.", True),
+    # ── CYCLE 34 (#14679's review at `5c6dda9dc3`, the cycle-32 P1 carried
+    # unfixed): the PRE-cue side graded `[-1:]` unconditionally, so whenever the
+    # cue was introduced by a SEQUENCER the fragment that survived was the
+    # literal `then` and no form could match it. All four renderings below are
+    # the SAME inversion the pin exists to catch, and all four were GREEN at
+    # `5c6dda9dc3` — measured end-to-end on the real `docs/quickstart-cloud.md`,
+    # rewording only line 135: each one left the doc-level test PASSING. The
+    # post-cue side had this machinery (`_SEQUENCER_TAIL_RE`); the pre-cue side
+    # has `_BARE_SEQUENCER_RE` + `_cue_governing_clause` now.
+    ("Confirm the tools are actually there, then restart your client.", True),
+    ("Confirm the tools are actually there, **then** restart your client.", True),
+    ("Confirm the tools are actually there, and then restart your client.", True),
+    ("Confirm the tools are actually there. Then restart your client.", True),
+    ("Confirm the tools are actually there; then restart your client.", True),
+    # …and the fourth rendering is the SUBORDINATE one: `before` governs the
+    # cue, so the confirmation after it is the condition OF the restart and
+    # happens FIRST — the exact order form (a) reds when it trails the cue.
+    ("Before you restart your client, confirm the tools are actually there.",
+     True),
+    ("Before you restart your client, please verify the tools are actually "
+     "there.", True),
+    ("Until you restart your client, confirm the tools are actually there.",
+     True),
+    ("By the time you restart your client, confirm the tools are actually "
+     "there.", True),
+    # ⛔ THE WALK-BACK MUST NOT RED FORWARD COPY. A bare sequencer sequences
+    # whatever precedes it, so the clause it defers to is graded — and when that
+    # clause carries no tools-appear claim, it stays GREEN. These rows are what
+    # pins that: without them the walk-back is unpinned in the safe direction and
+    # a future "always grade the previous clause" edit could red ordinary copy.
+    ("Delete the old entry, then restart your client.", False),
+    ("Check the log. Then restart your client, then confirm the tools are "
+     "actually there.", False),
+    ("Delete the old entry, then restart your client, then confirm the tools "
+     "are actually there.", False),
+    ("Before you restart your client, save the MCP config file.", False),
+    ("Before you restart your client, confirm the config is written.", False),
+    ("Restart your client, before confirming the tools are actually there.",
+     False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
