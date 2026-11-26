@@ -885,6 +885,42 @@ def test_check_reports_an_unreadable_document_as_could_not_run(tmp_path):
     assert rc == 2, f"an unreadable document must answer 2 (could not run), got {rc}"
 
 
+def test_check_REFUSES_a_duplicated_pin_instead_of_letting_the_last_win(
+    tmp_path, monkeypatch, capsys
+):
+    """A pin declared twice is "could not run" (2) — never a silent last-wins (0).
+
+    ⛔ THE FALSE PASS THIS CLOSES (#14625 review, round 3, P3): `pinned` was built with a
+    dict comprehension over `PINNED.findall`, so a REPEATED key kept only its LAST
+    occurrence — measured with a source that declares `sites` as 1339 and then 1332 (26
+    pin comments): `--check` printed "check: 25 pinned counts match" and exited **0**,
+    i.e. an author who edited the FIRST declaration got a green check for a number
+    nobody graded, from the one verb whose whole job is to refuse a wrong number. The
+    miscount is invisible by construction: 26 declarations still count as 25 pins.
+    """
+    src = _source_text()
+    assert '<!-- cypher-inventory:sites = ' in src, (
+        "the premise: the real source declares the `sites` pin this arm duplicates")
+    dup = tmp_path / "dup.md"
+    dup.write_text(
+        src.replace(
+            "<!-- cypher-inventory:sites = 1332 -->",
+            "<!-- cypher-inventory:sites = 1339 -->\n"
+            "<!-- cypher-inventory:sites = 1332 -->",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    rc = census.main(["--check", str(dup)])
+    assert rc == 2, (
+        f"a duplicated pin must answer 2 (could not run) — 0 is the last-wins false "
+        f"pass, 1 would send a lane to re-cut pins that are not the problem; got {rc}")
+    err = capsys.readouterr().err
+    assert "sites" in err and "more than once" in err, (
+        f"the refusal must name the duplicated pin so it can be found; stderr:\n{err}")
+
+
 def test_a_missing_source_or_document_answers_could_not_run_AND_SAYS_WHY(tmp_path, capsys):
     """Both `exists()` refusals answer 2 AND name the path they never found.
 
@@ -3660,6 +3696,10 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # found ungraded: `part.lower() == ".git"` is what stops `.GIT/config` on a
         # case-insensitive filesystem, and reverting it to `part` reds nothing else.
         "test_an_UPPERCASE_dot_GIT_component_is_refused_too",
+        # ⛔ AND THE GRADER'S OWN FALSE PASS (#14625 review, round 3, P3): a `sites` pin
+        # declared twice printed "25 pinned counts match" at rc 0 because the dict
+        # comprehension kept the last value. Deleting the duplicate check reds this arm.
+        "test_check_REFUSES_a_duplicated_pin_instead_of_letting_the_last_win",
         "test_the_renderer_refuses_the_all_surface_combination",
         # ⛔ THE TWO ROUND-4 RESIDUALS (#14625): a combination that silently dropped
         # the write, and a directory destination refused with a false cause. Both are
@@ -3740,8 +3780,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 39, (
-        f"expected EXACTLY 39 named split arms; got {len(split_arms)} — either a "
+    assert len(split_arms) == 40, (
+        f"expected EXACTLY 40 named split arms; got {len(split_arms)} — either a "
         "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
@@ -3763,8 +3803,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # deliberately — a red a reviewer reads rather than slack that a silently-added arm
     # rides. Counted over `defined`, so the 9 decorated arms are inside it too.
     test_functions = {n for n in defined if n.startswith("test_")}
-    assert len(test_functions) == 98, (
-        f"expected EXACTLY 98 test functions in this module; got "
+    assert len(test_functions) == 99, (
+        f"expected EXACTLY 99 test functions in this module; got "
         f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
