@@ -2072,21 +2072,33 @@ _INVERSION_FORMS = (
         #   - and one adverb re-opened the false RED it was written to close —
         #     "when the tools are STILL MISSING" / "… are DEFINITELY NOT there"
         #     stayed RED.
-        # So: an optional adverbial run is skipped, then the arm suppresses the
-        # claim ONLY when it resolves to an absence — a bare absence word, a
-        # negation whose complement is not one (`not visible`, `still not there`,
-        # `no longer visible`), NEVER `not <absence>` / `no longer <absence>`,
-        # which is a presence claim and must be graded.
+        # So: an adverbial run is skipped, then the arm suppresses the claim ONLY
+        # when it resolves to an absence — a bare absence word, or a negation
+        # whose complement is not one (`not visible`, `no longer visible`),
+        # NEVER `not <absence>` / `no longer <absence>`, which is a presence
+        # claim and must be graded.
+        # ⛔ BOTH RUNS ARE THE FILE'S OWN ADVERB CLASS, not a hand-picked list.
+        # The first cut spelled eight words on ONE side and `longer?` on the
+        # other, so a single inserted adverb leaked in BOTH directions
+        # (#14679 review cycle 32, measured): `not ACTUALLY missing` (presence)
+        # was GREEN, while `TEMPORARILY missing` / `JUST missing` / `COMPLETELY
+        # gone` (absences) were RED. This is the lesson form (a) already records
+        # 300 lines above — "an EIGHT-WORD ADVERB BLACKLIST WAS THE WRONG SHAPE
+        # … so the adverb list is gone" — and (a)'s own `(?:\w+ly|very|so|too|
+        # quite|rather|first|already|just|also)` is the class reused here. A
+        # closed list cannot be completed; the `-ly` slot can.
+        # ⛔ ONE NEGATION BRANCH, NOT TWO. A separate `no longer <non-absence>`
+        # alternative was measured to flip 0 of 319 rows, because `(?:not|never|
+        # no)\b` + its own lookahead already matches it — an arm no row can
+        # depend on is dead weight and it was removed (review cycle 32).
         r"(?!\s+"
-        r"(?:(?:still|currently|now|definitely|really|again|always|actually)"
-        r"\s+)*"
+        r"(?:(?:\w+ly|still|yet|now|very|so|too|quite|rather|first|already"
+        r"|just|also)\s+)*"
         r"(?:"
         r"(?:missing|gone|absent|broken|empty|stale)\b"
         r"|(?:not|never|no)\b"
-        r"(?!\s+(?:longer\s+)?"
+        r"(?!\s+(?:(?:\w+ly|longer|yet|still)\s+)*"
         r"(?:missing|gone|absent|broken|empty|stale)\b)"
-        r"|no\s+longer\s+"
-        r"(?!\s*(?:missing|gone|absent|broken|empty|stale)\b)"
         r")"
         r")"
     ),
@@ -3607,6 +3619,26 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Restart your client when the tools are still missing.", False),
     ("Restart your client when the tools are definitely not there.", False),
     ("Restart your client when the tools are still not visible.", False),
+    # …and the adverb run is the FILE'S OWN CLASS, not a hand-picked eight: the
+    # first cut spelled it out, so one inserted adverb leaked in both directions
+    # (#14679 review cycle 32, measured — these seven were RED, and the four
+    # `not <adverb> missing` shapes below were GREEN):
+    ("Restart your client when the tools are temporarily missing.", False),
+    ("Restart your client when the tools are just missing.", False),
+    ("Restart your client when the tools are completely gone.", False),
+    ("Restart your client when the tools are seemingly gone.", False),
+    ("Restart your client when the tools are intermittently missing.", False),
+    ("Restart your client when the tools are consistently broken.", False),
+    ("Restart your client when the tools are plainly absent.", False),
+    # A declared RESIDUAL, not a goal: a non-`-ly` adverb before an absence word
+    # (`altogether absent`) is still graded — the same residual form (a) carries,
+    # and it is pinned here so a reader sees the boundary instead of inferring
+    # the arm is complete.
+    ("Restart your client when the tools are altogether absent.", True),
+    # …and it is a REGRESSION GUARD for behaviour that predates this commit (`no
+    # longer visible` was already GREEN at `006c2038`), not evidence for the
+    # polarity fix — the third alternative that was supposed to carry it flipped
+    # 0 of 319 rows and was deleted as dead weight.
     ("Restart your client when the tools are no longer visible.", False),
     # …and a PRESENCE claim stated as a NEGATED ABSENCE failed OPEN — the
     # negation of an absence is presence, which is exactly the condition form
@@ -3616,6 +3648,14 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Restart your client once the tools are no longer empty.", True),
     ("Restart your client once the tools are no longer absent.", True),
     ("Restart your client once the tools are never gone.", True),
+    # …and one inserted adverb moved the polarity the other way (cycle 32):
+    ("Restart your client once the tools are not actually missing.", True),
+    ("Restart your client once the tools are not currently missing.", True),
+    ("Restart your client once the tools are not really missing.", True),
+    ("Restart your client once the tools are not yet missing.", True),
+    ("Restart your client once the tools are not entirely absent.", True),
+    ("Restart your client once the tools are no longer actually missing.", True),
+    ("Restart your client once the tools are never actually gone.", True),
     # …while a real PRESENCE condition stays graded:
     ("Restart your client when the tools are actually there.", True),
     ("Restart your client when the tools appear.", True),
