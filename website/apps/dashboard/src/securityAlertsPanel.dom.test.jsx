@@ -66,6 +66,9 @@ const at = (daysAgo) =>
 
 //: The LIVE row from `abuse_events` (project ybetwichurajbfswfeqa): 13 windows
 //: of one continuous bout on 2026-09-25/26, rendered by the panel a month later.
+//: ⛔ `message` is not a column — `abuse._alert_dict` derives it at read time, so
+//: this field is reproduced from `_read_velocity_message`'s `scope == "key"`
+//: branch (pinned by `tests/test_10156_alert_registers.py`).
 const velocity = {
   type: 'read_velocity',
   label: 'Unusual read volume',
@@ -77,7 +80,7 @@ const velocity = {
   episode: 'read_velocity|key|989c68e6a35b479b923a28542e|2026-09-25T17:19:05',
   message:
     "Read volume on one of this Organization's API keys crossed our " +
-    'unusual-activity threshold. This is informational; nothing was changed. ' +
+    'unusual-activity threshold. This is informational; it did not change anything. ' +
     "If you don't recognise this activity, review your API keys in Keys — " +
     'an unrecognised key should be revoked there.',
 }

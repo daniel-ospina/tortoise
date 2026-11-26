@@ -157,8 +157,8 @@ const INCIDENT_BY_DEFINITION = new Set([
 
 //: The reverse race is NOT covered and cannot be: when the API deploys first,
 //: the OLD dashboard reads the new feed and still renders its own heading and
-//: lead, so a row saying "This is informational; nothing was changed" can sit
-//: under "Revoke any key you don't recognize" until Pages catches up. Stated
+//: lead, so a row saying "This is informational; it did not change anything"
+//: can sit under "Revoke any key you don't recognize" until Pages catches up. Stated
 //: rather than hidden — the server copy is the half that can be fixed by
 //: shipping, and the window is self-healing (same merge, minutes).
 

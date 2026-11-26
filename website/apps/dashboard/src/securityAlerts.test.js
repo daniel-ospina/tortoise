@@ -42,7 +42,12 @@ const here = dirname(fileURLToPath(import.meta.url))
 
 //: The LIVE row this issue is about — copied from the project's `abuse_events`
 //: table (project ybetwichurajbfswfeqa, 2026-09-25/26) so the fixture is the
-//: real thing rather than a shape someone imagined.
+//: real thing rather than a shape someone imagined. ⛔ `message` is NOT one of
+//: those columns: it is derived at read time by `abuse._alert_dict`, so it is
+//: reproduced from the renderer (`_read_velocity_message`'s `scope == "key"`
+//: branch) and is checked against `tests/test_10156_alert_registers.py` — a
+//: fixture that quotes a wording no server version emits is a claim about the
+//: product that nothing measures.
 const REAL_VELOCITY_ROW = {
   type: 'read_velocity',
   label: 'Unusual read volume',
@@ -54,7 +59,7 @@ const REAL_VELOCITY_ROW = {
   episode: 'read_velocity|key|989c68e6a35b479b923a28542e|2026-09-25T17:19:05',
   message:
     "Read volume on one of this Organization's API keys crossed our " +
-    'unusual-activity threshold. This is informational; nothing was changed. ' +
+    'unusual-activity threshold. This is informational; it did not change anything. ' +
     "If you don't recognise this activity, review your API keys in Keys — " +
     'an unrecognised key should be revoked there.',
 }
