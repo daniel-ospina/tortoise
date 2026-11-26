@@ -79,6 +79,11 @@ than it is:
     discarded rather than resolved, so the page is chosen from the path alone. A
     query that CHANGES which page serves the path would be read against the
     wrong page; no live site does that today.
+  * a SCHEME-LESS address in prose (``premiselabs.co/tortoise/docs#chatgpt``,
+    shipped by the dashboard's harness copy and its wizard snapshot) is not a
+    link this scan reads, and ``.json`` is not a scan root. It names a live
+    fragment; nothing here would notice if it stopped resolving. Declared, not
+    fixed: accepting a scheme-less URL would read every prose mention as a link.
 """
 from __future__ import annotations
 
@@ -184,6 +189,29 @@ _SAME_PAGE = re.compile(r"""href="#(?P<frag>[^"]+)\"""")
 
 _PAGE_ID_CACHE: dict[str, set[str]] = {}
 
+#: The own-site fragment URLs this guard is expected to read, as ``(file, url)``.
+#: No line numbers: a reflow must not red this. A link ARRIVING is free (the
+#: resolver checks it); a link VANISHING from the scan is a silent NARROWING of
+#: the guard's own coverage, after which the guard reports OK about a URL it can
+#: no longer see — the fail-open it exists to catch, one level in.
+EXPECTED_POPULATION: frozenset[tuple[str, str]] = frozenset({
+    ("tortoise/abuse.py", "https://premiselabs.co/docs#appeal"),
+    ("tortoise/capacity_notice.py", "https://premiselabs.co/tortoise/docs#storage"),
+    ("tortoise/onboarding/SKILL.md", "https://premiselabs.co/docs#chatgpt"),
+    ("website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md",
+     "https://premiselabs.co/docs#chatgpt"),
+    ("website/apps/dashboard/src/billingCta.js", "https://tortoise.premiselabs.co/#pricing-section"),
+    ("website/apps/dashboard/src/billingCta.test.js", "https://tortoise.premiselabs.co/#pricing-section"),
+    ("website/faq.html", "https://premiselabs.co/tortoise#pricing-section"),
+    ("website/functions/blog/_lib.ts", "https://premiselabs.co/tortoise#pricing-section"),
+    ("website/tos.html", "https://premiselabs.co/tortoise#pricing-section"),
+})
+
+#: Anti-vacuity floor for the same-page half: how many ``href="#frag"`` values the
+#: scan must READ. 24 were live when this floor landed; a lower bound, so deleting
+#: a same-page link is legal and losing the extractor is not.
+EXPECTED_SAME_PAGE_MATCHES = 20
+
 
 def page_ids(name: str) -> set[str]:
     """Ids a page DECLARES, plus the legacy ``<a name>`` a browser also honours."""
@@ -214,6 +242,13 @@ def resolve(host: str, path: str) -> str | None:
     An unmapped path is `None`, and the caller FAILS naming it, which is what
     makes adding a page force this table to be taught.
     """
+    # A trailing slash is a SPELLING, not a different page: `_redirects` 301s
+    # `/docs/` -> `/docs` and the middleware 301s `/tortoise/` -> `/tortoise`,
+    # and a 301 whose target carries no fragment PRESERVES it — so both land on
+    # a page that declares the id. Without this they came back `unmapped`, a
+    # FALSE RED on a working link. It applies to EVERY host, not just the
+    # retired one, which is why it is here rather than inside the branch below.
+    path = path.rstrip("/") or "/"
     if host in TORTOISE_HOSTS:
         # `_middleware.ts`: the retired host's ROOT lands on the product prefix, and
         # so does every `PRODUCT_PAGES` member (`:593`, `:627`). The legal, contact
@@ -326,16 +361,49 @@ def test_emitted_own_site_fragments_resolve_to_a_declared_id():
     assert not dead, "fragment link that lands at the top of the page:\n" + "\n".join(dead)
 
 
+def test_the_population_did_not_silently_shrink():
+    """A URL leaving the scanned set is a GUARD NARROWING, not a cleanup.
+
+    The resolver test asserts ``targets`` is non-empty, which any SURVIVING row
+    satisfies: the same literal rewritten as ``"https://premiselabs.co/docs" +
+    "#appeal"`` — or split across two lines — leaves the population with both
+    tests green, so the guard reports OK about a link it can no longer see. That
+    is the fail-open this file exists to catch, one level in, and the URL it can
+    lose unnoticed is the one this PR is about. Pinning the SET (paths and URLs,
+    no line numbers) makes a removal fail HERE, naming what went missing, while
+    an added link stays green.
+    """
+    seen = {(site, url) for site, _line, url, _frag in own_site_targets()}
+    missing = sorted(EXPECTED_POPULATION - seen)
+    assert not missing, (
+        "own-site fragment URL(s) left the scanned population — the guard is now "
+        "blind to them, so its green run says nothing about them:\n"
+        + "\n".join(f"  {site}  {url}" for site, url in missing)
+        + "\nIf the link is genuinely gone, delete its row here in the same commit."
+    )
+
+
 def test_same_page_fragments_resolve():
     dead: list[str] = []
     pages = sorted(WEBSITE.glob("*.html"))
     assert pages, "no pages found under website/"
+    matches = 0
     for page in pages:
         html = page.read_text(encoding="utf-8", errors="replace")
         declared = page_ids(page.name)
         for lineno, line in enumerate(html.splitlines(), 1):
             for match in _SAME_PAGE.finditer(line):
+                matches += 1
                 frag = match.group("frag")
                 if frag not in declared:
                     dead.append(f"{page.name}:{lineno}  href=#{frag}")
+    # `assert pages` alone cannot tell "none dead" from "none read": if the
+    # extractor stops matching (a typo in the pattern, a reformat to single
+    # quotes), every list here is empty and this half is VACUOUSLY green. The
+    # count is the anti-vacuity floor — the same rule the emitted-URL half
+    # applies with `assert targets`.
+    assert matches >= EXPECTED_SAME_PAGE_MATCHES, (
+        f"the same-page extractor read {matches} href(s), expected at least "
+        f"{EXPECTED_SAME_PAGE_MATCHES} — it is BLIND, not green"
+    )
     assert not dead, "same-page fragment with no such id:\n" + "\n".join(dead)
