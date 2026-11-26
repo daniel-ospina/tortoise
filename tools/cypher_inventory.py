@@ -1123,7 +1123,16 @@ def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
     if rel is not None:
         probe_cwd, probe_path, label = ROOT, rel, rel
     else:
-        probe_cwd, probe_path, label = probe_dir, target.name, str(target)
+        probe_cwd, label = probe_dir, str(target)
+        # ⛔ THE FULL PATH FROM THE NEAREST EXISTING ANCESTOR, not `target.name`
+        # (#14625 review, round 5, P3): a destination whose parent directories do not
+        # exist yet asked about its BASENAME in a directory that is not its parent, so a
+        # peer repo tracking `sub/deep/x.md` answered "untracked" for `peer/sub/deep/x.md`
+        # after `sub/` was removed, and `--render` landed a generated document on a
+        # TRACKED path at rc 0. The invariant is about the path, so the probe names the
+        # whole remainder — `git ls-files` matches an index entry whose work-tree file is
+        # absent, which is exactly this case.
+        probe_path = target.relative_to(probe_dir).as_posix()
     # ⛔ A PROBE THAT CANNOT RUN IS "COULD NOT RUN" (2), never 1. An absent `git`
     # binary raises FileNotFoundError here, and nothing catches it: the interpreter
     # then exits 1, which this tool reserves for the DRIFT verdict — so a lane reads
@@ -1399,9 +1408,15 @@ def main(argv: list[str] | None = None) -> int:
                 # git directory whose own HEAD/refs were damaged answers exactly like
                 # a plain directory, so a `.git`-entry test let `--render <bare>/config`
                 # through at rc 0 and git could not restore it (#14625 review, P1,
-                # reproduced with HEAD removed: 92 -> 391,249 bytes). The structural
-                # term needs no subprocess — which is the point, since the whole reason
-                # this branch runs is that git could not answer.
+                # reproduced with HEAD removed: a 66-byte bare config -> 145,745 bytes).
+                # The structural term needs no subprocess — which is the point, since the
+                # whole reason this branch runs is that git could not answer.
+                #
+                # ⛔ AND THE CLASS IS A REPOSITORY'S METADATA, NOT EVERY GIT FILE: a
+                # user-level `$HOME/.gitconfig` carries no `objects/`/`refs/`/`HEAD`
+                # marker, so it is permitted (measured, round 5: rc 0, 23 -> 145,745
+                # bytes — git cannot restore that one either). Stated rather than
+                # implied, because the refusal message above claims the class.
                 ancestors = (target.parent, *target.parent.parents)
                 plainly_outside = (
                     "not a git repository" in stderr_text
