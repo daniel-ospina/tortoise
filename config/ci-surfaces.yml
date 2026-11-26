@@ -74,8 +74,8 @@ version: 1
 # members, and the pool being a SET is the whole of the claim), `#14607`'s registrations
 # (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), `#14671`'s
 # `tests/test_13450_ep_position_axis_participation.py` row in `durations` — `core`-registered — and
-# `#14726`'s dual registration (`tests/test_own_site_fragment_targets.py`, on `core` AND
-# `onboarding`, carrying a `durations` row) — the verb packs the pool into ONE
+# `#14726`'s dual registration, `tests/test_own_site_fragment_targets.py` row in
+# `durations`, on `core` AND `onboarding` — the verb packs the pool into ONE
 # est_seconds reading: eleven shards at 827.6 s (a, b, c, d, e, f, g, h, i, j, k), so
 # `ceil(827.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
 # the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
