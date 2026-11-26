@@ -180,6 +180,15 @@ async def _call(client, tool, args):
         if out is None:
             out = [getattr(c, "text", str(c))
                    for c in (getattr(res, "content", None) or [])]
+        # ⛔ THE MCP ERROR FLAG LIVES ON THE RESULT (#14691 review, round 6, P1).
+        # MCP reports a tool EXECUTION error inside a successful transport as
+        # `{"content": [...], "isError": true}`. Dropping that flag made a FAILED
+        # call indistinguishable from an ANSWERED-EMPTY one, which is how D4 — a
+        # claim about the product — could be published from calls that never ran.
+        if getattr(res, "isError", None) is True or getattr(res, "is_error",
+                                                            None) is True:
+            return {"tool": tool, "args": args, "ok": False,
+                    "error": f"MCP isError: {out!r}"[:400]}
         return {"tool": tool, "args": args, "ok": True, "reply": out}
     except Exception as exc:
         return {"tool": tool, "args": args, "ok": False,
@@ -493,9 +502,32 @@ async def run() -> int:
                          "silent_zero_for": silent},
         })
 
+    # ⛔ A FAILED CALL IS NOT A SILENT DOOR, in the PRODUCER too (#14691 review,
+    # round 6, P1). `rows()` maps an error reply to `[]`, so an errored witness
+    # satisfied the emptiness test and MANUFACTURED D4. Measured: all seven witness
+    # replies replaced with the failure text left the finding in place.
+    def _answered(call: dict) -> bool:
+        reply = (call or {}).get("reply")
+        if (call or {}).get("ok") is False or (call or {}).get("error"):
+            return False
+        if isinstance(reply, dict) and (reply.get("isError") is True
+                                        or reply.get("ok") is False
+                                        or reply.get("error")):
+            return False
+        if isinstance(reply, str):
+            return not reply.lstrip().lower().startswith(
+                ("error", "exception", "traceback", "failed", "timeout"))
+        if isinstance(reply, list) and reply and all(isinstance(x, str)
+                                                     for x in reply):
+            return not any(x.lstrip().lower().startswith(
+                ("error", "exception", "traceback", "failed", "timeout"))
+                for x in reply)
+        return True
+
     silent = {name: w["explore_neighbour_count"]
               for name, w in (report.get("link_witness") or {}).items()
               if len(rows(w["expand_relationships"].get("reply"))) == 0
+              and _answered(w.get("expand_relationships"))
               and w["explore_neighbour_count"] > 0}
     if silent:
         report["door_findings"].append({

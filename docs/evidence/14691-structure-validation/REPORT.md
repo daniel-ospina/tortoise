@@ -446,15 +446,19 @@ measurement. It is also the process fact worth carrying back: the pre-dispatch c
 `provenance.probe_sha256`, the hash of the `run_readback.py` that produced it. It was produced at
 `d4fc8fe51ee5`, where that file hashed
 `5a441859d7f953a91d493d9606b8c8404018a40eac35b658a75e4fbe6200f192`; the file in this tree hashes
-`19f8ed1a7636aa9a38abb5e3670f926b0a2968a82f6a39c571329aff2406f190`, because a later commit renamed
+`a1e3134c6ed60c5ec94f6260c30d78500312bd3b9121b4c3188467b520cffb54`, because three edits landed after it: a later commit renamed
 one unused loop variable (`element_kind` → `_element_kind`) to clear a `B007` finding on the
 `agent-infra-ci / lint` leg — **not a required context** (`main`'s protection, the active
 ruleset and `.mergify.yml` require `python-ci-gate`, `docs`, `pricing-artifact`,
 `test-isolation`, `license-surface`, `legal-e2e` and `ai-review-gate`; `agent-infra-ci` is in
 `python-ci-gate`'s `needs:` in no spelling), but the repo keeps `ruff check .` at a zero
 baseline for new code, so the rename was taken rather than left as debt. **The rename is inert** — mechanically verified by renaming
-it back and diffing against `d4fc8fe`: zero differences — so the artifact's numbers stand and only
-the binding is stale. It is stated here rather than silently regenerated, because regenerating a
+it back and diffing against `d4fc8fe`: zero differences. **The other two edits are the
+error-vs-empty guards this review added** — `_call()` now records the MCP `isError` flag instead of
+discarding it, and the D4 emitter refuses a witness whose call FAILED — so a future run cannot
+manufacture D4 from a call that never answered. Both are inert to the numbers in the committed
+artifact (they change what a future run would refuse, not what this one measured), and the sweep
+that measured them is §8.7. The artifact's numbers stand and only the binding is stale. It is stated here rather than silently regenerated, because regenerating a
 791 KB receipt would rewrite every number downstream of it to fix a comment-sized defect.
 `tests/test_14691_structure_evidence.py` pins the binding against that stated exception, so a future
 drift reds instead of going unnoticed (which is what let this one through the first review).
@@ -677,6 +681,34 @@ pinned by an arm that reds on its own mutation:
   that both tools EXECUTE while the surface advertises neither.
 * the witness rows' **`mechanism`** (`IMPL` → `hasPart`) → rows must stay epistemic,
   and exactly six of seven witnesses must still be isolated (D4).
+
+### 8.8 What the sixth round closed (a prose finding that carried no derivation)
+
+- **P1 — the prose door findings.** D1 and D5 arrive from `readback.json` entirely
+  as prose, and the scorer copied their `answer_over_mcp` through unread: reversing
+  D1 to *"YES — … its direction is visible too"* left 85-passed-green and
+  self-contradicted the `the_read_that_can` field in the same object. A prose
+  finding now survives only while its answer's POLARITY matches what its own
+  evidence says, and while its evidence is non-empty.
+- **P1 — D4 outliving its witnesses.** The append path guarded against errored
+  calls; the PROSE D4 did not. With all seven witness replies replaced by failure
+  text the finding stayed, its evidence still naming six "isolated" nodes, and the
+  artifact re-derived identically. D4 now requires a NON-ERRORED silent witness, and
+  the producer agrees: `run_readback._call()` records the MCP `isError` flag instead
+  of discarding it, and its D4 emitter refuses a failed witness.
+- **P2 — the peer's second copy of the witness rows.** `witness_neighbourhood_doors`
+  in `out/t6-independent-verification.json` carries the same rows; `IMPL` → `hasPart`
+  there contradicted both documents and was free. Pinned to the same rule and to the
+  same row counts (one epistemic row, on `Lumen Core`).
+- **P3 — `readback.db_uri`.** Nothing read it: pointing it at
+  `live-v5.prod.example:6379/live-v5` left the suite green. Now pinned to the graph
+  the score names, on the lane's own host.
+- **P3 — `score_t6.py --check` was a NO-OP.** `sys.argv` was never parsed: the
+  scorer always rewrote the artifact and exited 0, so the gate the review brief names
+  would silently REPAIR a corrupted artifact and report success. It now compares and
+  exits 1 without writing — and it refuses to score at all when the ruled direction
+  table cannot be imported (the import used to degrade to `{}` under a bare
+  `try/except`, which made the comparison depend on the caller's `PYTHONPATH`).
 
 The generic coverage arm (`test_no_FIGURE_in_the_two_documents_is_free`) is a
 **floor, not a substitute for a pin**: it proves a number is carried by some

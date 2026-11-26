@@ -615,11 +615,35 @@ def test_readback_provenance_binds_to_its_producer_or_the_stated_exception():
     # Two arms close it: the documented delta must REPRODUCE `produced_by` when
     # reverted (so any edit other than that one rename reds), and §8's stated
     # CURRENT hash must be the file's real hash.
-    reverted = script.read_text().replace("_element_kind", "element_kind")
+    # ⛔ THREE EDITS, STATED AS THREE (#14691 review, round 6, P1). The producer
+    # gained two error-vs-empty guards after the producing commit — `_call()` now
+    # keeps the MCP `isError` flag, and the D4 emitter refuses a FAILED witness —
+    # so the delta is no longer the rename alone. Each removal below must SUCCEED,
+    # which is what keeps this a binding: an edit to either guard makes its removal
+    # a no-op and the reverted hash then differs from `produced_by`.
+    def _reverted_to_producing_commit(text: str) -> str:
+        text = text.replace("_element_kind", "element_kind")
+        blocks = [
+            re.compile(r'(?s) *# ⛔ THE MCP ERROR FLAG LIVES ON THE RESULT.*?'
+                       r'\n *"error": f"MCP isError: \{out!r\}"\[:400\]\}\n'),
+            re.compile(r"(?s)\n    # ⛔ A FAILED CALL IS NOT A SILENT DOOR.*?"
+                       r"\n        return True\n"),
+        ]
+        for pattern in blocks:
+            text, count = pattern.subn("", text, count=1)
+            assert count == 1, f"the documented guard is gone: {pattern.pattern[:60]}"
+        text = text.replace(
+            "              and _answered(w.get(\"expand_relationships\"))\n", "", 1)
+        assert "_answered(" not in text.replace("def _answered", ""), (
+            "a call to the documented guard survived the revert")
+        return text
+
+    reverted = _reverted_to_producing_commit(script.read_text())
     assert hashlib.sha256(reverted.encode()).hexdigest() == produced_by, (
         "run_readback.py no longer differs from the producing commit by ONLY the "
-        "`element_kind` -> `_element_kind` rename, so REPORT.md §8's stated "
-        "delta and the artifact's provenance binding no longer describe it")
+        "`element_kind` -> `_element_kind` rename plus the two documented guards, "
+        "so REPORT.md §8's stated delta and the artifact's provenance binding no "
+        "longer describe it")
     assert actual in _report(), (
         "REPORT.md §8 does not state the hash this tree's run_readback.py "
         f"actually has ({actual})")
@@ -3336,3 +3360,199 @@ def test_the_witness_rows_are_EPISTEMIC_and_the_D4_witness_is_isolated():
     silent = [n for n, e in witness.items()
               if not _rows(e["expand_relationships"]["reply"])]
     assert len(silent) == 6, silent
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Round 6 of review — the prose findings that carried no derivation, the peer's
+# second copy of the witness rows, and a `--check` that did not check.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def test_a_PROSE_door_finding_must_agree_with_its_own_evidence():
+    r"""Reds if a prose-carried door finding's answer is reversed.
+
+    ⛔ #14691 review, round 6, P1. D1 and D5 arrive from `readback.json` entirely as
+    prose, and their `answer_over_mcp` was copied through by the scorer unread.
+    Measured on `ecf4fd5d92`: reversing D1's answer to *"YES — … its direction is
+    visible too"* left **79 passed**, SELF-CONTRADICTING the `the_read_that_can`
+    field in the same object (that key exists precisely because no MCP door reports
+    direction). A finding whose answer contradicts its own evidence is not a
+    finding, so the scorer DROPS it — which reds here, because the artifact's
+    committed answer no longer derives.
+    """
+    module = _load_score_module()
+    readback = _readback()
+    d1 = next(f for f in readback["door_findings"] if f["id"] == "D1")
+    assert d1["answer_over_mcp"].upper().startswith("NO")
+    assert "the_read_that_can" in d1["evidence"], (
+        "D1's evidence no longer names the only read that can see direction")
+
+    with contextlib.ExitStack() as stack:
+        for filename, key in (("readback.json", "READBACK"),
+                              ("t6-score.json", None)):
+            path = BUNDLE / "out" / filename
+            original = path.read_text()
+            stack.callback(path.write_text, original)
+            if key is None:
+                continue
+            stack.enter_context(_readback_patch(original))
+        # flip D1's answer and re-derive: the finding must NOT survive
+        patched = json.loads((BUNDLE / "out" / "readback.json").read_text())
+        for finding in patched["door_findings"]:
+            if finding["id"] == "D1":
+                finding["answer_over_mcp"] = (
+                    "YES — the edge, its type and its direction are visible too")
+        (BUNDLE / "out" / "readback.json").write_text(
+            json.dumps(patched, indent=2) + "\n")
+        module = _load_score_module()
+        derived = [f["id"] for f in module._door_findings()]
+        assert "D1" not in derived, (
+            "the scorer still publishes D1 with its answer reversed — a finding "
+            "that contradicts its own evidence must be dropped")
+
+
+@contextlib.contextmanager
+def _readback_patch(_original: str):
+    """A no-op context so the ExitStack above reads as one guard block."""
+    yield
+
+
+def test_D4_cannot_survive_its_witnesses_all_failing():
+    r"""Reds if D4 is published while every witness call was an error.
+
+    ⛔ #14691 review, round 6, P1 (second half). The append path guards against
+    errored calls, but the PROSE D4 arriving from `readback.json` was never
+    re-checked: with all seven witness replies replaced by failure text the finding
+    stayed in the artifact, with its evidence still citing six "isolated" nodes and
+    the scorer re-deriving the file IDENTICALLY. A finding may only stand while a
+    non-errored witness is still silent.
+    """
+    module = _load_score_module()
+    readback = _readback()
+    d4 = next((f for f in readback["door_findings"] if f["id"] == "D4"), None)
+    assert d4, "the artifact no longer carries D4 at all"
+
+    sibling = BUNDLE / "out" / "readback.json"
+    original = sibling.read_text()
+    try:
+        patched = json.loads(original)
+        for entry in patched["link_witness"].values():
+            entry["expand_relationships"] = {
+                "tool": "tortoise_expand_relationships",
+                "args": entry["expand_relationships"].get("args") or {},
+                "ok": True,
+                "reply": ["Error: timeout while expanding relationships"],
+            }
+        sibling.write_text(json.dumps(patched, indent=2) + "\n")
+        module = _load_score_module()
+        derived = [f["id"] for f in module._door_findings()]
+        assert "D4" not in derived, (
+            "D4 is still published although every witness call FAILED — a failed "
+            "call is not a silent door")
+    finally:
+        sibling.write_text(original)
+
+
+def test_the_peer_witness_rows_are_the_scorers_witness_rows():
+    r"""Reds if the PEER artifact's witness rows carry a structural mechanism.
+
+    ╔═ #14691 review, round 6, P2. The round-5 arm pinned the scorer's own
+    `link_witness`; the peer artifact keeps a SECOND copy of the same rows
+    (`witness_neighbourhood_doors`), and rewriting its `mechanism` `IMPL` →
+    `hasPart` left 79 passed while contradicting both documents. The second copy is
+    pinned here, to the same rule and to the same row counts.
+    """
+    peer = _independent()["witness_neighbourhood_doors"]
+    witness = _readback()["link_witness"]
+    epistemic = {"supports", "contradicts", "refines", "IMPL", "NAND"}
+    assert len(peer) == 3, sorted(peer)          # a SUBSET: three probes here
+    for name, entry in peer.items():
+        for row in entry.get("explore") or []:
+            assert row.get("predicate") in epistemic, (name, row.get("predicate"))
+            assert row.get("mechanism") in epistemic, (name, row.get("mechanism"))
+        assert entry["explore_rows"] == len(entry.get("explore") or []), name
+    # the same answers, where the two probes asked about the same node: one row on
+    # `Lumen Core`, none elsewhere — and the ONE epistemic row overall, which is
+    # the whole of D4's "it reports epistemic edges, not structural ones".
+    assert peer["Lumen Core"]["explore_rows"] == 1
+    assert sum(e["explore_rows"] for e in peer.values()) == 1
+    for name, entry in peer.items():
+        row = _rows(witness.get(name, {}).get("expand_relationships", {})
+                    .get("reply"))
+        if name in witness:
+            assert entry["explore_rows"] == len(row), (name, entry["explore_rows"],
+                                                      len(row))
+
+
+def test_the_readback_db_uri_names_the_graph_it_measured():
+    r"""Reds if `readback.json.db_uri` is pointed at another graph or host.
+
+    ⛔ #14691 review, round 6, finding 3 (P3). `db_uri` says which graph the
+    artifact was measured against, and nothing read it: pointing it at
+    `live-v5.prod.example:6379/live-v5` with the byte count held at 809,812 left 79
+    passed. It must name the lane's private graph, on the lane's own port.
+    """
+    graph = _score()["graph"]
+    uri = _readback()["db_uri"]
+    assert uri.endswith("/" + graph), (uri, graph)
+    assert "live-v5" not in uri
+    assert "127.0.0.1:" in uri, uri
+
+
+def test_the_scorer_refuses_to_derive_from_a_PARTIAL_contract(tmp_path):
+    r"""Reds if `DIRECTIONS` may silently be empty.
+
+    ⛔ #14691 review, round 6, finding 4 (the other half). The ruled table was
+    imported inside a bare `try/except`, so running the scorer with the repo root
+    off `sys.path` produced a derivation missing `produces` — and `--check` then
+    disagreed with a committed artifact that had been produced WITH it. The scorer
+    now puts the repo root on `sys.path` itself and FAILS CLOSED when the table is
+    unavailable, so a partial contract can never be scored against.
+    """
+    import re as _re
+
+    module = _load_score_module()
+    assert module.DIRECTIONS, module.DIRECTIONS_SOURCE
+    assert "UNAVAILABLE" not in module.DIRECTIONS_SOURCE
+    assert {"ownedBy", "managedBy", "dependsOn", "produces"} <= set(
+        module.DIRECTIONS), sorted(module.DIRECTIONS)
+    source = (BUNDLE / "score_t6.py").read_text()
+    assert _re.search(r"if not DIRECTIONS:", source), (
+        "the scorer no longer fails closed when the direction table is missing")
+
+
+def test_the_scorer_check_flag_REFUSES_a_corrupted_artifact(tmp_path):
+    r"""Reds if `score_t6.py --check` writes instead of checking.
+
+    ⛔ #14691 review, round 6, finding 4 (P3). `sys.argv` was never parsed: the
+    scorer always rewrote `out/t6-score.json` and exited 0. The review brief's own
+    baseline step is `score_t6.py --check`, so a corrupted artifact would be silently
+    REPAIRED by the gate that was supposed to catch it — a no-op gate that reads as
+    a pass. Reproduced here in a throwaway copy of the bundle.
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    # the copy must sit at the SAME DEPTH as the real bundle, because the scorer
+    # derives its repo root from `Path(__file__).resolve().parents[2]`.
+    bundle = tmp_path / "docs" / "evidence" / "14691-structure-validation"
+    shutil.copytree(BUNDLE, bundle)
+    # the scorer derives its repo root from its own path (`parents[2]`), so the
+    # copy needs the product on that path — symlinked, never copied.
+    for name in ("tortoise", "tools", "config"):
+        (tmp_path / name).symlink_to(REPO / name, target_is_directory=True)
+    artifact = bundle / "out" / "t6-score.json"
+    intact = artifact.read_text()
+    assert subprocess.run([sys.executable, "score_t6.py", "--check"], cwd=bundle,
+                          capture_output=True).returncode == 0, (
+        "the uncorrupted artifact does not pass `--check`")
+    broken = intact.replace('"A2": "FAIL"', '"A2": "PASS"', 1)
+    assert broken != intact
+    artifact.write_text(broken)
+    result = subprocess.run([sys.executable, "score_t6.py", "--check"], cwd=bundle,
+                            capture_output=True, text=True)
+    assert result.returncode == 1, (
+        f"`--check` accepted a corrupted artifact (exit {result.returncode})")
+    assert artifact.read_text() == broken, (
+        "`--check` REWROTE the artifact — it must never write")
