@@ -10849,8 +10849,8 @@ _H_14544_INVERTED_RE = re.compile(
 #:                                             round 31's head); and two ELLIPTICAL spellings the
 #:                                             marker list never had — `…; the row as well.` and
 #:                                             `… and so too the row.` — also returned `None`
-#:   33  graded EVERY match, not the first -> `.search` returned the FIRST row claim and stopped, so a
-#:                                             NEGATED first claim HID a later un-negated one:
+#:   33  graded EVERY match, not the first -> `.search` returned the FIRST row claim and stopped, so
+#:                                             a NEGATED first claim HID a later un-negated one:
 #:                                             `The row is not exempt, but the row's weight is
 #:                                             exempt.` shipped GREEN (measured at round 32's head)
 #: ⛔ RULE 1 — NEVER ENUMERATE AN OPEN LEXICAL CLASS — and the COPULA is one, which is the correction
@@ -10871,7 +10871,8 @@ _H_14544_INVERTED_RE = re.compile(
 #: (`_H_14544_NEGATION_WINDOW_BEFORE` / `_AFTER`, round 30), AND NOT CROSS A CLAUSE BOUNDARY
 #: (Rule 2b below, round 33 — `but` / `yet` / `;` / em-dash truncate the window), because EVERY
 #: sentence of the graded paragraph already contains one — `does NOT claim`, `cannot move`,
-#: `no-per-file-weight` — so a sentence-wide veto was OFF for exactly the rewrite a fold produces. Within the window it is
+#: `no-per-file-weight` — so a sentence-wide veto was OFF for exactly the rewrite a fold produces.
+#: Within the window it is
 #: tolerated: `The row is NOT exempt.`, `No \`durations\` row is exempt from being a packing cause.`
 #: and `The \`durations\` row is exempt from nothing.` are GREEN — all TRUE, all of them refused by
 #: round 28's predicate, which had no negation carve-out at all and only tolerated the first by
@@ -10905,8 +10906,8 @@ _H_14544_INVERTED_RE = re.compile(
 #:   * an ANAPHORIC weight that names no row at all (`as is the weight it carries`, `as is its
 #:     weight`) — the noun phrase is required to NAME one, in either order (round 30);
 #:   * a verb-to-`exempt` run LONGER THAN 60 CHARACTERS, or one that CROSSES A CLAUSE BOUNDARY —
-#:     the two bounds Rule 1b actually grades, measured at round 33: `The row is with a great deal of
-#:     confidence and after much discussion among the authors exempt.` (94 characters) and an
+#:     the two bounds Rule 1b actually grades, measured at round 33: `The row is with a great
+#:     deal of confidence and after much discussion among the authors exempt.` (94 characters) and an
 #:     interposed comma group over 60 characters both return `None`. ⛔ The two examples this note
 #:     used to give were BOTH false at the head that carried them, and both are READ fixtures now:
 #:     `the row would eventually be exempt` (round 32) and `the row can be expected to be exempt`
@@ -11039,7 +11040,7 @@ _H_14544_CLAUSE_BREAK_RE = re.compile(
     r"[;.!?\u2014]|\b(?:but|yet|however|although|whereas)\b", re.IGNORECASE)
 
 
-def _h_14544_negated(sentence: str, match: "re.Match[str]") -> bool:
+def _h_14544_negated(sentence: str, match: re.Match[str]) -> bool:
     """Whether a negation sits in the WINDOW around `match` — Rule 2, scoped.
 
     ⛔ AND IT DOES NOT REACH ACROSS A CLAUSE BOUNDARY (#14623 round 33). The window was symmetric and
@@ -11066,8 +11067,8 @@ def _h_14544_negated(sentence: str, match: "re.Match[str]") -> bool:
     return _H_14544_NEGATION_RE.search(before + " " + after) is not None
 
 
-def _h_14544_first_unnegated(pattern: "re.Pattern[str]",
-                            sentence: str) -> "re.Match[str] | None":
+def _h_14544_first_unnegated(pattern: re.Pattern[str],
+                            sentence: str) -> re.Match[str] | None:
     """The FIRST match of `pattern` that no negation in its window covers, or None.
 
     ⛔ `pattern.search` IS NOT ENOUGH, and the gap it leaves is measured (#14623 round 33): the first
@@ -11508,7 +11509,8 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             # negation covers the pronoun too — `so is the weight of the row` inherits the `not`
             # from the clause before it, and the weight is therefore NOT exempt.
             "The row is not exempt, and so is the weight of the row.",
-            "The REGISTRATION is exempt from nothing, and the weight of the row is not exempt either.",
+            "The REGISTRATION is exempt from nothing, and the weight of the row is not exempt"
+            " either.",
             # ⛔ RULE 3 (round 29, P2): `too` as an INTENSIFIER takes an adjective — TRUE prose about
             # a row. The `: The row is too specific` case below is the one that DRIVES the
             # clause-terminal lookahead: it contains `exempt` in the same sentence, so the additive
