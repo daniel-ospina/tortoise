@@ -314,8 +314,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "still scans the whole tagged population before slicing, so a very large tag "
                     "can still be slow. "
                     "include_retracted=True surfaces tombstones. For "
-                    "semantic relevance use tortoise_search; for a single known ID use "
-                    "tortoise_get_point.",
+                    "semantic relevance use tortoise_search_knowledge; for a single "
+                    "known ID use tortoise_get_point.",
         risk="read",
         http_policy=True,
         # #10602: `query` → `paginated_query`. The un-paginated path used to call
@@ -2732,10 +2732,15 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # The destinations come from `tools/bridge_table.py`'s authored Phase-0.1 map, which
     # is the finer-grained record where the two disagree: `tortoise_issue_insight` goes to
     # `search_knowledge`, and `tortoise_list_graphs` / `_namespaces` / `_topics` go to the
-    # tenancy block and to `list_knowledge` respectively — so those four are NOT retired
-    # here. `tortoise_check_structure` is not retired either, and for a different reason:
-    # it is the one member with a WRAP envelope, so it carries the #8482 failure repair
-    # that a `-> Any` container cannot (see `tortoise_graph_overview`'s docstring). `docs/product/canonical-mcp-tools.md` describes them as absorbed transitively
+    # tenancy block and to `list_knowledge` respectively. ⛔ All four are RETIRED at this
+    # head, in the batch that made each destination live: `issue_insight` in #11609 lane P6,
+    # `list_graphs` in lane P7, `list_namespaces` in lane P11, and `list_topics` with it
+    # (`tortoise_list_knowledge(kind="topic")`). `tortoise_check_structure` was the last of
+    # this family to go: it was held longest because it is the one member with a WRAP
+    # envelope, so it carried the #8482 failure repair a `-> Any` container could not — and
+    # it retired in lane P11, the batch that made `_row_section_envelope` build that same
+    # envelope at the container boundary (see `tortoise_graph_overview`'s docstring).
+    # `docs/product/canonical-mcp-tools.md` describes them as absorbed transitively
     # through `overview`; the authored map names where each capability actually lands, and
     # that is the one `tools/mcp_rename_table.py` cross-checks against.
     "tortoise_summarize_structure": 'tortoise_graph_overview(section="structure")',
@@ -2751,16 +2756,16 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # GitHub's own `DeprecatedToolAliases` states the same limit). A member retires
     # only in the batch that lands the container covering it, so no pointer ever
     # names a replacement that does not exist.
-    # ⛔ SIX of this family's members are DELIBERATELY NOT retired here, and the reason is
-    # the one #10914 recorded for `tortoise_check_structure`: `search_sessions`,
-    # `suggest_entry_points`, `list_batches`, `list_namespaces`, `diary_read` and
-    # `expand_relationships` all declare a LIST envelope (`-> list[dict]`), which is what
-    # carries the #8482 failure repair. Their containers return `Any`, so retiring the door
-    # before the container declares an envelope would move that repair off the advertised
-    # path — a `_safe` failure payload the array schema cannot carry. They are covered by
-    # their containers TODAY (the handler answers through the container) and retire in the
-    # batch that gives the container a declared envelope. Pinned in
-    # `tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`.
+    # ⛔ SIX of this family's members were DELIBERATELY NOT retired at the time this block
+    # was written, for the reason #10914 recorded for `tortoise_check_structure`:
+    # `search_sessions`, `suggest_entry_points`, `list_batches`, `list_namespaces`,
+    # `diary_read` and `expand_relationships` all declare a LIST envelope (`-> list[dict]`),
+    # which is what carried the #8482 failure repair, and their containers return `Any`.
+    # ⛔ THEY ARE NO LONGER LIVE: #11609 lane P11 retired all six FORWARD, in the batch that
+    # made the reason false by applying `_row_section_envelope` at the containers' list
+    # arms — the hand-built envelope is what carries the repair now. The property is
+    # asserted on the wire (not inferred from the doors' existence) by
+    # `tests/test_11609_read_containers.py::TestTheContainersCarryTheEnvelope`.
     # ⛔ `tortoise_issue_insight` and `tortoise_session_context` USED to sit above, held by
     # "retiring the registry entry deletes its REST route with it". That reason was
     # MEASURED FALSE (#11609 lane P4, `docs/architecture/11609-STRUCTURAL-BLOCKERS.md`
@@ -2846,10 +2851,12 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_recall":
         'tortoise_check_confidence(recall=True, query=..., mode="state", '
         'min_confidence=..., limit=...)',
-    # ⛔ `tortoise_expand_relationships` is NOT retired here either: it declares a LIST
-    # envelope (`-> list[dict]`) and so carries the #8482 repair, which a `-> Any`
-    # container cannot. Its handler already answers through the container
-    # (`include_content=True`); the name retires with the container's envelope.
+    # ⛔ `tortoise_expand_relationships` retires HERE, in the batch that gave
+    # `explore_connections` the list envelope (#11609 lane P11). Its handler already
+    # answered through the container (`include_content=True`); what held it was that
+    # the container was `-> Any`, so a list came back as a bare text block where the
+    # door shipped `{"result": [...]}` — the #10085 shape. `_row_section_envelope`
+    # at the container boundary closes exactly that, so the reason is now false.
     "tortoise_entity_profile": 'tortoise_explore_connections(node_id, hops=...)',
     "tortoise_traverse": 'tortoise_explore_connections(node_id, hops=...)',
     "tortoise_review_connections": 'tortoise_review_link_candidates(kind="connections", mode=...)',
@@ -3005,19 +3012,23 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # that are safe to take, which is a much smaller set than "every live name
     # absent from the 27-target":
     #
-    # ⛔ EVERY other read door this wave could have retired is protected by a
-    # RECORDED DECISION above, and none of them is retired here:
+    # ⛔ EVERY other read door this wave could have retired was protected by a
+    # RECORDED DECISION above, and none of them retired HERE — every one of them has since
+    # retired in the batch that made its reason FALSE:
     #
     #   · `search_sessions`, `suggest_entry_points`, `list_batches`,
     #     `list_namespaces`, `diary_read`, `expand_relationships` — the SIX the
     #     READ batch left live on purpose. Each declares `-> list[dict]`, the array
     #     envelope that carries the #8482 `_safe` failure repair; their containers
-    #     return `Any`, so retiring the door moves that repair off the advertised
-    #     path. Pinned by
-    #     `tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`.
-    #     They retire in the batch that gives the container a declared envelope.
+    #     returned `Any`, so retiring a door would have moved that repair off the advertised
+    #     path. ⛔ RETIRED in #11609 lane P11, the batch that closed that gap:
+    #     `_row_section_envelope` builds `{"result": [...]}` at each container's list arm,
+    #     so the repair is on the container's wire and the door is free to go. The property
+    #     is pinned at the container by
+    #     `tests/test_11609_read_containers.py::TestTheContainersCarryTheEnvelope`.
     #   · `check_structure` and `calibrate_summary` — the same envelope reason
-    #     (`list[dict]`, no `rest_spec`), stated at #10914 and #12951.
+    #     (`list[dict]`, no `rest_spec`), stated at #10914 and #12951. ⛔ RETIRED with the
+    #     six above in #11609 lane P11.
     #   · `issue_insight` and `session_context` — RETIRED in #11609 lane P6, the batch
     #     that ACTED on lane P4's measurement that this reason was FALSE: the only thing
     #     that would derive a route from a `rest_spec` (`FastAPIRouterAdapter.register_all`)
@@ -3033,6 +3044,8 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     #     `rest_spec` (`GET /v1/search`) is a recorded CELL for a route that exists
     #     independently, and lane P4 measured the coupling FALSE (§1.5) — so "it has a
     #     REST route" is NOT a second reason, and removing that cell would not gate it.
+    #     ⛔ RETIRED in #11609 lane P11 with the six + the two above; its `rest_spec` cell
+    #     STAYS on the retired row as the record that the route exists independently.
     #   · `query` — the paged destination two ALREADY-retired pointers name
     #     (`paginated_query`, `query_points_by_tag`), and the UNION envelope the
     #     #8482 sweep's shrinkage floor measures alone at this head (the second,
@@ -3076,9 +3089,12 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # The seven below are the residue: `-> dict`, no `rest_spec`, no envelope
     # repair, and a destination arm that exists and delegates to the very method
     # the door calls. ⛔ THEY ARE THE RETIRED SEVEN, NOT A SUM TO ADD TO THE HELD ONES: the
-    # `·` bullets above already enumerate every name that stays live, and a retired name is
-    # not one of them. The HELD names above are 17 of the 17 live names off the 27-target —
-    # if you find a live name that is not on the target and not in that list, the list is
+    # `·` bullets above enumerate every name that STAYS live (or records that it left), and
+    # a retired name is not one of them. The names that remain HELD at this head are THREE
+    # of the 3 live names off the 27-target — `tortoise_query` (paged destination) plus
+    # `tortoise_org_create` and `tortoise_ingest` (no MCP destination exists) — and
+    # `tests/test_11609_door_retirement.py`'s two tables are what pin that population. If you
+    # find a live name that is not on the target and not in those tables, the tables are
     # incomplete and that name is NOT safe to retire. (The earlier form of this sentence read
     # "the names above PLUS these seven are 17 of the 17 live names" — it printed 17, but it
     # folded the seven RETIRED rows INTO that 17, implying the held bullets above add up to 10
@@ -3087,9 +3103,12 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # (It was 25 before the #11609 P1, P2 and P6 waves left it there, with their arms:
     # `create_point`/`diary_write` in P1, `compute_confidence`/`recall` in P2, the
     # `rest_spec` pair and the DELETE pair in P6 — 25 -> 23 -> 21 -> 19 -> 17, one pair per
-    # unit. ⛔ THIS BLOCK STILL SAID 21 AND STILL LISTED BOTH P6 PAIRS AS HELD after #13626
-    # merged, which is why `tests/test_11609_door_retirement.py`'s population check (17/10/7)
-    # and this prose disagreed on `main` — #13626 review ISSUE 2.)
+    # unit. P7 then took FIVE, and lane P11 took the last NINE (the envelope category):
+    # 17 -> 12 -> 3. ⛔ THIS BLOCK ONCE SAID 21 AND LISTED BOTH P6 PAIRS AS HELD after #13626
+    # merged, which is why `tests/test_11609_door_retirement.py`'s population check
+    # (17/10/7) and this prose disagreed on `main` — #13626 review ISSUE 2. The same drift
+    # hit the held-door count at lane P11, so the number above is now stated WITH the wave
+    # that moved it.)
     # ⛔ ONE HOP to a live name in every pointer (GitHub's own
     # `DeprecatedToolAliases` states the limit: aliases are not transitive).
     # Arguments are named where dropping one changes the operation — `type=` and
@@ -3192,6 +3211,64 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # HTTP tenant filter that is the reason it is a section rather than an SDK
     # read — so "no container row yet" is false, and the door retires forward.
     "tortoise_list_graphs": 'tortoise_graph_overview(section="graphs")',
+    # ── #11609 lane P11 — the LAST NINE envelope doors retire forward ──
+    #
+    # Every one of these was held by the SAME reason: it declares `-> list[dict]`, so
+    # it ships `{"result": [...]}` (FastMCP's `x-fastmcp-wrap-result` envelope), and
+    # its container is annotated `-> Any`, so the container's list arm shipped a bare
+    # text block with NO `structuredContent` (#10085, measured through a connector as
+    # `{"text": "[\"org_…\"]"}`). Retiring the door first would have moved a caller
+    # from a structured reply to an opaque one — the silent shape change those doors
+    # existed to prevent.
+    #
+    # ⛔ THE ENABLING CHANGE IS AT THE CONTAINER, NOT IN THIS MAP. Each container now
+    # runs its result through `_row_section_envelope` (`mcp_server.py`), which wraps a
+    # LIST exactly as FastMCP wraps a wrap-annotated tool and returns a MAPPING
+    # untouched — so the list arms ship the retired door's own bytes, every already-dict
+    # arm keeps its shape, and no customer-visible `structuredContent` re-wrap occurs.
+    # That is why this batch needs no `list[dict] | dict` annotation and therefore no
+    # surface approval: the approval gate was written for the RE-WRAP, and there is none.
+    #
+    # Arguments are named wherever the container RENAMES one — `agent_name` → `agent` and
+    # `last_n` → `limit` on the diary, `kind_filter` → `kind` on entry points,
+    # `point_id` → `node_id` on the relationship walk — because a pointer that drops a
+    # renamed argument either raises `TypeError` for the migrating caller or silently
+    # widens the read. `mode=`/`kind=`/`section=`/`calibrate=` are the containers' OWN
+    # discriminators (bridge table Part A) and every pointer resolves in ONE hop.
+    "tortoise_search":
+        'tortoise_search_knowledge(query=..., kind=..., limit=..., entity_type=..., '
+        'order_by=..., min_confidence=..., threshold=..., relationship_filter=..., '
+        'traversal_path=...)',
+    "tortoise_search_sessions":
+        'tortoise_search_knowledge(mode="sessions", query=..., agent=..., topics=..., '
+        'after=..., before=..., limit=..., offset=...)',
+    "tortoise_suggest_entry_points":
+        'tortoise_search_knowledge(mode="entry_points", query=..., limit=..., kind=...)',
+    "tortoise_list_batches": 'tortoise_list_knowledge(kind="batch", limit=...)',
+    # ⛔ `list_knowledge(kind="namespace")`, NOT `graph_overview(section="namespaces")`,
+    # although the door's own handler reaches `sdk.graph_overview("namespaces")` and that
+    # section ALSO wraps its list today. Two reasons, both recorded artifacts: the authored
+    # Phase-0.1 destination in `tools/bridge_table.py` `DESTINATION` names
+    # `list_knowledge`, and `tools/mcp_rename_table.py` treats a pointer that disagrees with
+    # it as a FINDING (`DISAGREEMENTS`), which the pinned empty set would red on. Reaching
+    # the same body is not the test — agreeing with the map that decides where the
+    # capability lands is.
+    "tortoise_list_namespaces": 'tortoise_list_knowledge(kind="namespace")',
+    # ⛔ `limit=10`, NOT `limit=...`: THE DEFAULT IS PART OF THE MIGRATION. The door's
+    # `last_n` default was 10 and the container's `limit` default is 20 (`mcp_server.py`),
+    # which the SDK forwards as `_diary_read(last_n=limit)`. A caller who migrates without
+    # naming the argument therefore gets TWICE the rows the door gave it — the same "silently
+    # widens the read" class the paragraph above names, riding the DEFAULT rather than the
+    # rename. Naming the value keeps the absorbed read byte-identical, and
+    # `tests/test_11609_door_retirement.py::TestThePointerIsCallableAtTheContainer::
+    # test_a_renamed_argument_keeps_the_door_default` derives it from the retired door's own
+    # signature, so the pointer and the door cannot drift apart.
+    "tortoise_diary_read":
+        'tortoise_list_knowledge(kind="diary", agent=..., limit=10, wing=...)',
+    "tortoise_expand_relationships":
+        'tortoise_explore_connections(node_id, include_content=True, hops=...)',
+    "tortoise_check_structure": 'tortoise_graph_overview(section="structure_check")',
+    "tortoise_calibrate_summary": 'tortoise_check_confidence(calibrate=True)',
 }
 
 
