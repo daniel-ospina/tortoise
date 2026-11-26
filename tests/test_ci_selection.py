@@ -10192,10 +10192,18 @@ _H_14544_NEGATION = (
     r"|were\s+not|weren['\u2019]?t)")
 _H_14544_CHANGE_VERB = (
     r"(?:touch|chang|mov|rewr|re-read|reread|edit|alter|affect|modif|shift)")
-#: ACTIVE order: the cut named FIRST, then a negation, then the change verb.
+#: ACTIVE order: the cut named FIRST, then a negation, then the change verb, and — ⛔ THE OBJECT IS
+#: READ, not assumed — the row/weight as the thing the verb acts on, within 40 characters. Without
+#: that third clause this arm refused the TRUE sentences the paragraph exists to establish: a
+#: review measured RED on “`#14544` did not touch that `eval` registration, so the file stays in the
+#: pool”, on the live `cannot move a bin` rewritten as `does not move a bin`, and on the honest
+#: clause pair with its halves swapped (#14623 review round 6, F1). A negated change of a
+#: REGISTRATION or of a BIN is the paragraph's own true claim, so only a negated change of the ROW
+#: is the retired one.
 _H_14544_NEGATED_ACTOR_CHANGE_RE = re.compile(
     r"(?:#14544|that\s+cut|the\s+cut)[\s\S]{0,400}?" + _H_14544_NEGATION
-    + r"[\s\S]{0,80}?" + _H_14544_CHANGE_VERB,
+    + r"[\s\S]{0,80}?" + _H_14544_CHANGE_VERB
+    + r"[\s\S]{0,40}?(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)",
     re.IGNORECASE)
 #: PASSIVE order: the row or the weight FIRST, then a negation, then the change verb. Two guards —
 #: the caller also requires `_H_14544_ACTOR_RE` in the SENTENCE, and the negation here is restricted
@@ -10210,12 +10218,24 @@ _H_14544_NEGATED_ROW_CHANGE_RE = re.compile(
     r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[\s\S]{0,20}?" + _H_14544_ROW_NEGATION
     + r"[\s\S]{0,40}?" + _H_14544_CHANGE_VERB,
     re.IGNORECASE)
+#: …and the ADJECTIVE forms of the same claim, which reverse the word order and so reach neither
+#: arm above: `<row|weight> … untouched / unchanged / left alone … `#14544``, and the transposed
+#: deleted sentence `` `#14544` touched neither that row nor its weight ``. Measured GREEN before
+#: this arm existed (#14623 review round 6, F4).
+_H_14544_ROW_ADJECTIVAL_RE = re.compile(
+    r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[\s\S]{0,80}?"
+    r"(?:untouched|unchanged|left\s+alone)[\s\S]{0,80}?(?:#14544|that\s+cut|the\s+cut)"
+    r"|#14544[\s\S]{0,40}?touch(?:ed|es|ing)?\s+neither\s+that\s+row",
+    re.IGNORECASE)
 #: The required claims stated the OTHER way round, beside the true one — measured GREEN at
 #: `148ab7c` (#14623 review round 5, F1d/F1e): keep `The REGISTRATION is the ONLY half exempt` and
 #: add "though both halves are exempt"; keep the true conclusion and add "this paragraph DOES
 #: exclude it". Keeping a true sentence beside its inverse satisfies every positive pin.
 _H_14544_INVERTED_RE = re.compile(
-    r"both\s+halves|paragraph\s+DOES\s+exclude", re.IGNORECASE)
+    r"both\s+halves\s+(?:are\s+|stay\s+)?exempt|both\s+(?:are|stay)\s+exempt"
+    r"|neither\s+half\s+is\s+excluded|row\s+half\s+is\s+exempt"
+    r"|paragraph\s+DOES\s+exclude",
+    re.IGNORECASE)
 
 
 def _h_14544_banned_claim(block: str) -> str | None:
@@ -10235,6 +10255,8 @@ def _h_14544_banned_claim(block: str) -> str | None:
         if (_H_14544_NEGATED_ROW_CHANGE_RE.search(sentence)
                 and _H_14544_ACTOR_RE.search(sentence)):
             return sentence.strip()
+        if _H_14544_ROW_ADJECTIVAL_RE.search(sentence):
+            return sentence.strip()
     return None
 
 
@@ -10249,7 +10271,7 @@ def _h_14544_banned_claim(block: str) -> str | None:
 #: review round 4, P3): “the `durations` entry for it, which is `#14544`'s own edit”.
 _H_14544_ROW_PROVENANCE_RE = re.compile(
     r"(?:row\s+in\s+`durations`|`durations`[\s#]{0,3}(?:row|entry))[\s\S]{0,400}?"
-    r"(?:IS|is|which\s+is)\s+`#14544`['\u2019]s\s+own\s+edit",
+    r"(?:IS|is|which\s+is)\s+(?:`#14544`['\u2019]s\s+own\s+edit|an\s+edit\s+by\s+`#14544`)",
     re.IGNORECASE)
 #: The SCOPE half: the paragraph must state that ONE half — the REGISTRATION — is exempt, with the
 #: polarity pinned. Measured at `d1f14298`: inverting it to “Both halves stay exempt” (the commit's
@@ -10263,7 +10285,12 @@ _H_14544_SCOPE_RE = re.compile(
 #: graded the anaphor ban and the provenance tokens and never the sentence that draws the
 #: conclusion, so a paragraph stating the OPPOSITE of the correction was certified clean.
 _H_14544_CONCLUSION_RE = re.compile(
-    r"cause\s+this\s+paragraph\s+does\s+NOT\s+exclude", re.IGNORECASE)
+    r"cause\s+this\s+paragraph\s+does\s+NOT\s+(?:exclude|rule\s+out)", re.IGNORECASE)
+#: The FOURTH graded claim, which the docstring named while nothing graded it (#14623 review round
+#: 6, F3): the paragraph must not restate a per-file weight. It may name the row, its provenance and
+#: the commit; the figure lives in `durations`, graded there by `_carry_row_claim_violations`. The
+#: pattern is a DECIMAL, so issue numbers and shas (`e66997b81e76`) are not read.
+_H_14544_WEIGHT_FIGURE_RE = re.compile(r"\b\d+\.\d+\b")
 
 
 def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
@@ -10321,6 +10348,14 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
         "weight is the shard-layout input. State the REGISTRATION as the exempt half and the row "
         "as `#14544`'s OWN edit, and do not restate the weight (the no-per-file-weight rule above "
         "binds the figure).")
+    # ⛔ THE FOURTH CLAIM, graded rather than named: a per-file WEIGHT restated in this paragraph was
+    # GREEN while no assertion read it (#14623 review round 6, F3) — the figure belongs on the row,
+    # where `_carry_row_claim_violations` checks it against the map.
+    assert _H_14544_WEIGHT_FIGURE_RE.search(paragraph) is None, (
+        "the `#14544` paragraph restates a per-file weight "
+        f"({_H_14544_WEIGHT_FIGURE_RE.search(paragraph).group(0)!r}) — the no-per-file-weight rule "
+        "above binds it, and the figure belongs on the row in `durations`, where it is graded "
+        "against the map rather than against prose")
     assert _H_14544_INVERTED_RE.search(header) is None, (
         "the block states a required claim the OTHER way round — “both halves [are] exempt” or "
         f"“this paragraph DOES exclude”: {_H_14544_INVERTED_RE.search(header).group(0)!r}. Keeping "
@@ -10383,23 +10418,41 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
         "the provenance pattern still matches when the clause is NEGATED (`row is NOT `#14544`'s "
         f"own edit`, measured on {negated!r}) — it reads the row's name and the words `own edit` "
         "without the polarity, so a fold that restored the false reading would keep this arm GREEN")
+    # ⛔ NON-VACUITY for the WEIGHT rule and the INVERSE ban, so neither is decoration: the same
+    # paragraph with a figure in it must red, and the inverse pattern must READ each spelling it
+    # claims to refuse (a constant nothing exercises is a constant anyone can blank — measured
+    # GREEN with `_H_14544_INVERTED_RE` replaced by `(?!)`, #14623 review round 6, F2).
+    assert _H_14544_WEIGHT_FIGURE_RE.search(paragraph + " The weight beside that row is 90.0 s."), (
+        "the weight rule no longer reads a decimal figure, so it grades nothing — re-point it")
+    for inverse in (
+            "The REGISTRATION is the ONLY half exempt, though both halves are exempt",
+            "Both are exempt.",
+            "The row half is exempt too.",
+            "Neither half is excluded.",
+            "On the record's own numbers this paragraph DOES exclude it."):
+        assert _H_14544_INVERTED_RE.search(inverse), (
+            f"the inverse ban misses {inverse!r} — a constant no fixture exercises can be blanked "
+            "and the arm stays GREEN, so the inverse of a required claim would ship clean")
     # …and the SCOPE and CONCLUSION pins read their polarity the same way: each mutant is the live
     # paragraph with that ONE claim inverted, so a pattern that lost its polarity direction reds here
     # instead of certifying the inversion.
-    scope_inverted = paragraph.replace(
-        "The REGISTRATION is the ONLY half", "Both halves stay exempt", 1)
-    assert scope_inverted != paragraph, (
-        "the live `#14544` paragraph no longer scopes the exemption with `The REGISTRATION is the "
-        "ONLY half`, so the inversion check below grades nothing — re-point it")
+    # ⛔ BOTH FIXTURES ARE DERIVED FROM THE LIVE MATCH, not from a literal spelling: keying them to
+    # the exact words the block uses today made a TRUE rewording (`… does not rule out`) a false
+    # block on the FIXTURE rather than a grade (#14623 review round 6, F5). Dropping the polarity
+    # token from the matched span is the mutation, whichever words the span happens to use.
+    scope_inverted = scope.group(0).replace("ONLY", "not the ONLY", 1)
+    assert scope_inverted != scope.group(0), (
+        "the matched scope clause carries no `ONLY` to negate, so the inversion check below grades "
+        f"nothing — re-point it at: {scope.group(0)!r}")
     assert not _H_14544_SCOPE_RE.search(scope_inverted), (
-        "the scope pattern still matches when the scope is INVERTED (`Both halves stay exempt`) — "
-        "it grades the word `exempt` rather than which half, so a fold that exempted the row again "
+        "the scope pattern still matches when the scope is NEGATED (`… is not the ONLY half`) — it "
+        "grades the word `exempt` rather than which half, so a fold that exempted the row again "
         "would keep this arm GREEN")
-    conclusion_inverted = paragraph.replace(
-        "this paragraph does NOT exclude", "this paragraph DOES exclude", 1)
-    assert conclusion_inverted != paragraph, (
-        "the live `#14544` paragraph no longer draws the conclusion with `this paragraph does NOT "
-        "exclude`, so the inversion check below grades nothing — re-point it")
+    conclusion_inverted = re.sub(
+        r"\bnot\b\s+", "", conclusion.group(0), count=1, flags=re.IGNORECASE)
+    assert conclusion_inverted != conclusion.group(0), (
+        "the matched conclusion clause carries no `NOT` to drop, so the inversion check below "
+        f"grades nothing — re-point it at: {conclusion.group(0)!r}")
     assert not _H_14544_CONCLUSION_RE.search(conclusion_inverted), (
         "the conclusion pattern still matches when the conclusion is INVERTED (`… is a cause this "
         "paragraph DOES exclude`) — it grades `exclude` without the polarity, so a fold that "
@@ -10434,6 +10487,9 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             # the PEER round-3 shapes: the same claim with a PLURAL noun and with the block's own
             # `durations entry` spelling — the noun alternation is a fixture, not a promise.
             "the rows were never touched by `#14544`",
+            "That row was untouched by `#14544`.",
+            "The row's weight was unchanged by `#14544`.",
+            "`#14544` touched neither that row nor its weight.",
             "the `durations` entries were not touched by `#14544`",
             # NOT honest prose, though it reads like it: it asserts the row's weight `was never
             # re-read` in the same sentence that names the cut which DID re-read it — the claim is
@@ -10453,6 +10509,11 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             # that makes a blanket "row … not … touch" rule a false block (peer round 3, graded
             # here so the restricted negation list cannot silently widen back).
             "the row does not touch the shard layout, and `#14544`'s cut is separate",
+            # ⛔ THE OBJECT IS READ: these are TRUE — a negated change of a REGISTRATION, of a BIN,
+            # or of a layout — and the round-6 reviewer measured all three as false blocks before
+            # the object clause existed.
+            "`#14544` did not touch that `eval` registration, so the file stays in the pool.",
+            "`#14544`'s cut is separate, and the row does not touch the shard layout.",
             "another row's weight was retimed; the retime does not touch the shard layout, and "
             "`#14544`'s cut is separate",
             "`#14544`'s removal of the file from the `core` surface cannot move a bin"):
