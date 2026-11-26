@@ -1,4 +1,6 @@
-# The SDK event log for this run is 391 KB of raw JSONL — scratch, not evidence.
-# It is reproducible with run.sh; the receipts in this directory are the evidence.
+# The SDK event log for this run is raw JSONL, many hundreds of KB — scratch, not
+# evidence. Deliberately NOT sized here: this line said "391 KB" for a
+# 325,206-byte file, which is the stale-shipped-number drift the bundle's suite
+# now pins everywhere else (#14691 review, 6th cycle, finding 7).
 out/events.jsonl
 out/events.jsonl.position

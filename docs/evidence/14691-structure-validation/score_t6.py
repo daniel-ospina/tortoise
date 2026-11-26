@@ -468,11 +468,31 @@ def a2_edges() -> dict:
                 # §3.6 types `managedBy` as `Entity → Subject`: the RESPONSIBLE
                 # PARTY is the dst. Checked on KIND (a Subject end), because the
                 # declaration constrains the kinds, not a particular name.
+                # ⛔ THE MIRROR OF N6 (#14691 review, 6th cycle, finding 6). The
+                # `produces` arm got its UNCLASSIFIABLE bucket; this one did not,
+                # so an absent or unreadable `dst_kind` graded the row INVERTED —
+                # asserting the row says the REVERSE of the corpus from a kind the
+                # scorer never read — and moved the very tallies A2's paragraph is
+                # pinned to (`asymmetric_rows_inverted` 15 -> 16, distinct pairs
+                # 13 -> 14). Measured on the peer head: one unreadable
+                # `managedBy` row did exactly that and nothing reddened.
                 subject_kinds = (_ROLE_KINDS["person"] | _ROLE_KINDS["team"]
                                  | _ROLE_KINDS["role"] | {"core:organization"})
-                row["dst_kind_is_a_subject"] = e["dst_kind"] in subject_kinds
-                row["orientation"] = ("correct" if row["dst_kind_is_a_subject"]
-                                      else "INVERTED")
+                dst_kind = e.get("dst_kind") or ""
+                src_kind = e.get("src_kind") or ""
+                row["dst_kind_is_a_subject"] = dst_kind in subject_kinds
+                row["src_kind_is_a_subject"] = src_kind in subject_kinds
+                if row["dst_kind_is_a_subject"]:
+                    row["orientation"] = "correct"
+                elif row["src_kind_is_a_subject"]:
+                    row["orientation"] = "INVERTED"
+                elif dst_kind or src_kind:
+                    # one end was READ and is not a Subject end: the row is
+                    # genuinely backwards (the committed rows land here — a
+                    # person src, a customer dst — which is the finding)
+                    row["orientation"] = "INVERTED"
+                else:
+                    row["orientation"] = "UNCLASSIFIABLE"
             other.append(row)
 
     # (e2) the OWNERSHIP DOOR's own answer — the one product read that can
@@ -1001,7 +1021,19 @@ def _tokens() -> dict:
             "by_doc": by_doc}
 
 
-def main() -> int:
+def build_score() -> dict:
+    """The whole score, DERIVED from the committed artifacts and nothing else.
+
+    Split out of `main()` so the falsifier suite can RE-DERIVE this artifact and
+    compare it to the committed one (#14691 review, 6th cycle, finding 2).
+    Without the split, everything a test did not happen to name was free: the
+    EVIDENCE rows — `corpus_chars`, `edge_count`, `entity_names_checked`, the
+    warnings block, every `ownership[].verdicts`, every A5 probe's ranks and
+    `extraction_tokens.by_doc` — could be rewritten while the suite stayed green,
+    and two of them then contradicted REPORT.md, which also stayed green. A
+    function that returns the score without writing is what makes the artifact
+    checkable rather than trusted.
+    """
     score = {
         "issue": 14691, "test": "T6",
         "graph": RECEIPT.get("graph_name"),
@@ -1035,6 +1067,11 @@ def main() -> int:
     score["verdicts"] = {k: (v if isinstance(v, str)
                              else ("PASS" if v else "FAIL"))
                          for k, v in totals.items()}
+    return score
+
+
+def main() -> int:
+    score = build_score()
 
     (OUT / "t6-score.json").write_text(json.dumps(score, indent=2,
                                                   default=str) + "\n")
