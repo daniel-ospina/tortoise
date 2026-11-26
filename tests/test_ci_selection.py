@@ -9283,8 +9283,9 @@ _ROW_CLAIM_CARRY_RE = re.compile(
     r"(?:\s*,\s*(?:`?#\d+`?\s*'s\s*)?`?tests/[\w/.-]+\.py`?"
     r"|\s+and\s+(?:`?#\d+`?\s*'s\s*)?`?tests/[\w/.-]+\.py`?)*)"
     r"\s+carry\s+"
-    r"(?:(?:an?\s+)?explicit\s+`?(?P<value>\d+(?:\.\d+)?)`?\s+`?durations`?\s+rows?"
-    r"|no\s+rows?)",
+    r"(?:(?:an?\s+)?explicit\s+`?(?P<value>\d+(?:\.\d+)?)`?\s+`?durations`?\s+"
+    r"(?:rows?|entr(?:y|ies))"
+    r"|no\s+(?:rows?|entr(?:y|ies)))",
     re.IGNORECASE,
 )
 
@@ -10225,8 +10226,13 @@ _H_14544_NEGATED_ROW_CHANGE_RE = re.compile(
 #: `148ab7c` (#14623 review round 5, F1d/F1e): keep `The REGISTRATION is the ONLY half exempt` and
 #: add "though both halves are exempt"; keep the true conclusion and add "this paragraph DOES
 #: exclude it". Keeping a true sentence beside its inverse satisfies every positive pin.
+#: ⛔ THE PREDICATE IS REQUIRED (#14623 review round 6, P3). A bare `both halves` was banned, so a
+#: TRUE sentence about this paragraph — "both halves of this paragraph are graded by an arm each"
+#: — red the arm with a diagnostic quoting a claim it never made. The inverse is `both halves …
+#: exempt`, so the predicate is what makes it the inverse; the non-vacuity assertions beside the
+#: arm pin both spellings it must still read.
 _H_14544_INVERTED_RE = re.compile(
-    r"both\s+halves|paragraph\s+DOES\s+exclude", re.IGNORECASE)
+    r"both\s+halves[\s\S]{0,20}(?:exempt|excluded)|paragraph\s+DOES\s+exclude", re.IGNORECASE)
 
 
 def _h_14544_banned_claim(block: str) -> str | None:
@@ -10344,6 +10350,20 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
         "the true sentence beside its inverse satisfies every positive pin while asserting the "
         "reading `#14612` deletes (measured GREEN at `148ab7c`, #14623 review round 5); drop the "
         "inverse")
+    # ⛔ NON-VACUITY, in the direction the narrowing could break: a pattern that reads NOTHING is the
+    # no-op gate this block's siblings exist to prevent, and this one has no fixture elsewhere — it
+    # is asserted only against the live block, so narrowing it is invisible. Both spellings the
+    # failure message names must still be READ, and the bare token pair with no exempt predicate
+    # beside it must NOT be (that is a TRUE sentence about the paragraph, not the inverse).
+    for inverse in ("both halves are exempt", "this paragraph DOES exclude it"):
+        assert _H_14544_INVERTED_RE.search(inverse), (
+            f"the inverted-claim pattern no longer reads {inverse!r}, so the assertion above passes "
+            "over any spelling of the reading `#14612` deletes — re-point `_H_14544_INVERTED_RE`")
+    assert _H_14544_INVERTED_RE.search(
+        "both halves of this paragraph are graded by an arm each") is None, (
+        "the inverted-claim pattern refuses the bare token pair with no exempt predicate near it, "
+        "so it reds a TRUE sentence about the paragraph with a diagnostic that quotes an inverse "
+        "the sentence never makes")
     provenance = _H_14544_ROW_PROVENANCE_RE.search(paragraph)
     assert provenance is not None, (
         "the `#14544` exemption paragraph no longer records that the `durations` row is `#14544`'s "
