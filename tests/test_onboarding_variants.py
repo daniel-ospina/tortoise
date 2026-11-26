@@ -1827,7 +1827,19 @@ _PRE_CUE_ONLY = _inversion_form(
     # real doc as a false PASS). `make sure to` / `be sure to` are the same
     # instruction; "after making sure the tools …" remains a DECLARED residual
     # of form (a), not of this slot.
-    r"^(?:(?:please|kindly)\s+)?(?:(?:first(?:ly)?|also|just)\s*,?\s+)?"
+    # ⛔ A LEADING SEQUENCER/ADVERB IS THE SAME ONE-INSERTED-WORD DEFECT as the
+    # courtesy and modal slots above, and it was the LAST one left: `Now`/`Then`
+    # /`Next`/`Finally`/`Immediately`/`Simply`/`Again`/`Still` in front of the
+    # imperative defeated form (f) ENTIRELY — measured at `509d235dcce1`, one
+    # leading word flipped **39 of the 40** declared-RED pre-cue rows GREEN, and
+    # `Then confirm the tools are actually there. Restart your client, …` passed
+    # both doc-level assertions end-to-end on the real `docs/quickstart-cloud.md`
+    # — i.e. the whole pre-cue half of this pin, defeated by one word (#14679
+    # review cycle 37). The run is capped-free and repeats, and it was measured
+    # at **0 flips over all 405 rows** plus the shipped doc before landing.
+    r"^(?:(?:(?:now|then|next|finally|lastly|immediately|again|simply|still"
+    r"|please|kindly)\s*,?\s+)+)?"
+    r"(?:(?:first(?:ly)?|also|just)\s*,?\s+)?"
     r"(?:(?:you\s+)?(?:must|should|need\s+to|have\s+to|can|could|will)\s+"
     r"|be\s+sure\s+to\s+|make\s+sure\s+to\s+)?"
     r"(?:"
@@ -2665,7 +2677,8 @@ def _cue_governing_clause(statements: list[str]) -> list[str]:
 # "After restarting, check the tools are present." and "Once the client restarts,
 # check the tools are present." all came back RED with the "inverts its own
 # restart cue" message over copy that plainly puts the restart FIRST (measured,
-# #14679 review at `18f99499d7`). The phrase is found ANYWHERE in the clause now,
+# #14679 review at `18f99499d7`). The phrase is found ANYWHERE IN THE CLAUSE'S
+# STATEMENT now — not in the clause alone, and not in the paragraph
 # because where the deferral sits in the sentence does not change what it defers.
 _DEFERRED_CHECK_RE = re.compile(
     r"\b(?:after|once|when|following|upon)\s+(?:\w+\s+){0,3}restart(?:ing|s|ed)?\b"
@@ -4194,6 +4207,20 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # unrelated earlier deferral does not make a later confirmation forward.
     ("Check the logs after restarting. Confirm the tools are actually there. "
      "Restart your client, then confirm the tools are actually there.", True),
+    # ── CYCLE 38 (#14679's review at `509d235dcce1`): form (f)'s leading slot had
+    # no SEQUENCER/ADVERB arm, so ONE leading word defeated the whole pre-cue
+    # half — measured: 39 of the 40 declared-RED pre-cue rows flipped GREEN and
+    # `Then confirm the tools … Restart your client, …` passed both doc-level
+    # assertions end-to-end on the real quickstart.
+    ("Now confirm the tools are actually there, then restart your client.", True),
+    ("Then confirm the tools are actually there. Restart your client.", True),
+    ("Next confirm the tools are actually there. Restart your client.", True),
+    ("Finally confirm the tools are actually there. Restart your client.", True),
+    # …while a leading sequencer in front of the RESTART is still forward copy:
+    ("Now restart your client, then confirm the tools are actually there.",
+     False),
+    ("Simply restart your client, then confirm the tools are actually there.",
+     False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
