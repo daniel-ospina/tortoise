@@ -12489,7 +12489,7 @@ def test_the_org_info_repoint_is_still_stated_as_the_numstat_the_document_read()
         _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8"))
     assert "04-plan.md" in positive, (
         "`05-verify.md` no longer states a MEASURED `numstat origin/main...HEAD` pair for "
-        "`04-plan.md`. The `org_info` span re-point (`17218-17295` -> `17319-17396`) is this "
+        "`04-plan.md`. The `org_info` span re-point (`17218-17295` -> `17375-17452`) is this "
         "branch's own work — `git diff --numstat origin/main...HEAD -- "
         "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints `1 1` — so the row "
         f"is not optional prose. Measured positive claims: {positive}")
