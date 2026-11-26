@@ -73,7 +73,7 @@ RESIDUAL_DOMAIN_ANSWER = 'a domain answer that carries an `error` key on purpose
 #: the fact, in BOTH halves: the narrowed clause is required PRESENT, and the claim
 #: that a total outage still nests is required ABSENT — an operator who read the old
 #: sentence would filter on `status` for orientation outages that no longer read `ok`.
-RESIDUAL_NESTED_REFUSAL = 'a PARTIAL summary of `tortoise_overview()` with no `section`'
+RESIDUAL_NESTED_REFUSAL = 'a PARTIAL summary of `tortoise_graph_overview()` with no `section`'
 STALE_TOTAL_OUTAGE_NESTING = 'a refusal buried deeper than the seam reads'
 #: What the gate actually scans — pinned so the doc cannot claim a narrower
 #: denominator than the one that holds the class shut.
