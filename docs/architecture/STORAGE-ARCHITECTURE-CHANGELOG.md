@@ -2775,10 +2775,11 @@ NINETEEN customer-callable read sites` blast-radius line) while the other TWO �
 many of the NINETEEN sites reach it` and `carries FIVE of the NINETEEN sites` — are read by NO arm
 (measured: rewriting BOTH to `EIGHTEEN` leaves all 61 of the file's tests green), and
 `_STATED_DOOR_COUNT` reads all three door statements, the `over the 16 distinct doors` parenthetical
-included. The cell-occurrence figure is not regex-graded at all: what is graded is its DERIVATION
-(`_customer_callable_doors()` 16 over 23 cells, plus the `attributed >= 23` and `total >= 23` floors),
-so a prose edit that left the table alone would not red — said plainly here rather than implied away
-by quoting only the graded figures.
+included. The cell-occurrence figure IS graded, though not where the paragraph above says: its own
+regex `\b(\d+) cell occurrences?\b` sits in `test_the_stated_door_count_matches_the_table` and is
+asserted EQUAL to the table's door instances (measured: `23` -> `24` reds it), while the separate
+DERIVATION floors are `attributed >= 23` and `total >= 23` — two different measurements of the same
+fact, which is why a prose edit CAN red here and why this sentence no longer claims otherwise.
 `tests/test_7948_about_object_read_sites.py` derives them from the table rather than trusting prose:
 read sites `FORTY-THREE` → `FORTY-FOUR`, customer-callable `EIGHTEEN` → `NINETEEN`, distinct doors
 `FIFTEEN` → `SIXTEEN` (nine MCP tools, TWO SDK methods, five REST routes — the new door is
