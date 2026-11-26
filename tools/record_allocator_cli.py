@@ -371,6 +371,41 @@ def _cmd_seed(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
     return _result_row(result)
 
 
+def _next_cutover_command(org_id: str, graph_id: str,
+                          counter_mode: str | None) -> str:
+    """The command THIS entry's state actually needs — ONE home (#14624 review F2).
+
+    ⛔ THE FIELD IS NOT A SEED COMMAND, and naming it one printed a HALF REMEDY for
+    two of the three states in this population. `seed` re-seeds MONOTONICALLY and
+    leaves the mode alone, so over a `seeded` row it changes nothing an allocation
+    reads (still `seeded`, so still nothing allocates) and over a `halted` row it
+    leaves the halt standing — the exact "green command, unchanged red field" shape
+    :func:`tortoise.record_writer.uncut_graph_remedy` exists to prevent. So only
+    the BORN-UNCUT state (`counter_mode is None`) gets the seed, which is what
+    CREATES that row; the two mode-bearing states are delegated to that function,
+    so the CLI does not grow a second copy of "which verb reaches this state".
+
+    NO DB, NO SIDE EFFECT: a pure function of the row `sweep` already read, so the
+    payload cannot claim a state the entry beside it does not carry.
+    """
+    if counter_mode is None:
+        # No row at all. The floor is that graph's OWN journal COUNT, which is what
+        # `--journal` counts (the two are interchangeable inputs to the same
+        # quantity — see `_journal_floor`), and `--enumerated-floor N` is the
+        # operator stating it by hand.
+        return (f"record_allocator_cli.py seed --org-id {org_id} "
+                f"--graph-id {graph_id} --journal <that graph's journal path>")
+    from tortoise import record_writer as rw
+
+    # `uncut_graph_remedy` WRAPS each command in backticks: that is formatting for
+    # its log and `/health` sites. A JSON field carries the command, not markdown,
+    # so the quotes come off — the ` then ` between two steps is the function's own
+    # separator and reads as the sequence an operator runs.
+    return rw.uncut_graph_remedy(
+        org_id, graph_id=graph_id, reason=f"mode_{counter_mode}"
+    ).replace("`", "")
+
+
 def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
     """READ-ONLY: which of this org's graphs are NOT CUT OVER (#13043 P1-1).
 
@@ -487,9 +522,16 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
             "counter_mode": counter_modes.get(graph_id),
             "journal_max_seq": int(row[0]) if row else 0,
             "journal_count": journal_count,
-            "seed_command": (
-                f"record_allocator_cli.py seed --org-id {args.org_id} "
-                f"--graph-id {graph_id} --journal <that graph's journal path>"),
+            # ⛔ ONE FIELD, ONE REMEDY PER STATE (#14624 review F2). This was
+            # `seed_command` for EVERY entry, and a seed is the right verb only for
+            # the born-uncut state: for the two states this same change added to
+            # the population it re-seeds monotonically and LEAVES THE MODE ALONE,
+            # so the one actionable field printed the half remedy
+            # `uncut_graph_remedy` exists to stop publishing. Renamed rather than
+            # left as `seed_command` because a field that prints `arm` is a name
+            # that lies about its own content.
+            "next_command": _next_cutover_command(
+                args.org_id, graph_id, counter_modes.get(graph_id)),
         }
         if args.floor is not None:
             # Reachable only for a SINGLE graph (the refusal above), and it is a

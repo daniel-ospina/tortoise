@@ -8450,17 +8450,17 @@ def _backup_watcher_health() -> dict:
 _UNCUT_CLEARS_NOTE = (
     "a restart, or an observation of that graph by THIS process (an armed write "
     "with TORTOISE_RECORD_ALLOCATE on, or a successful provision). "
-    "⛔ TWO STATES, TWO VERBS — one command does not reach both (#14610 review, "
-    "P2): for a graph with NO cursor row `record_allocator_cli.py backfill "
-    "--org-id <org> --arm --acknowledge-cutover` cuts the RECORD over (a bare "
-    "`backfill` only seeds the ROW, and a `seeded` row allocates nothing), "
-    "while a graph whose row already exists in mode `seeded` (`reason: "
-    "mode_seeded`) is OUTSIDE that verb's population — `backfill` prints "
-    "`considered: 0` and exits 0 — and is cured by `record_allocator_cli.py "
-    "arm --org-id <org> --graph-id <graph> --acknowledge-cutover`; a `halted` "
-    "one needs `reopen` first. Either runs in another process, so on a quiescent "
-    "graph — or with the allocator flag off — this process's entry, and `ok`, "
-    "clear only on restart"
+    "⛔ ONE POPULATION, THREE STATES (#14610 P2; re-cut by #14624 F1): `record_allocator_cli.py "
+    "backfill --org-id <org> --arm --acknowledge-cutover` reaches BOTH a graph with NO cursor "
+    "row AND one whose row exists in mode `seeded` (`reason: mode_seeded`) — the population is "
+    "everything NOT ALLOCATING, so a `seeded` row is re-seeded monotonically and then armed in "
+    "that same run (a bare `backfill` only seeds the ROW, and a `seeded` row allocates nothing). "
+    "It CANNOT lift a `halted` one: `arm` moves `seeded` → `active` ONLY, so "
+    "`record_allocator_cli.py reopen --org-id <org> --graph-id <graph>` comes FIRST, then "
+    "`backfill --arm` — or the single-graph `arm --org-id <org> --graph-id <graph> "
+    "--acknowledge-cutover`, the narrower verb for a `seeded` row. Either runs in another "
+    "process, so on a quiescent graph — or with the allocator flag off — this process's entry, "
+    "and `ok`, clear only on restart"
 )
 
 #: ⛔ WHAT A `halted` GRAPH IS ACTUALLY LOSING, published BESIDE

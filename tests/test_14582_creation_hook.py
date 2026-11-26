@@ -856,15 +856,21 @@ def test_the_payload_states_how_the_uncut_field_clears(monkeypatch):
     only on a restart. Publishing the count alone left an operator who ran the
     documented remedy staring at a red `ok` with no way to know why.
 
-    ⛔ AND ONE COMMAND DOES NOT REACH BOTH POPULATIONS (#14610 review, P2 —
-    ported here). The pre-F1 sentence said a bare `backfill` "heals the RECORD",
-    which is false twice: a bare `backfill` only SEEDS the row (a `seeded` row
-    allocates nothing), and `backfill`'s population is graphs with NO cursor row
-    — so a graph whose row already exists in mode `seeded` is outside it
-    entirely (`backfill` prints `considered: 0` and exits 0) and needs the `arm`
-    verb, while a `halted` one needs `reopen` first. An operator following the
-    old sentence on either of those populations got a green command and an
-    unchanged red field. The assertions below pin the verbs, not the prose.
+    ⛔ AND THE VERB IS PER STATE, BUT THE POPULATION IS ONE (#14610 review, P2 —
+    ported here; RE-CUT by #14624 review F1). The pre-F1 sentence said a bare
+    `backfill` "heals the RECORD", which is false: a bare `backfill` only SEEDS
+    the row and a `seeded` row allocates nothing, so `--arm` is part of the verb.
+    The other half of that fix claimed a `seeded` graph is OUTSIDE `backfill`'s
+    population — true at the time and FALSE since, because this same change
+    widened `UNCUT_GRAPHS_SQL` to `c.graph_id IS NULL OR c.mode <> 'active'`:
+    `backfill --arm` now re-seeds a `seeded` row monotonically and arms it in the
+    same run (MEASURED by
+    `test_a_non_arm_backfill_does_not_read_as_a_finished_cutover`, which sees
+    `considered: 1` / `armed: 1` there). What the population verb still cannot
+    reach is a `halted` row — `arm` is scoped `mode = 'seeded'` — so `reopen` is
+    that state's FIRST step. A note publishing the retired premise sends an
+    operator round the long route and calls the short one a no-op. The
+    assertions below pin the verbs, not the prose.
     """
     rw.reset_uncut_graphs()
     try:
@@ -888,10 +894,18 @@ def test_the_payload_states_how_the_uncut_field_clears(monkeypatch):
         assert "--arm" in note and "--acknowledge-cutover" in note, (
             "a bare `backfill` only SEEDS the row and a `seeded` row allocates "
             "nothing; the note must carry `--arm --acknowledge-cutover`")
-        assert "mode_seeded" in note and "considered: 0" in note, (
-            "a graph already in mode `seeded` is OUTSIDE `backfill`'s population "
-            "— an operator needs to see that its exit 0 and `considered: 0` do "
-            "not mean the row was cured")
+        assert "mode_seeded" in note and "considered: 0" not in note, (
+            "the note repeats the PRE-FIX premise: `backfill --arm` DOES reach a "
+            "`seeded` graph now (`UNCUT_GRAPHS_SQL` is `c.graph_id IS NULL OR "
+            "c.mode <> 'active'`), so telling an operator it prints "
+            "`considered: 0` over their seeded row sends them away from the "
+            "verb that cures it — the green-command/unchanged-red-field shape "
+            "this note exists to prevent (#14624 review F1)")
+        assert "seeded" in note and "OUTSIDE" not in note, (
+            "the note must NAME the `seeded` state without calling it outside "
+            "the population verb's reach — that is the claim the widened "
+            "`UNCUT_GRAPHS_SQL` now supports and the retired sentence "
+            "contradicted (#14624 review F1)")
         assert "arm --org-id" in note and "reopen" in note, (
             "the `seeded` population is cured by `arm`, and a `halted` one needs "
             "`reopen` first — naming neither leaves both red with no verb")
@@ -2323,22 +2337,28 @@ def _modes():
 
 
 def test_the_remedy_is_state_aware_because_one_command_cannot_reach_both():
-    """⛔ P2 (#14610 review): the published remedy could not reach `mode_seeded`.
+    """⛔ P2 (#14610 review, RE-CUT by #14624 review F1): the remedy is per state.
 
     The `armed_but_uncut` registry files a graph whose row EXISTS in mode
-    `seeded` under reason `mode_seeded`, and the message published for it named
-    the POPULATION verb — `backfill --arm --acknowledge-cutover`. That verb walks
-    `UNCUT_GRAPHS_SQL`, which keeps `c.graph_id IS NULL`, so a `seeded` graph is
-    excluded from its own remedy's population: MEASURED against a seeded row, it
-    printed `considered: 0, seeded: 0, refused: 0, armed: 0` and returned
-    `EXIT_OK` while the record leg stayed refused and `/health` stayed non-`ok`.
-    The verb that cures it is the single-graph `arm` (`ARM_SQL` is scoped
-    `AND mode = 'seeded'`), and a `halted` row needs `reopen` first because `arm`
-    refuses it BY DESIGN.
+    `seeded` under reason `mode_seeded`. #14610's fix named the single-graph `arm`
+    for it, and justified that against `UNCUT_GRAPHS_SQL`'s then-narrow
+    population (`c.graph_id IS NULL`, so a `seeded` graph sat outside the
+    population verb and `backfill` printed `considered: 0`). ⛔ THAT PREMISE IS
+    FALSE AT THIS HEAD: the same change widened the predicate to `c.graph_id IS
+    NULL OR c.mode <> 'active'` — so `backfill --arm` reaches a `seeded` row and
+    the docstring of the test that shipped the old claim was wrong about the tree
+    it shipped against.
+
+    The BEHAVIOUR is right for a different reason, which is the one stated here
+    now: the single-graph `arm` is the NARROWER verb for a row that only needs
+    arming (no re-seed, no org-wide run), and `--graph-id` costs an operator one
+    command. What the population verb still cannot reach is a `halted` row:
+    `ARM_SQL` is scoped `AND mode = 'seeded'`, so `reopen` must come first —
+    naming `arm` alone there is the no-op this function exists to prevent.
 
     NON-VACUITY: pre-fix this function took no keyword arguments at all, so this
-    call raises `TypeError` — and even a caller that could pass them would get
-    the population verb back, which is the assertion below that fails.
+    call raises `TypeError`; drop the `graph_id`/`reason` routing and every state
+    gets `backfill --arm`, which reds the `seeded` and `halted` arms below.
     """
     seeded, halted, _active = _modes()
 
@@ -2348,9 +2368,11 @@ def test_the_remedy_is_state_aware_because_one_command_cannot_reach_both():
     seeded_remedy = rw.uncut_graph_remedy(
         "org-14610", graph_id="g_seeded", reason=f"mode_{seeded}")
     assert "backfill" not in seeded_remedy, (
-        "a `mode_seeded` graph is OUTSIDE `backfill`'s population (`c.graph_id "
-        "IS NULL`), so publishing it is a false clean — the command exits 0 "
-        f"over 0 graphs — got {seeded_remedy!r}")
+        "a `mode_seeded` graph needs only the ARM, so the published remedy must "
+        "be the narrower single-graph verb — the population verb reaches it too "
+        "(`c.graph_id IS NULL OR c.mode <> 'active'`), but it re-seeds the row "
+        "org-wide to say so: got "
+        f"{seeded_remedy!r}")
     assert "arm" in seeded_remedy and "--graph-id g_seeded" in seeded_remedy, (
         "the single-graph verb must name BOTH the graph and the arm — got "
         f"{seeded_remedy!r}")
@@ -2381,6 +2403,12 @@ def test_the_warning_publishes_the_verb_that_reaches_the_observed_state(caplog):
     for a `mode_seeded` graph named the wrong verb — which is the P2 in its
     shipped form.
 
+    ⛔ The `backfill` exclusion here is NARROWNESS, not reachability (#14624
+    review F1): the population verb now DOES reach a `seeded` row, so a line that
+    named it would not be a no-op — but this site knows the graph AND the reason,
+    so it must publish the narrower one-command remedy, not send the operator to
+    an org-wide re-seed to fix one graph.
+
     NON-VACUITY: pre-fix the emitted line carries `backfill` and no `--graph-id`.
     """
     import logging
@@ -2392,8 +2420,9 @@ def test_the_warning_publishes_the_verb_that_reaches_the_observed_state(caplog):
     line = " ".join(r.getMessage() for r in caplog.records)
     assert "g_seeded" in line and "org-14610" in line, line
     assert "backfill --org-id" not in line, (
-        "the warning for a `mode_seeded` graph still names the population verb, "
-        f"which cannot reach it — got {line!r}")
+        "the warning for a `mode_seeded` graph names the org-wide population "
+        "verb while it has the graph in hand — the narrower `arm --graph-id` is "
+        f"the remedy this graph needs — got {line!r}")
     assert "arm --org-id org-14610 --graph-id g_seeded" in line, (
         f"the warning must name the verb that reaches this graph — got {line!r}")
 

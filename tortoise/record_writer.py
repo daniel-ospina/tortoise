@@ -3268,19 +3268,18 @@ def uncut_graph_remedy(org_id: str = "<org>", *,
     It is a FUNCTION rather than a constant so the six sites that publish it
     cannot drift apart, and so the org id is interpolated where it is known.
 
-    ⛔ AND IT IS STATE-AWARE, because ONE command cannot reach every state
-    (#14610 review, P2 — measured against a `seeded` row, not read off the
-    source). The population verb above walks `UNCUT_GRAPHS_SQL`, which joins the
-    cursor row and keeps `WHERE c.graph_id IS NULL` (`record_allocator.py`) —
-    i.e. graphs that have NO row. A graph whose row EXISTS in mode `seeded` is
-    outside that population by construction: `/health` reports it as
-    `armed_but_uncut` reason `mode_seeded`, and running the population verb over
-    it prints `considered: 0`, heals nothing, and exits `EXIT_OK`. The verb that
-    DOES cure it is the single-graph `arm` (`ARM_SQL` is scoped `AND mode =
-    'seeded'`), which needs `--graph-id` and carries the same
-    `--acknowledge-cutover` gate; a `halted` row needs the operator's `reopen`
-    first (`ARM_SQL` refuses `halted` BY DESIGN, so naming `arm` alone there
-    would send them to a no-op).
+    ⛔ AND IT IS STATE-AWARE, because the verbs are not interchangeable even now
+    that ONE population carries every state (#14624 review F1). `UNCUT_GRAPHS_SQL`
+    joins the cursor row and keeps `WHERE c.graph_id IS NULL OR c.mode <>
+    'active'` (`record_allocator.py`) — i.e. everything NOT ALLOCATING — so the
+    population verb `backfill --arm --acknowledge-cutover` DOES reach a graph
+    whose row exists in mode `seeded`: it re-seeds monotonically and arms in the
+    same run. What it cannot reach is a `halted` row, because `ARM_SQL` is scoped
+    `AND mode = 'seeded'`: that one needs the operator's `reopen` FIRST, and
+    publishing `arm` alone there would send them to a no-op. The single-graph
+    `arm` (`--graph-id`, same `--acknowledge-cutover` gate) is the narrower verb
+    for a `seeded` row, which is what this function returns for `mode_seeded`:
+    one graph, no re-seed, the same terminal state.
 
     So the callers that KNOW the reason and the graph pass them. A caller with
     no reason (a static site) still gets the population verb, which is correct

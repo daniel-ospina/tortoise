@@ -419,6 +419,57 @@ def test_the_sweep_reports_which_not_cut_over_state_each_graph_is_in() -> None:
         f"the payload must say what `count: 0` means: {payload.get('count_means')!r}")
 
 
+def test_each_state_is_handed_the_command_that_actually_reaches_it() -> None:
+    """⛔ THE ENTRY'S ONE ACTIONABLE FIELD MUST NOT PRINT A HALF REMEDY (#14624 F2).
+
+    Every entry used to carry `seed_command`, and `seed` is the right verb for
+    exactly ONE of the three states this population now holds. `seed` re-seeds
+    MONOTONICALLY and leaves the mode alone, so over a `seeded` row it changes
+    nothing an allocation reads (still `seeded`, so still nothing allocates) and
+    over a `halted` row it leaves the halt standing. That is the "green command,
+    unchanged red field" shape `record_writer.uncut_graph_remedy` exists to
+    prevent — published by the field an operator acts on, beside the mode that
+    refutes it.
+
+    The mode-bearing states are delegated to that one home, so this test is also
+    the CLI's pin against a second copy of the verb table: a local `if seeded:`
+    re-derivation drifts the day `ARM_SQL`/`HALT_SQL` move.
+
+    NON-VACUITY: pre-fix the field is named `seed_command` (KeyError) — and even
+    renamed, every entry would carry `seed --org-id o --graph-id <g>`, which reds
+    both mode arms below.
+    """
+    conn = _SweepConn(["g-seeded", "g-halted", "g-born"], max_seq=4,
+                      modes={"g-seeded": "seeded", "g-halted": "halted"})
+    payload = _sweep(type("A", (), {"org_id": "o", "floor": None,
+                                    "journal": None})(), conn)
+    commands = {e["graph_id"]: e["next_command"] for e in payload["uncut_graphs"]}
+
+    # BORN UNCUT: no row at all, so a SEED is what creates one — and its floor is
+    # that graph's own journal, which is why the flag is `--journal`, not a
+    # magic number.
+    born = commands["g-born"]
+    assert " seed --org-id o --graph-id g-born" in born, born
+    assert "--journal" in born and "--enumerated-floor" not in born, (
+        f"a born-uncut graph's floor comes from ITS journal — got {born!r}")
+
+    # SEEDED: the row exists and only needs arming. The narrower verb, because
+    # this entry is one graph (`backfill --arm` reaches it too, org-wide).
+    seeded = commands["g-seeded"]
+    assert " arm --org-id o --graph-id g-seeded" in seeded, (
+        f"a `seeded` row allocates nothing until it is ARMED — got {seeded!r}")
+    assert "seed" not in seeded.replace("seeded", ""), (
+        f"`seed` leaves the mode alone, so it is the half remedy here — got {seeded!r}")
+    assert "--acknowledge-cutover" in seeded, (
+        f"`arm` carries the cutover acknowledgement gate — got {seeded!r}")
+
+    # HALTED: `ARM_SQL` is scoped `mode = 'seeded'`, so `arm` ALONE is a no-op and
+    # `reopen` must be the first step (the order, not just the presence).
+    halted = commands["g-halted"]
+    assert "reopen" in halted and halted.index("reopen") < halted.index("arm --org-id"), (
+        f"a halted row needs `reopen` BEFORE `arm`, or the command is a no-op: {halted!r}")
+
+
 def test_the_sweep_does_not_assert_a_floor_it_never_counted() -> None:
     """FINDING 4: `floor_is_the_journals_count: True` was a LITERAL.
 
