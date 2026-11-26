@@ -2389,7 +2389,24 @@ def _negated_observation_only(clause: str) -> bool:
     if re.search(r"\b(?:confirm|check|verif(?:y|ies|ied|ying)"
                  r"|ensur(?:e|es|ed|ing))\w*\b", clause[neg.end():]):
         return False
-    remainder = clause[: neg.start()]
+    # ⛔ THE REMAINDER IS THE CLAUSE WITH THE NEGATED OBSERVATION *DELETED*, NOT
+    # THE PREFIX IN FRONT OF IT. A prefix-only remainder asks only what is LEFT of
+    # the observation, so a graded claim stated AFTER it was invisible to this
+    # skip: "Restart your client seeing no errors only once the tools are actually
+    # there" is form (e) with no confirmation verb for the arm above to catch, so
+    # it was classified observation-only and shipped GREEN while its
+    # negation-free twin is a declared RED row (#14679's review at `4aa1fc78`,
+    # Finding 1 — the one reproduction cycle 36's suffix arm did not close;
+    # measured GREEN at `31554d14` and RED with this splice). Splicing the suffix
+    # onto the prefix keeps every form gradable ACROSS the seam instead of
+    # discarding one side of it. This complements, and does not replace, the arm
+    # above: the forms that need their predicate in the connective's OWN clause
+    # (a)/(c)/(d) are closed by that predicate test, because deleting the span
+    # leaves `after  errors and confirming …`, which no form matches. Widening the
+    # remainder flips **0 of 417** declared rows (measured at `31554d14` by
+    # re-running the whole table under this splice) — no forward row depends on
+    # the discarded suffix.
+    remainder = clause[: neg.start()] + " " + clause[neg.end():]
     return not any(pattern.search(remainder) for pattern in _INVERSION_FORMS)
 
 # A clause that opens with one of these continues the cue FORWARD ("restart,
@@ -4121,6 +4138,33 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # was classified as observation-only and skipped:
     ("Restart your client after seeing no errors and confirming the tools are "
      "actually there.", True),
+    # ── …CYCLE 39, the same hole stated as Finding 1 in the review at
+    # `4aa1fc78`: the skip is CLAUSE-WIDE, so a claim to the RIGHT of the negated
+    # observation must still be graded. Four of these pin the cycle-36 suffix arm
+    # (they were GREEN before it and no row covered them); the fifth is form (e),
+    # which has no confirmation verb for that arm to see — the PREFIX-ONLY
+    # remainder was what skipped it, and the splice above is what grades it
+    # (measured GREEN at `31554d14`, RED after). One row per form, so a regression
+    # names the arm that lost the discriminator:
+    ("Restart your client after you saw no errors and verified the tools are "
+     "actually there.", True),                                 # (a)
+    ("Restart your client having noticed no errors and first confirmed the "
+     "tools are actually there.", True),                       # (b)
+    ("Restart your client, but having seen no errors first confirm the tools "
+     "are actually there.", True),                             # (c)
+    ("Restart your client but having noticed no errors confirm the tools are "
+     "actually there beforehand.", True),                      # (d)
+    ("Restart your client seeing no errors only once the tools are actually "
+     "there.", True),                                          # (e) — splice
+    # …and the discriminator must not become "any negation reds the clause":
+    # when the negation's own complement IS the tools object, or when nothing
+    # follows it to grade, the observation is the clause's ONLY claim and the
+    # skip must still fire (these three are GREEN at the head and under the
+    # splice alike):
+    ("Restart your client seeing no tools in the list only once the list has "
+     "loaded.", False),
+    ("Restart your client after you have noticed no errors in the log.", False),
+    ("Restart your client if you see no `tortoise_*` tools in the list.", False),
     # (2) when a `before|until|by the time` governor is known AND a break glyph
     # sits immediately after the cue, the post-cue list is empty, so form (f) —
     # which only the post-cue side reaches — graded nothing. Every non-comma
