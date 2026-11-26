@@ -3586,11 +3586,11 @@ def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     # own REST door), and `_door_reaches` accepts exactly one pair for it. This floor
     # tracks §13's cell-occurrence count and moves WITH the table, as the note below
     # requires. ⚠️ It is NOT a per-occurrence tripwire: the figure it bounds is
-    # `total` (accepted PAIRS, 28 here) against 22, so it reds on a loss of 7 or more,
+    # `total` (accepted PAIRS, 28 here) against 23, so it reds on a loss of 6 or more,
     # not on one. The one-occurrence tripwire is the sibling arm's
-    # `attributed >= 22`, where `attributed` IS the occurrence count.
-    assert total >= 22, (
-        f"only {total} pairs are accepted although §13's cells name 22 door "
+    # `attributed >= 23`, where `attributed` IS the occurrence count.
+    assert total >= 23, (
+        f"only {total} pairs are accepted although §13's cells name 23 door "
         "occurrences (the count the table arm pins) — the predicate has broken the "
         "other way"
     )
@@ -3709,8 +3709,17 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # (31 -> 30), #11609 batch 1 archived `tortoise_backfill_v25`, taking row 32's
     # MCP door with it (30 -> 29), #12901 retired the row's surviving SDK door
     # `backfill_v25` itself (29 -> 28), and #13448 registered row 45
-    # (`ended.py::build_cypher`), whose ONE door is the SDK's (28 -> 29 — its MCP twin
-    # cannot pass `ended_scope`, so it is not a door; see that row's reach cell).
+    # (`ended.py::build_cypher`) with ONE door, the SDK's (28 -> 29).
+    # ⛔ The "its MCP twin cannot pass `ended_scope`, so it is not a door" reading of
+    # that row was refuted by measurement: NEITHER door accepts `ended_scope` — the
+    # scope is set INSIDE the shared `_tortoise_fts_query` when the query is a plain
+    # ending question (`state_intent.detect_state_question`), and both handlers forward
+    # the plain query with default knobs, so the router fires for either and the chain
+    # the arm follows IS the reach path. Row 45 therefore names BOTH doors and this
+    # numeral moved 22 -> 23 with that cell — a CELL-OCCURRENCE move only: no new
+    # DISTINCT door (`MCP tortoise_search` was already in the table's door set) and no
+    # new accepted PAIR (the predicate already accepted this one, so the 28-pair pin
+    # does not move).
     # ⛔ #13899 then retired ten SDK-door occurrences and re-pointed two (29 -> 21): the
     # six methods those cells named (`tortoise_fts_query`, `recall_state`,
     # `recall_subgraph`, `belief_timeline`, `topic_summarize`, `ingest`) all left the
@@ -3720,10 +3729,14 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # one, at its live spelling: `write_knowledge_batch` (measured to reach `_ingest`) and
     # `search_knowledge` (measured to reach `ended.py::build_cypher` via `ended_scope`).
     # A table change moves this numeral with the table — 21 -> 22 at `#14592`'s head
-    # (`cy-14593`), where row 46 contributed ONE cell occurrence of its own.
-    assert attributed >= 22, (
+    # (`cy-14593`), where row 46 contributed ONE cell occurrence of its own — and
+    # 22 -> 23 where row 45's cell names its SECOND door (`MCP tortoise_search`; the
+    # note above records the measurement that refuted the "not a door" reading). Both
+    # moves are CELL-OCCURRENCE moves: the distinct door set is 16 either way and the
+    # accepted-PAIR pin is 28 either way.
+    assert attributed >= 23, (
         f"only {attributed} door attributions were attempted across the "
-        f"customer-callable rows, and this arm cross-checks against NO fewer than 22 "
+        f"customer-callable rows, and this arm cross-checks against NO fewer than 23 "
         f"hand-counted occurrences — a partial `_doors()` regression (one door KIND "
         f"resolving for only some of its rows) subtracts from `attributed` and "
         f"`expected` alike, so this floor is the only thing that reds on it"
