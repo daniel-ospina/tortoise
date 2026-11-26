@@ -4103,6 +4103,49 @@ def test_the_PRODUCER_and_the_SCORER_share_ONE_error_predicate():
             f"the producer answered {call!r} while the scorer says failed={expected}")
 
 
+def test_the_PEER_probe_keeps_the_MCP_error_arm():
+    r"""Reds if `verify_independent._call` loses the MCP `isError` arm.
+
+    ⛔ #14723 review, cycle 3, P2. `verify_independent.py` deliberately does NOT
+    import `score_t6.call_failed`: it is run standalone from `/tmp` against a
+    checkout it resolves itself, so it must not depend on the bundle being
+    importable. Its error arm is therefore a MIRROR of `run_readback.py`'s rather
+    than the shared predicate — and a mirror the tree did not read CAN drift. The
+    consequence of drift is the round-6 defect returning in a THIRD file: a failed
+    MCP call recorded as `{"ok": True, "reply": ["Error: …"]}`, i.e. a timeout
+    published as a silent door in a probe `REPORT.md` calls "re-runnable".
+
+    Measured before this test: `rg -l 'verify_independent' tests/ tools/` is EMPTY
+    — no test opened the file at all — so deleting the arm left 96 passed.
+    """
+    src = (BUNDLE / "verify_independent.py").read_text()
+    # ⛔ NORMALISED, because the predicate is LINE-WRAPPED in both files
+    # (`getattr(res, "is_error",\n  None) is True`): a raw substring search reds
+    # on a healthy file, which is a false block and not a gate.
+    flat_src = " ".join(src.split())
+    assert 'getattr(res, "isError", None) is True' in flat_src, (
+        "verify_independent._call lost the MCP `isError` arm — a tool EXECUTION "
+        "error inside a successful transport reads as an ANSWERED-EMPTY call "
+        "again, which is how D4 was first published from calls that never ran")
+    assert 'getattr(res, "is_error", None) is True' in flat_src, (
+        "verify_independent._call keeps only one spelling of the MCP error flag; "
+        "the snake_case one is what some client versions set")
+    assert '"ok": False' in src, (
+        "verify_independent._call no longer returns a failure ENVELOPE, so a "
+        "consumer reading `ok` cannot see the error it just detected")
+    # ⛔ AND THE MIRROR IS CHECKED AGAINST THE FILE IT MIRRORS. Pinning only the
+    # probe's copy would let `run_readback.py`'s arm move while the probe keeps
+    # mirroring a spelling the producer abandoned — drift in either direction is
+    # the same defect.
+    rb = " ".join((BUNDLE / "run_readback.py").read_text().split())
+    for fragment in ('getattr(res, "isError", None) is True',
+                     'getattr(res, "is_error", None) is True',
+                     'f"MCP isError: {out!r}"[:400]'):
+        assert fragment in rb, (
+            f"run_readback.py no longer carries {fragment!r} — the arm this probe "
+            "mirrors has moved, so the mirror is now of nothing")
+
+
 def _producer_answered(reply, call=None):
     """`run_readback._answered`'s rule, taken from the file, not restated."""
     source = (BUNDLE / "run_readback.py").read_text()
