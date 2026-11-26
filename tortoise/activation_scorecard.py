@@ -354,15 +354,15 @@ FUNNEL_QUERY = (
 #
 # The prefix is INTERPOLATED from its one owner (``session_schema``), not bound
 # as a ``$`` parameter, and what that buys is LINE COST, stated at its real size:
-# the one PRODUCTION execution is ``hosted_api.py:28477`` (the two TEST sites are
+# the one PRODUCTION execution is ``hosted_api.py:29604`` (the two TEST sites are
 # ``tests/test_activation_scorecard.py`` — a stubbed ``_G``, through the hosted
 # route — and ``tests/test_demo_session_read_exclusion_8290.py``, which queries it
 # directly on a real embedded engine), and a ``params=…`` argument there does not
 # fit in 100 columns, so it wraps and pushes later lines down. Measured over every
 # ``hosted_api.py:<line>`` cite in the tracked tree: **7** distinct cite
-# targets have a line number LARGER than 28477 (35810 … 99999) and those are the
-# ones that shift; **475** have a number smaller than it (26 … 28446) and cannot
-# move. (483 distinct targets in all — the remainder is 28477 itself, which this
+# targets have a line number LARGER than 29604 (36937 … 99999) and those are the
+# ones that shift; **476** have a number smaller than it (26 … 28446) and cannot
+# move. (484 distinct targets in all — the remainder is 29604 itself, which this
 # very comment names. NEVER re-take these by hand — that is how they went wrong
 # twice. `uv run python tools/hosted_api_cite_census.py --refresh` re-states every
 # figure in this note AND the list-helper's in one command whenever
@@ -404,15 +404,18 @@ FUNNEL_QUERY = (
 # 93 below / 1 at it, so the pivot ITSELF was among the rows, and TWO of them were also
 # cited elsewhere — that pivot (`28477`) and line `19186` — so
 # 244 − 2 = **242**. `main`'s `#14592` then restamped the appendix (its own lines
-# moved), and at THIS branch's base `1aef0b618bcf` it reads 244 split **150 / 93 / 1**
+# moved), and at this branch's base it reads 244 split **150 / 93 / 1**
 # with NEITHER of those two rows present and only the pivot shared, so 244 − 1 =
 # **243**. Both counts are right at their own base; a reader who calls 242 wrong is
 # counting a tree it was never measured on. (Measured with the appendix's own address
 # shape at each sha: `git grep -a -o -E '[[:alnum:]_.-]*hosted_api\.py:[0-9]+' <sha> --
 # docs/architecture/CYPHER-INVENTORY.md`. At `939e37f664` the rows `19186` and `28477`
-# are both present; at `1aef0b618bcf` neither is.) ⛔ Re-take these by MEASUREMENT at
-# the base you are describing, never by adjusting the numbers above: that arithmetic is
-# what produced the stale set in the first place.
+# are the two shared targets; at the shipping base only `29604` is.) ⛔ THE SPLIT IS
+# RE-MEASURED AT EVERY REBASE, never carried: `#14625`'s rebase onto `c1c8df1a3817`
+# moved the appendix's own line numbers and left every one of the four figures
+# IDENTICAL (244 distinct, 150 above / 93 below / 1 at, only the pivot shared elsewhere),
+# which is what a line-number-only restamp must do — and is why the base sha is named in
+# this clause rather than a figure.
 # ``STAGE3_PREDICATE`` is interpolated for the same reason, but as a predicate
 # EXPRESSION (``WHERE ({STAGE3_PREDICATE}) AND …``), never inside a quoted
 # literal — so escaping is not what it needs. The one value interpolated INSIDE a
