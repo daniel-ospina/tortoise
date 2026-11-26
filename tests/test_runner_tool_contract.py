@@ -1155,10 +1155,15 @@ def test_the_published_help_parser_reads_the_event_command():
     `co` is this machine's alias, `accessibility`/`environment`/`mintty` are HELP TOPICS and
     `--help`/`--version` are FLAGS, so a parser that regressed to a flat `^  ([a-z-]+)` scan
     fails here instead of quietly widening the list.
+
+    ⛔ The ALIAS exclusion has no assertion of its own ON PURPOSE: the equality above already
+    grades it, because the fixture carries an ALIAS section, so `co` in `parsed` fails that
+    line. A second `"co" not in parsed` line is unreachable — measured: every mutant that
+    harvests `co` reds the equality FIRST — and an assertion that can never fire is dead
+    weight that reads as coverage (agent-infra#3442 rule 3).
     """
     parsed = _parse_published_gh_subcommands(_GH_HELP_FIXTURE)
     assert parsed == {"auth", "pr", "repo", "run", "api", "event", "org"}, sorted(parsed)
-    assert "co" not in parsed, "the ALIAS section is not `gh`'s command set"
     assert "event" in _GH_SUBCOMMANDS, (
         "`gh event` (2.105.0's Event Streams preview) is not in the closed list, so "
         "`gh event listen` reads CLEAN in a workflow scan"
