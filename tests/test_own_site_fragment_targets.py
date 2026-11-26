@@ -88,10 +88,14 @@ than it is:
     URL carries no quote for ``_JS_STR`` to read, so a QUOTED URL in that
     position would be read as live: a false RED, never a false pass.
   * a ROOT-RELATIVE href carrying a fragment (``href="/docs#appeal"`` — the
-    site's dominant link style, used by ``website/docs.html:127``) is NOT read:
+    site's dominant link style, e.g. ``website/docs.html:128``) is NOT read:
     ``_OWN_URL`` needs an own host and ``_SAME_PAGE`` needs ``href="#``. No page
     carries one today. Closing it means resolving a bare path against the
     company host as the base, which is a table this file does not have.
+  * ``www.premiselabs.co`` is READ and REFUSED rather than resolved: it has no
+    DNS record (NXDOMAIN on three resolvers), so a ``www.`` link is a broken
+    destination and ``resolve()`` returns ``None`` for it. It stays in
+    ``OWN_HOSTS`` on purpose — dropping it would stop reading those links.
 """
 from __future__ import annotations
 
@@ -109,6 +113,15 @@ sys.path.insert(0, str(TESTS_DIR))
 from _html_links import extract_element_ids  # noqa: E402
 
 OWN_HOSTS = ("premiselabs.co", "www.premiselabs.co", "tortoise.premiselabs.co")
+
+#: Hosts this scan still READS but refuses to resolve, so a link on one of them is
+#: RED rather than silently absent or silently green. ``www.premiselabs.co`` has no
+#: DNS record at all (NXDOMAIN on 1.1.1.1, 8.8.8.8 and 9.9.9.9 — measured), so a
+#: ``www.`` link is a broken destination no matter how good its fragment is; while
+#: it stayed in the reachable table it resolved to `docs.html` and read GREEN.
+#: Removing it from ``OWN_HOSTS`` instead would stop reading ``www.`` links
+#: entirely, which is the false-pass direction this file exists to prevent.
+UNSERVED_HOSTS = ("www.premiselabs.co",)
 
 #: The retired-but-permanent host. `_middleware.ts` 301s it onto the PRODUCT
 #: PREFIX, so its ROOT is `/tortoise` (`product.html`) — NOT the company page
@@ -276,6 +289,10 @@ def resolve(host: str, path: str) -> str | None:
     # FALSE RED on a working link. It applies to EVERY host, not just the
     # retired one, which is why it is here rather than inside the branch below.
     path = path.rstrip("/") or "/"
+    if host in UNSERVED_HOSTS:
+        # Read, and refused: see UNSERVED_HOSTS. `None` makes the caller report an
+        # unmapped host, which is the verdict a NXDOMAIN link deserves.
+        return None
     if path == "/index.html":
         # `_redirects` 301s `/index.html` to the ROOT, and which page that is
         # depends on the HOST — so it is normalised here rather than given a row
@@ -449,3 +466,19 @@ def test_same_page_fragments_resolve():
         "same commit and say which). A count cannot tell those apart."
     )
     assert not dead, "same-page fragment with no such id:\n" + "\n".join(dead)
+
+
+def test_a_host_that_does_not_resolve_is_refused_not_resolved():
+    """`www.premiselabs.co` is READ and REFUSED — not silently green.
+
+    It has no DNS record (NXDOMAIN on three public resolvers, measured), so a
+    ``www.`` link is a broken destination however good its fragment is. While it
+    resolved through the ordinary table it read GREEN, because the path maps to a
+    real page on the host it redirects to. ``UNSERVED_HOSTS`` is the refusal; this
+    pin keeps it a refusal, and keeps the host in ``own_site_targets()``'s scan so
+    a ``www.`` link is still SEEN rather than quietly ignored.
+    """
+    for host in UNSERVED_HOSTS:
+        assert host in OWN_HOSTS, f"{host} must stay READ, not dropped from the scan"
+        assert resolve(host, "/docs") is None, f"{host} resolved — it does not exist"
+    assert resolve("premiselabs.co", "/docs") == "docs.html"
