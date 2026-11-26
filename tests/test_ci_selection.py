@@ -10585,7 +10585,17 @@ _H_14544_INVERTED_RE = re.compile(
     r"|ONLY\s+half[^;.!?]{0,60}?\b(?:not|never)\b[^;.!?]{0,20}?exempt\b"
     r"|paragraph\s+DOES\s+exclude"
     # …and the provenance claim kept only to be RETRACTED (#14623 review round 12, F5).
-    r"|own\s+edit[^.;!?]{0,40}?(?:which\s+is\s+(?:false|untrue|wrong)|is\s+(?:false|untrue|wrong))",
+    r"|own\s+edit[^.;!?]{0,40}?(?:which\s+is\s+(?:false|untrue|wrong)|is\s+(?:false|untrue|wrong))"
+    # ⛔ AND THE SECOND-NOUN FORMS THE WIDENED POSITIVE PIN ADMITS (#14623 round 25, P2). The
+    # round-24 widening added `REGISTRATION(?:\s+half|\s+alone)?\s+is\s+exempt` to
+    # `_H_14544_SCOPE_RE` — a pattern that `search`es, so a sentence that starts with the scope
+    # claim and then HOWLS THE ROW IN satisfies it. "The REGISTRATION is exempt, and so is the
+    # row" states the exact reading `#14612` deletes and matched no alternative here, so the arm
+    # stayed GREEN over it — measured on this tree by substituting that sentence into the live
+    # paragraph: GREEN, where the pre-round-24 pin RED'd it. Widening the pin without widening this
+    # ban is the round-15 defect repeated, so the three conjunctions that grant the SECOND half
+    # are banned here, and the non-vacuity loop below reads each of them.
+    r"|so\s+is\s+the\s+row\b|as\s+well\s+as\s+the\s+row\b|row\s+is\s+too\b",
     re.IGNORECASE)
 
 
@@ -10785,7 +10795,10 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # is asserted only against the live block, so narrowing it is invisible. Both spellings the
     # failure message names must still be READ, and the bare token pair with no exempt predicate
     # beside it must NOT be (that is a TRUE sentence about the paragraph, not the inverse).
-    for inverse in ("both halves are exempt", "this paragraph DOES exclude it"):
+    for inverse in ("both halves are exempt", "this paragraph DOES exclude it",
+                    "The REGISTRATION is exempt, and so is the row",
+                    "The REGISTRATION is exempt as well as the row",
+                    "The REGISTRATION half is exempt, and the row is too"):
         assert _H_14544_INVERTED_RE.search(inverse), (
             f"the inverted-claim pattern no longer reads {inverse!r}, so the assertion above passes "
             "over any spelling of the reading `#14612` deletes — re-point `_H_14544_INVERTED_RE`")
