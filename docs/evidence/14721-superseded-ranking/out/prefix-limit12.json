@@ -1,0 +1,102 @@
+{
+ "label": "prefix-limit12",
+ "query": "Did ColdPath fail its cold-chain audit, and what did we do about it?",
+ "rows": [
+  {
+   "rank": 1,
+   "id": "pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078",
+   "status": "superseded",
+   "content": "ColdPath Logistics holds a validated cold-chain certificate",
+   "superseded_by": {
+    "id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+    "content_snippet": "Two of ColdPath's vehicles could not show a validated cold-chain certificate, so ColdPath does not hold a validated cold",
+    "created_at": "2026-11-26T15:06:41.006129+00:00",
+    "superseded_at": "2026-11-26T15:06:41.006129+00:00",
+    "source": "doc-05"
+   }
+  },
+  {
+   "rank": 2,
+   "id": "pt_bc95cd1ebe4549b9cc51b060b6196c92e9967c79034213377099462be4d409",
+   "status": "live",
+   "content": "The wholesale licence forbids subcontracting the delivery of chilled goods to a partner that does not hold a v",
+   "superseded_by": null
+  },
+  {
+   "rank": 3,
+   "id": "pt_7bd69d604cd4445a25e75a07586f14e80984b67f03972c19396675b8276132",
+   "status": "live",
+   "content": "The cold chain must stay below 4 degrees Celsius at all times from the loading bay to the customer's door, wit",
+   "superseded_by": null
+  },
+  {
+   "rank": 4,
+   "id": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f",
+   "status": "live",
+   "content": "We revert to NordicFreight as our delivery partner and stop using ColdPath Logistics",
+   "superseded_by": null
+  },
+  {
+   "rank": 5,
+   "id": "pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55a8abf",
+   "status": "live",
+   "content": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes",
+   "superseded_by": null
+  },
+  {
+   "rank": 6,
+   "id": "pt_d1008a76210e80dc8ba9805fea4d5c6105e1648293f57eaba9cbc7fc613ee8",
+   "status": "live",
+   "content": "The ColdPath choice is not viable and we cannot keep using ColdPath Logistics for chilled deliveries",
+   "superseded_by": null
+  },
+  {
+   "rank": 7,
+   "id": "pt_94b2d0840c239501d3d8ae75090bc92300499a7ca9abe94d585f2a6eb600ca",
+   "status": "live",
+   "content": "Our wholesale licence forbids subcontracting chilled goods to a partner without a validated cold-chain certifi",
+   "superseded_by": null
+  },
+  {
+   "rank": 8,
+   "id": "pt_be134ce17647febe4a047bec9c757f2a895e90e9c1b54c11f32d7b0544991f",
+   "status": "superseded",
+   "content": "We are switching our delivery partner to ColdPath Logistics",
+   "superseded_by": {
+    "id": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f",
+    "content_snippet": "We revert to NordicFreight as our delivery partner and stop using ColdPath Logistics",
+    "created_at": "2026-11-26T15:06:41.182036+00:00",
+    "superseded_at": "2026-11-26T15:06:41.182036+00:00",
+    "source": "doc-05"
+   }
+  },
+  {
+   "rank": 9,
+   "id": "1a2186438de-ff295eab9ffc",
+   "status": "live",
+   "content": "validated cold-chain certificate",
+   "superseded_by": null
+  },
+  {
+   "rank": 10,
+   "id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+   "status": "live",
+   "content": "Two of ColdPath's vehicles could not show a validated cold-chain certificate, so ColdPath does not hold a vali",
+   "superseded_by": null
+  },
+  {
+   "rank": 11,
+   "id": "pt_33c51c38530ad478a79db91aff50d628511516d19bf0535e22ad1f286fdd5f",
+   "status": "live",
+   "content": "The subcontracting restriction is a licence constraint, not a preference, and any partner without a validated ",
+   "superseded_by": null
+  },
+  {
+   "rank": 12,
+   "id": "1a218643887-12e1949b7bf9",
+   "status": "live",
+   "content": "cold chain",
+   "superseded_by": null
+  }
+ ]
+}
