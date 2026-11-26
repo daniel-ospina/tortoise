@@ -339,10 +339,12 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
  *  * `scanSaturated` / `unavailable` — the feed's two "we may not have seen
  *    everything" facts, carried through rather than dropped by the move;
  *  * `feedLoaded` — whether the read that backs `alerts` has SETTLED. A FOURTH
- *    fact, and the only one a caller can omit and still be honest, because it
- *    defaults to `false`: the panel then says it is still checking instead of
- *    printing `LEDGER_EMPTY` ("You have no notifications."), which is a claim
- *    about the Organization's state that an unread feed cannot support. There is
+ *    fact, and one of the TWO a caller can omit and still be honest, because it
+ *    defaults to `false`: the panel then withholds `LEDGER_EMPTY` ("You have no
+ *    notifications.") — a claim about the Organization's state that an unread
+ *    feed cannot support — and prints whichever of the two unsettled sentences
+ *    `feedRequested` selects below, so omitting BOTH says "not checked yet",
+ *    never "still checking". There is
  *    exactly ONE production caller (`main.jsx`, which tracks `alertsLoaded` on the
  *    read it already owns) and it must pass `true` once that read settles;
  *    defaulting to `true` HERE would make the false all-clear the silent path
