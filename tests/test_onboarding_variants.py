@@ -1742,7 +1742,7 @@ _CONFIRM_PREDICATE = (
 # ⛔ The plural branch is listed FIRST and covers `tools list` on its own; the
 # second branch exists only for the singular head, and `list` is deliberately
 # not a `_DOC_NOUN` ("the tools list" is the session's own list, not a page).
-_TOOLS_OBJECT = r"(?:\btools\b|\btool\s+lists?\b)"
+_TOOLS_OBJECT = r"(?:\btools\b|\btool\s+lists?\b|\btools\s+lists?\b)"
 # …and the compiled form, for the ONE site that must LOCATE the object rather
 # than match it in sequence: `_confirmation_scopes_the_config` needs its offset
 # to decide which side of the object a config noun sits on. Built from the same
@@ -1924,7 +1924,13 @@ _INVERSION_FORMS = (
         r"(?:(?:\w+ly|very|so|too|quite|rather|first|already|just|also)\s+)*"
         r"(?!(?:see(?:s)?|saw|seen|look(?:ing|s|ed)?|list(?:ing|s|ed)?)\b"
         r"(?!.*?\b(?:confirm|check|verif(?:y|ies|ied)|ensur(?:e|es|ed))\w*\b"
-        r"[^\n]*?\b(?:tools|tool\s+list|they|it)\b)))"
+        # ⛔ THE GUARD READS THE GRADED OBJECT, not its own copy of it. It spelled
+        # `tools|tool\s+list` inline, so `tool LISTS` was not found, the clause was
+        # classified as a pure observation, and form (a) was disarmed — the exact
+        # defect the singular arm closed, one character over (#14679 review cycle
+        # 30, measured: "… if you looked in the panel and confirmed the tool
+        # lists are complete" GREEN, its `tool list` twin a declared RED row).
+        r"[^\n]*?\b(?:" + _TOOLS_OBJECT + r"|they|it)\b)))"
         r"(?:\w+-)?"
         + _CONFIRM_PREDICATE
         + r"[^\n]*?" + _TOOLS_OBJECT + _NOT_A_DOC
@@ -2046,6 +2052,19 @@ _INVERSION_FORMS = (
         # object widening just closed.
         r"(?:are|is|appear|appears|show|shows|exist|exists|load|loads"
         r"|listed|visible)\b"
+        # ⛔ AN ABSENCE IS NOT A PRESENCE CLAIM, and `when` is a CONDITIONAL —
+        # the module's own doctrine. Admitting `when` without this arm redded the
+        # symptom copy `when`-led clauses are made of: "Restart your client when
+        # the tools are MISSING" / "… are not visible in the panel" / "… are gone
+        # from the list" went GREEN→RED at `b2f9a12f` and none of the two skips
+        # applied before every form could save them (`_INSTALL_SIDE_RE` wants an
+        # install participle; `_OBSERVATION_NEGATION_RE` wants `see|saw|notice`).
+        # A restart cannot be once-conditioned on an ABSENCE, so the inversion
+        # reading is impossible and the RED asserted something the copy does not
+        # say — the #3429 shape that gets a pin deleted (#14679 review cycle 30,
+        # measured; the four declared-GREEN `when`-led symptom rows survived only
+        # because an observation verb kept them out of the 2-token window).
+        r"(?!\s+(?:not|never|no|missing|gone|absent|broken|empty|stale)\b)"
     ),
     _PRE_CUE_ONLY,
 )
@@ -2347,7 +2366,13 @@ def _tools_appear_after_cue(quick: str) -> bool:
     # reloaded. The tools appear later." wrongly satisfied the bound. Only the
     # separating whitespace/comma that continues the cue is stripped.
     parts = _STATEMENT_BREAK_RE.split(after.lstrip(" \t,…"), maxsplit=2)
-    return re.search(_TOOLS_OBJECT, " ".join(parts[:2])) is not None
+    # ⛔ CASE CARRIES NO MEANING IN THIS PROSE, and this was the ONE object search
+    # without the flag: "Restart your client, then confirm the Tools are there"
+    # satisfied the bound but "Restart your client. Tools then appear in the
+    # list." did not — a red with the "must keep a tools-appear clause" message
+    # over a paragraph that carries one (#14679 review cycle 30, measured).
+    return re.search(_TOOLS_OBJECT, " ".join(parts[:2]),
+                     re.IGNORECASE) is not None
 
 
 def _restart_cue_order_violation(quick: str) -> str | None:
@@ -3538,6 +3563,33 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Restart your client only once the tool list appears.", True),
     ("Restart your client only once the tool list exists.", True),
     ("Restart your client only once the tool list loads.", True),
+    # ── CYCLE 30 (#14679's review at `b2f9a12f`): six findings, each a row here.
+    # The first is the regression that review round introduced: admitting `when`
+    # into form (e) without an absence arm turned `when`-led SYMPTOM copy RED.
+    # A restart cannot be once-conditioned on an absence, so those REDs asserted
+    # an inversion the copy does not contain (#3429's pin-deletion shape):
+    ("Restart your client when the tools are missing.", False),
+    ("Restart your client when the tools are not visible in the panel.", False),
+    ("Restart your client when the tools are gone from the list.", False),
+    ("Restart your client if the tools are missing.", False),
+    # …while a real PRESENCE condition stays graded:
+    ("Restart your client when the tools are actually there.", True),
+    ("Restart your client when the tools appear.", True),
+    # form (a)'s observation guard spelled its own object, so `tool lists` was
+    # classified as a pure observation and form (a) was disarmed — the singular
+    # defect one character over:
+    ("Restart your client if you looked in the panel and confirmed the tool "
+     "lists are complete.", True),
+    # `tools list` (plural head) is the file's own prose spelling and form (e)
+    # missed it: `\btools\b` matched, then the copula demanded whitespace and
+    # found `list`:
+    ("Restart your client only once the tools list is complete.", True),
+    ("Restart your client after the tools list is complete.", True),
+    # `although` is pinned at BOTH of its newer sites, not only form (c)'s copy —
+    # removing either one alone flipped 0 rows while changing real verdicts:
+    ("Restart your client, although confirm the tools are already there.", True),
+    ("Restart your client and then, although first confirm the tools are "
+     "actually there, run `tortoise mcp-status`.", True),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
@@ -3572,6 +3624,12 @@ def test_3232_every_cue_paragraph_is_graded():
     # the cue's own sentence, and the one immediately after it, both count:
     ("Restart your client, then confirm the tools are actually there.", True),
     ("Restart your client. The tools then appear in the list.", True),
+    # …and the bound is CASE-INSENSITIVE like every other object search (it was
+    # the one without the flag: a capitalised `Tools` failed a paragraph that
+    # carries the clause, with the "must keep a tools-appear clause" message):
+    ("Restart your client. Tools then appear in the list.", True),
+    # …and the SINGULAR spelling satisfies it, as it does in the pin itself:
+    ("Restart your client. Confirm the tool list is complete.", True),
     # a mention TWO sentences later does not, and neither does silence:
     ("Restart your client. The config is reloaded. The tools appear later.",
      False),
