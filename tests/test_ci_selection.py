@@ -10945,11 +10945,17 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The REGISTRATION stays exempt, and the row remains exempt.",
             # ⛔ ONE FIXTURE PER ADMITTED SPELLING of the subject form, because the run is only as
             # graded as the fixtures that reach it (#14623 review round 25, P3). The alternative is
-            # `the row (?:is|stays|remains) (?:also|still|now)? exempt`; without these, a later lane
-            # could narrow ANY copula or adverb out of it and the whole 504-case file stays GREEN —
-            # `The REGISTRATION is exempt, and the row is still exempt:` would ship as a clean
-            # paragraph, the exact reading `#14612` deletes. Measured: dropping `stays`, or the
-            # `still|now` adverb run, left `1 passed` until each spelling below was pinned.
+            # `the row (?:is|stays|remains) (?:also|still|now)? exempt`. FOUR of its six tokens were
+            # ungraded here before this fixture run — `stays`, `also`, `still`, `now` — so a later
+            # lane could narrow any of them out of the alternation and the whole 504-case file stayed
+            # GREEN: `The REGISTRATION is exempt, and the row is still exempt:` would ship as a clean
+            # paragraph, the exact reading `#14612` deletes. ⛔ THE OTHER TWO WERE ALREADY GRADED by
+            # the fixtures above (`is` by the `so is the row`/`exempt too` pair, `remains` by the
+            # `stays exempt, and the row remains exempt` line), which is why this comment says FOUR
+            # and not "any copula or adverb": MEASURED on the parent commit, dropping `remains` or
+            # `is` already REDded, and only the four named tokens stayed GREEN (#14623 review round
+            # 26, P3 — an earlier revision of this very comment said "ANY copula or adverb" and
+            # was false, the over-stated-measurement class this block exists to delete).
             "The REGISTRATION is exempt, and the row is also exempt.",
             "The REGISTRATION is exempt, and the row is still exempt.",
             "The REGISTRATION is exempt, and the row is now exempt.",
