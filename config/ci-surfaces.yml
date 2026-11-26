@@ -58,19 +58,20 @@ version: 1
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
 # reader of the prose can see. On THIS tree — `origin/main` merged in, plus THIS lane's own row
-# (`tests/test_13450_ep_position_axis_participation.py`, `core`, at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`), PLUS every row `main` carries at this base — the verb packs seven shards
-# at 827.2 s (a, b, c, d, i, j, k) and four at 827.3 s (e, f, g, h), so `ceil(827.3/60 x 2)` = 28 m
+# (`tests/test_own_site_fragment_targets.py`, `core` and `onboarding`, at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT` — no `durations` row, because the CI run that would measure one is the run
+# this lane is re-triggering), PLUS every row `main` carries at this base — the verb packs nine
+# shards at 827.4 s (a, c, d, e, f, h, i, j, k) and two at 827.5 s (b, g), so `ceil(827.5/60 x 2)` = 28 m
 # governs (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.3 = 2.0307), so the two agree
+# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.5 = 2.0302), so the two agree
 # by construction rather than by a hand re-read.
 # ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
 # own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
 # figures stay on the commit that measured them. The delta is measurable and small: `fast_pool()`
-# holds 1339 files at this head against 1338 on `main`, read by running the verb on one manifest per
+# holds 1340 files at this head against 1339 on `main`, read by running the verb on one manifest per
 # side (`origin/main`'s blob and this tree's), and the ONE addition this lane brings is
-# `tests/test_13450_ep_position_axis_participation.py` — the row that moved the partition off
-# `main`'s own — with nothing `main` carries missing from this tree. ⛔ Every OTHER row this tree
+# `tests/test_own_site_fragment_targets.py` — the row that moved the partition off `main`'s own —
+# with nothing `main` carries missing from this tree. ⛔ Every OTHER row this tree
 # carries is `main`'s at this head, NOT this lane's (`#14597`'s expansion-fusion row, `#14548`'s
 # residue RATCHET — `tests/test_sdk_privatise_sweep.py`, the one `core` row here whose weight is
 # NOT the flat 2.0 s — `#14607`'s `tests/test_mcp_selfcheck.py` and
@@ -2981,6 +2982,18 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #11939: the own-site fragment guard, from the EMITTING side. `tortoise/abuse.py`
+  # (`appeal_url()`) is the site it was found at, and `tortoise/**/*.py` is where a
+  # new fragment URL is most often introduced — that path selects `core`, so this
+  # arm is what runs the guard for it. DUAL-REGISTERED with `onboarding` for the
+  # other direction (a page that stops DECLARING the id), because every page the
+  # guard resolves — `website/docs.html`, `product.html`, `faq.html`,
+  # `contact.html`, the dashboard's `main.jsx` — is an `onboarding` SOURCE_PATTERN
+  # and a named-surface match REPLACES the `core` fallback. Measured before the
+  # second arm existed: `select(['website/docs.html'])` -> `surfaces: ['onboarding']`
+  # and this file was NOT in `test_files`, so deleting `id="appeal"` from the page
+  # — the exact regression the guard exists to catch — ran it nowhere.
+  - test_own_site_fragment_targets.py
 
   # #14592 Phase A: the REST read parity suite (`/v1/objects`, `/v1/subjects`,
   # `/v1/sources`, `/v1/entities/{id}/relations`, `/v1/entities/{id}/belief`).
@@ -10979,6 +10992,17 @@ surfaces:
   - test_runtime_urls_are_canonical.py  # #11767: dual-registered api + core + onboarding — measured: abuse.py-only → ['core'], SKILL.md-only → ['onboarding'], email_notify.py-only → ['api']
   - test_website_static.py
   - test_website_docs_consistency.py  # #3332: checks each public page against its canonical source (status vocab, EP mechanism, ontology link)
+  # #11939: the own-site fragment guard, from the DECLARING side — the half that
+  # makes deleting `id="appeal"` from `website/docs.html` red. The pages it
+  # resolves are all SOURCE_PATTERNS of this surface (`docs.html`, `faq.html`,
+  # `product.html`, `contact.html`, `website/apps/dashboard/src/**`), and a
+  # named-surface match REPLACES the `core` fallback — so without this arm a
+  # page-only diff selected `['onboarding']` and the guard never ran. DUAL-
+  # REGISTERED with `core`, whose arm covers the emitting side (`tortoise/abuse.py`).
+  # No `durations` row here: the CI run that would measure one has not completed
+  # yet, and a number invented here would be a carried figure under a citation
+  # that does not exist — `ci-timing --refresh-durations` adds it from junit.
+  - test_own_site_fragment_targets.py
   # #3329: the public capacity page. Registered HERE because `website/self-hosted.html`
   # is a SOURCE_PATTERN of this surface, and `docs/capacity.md` is added as a CONCRETE
   # path below — `docs/` alone is NOT a pattern and is in NON_PYTHON_PREFIXES, so

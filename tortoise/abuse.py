@@ -413,18 +413,18 @@ def appeal_url() -> str:
     """Where a suspended org/agent is told to appeal.
 
     #11767: the host is the CANONICAL company origin, not the retired
-    `tortoise.premiselabs.co`. ``/docs#appeal`` (not ``/docs.html``) because the
-    canonical path is what the redirect map serves. It is ONE hop, deliberately:
-    ``/docs`` is a permanent SAME-HOST 301 onto the docs page's terminal address
-    ``/tortoise/docs`` (#11763; measured live 2026-11-12 — 301, then 200, one
-    redirect, both on the company origin). Emitting the terminal path here would
-    make it 0 hops, and that is deliberately NOT done in this PR: this function's
-    DESTINATION is #11939's decision (`/docs#appeal` with the section written, or
-    `/contact`), so flipping the path now would decide half of a question that
-    issue may answer by moving the link somewhere else entirely. #12049 re-points
-    the pasted onboarding copies and explicitly does NOT touch this function
-    (its item 4) — so do not read this comment as "someone else will";
-    #11939 is the owner of where this link goes, and it is OPEN.
+    `tortoise.premiselabs.co`. The path is the docs page's TERMINAL address,
+    ``/tortoise/docs`` — not ``/docs.html``, which the redirect map 301s, and not
+    ``/docs``, which is itself a permanent SAME-HOST 301 onto the terminal one
+    (#11763; measured live 2026-11-12 — 301, then 200, both on the company
+    origin). Naming the terminal path is what makes this link 0 hops. #11939
+    settled the DESTINATION (the `#appeal` section written into the page, rather
+    than pointing at `/contact`) and asked, in its own words, that the
+    terminal-path re-point ride "in the same change" — so this is that change, not a
+    follow-up. Emitting `/docs` and leaving the flip to a later lane is exactly the
+    unowned re-point #12049 exists to complain about; do not reintroduce it.
+    #12049 re-points the pasted onboarding copies and explicitly does NOT touch
+    this function (its item 4) — so do not read this comment as "someone else will".
     ⛔ An earlier revision of THIS docstring left a `#12049 and not #11764`
     paragraph here, arguing the pasted-onboarding re-point would have no owner
     without #12049. That fact is true but it is about `onboarding/SKILL.md`, not
@@ -445,7 +445,7 @@ def appeal_url() -> str:
     """
     return os.environ.get(
         "TORTOISE_ABUSE_APPEAL_URL",
-        "https://premiselabs.co/docs#appeal",
+        "https://premiselabs.co/tortoise/docs#appeal",
     )
 
 

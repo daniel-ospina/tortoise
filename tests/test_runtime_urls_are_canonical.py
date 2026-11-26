@@ -23,7 +23,8 @@ So the assertions here are on the ARTIFACT (the invite email's own body, the
 The siblings named on #11767 are pinned too: the CORS allowlist that must KEEP
 the retired origin with a recorded removal trigger, the two Supabase edge
 functions whose public allowlists already carry both hosts, and the appeal URL
-whose host moved while its dead `#appeal` fragment did not (#11939).
+whose host moved and whose `#appeal` fragment is now LIVE — #11939 added the
+section, and `tests/test_own_site_fragment_targets.py` holds the id in place.
 
 ⛔ #11767's items 4 and 5 are IN THIS FILE'S SURFACE: the dashboard landing
 pages, the blog origin, and the dashboard's docs links used to spell the retired
@@ -841,7 +842,7 @@ def test_supabase_edge_function_allowlists_agree():
         "front the same marketing pages")
 
 
-# ── The appeal URL — host moved, fragment did NOT (that is #11939) ────────────
+# ── The appeal URL — host moved, and #11939 made the fragment live ────────────
 
 
 def test_appeal_url_default_is_the_canonical_origin(monkeypatch):
@@ -849,7 +850,10 @@ def test_appeal_url_default_is_the_canonical_origin(monkeypatch):
 
     monkeypatch.delenv("TORTOISE_ABUSE_APPEAL_URL", raising=False)
     url = abuse.appeal_url()
-    assert url == f"{CANONICAL_ORIGIN}/docs#appeal"
+    assert url == f"{CANONICAL_ORIGIN}/tortoise/docs#appeal", (
+        "the emitted URL is the docs page's TERMINAL address (0 hops). `/docs` is a "
+        "same-host 301 onto `/tortoise/docs`, and #11939's recorded ask is that the "
+        "terminal-path re-point ride in the same change as the destination decision")
     assert RETIRED_HOST not in url
     assert "/docs.html" not in url, (
         "docs.html is itself a 301 to /docs; the emitted URL names the "
@@ -864,15 +868,31 @@ def test_appeal_url_still_follows_the_override(monkeypatch):
     assert abuse.appeal_url() == "https://x.example/appeal"
 
 
-def test_appeal_url_documents_the_dead_fragment_rather_than_implying_it_works():
-    """#11767 §6.1: `#appeal` has no `id="appeal"` on the docs page — it is a
-    pre-existing defect filed as #11939, deliberately NOT fixed here. The
-    docstring must say so, so a host flip is never read as a working appeal
-    link."""
+def test_appeal_url_documents_the_live_fragment_and_its_guard():
+    """#11767 §6.1 + #11939: the docstring must STATE which of the two the
+    `#appeal` fragment is, never leave it implied.
+
+    This pin was written when the fragment was dead (`#appeal` had no
+    `id="appeal"` on the docs page, filed as #11939) and it required the word
+    DEAD, so a host flip could never be read as a working appeal link. #11939
+    settled the destination the other way — the section was ADDED to
+    `website/docs.html` — so the state flipped and this pin flips with it.
+
+    ⛔ THE INVARIANT IS "THE DOCSTRING DECLARES THE STATE", not "the state is
+    dead": that is why this arm now requires LIVE *and* names the guard that
+    holds it. Delete the `✅` paragraph from the docstring and this reds, which
+    is the property the DEAD spelling used to carry one level over.
+    """
     import inspect
 
     from tortoise import abuse
 
     doc = inspect.getdoc(abuse.appeal_url) or ""
     assert "11939" in doc
-    assert "DEAD" in doc.upper()
+    assert "LIVE" in doc.upper(), (
+        "the docstring must say the #appeal fragment is LIVE — #11939 added the "
+        "section to website/docs.html; a silent docstring is how a dead fragment "
+        "gets read as a working appeal link")
+    assert "test_own_site_fragment_targets" in doc, (
+        "the docstring must name the guard that keeps `id=\"appeal\"` from being "
+        "deleted quietly — without it the LIVE claim above is unbacked")
