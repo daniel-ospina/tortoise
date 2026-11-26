@@ -402,6 +402,14 @@ export function NotificationBell({
     setShowOlder(false)
     setShowSnoozed(false)
     setShowDismissed(false)
+    // The ACKED group is a disclosure too, and it was the one state this block
+    // did not re-initialise (review finding): `showAcked` is declared beside the
+    // other three and rendered as a collapsible, so after a switch the new
+    // Organization's "Acknowledged for everyone" group opened WITHOUT a click
+    // while every sibling collapsed. No wrong data — the rows belong to the new
+    // key — but the block's own contract is "derived per-key state is
+    // re-initialised on a key change", and one member was outside it.
+    setShowAcked(false)
     setSaveFailed(false)
   }
 
@@ -474,8 +482,24 @@ export function NotificationBell({
     // is inside the row that just left `entries`.
     restoreListFocus()
   }
-  const handleUnsnooze = (episodeKey) => persist(unsnooze(ledger.state, episodeKey))
-  const handleRestore = (entry) => persist(undismiss(ledger.state, entry.key))
+  // ⛔ THE REVERSIBLE PAIR NEEDS THE SAME HAND-OFF (#14694 review finding). The
+  // bound above is stated over "a row's Dismiss button"; Unsnooze and Restore
+  // live inside the Snoozed/Dismissed `<li>`s and are removed by the very write
+  // they trigger (`buildLedger` drops the key from `snoozed`/`dismissed`), so the
+  // button that had focus unmounts and focus falls to `<body>` with the panel
+  // open — exactly the defect the two handlers above were fixed for, left live on
+  // the two controls a reader reaches AFTER opening a collapsed group precisely so
+  // they can undo something. Measured: focus landed on `<body>` on both paths
+  // while the panel stayed open, and no existing test read focus here, so neither
+  // the fix nor this gap was visible to the suite.
+  const handleUnsnooze = (episodeKey) => {
+    persist(unsnooze(ledger.state, episodeKey))
+    restoreListFocus()
+  }
+  const handleRestore = (entry) => {
+    persist(undismiss(ledger.state, entry.key))
+    restoreListFocus()
+  }
 
   const toggleOpen = () => {
     const opening = !open

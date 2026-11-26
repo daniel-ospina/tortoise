@@ -30,8 +30,13 @@
 // file is not collected or does not pass).
 import { afterEach, test, vi } from 'vitest'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import React from 'react'
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
+
+const here = dirname(fileURLToPath(import.meta.url))
 
 // Imported on purpose: `css: true` only injects CSS this file's own module graph
 // pulls in, so without it the visibility assertion below runs in a document with
@@ -48,10 +53,12 @@ import {
   LEDGER_PENDING,
   OLDER_HIDE,
   OLDER_TOGGLE,
+  RESTORE,
   SAVE_FAILED,
   SNOOZE_PERIODS,
   STORAGE_UNAVAILABLE,
   TRUNCATED_NOTE,
+  UNSNOOZE,
   entryKeyOf,
   storageKey,
 } from './notificationLedger.js'
@@ -473,6 +480,75 @@ test('#14694: snoozing from the LIST keeps focus inside the panel, not on <body>
   assert.notEqual(document.activeElement, document.body,
     'a removed active element must not drop focus to <body>')
   assert.equal(document.activeElement, container.querySelector('.notif-panel'))
+})
+
+test('#14694: UNSNOOZE keeps focus inside the panel, not on <body>', () => {
+  // The reversible pair is reached only AFTER expanding a collapsed group, so the
+  // reader has just made two deliberate moves when the button they activated is
+  // unmounted by its own write — losing their tab position there is worse than on
+  // the forward path, and `handleUnsnooze` restored focus on no path at all
+  // (review finding). No existing test read focus here, so the gap was invisible.
+  const { container } = renderBell({ alerts: [alert({ message: 'snoozed, then undone' })] })
+  fireEvent.click(bell(container))
+  fireEvent.change(container.querySelector('.notif-snooze'), { target: { value: '1h' } })
+  fireEvent.click([...container.querySelectorAll('.notif-more')]
+    .find((b) => /Snoozed \(/.test(b.textContent)))
+  const unsnooze = [...container.querySelectorAll('button')]
+    .find((b) => b.textContent.trim() === UNSNOOZE)
+  assert.ok(unsnooze, 'precondition: the Snoozed group is expanded and offers Unsnooze')
+  unsnooze.focus()
+  assert.equal(document.activeElement, unsnooze, 'precondition: focus is where the reader put it')
+  fireEvent.click(unsnooze)
+  assert.ok(container.querySelector('.notif-panel'), 'the panel stays open')
+  assert.notEqual(document.activeElement, document.body,
+    'a removed active element must not drop focus to <body>')
+  assert.equal(document.activeElement, container.querySelector('.notif-panel'))
+})
+
+test('#14694: RESTORE keeps focus inside the panel, not on <body>', () => {
+  // The sibling of Unsnooze on the Dismissed group, same defect (`handleRestore`).
+  const { container } = renderBell({ alerts: [alert({ message: 'dismissed, then restored' })] })
+  fireEvent.click(bell(container))
+  fireEvent.click([...container.querySelectorAll('.notif-actions button')]
+    .find((b) => /Dismiss/.test(b.textContent)))
+  fireEvent.click([...container.querySelectorAll('.notif-more')]
+    .find((b) => /Dismissed \(/.test(b.textContent)))
+  const restore = [...container.querySelectorAll('button')]
+    .find((b) => b.textContent.trim() === RESTORE)
+  assert.ok(restore, 'precondition: the Dismissed group is expanded and offers Restore')
+  restore.focus()
+  assert.equal(document.activeElement, restore, 'precondition: focus is where the reader put it')
+  fireEvent.click(restore)
+  assert.ok(container.querySelector('.notif-panel'), 'the panel stays open')
+  assert.notEqual(document.activeElement, document.body,
+    'a removed active element must not drop focus to <body>')
+  assert.equal(document.activeElement, container.querySelector('.notif-panel'))
+})
+
+test('#14694: a key change collapses the ACKED group with its three siblings', () => {
+  // `showAcked` is the fourth disclosure and was the only state the key-change
+  // reset block did not re-initialise (review finding), so the newly-selected
+  // Organization's "Acknowledged for everyone" group rendered OPEN without a
+  // click while every sibling collapsed. The contract is stated in the block's
+  // own comment: derived per-key state is re-initialised on a key change.
+  //
+  // A SOURCE PIN, not a render: the acked group only exists once a row has been
+  // acknowledged org-wide, which needs `canAcknowledge` + a server round trip — a
+  // DOM dance through that would be testing the harness more than the reset. The
+  // rendered half of every other disclosure is covered above; this one is about
+  // the reset listing all four, which is exactly what a source can see.
+  const src = readFileSync(join(here, 'notificationPanel.jsx'), 'utf8')
+  const resetAt = src.indexOf('if (lastKey !== key) {')
+  assert.ok(resetAt !== -1, 'the key-change reset block must exist')
+  const block = src.slice(resetAt, src.indexOf('\n  }', resetAt))
+  for (const setter of [
+    'setShowOlder(false)', 'setShowSnoozed(false)',
+    'setShowDismissed(false)', 'setShowAcked(false)',
+  ]) {
+    assert.ok(block.includes(setter),
+      `the key-change reset must re-initialise ${setter} — one disclosure left `
+      + 'set would open the new Organization\'s group without a click')
+  }
 })
 
 test('#14694: an ACKNOWLEDGED episode stays REVIEWABLE after the detail closes', () => {
