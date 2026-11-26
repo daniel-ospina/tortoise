@@ -83,8 +83,13 @@ the episode opens, then at most one reminder per 24h **while the delivery window
 holds** (the episode-end release re-arms it for the RULE-episode kinds, and the
 kind-agnostic per-outcome releases re-arm ANY kind — the scopes below say where
 each fires, and the emitted reminder says so too); a
-measurement (#10156's ACTIVITY register) files nothing by design and is
-DELIVERED as a bounded digest. `_end_alert_episode` re-arms both and resolves the
+class in ``notify.ABUSE_ACTIVITY_KINDS`` (R3/R4/R8) files nothing by design and
+is DELIVERED as a bounded digest. ⛔ A CUSTOMER-ACTIVITY rate is NOT the same
+thing: ``flag`` and ``review_needed`` are ``REGISTER_ACTIVITY`` since #14687 and
+they DO file an operator incident (``notify.ABUSE_INCIDENT_KINDS``) — the
+customer register answers "how may a customer be told", the notify sets answer
+"what record does this belong to", and they are deliberately different questions
+(see ``ALERT_REGISTER_OF``'s note). `_end_alert_episode` re-arms both and resolves the
 incidents once the episode CONFIRMS over — observation `DR_RECOVERY_STREAK` (2) of the
 #3146 recovery window, not the first clean one. ⛔ THAT GATE IS THE STORE PATH'S: with a
 store, `resolve_incident_state` NORMALLY answers SKIPPED_WINDOW on the first clean

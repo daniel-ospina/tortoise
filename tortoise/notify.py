@@ -134,9 +134,12 @@ ABUSE_INCIDENT_KINDS: frozenset[str] = frozenset({
 #:
 #: This is a DECLARED non-filing decision, not a gap: #10156 split the dashboard
 #: into two registers and put R3/R4/R8 in ``REGISTER_ACTIVITY`` — *"a detector
-#: OBSERVED a rate. It measured; it changed nothing. Informational, muted, no
-#: verb."* Filing a GitHub incident for a rate blip is the exact framing #10156
-#: removed, so these classes file nothing BY DESIGN and every message says so.
+#: OBSERVED a rate. It measured; it disabled nothing. Informational, muted, no
+#: verb."* (⛔ "changed nothing" was the old spelling: #14687 narrowed it because
+#: a ``flag`` row DOES write ``flagged_at`` — the claim that holds for R3/R4/R8,
+#: which never disable anything, is the enforcement one.) Filing a GitHub
+#: incident for a rate blip is the exact framing #10156 removed, so these classes
+#: file nothing BY DESIGN and every message says so.
 #: Their delivery is a DIGEST (:data:`_ACTIVITY_DELIVERY_WINDOW_S`), because the
 #: detector windows are minutes wide — one message per window is what made the
 #: human channel "out of control" while the detector was working correctly.
@@ -921,9 +924,13 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
     """A human-work-item class: the INCIDENT owns the message (#14407).
 
     ⛔ NOT "a state-change class": two of ``ABUSE_INCIDENT_KINDS``' three members
-    (``abuse_flag``, ``abuse_review_needed``) are re-derived rate MEASUREMENTS and
-    only ``abuse_suspended`` changes state (see the module docstring, and the
-    ``else`` arm of the ``what`` expression below).
+    (``abuse_flag``, ``abuse_review_needed``) are re-derived rate MEASUREMENTS, and
+    only ``abuse_suspended`` records an operator/enforcement action. ⚠️ Do NOT
+    promote that into "the flag changes nothing" — ``abuse_flag`` is emitted right
+    after ``store.flag_org``, which writes ``organizations.flagged_at`` (a MARKER,
+    which ``/v1/team`` renders as ``status: "flagged"``). What the flag does not do
+    is ENFORCE: nothing punitive follows it. See ``abuse.py``'s register note and
+    the ``else`` arm of the ``what`` expression below.
 
     One decision point for both channels — the store's create-once object files
     the issue AND emits the single Telegram push for the lifecycle, so the human
