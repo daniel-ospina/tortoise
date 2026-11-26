@@ -1463,6 +1463,70 @@ def test_a_git_that_never_answers_makes_could_not_run_not_drift(tmp_path, monkey
         f"each refusal must read as 'could not run'; stderr:\n{err}")
 
 
+def test_a_NESTED_repository_under_ROOT_cannot_permit_what_ROOT_tracks(
+    tmp_path, monkeypatch, capsys
+):
+    """…and asking the DESTINATION's repository alone is not enough — ask BOTH.
+
+    ⛔ THE ROUND-7 FIX INVERTED TWO ROWS (#14625 review, round 8, P0). Following the
+    destination was right for a linked worktree, a nested repository and a submodule
+    gitlink — and wrong for a nested repository that does NOT name the path while ROOT
+    does: `git init` in a tracked subdirectory (or a nested repo whose commit predates
+    the file) answers `ls-files` rc 1 and `ls-tree` "not a valid object name", the guard
+    read both as permits, and `--render` replaced 12 bytes of ROOT-TRACKED content with
+    109 at **rc 0**, no stderr. The pre-fix code refused both of those rows, so the fix
+    traded two fail-opens for two others.
+
+    Neither repository is authoritative, so both are asked and either refusal wins. This
+    arm pins the composite: drop the ROOT half and it reds.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    inner = repo / "inner"
+    keeper = inner / "docs" / "DOC.md"
+    keeper.parent.mkdir(parents=True)
+    keeper.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", "inner/docs/DOC.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=a",
+         "commit", "-qm", "tracked"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(inner), "init", "-q"], check=True)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # ⛔ BOTH HALVES OF THE PREMISE MEASURED, because the arm is about two repositories
+    # disagreeing and a git that resolved differently would make it vacuous: ROOT must
+    # TRACK the path, and the nested repository must answer "not tracked" for it.
+    root_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "inner/docs/DOC.md"],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert root_answer.returncode == 0, (
+        "the premise: ROOT must TRACK the destination; got "
+        f"rc={root_answer.returncode} — without that, the ROOT half has nothing to refuse")
+    nested_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "docs/DOC.md"],
+        cwd=inner, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert nested_answer.returncode == 1, (
+        "the premise: the NESTED repository must not name the path; got "
+        f"rc={nested_answer.returncode} — if it tracked it the arm would grade the "
+        "nested half instead of the composite")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", keeper.relative_to(repo).as_posix()])
+    assert rc == 2, (
+        f"a nested repository must not permit what ROOT tracks, got {rc} — "
+        "following the destination alone reopens this")
+    err = capsys.readouterr().err
+    assert "TRACKED path" in err, f"the refusal must name the tracked path; stderr:\n{err}"
+    assert keeper.read_bytes() == before, (
+        "ROOT-tracked content was overwritten: the composite guard did not ask ROOT")
+
+
 def test_EVERY_git_probe_carries_the_modules_own_timeout_bound():
     """The `timeout=` on every `subprocess.run` is graded at the CALL SITE, not only by
     the exception it raises.
@@ -1471,11 +1535,16 @@ def test_EVERY_git_probe_carries_the_modules_own_timeout_bound():
     arms above prove that when `subprocess.run` RAISES `TimeoutExpired` the verbs answer
     2 — but a fake that raises unconditionally cannot see whether a bound was ever
     passed, so `timeout=` could be deleted from a call site with the whole file green.
-    MEASURED at this head before the arm existed: deleting `timeout=_GIT_PROBE_TIMEOUT_S`
-    from `surface_files`'s `git ls-files` → `137 passed, 15 skipped` GREEN; deleting it
-    from `_tracked_destination_refusal`'s probe → GREEN again. The artifact claimed the
-    opposite in both places, which is the finding: an arm that grades a CONSEQUENCE is
-    not an arm that grades the CAUSE, and `_GIT_PROBE_TIMEOUT_S` is the cause.
+    MEASURED before the arm existed, on the pre-rebase base (`137 passed, 15 skipped`
+    there — the figure belongs to THAT tree, not to this one): deleting
+    `timeout=_GIT_PROBE_TIMEOUT_S` from `surface_files`'s `git ls-files` stayed GREEN;
+    from `_tracked_destination_refusal`'s probe, GREEN again. Re-verified at this head by
+    mutation — every one of the four `subprocess.run` sites reds when its kwarg goes.
+    ⛔ NOT "a call site": the metadata probe's own arm records `passed_kwargs`, so
+    deleting the kwarg THERE reds it (`the probe's bound must be the module's own`). The
+    two sites this arm exists for are the other two. The artifact claimed the bound was
+    graded everywhere, which is the finding: an arm that grades a CONSEQUENCE is not an
+    arm that grades the CAUSE, and `_GIT_PROBE_TIMEOUT_S` is the cause.
 
     So this arm reads the module's own AST: every `subprocess.run` in
     `tools/cypher_inventory.py` is a git probe (asserted, not assumed), and every one of
@@ -4319,8 +4388,13 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # the metadata probe left the TRACKED-path probe and the census's own
         # `git ls-files` unbounded, so a hung git still hung `--render` (measured:
         # external `timeout 90` -> 124) and an uncaught `TimeoutExpired` would exit 1,
-        # the DRIFT code. ⛔ THIS ARM GRADES THE REFUSAL PATH ONLY — dropping
-        # `TimeoutExpired` from either census handler reds it. It does NOT grade that a
+        # the DRIFT code. ⛔ THIS ARM GRADES THE REFUSAL PATH ONLY — and only ONE
+        # of the two census handlers: dropping `TimeoutExpired` from the ENUMERATION
+        # guard (`main()`, the first `surface_files` call) reds it; the `report()`
+        # guard is reached only after enumeration succeeds, and its fake hangs the
+        # FIRST call, so dropping the term there leaves this arm GREEN (measured in
+        # round 9 — no fake in this file raises `TimeoutExpired` from `rg_totals`).
+        # It does NOT grade that a
         # `timeout=` was PASSED: its fake raises unconditionally, so dropping the kwarg
         # left it GREEN (measured at this head, twice) — which is why the arm below
         # exists, and why the sentence that used to stand here ("Deleting `timeout=`
@@ -4353,6 +4427,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "test_a_damaged_git_directory_is_NOT_a_permit_for_the_TRACKING_probe",
         "test_a_tracking_probe_answers_about_the_INDEX_so_HEAD_is_asked_before_a_permit",
         "test_a_DANGLING_git_entry_is_NOT_a_permit_for_the_tracking_probe",
+        "test_a_NESTED_repository_under_ROOT_cannot_permit_what_ROOT_tracks",
         "test_the_tracking_probe_still_PERMITS_both_honest_answers",
         "test_the_renderer_reports_a_write_failure_as_could_not_run",
         # ⛔ THE OTHER THREE "COULD NOT RUN" SIBLINGS. The set named only the probe
@@ -4427,8 +4502,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 50, (
-        f"expected EXACTLY 50 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
+    assert len(split_arms) == 51, (
+        f"expected EXACTLY 51 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
     missing = sorted(split_arms - defined)
@@ -4437,7 +4512,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 50` reds a name PRUNED from the literal and `missing` reds a    # name that no longer resolves; neither can red for an arm that was never named at
+    # `len(split_arms) == 51` reds a name PRUNED from the literal and `missing` reds a    # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
     # left the whole suite GREEN (100 passed, 15 skipped), so the sentence above — that
@@ -4469,11 +4544,18 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # 103 -> 106 (`split_arms` 44 -> 47 with them): the refusal arm, the structural-term
     # arm that keeps a git-disowned checkout out of the permit, and the over-block
     # counterweight. All three carry a #13098 split invariant and are named above.
+    # ⛔ AND THE ROUND-8 P0's COMPOSITE GUARD TAKES IT 109 -> 110 (`split_arms`
+    # 50 -> 51): following the DESTINATION alone inverted two rows — a nested `git
+    # init` under ROOT answers "untracked" for a path ROOT tracks, and `--render`
+    # overwrote it at rc 0. The guard now asks BOTH repositories; that arm is the only
+    # thing that reds if the ROOT half is dropped again.
     # ⛔ AND THE ARM THAT GRADES THE `timeout=` ITSELF TAKES IT 108 -> 109
-    # (`split_arms` 49 -> 50): the raise-only arms above are green with the kwarg
-    # deleted, so without this one the bound is not graded at any call site.
-    assert len(test_functions) == 109, (
-        f"expected EXACTLY 109 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
+    # (`split_arms` 49 -> 50) — scoped to what was measured: with the kwarg deleted,
+    # `surface_files`'s `git ls-files` and `_tracked_destination_refusal`'s probe are
+    # GREEN from the raise-only arms alone. The metadata probe's arm records
+    # `passed_kwargs` and DOES see its own bound, so it is not one of the blind ones.
+    assert len(test_functions) == 110, (
+        f"expected EXACTLY 110 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
 
