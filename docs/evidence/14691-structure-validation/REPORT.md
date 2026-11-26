@@ -684,26 +684,26 @@ pinned by an arm that reds on its own mutation:
 
 ### 8.8 What the sixth round closed (a prose finding that carried no derivation)
 
-- **P1 — the prose door findings.** D1 and D5 arrive from `readback.json` entirely
+* **P1 — the prose door findings.** D1 and D5 arrive from `readback.json` entirely
   as prose, and the scorer copied their `answer_over_mcp` through unread: reversing
   D1 to *"YES — … its direction is visible too"* left 85-passed-green and
   self-contradicted the `the_read_that_can` field in the same object. A prose
   finding now survives only while its answer's POLARITY matches what its own
   evidence says, and while its evidence is non-empty.
-- **P1 — D4 outliving its witnesses.** The append path guarded against errored
+* **P1 — D4 outliving its witnesses.** The append path guarded against errored
   calls; the PROSE D4 did not. With all seven witness replies replaced by failure
   text the finding stayed, its evidence still naming six "isolated" nodes, and the
   artifact re-derived identically. D4 now requires a NON-ERRORED silent witness, and
   the producer agrees: `run_readback._call()` records the MCP `isError` flag instead
   of discarding it, and its D4 emitter refuses a failed witness.
-- **P2 — the peer's second copy of the witness rows.** `witness_neighbourhood_doors`
+* **P2 — the peer's second copy of the witness rows.** `witness_neighbourhood_doors`
   in `out/t6-independent-verification.json` carries the same rows; `IMPL` → `hasPart`
   there contradicted both documents and was free. Pinned to the same rule and to the
   same row counts (one epistemic row, on `Lumen Core`).
-- **P3 — `readback.db_uri`.** Nothing read it: pointing it at
+* **P3 — `readback.db_uri`.** Nothing read it: pointing it at
   `live-v5.prod.example:6379/live-v5` left the suite green. Now pinned to the graph
   the score names, on the lane's own host.
-- **P3 — `score_t6.py --check` was a NO-OP.** `sys.argv` was never parsed: the
+* **P3 — `score_t6.py --check` was a NO-OP.** `sys.argv` was never parsed: the
   scorer always rewrote the artifact and exited 0, so the gate the review brief names
   would silently REPAIR a corrupted artifact and report success. It now compares and
   exits 1 without writing — and it refuses to score at all when the ruled direction
