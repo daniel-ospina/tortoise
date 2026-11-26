@@ -2267,6 +2267,16 @@ _PRE_CUE_ONLY = _inversion_form(
     # because `_cue_governing_clause` has already dropped the pure-sequencer clause
     # (`then`) from this string: the graded clause here is `Check the tools`, not
     # `Check the tools, then` (verified by direct call).
+    # ⛔ DECLARED RESIDUAL — the bare SINGULAR object (`Check the tool, then restart
+    # your client.`) is NOT graded, and the arm stays paired with `_TOOLS_OBJECT`
+    # rather than spelling `tools?` itself. Measured at `776c58252c1b`: substituting
+    # `\btools?\b` into `_TOOLS_OBJECT` flips this residual RED and ALSO flips three
+    # declared-GREEN rows to RED (`Restart your client after checking the tool list
+    # documentation.`, `… tool list reference.`, `You shouldn't restart your client
+    # unless the tool list is empty.`) — the widened branch stops on `tool` and feeds
+    # `list` to `_NOT_A_DOC`, so a documentation noun no longer protects the clause.
+    # The object therefore stays a ONE-definition closed set (its existing comment's
+    # rule) and the singular spelling is a pinned table row below, not an arm here.
     + r"|\s*"
     + _PRE_CUE_VERB
     + r"[^\n]*?"
@@ -7633,6 +7643,13 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     #    was GREEN end-to-end on the shipped pin.
     ("Check the tools, then restart your client.", True),
     ("Check the tool list, then restart your client.", True),
+    #    ⛔ DECLARED RESIDUAL (measured at `776c58252c1b`) — the bare SINGULAR
+    #    object is ungraded on purpose: widening `_TOOLS_OBJECT` to `tools?` flips
+    #    this row RED and three declared-GREEN rows with it (see the arm's comment),
+    #    because `tool` then wins the alternation over `tool list` and `list` reaches
+    #    `_NOT_A_DOC` in place of the documentation noun. Pinned so the gap is
+    #    visible and a future tightening shows up here as a deliberate flip.
+    ("Check the tool, then restart your client.", False),
     ("Check the tools overview for the full list, then restart your client.",
      False),
     ("Restart your client, then check the tools.", False),
