@@ -3973,9 +3973,14 @@ def test_every_DOOR_finding_citation_names_CODE_it_can_actually_be_about():
     assert seen <= structural, sorted(seen - structural)
     assert seen.isdisjoint(epistemic)
     _, _, _, union_lines = _cited_range(d1["explore_connections"])
-    assert "UNION" in union_lines.upper(), (
+    # ⛔ BOTH ARM DIRECTIONS, not the word UNION (#14691 review, round 13, P3-3): a
+    # range holding the ROOT-branch union join passed, because it also says UNION.
+    # The claim is that the read merges the two directions, so both arrow forms must
+    # be in the cited lines.
+    compact = re.sub(r"\s+", "", union_lines)
+    assert "-[r]->" in compact and "<-[r]-" in compact, (
         f"D1 cites {d1['explore_connections']!r} for the undirected read; those "
-        f"lines carry no UNION: {union_lines[:120]!r}")
+        f"lines do not merge both directions: {union_lines[:160]!r}")
     _, _, _, expand_lines = _cited_range(d1["expand_relationships"])
     for predicate in ("IMPL", "NAND", "hasPart"):
         assert predicate in expand_lines, (
@@ -4050,20 +4055,37 @@ def test_a_door_finding_PROSE_claim_is_derived_not_merely_cited():
     # P3-3). "some module's text contains it" admitted a PUT packs route at the same
     # length, and admitted the right one on a DOCSTRING rather than the decorator
     # that serves it.
-    served = {}
+    # the VERB is part of the claim (`PUT` would name a write), and so is the
+    # module: a route served by a different handler at the same path length is a
+    # different sentence.
+    verb = (re.search(r"\b(GET|POST|PUT|DELETE|PATCH)\b", d1["the_read_that_can"])
+            or re.search(r"\b(GET|POST|PUT|DELETE|PATCH)\b", route.group(0)))
+    assert verb, d1["the_read_that_can"]
+    served = []
     for path in (REPO / "tortoise").glob("*.py"):
-        for line in path.read_text(errors="ignore").splitlines():
-            hit = re.match(r"\s*@app\.(?:get|post|put|delete|patch)\(\"([^\"]+)\"",
+        lines = path.read_text(errors="ignore").splitlines()
+        for index, line in enumerate(lines):
+            hit = re.match(r"\s*@app\.(get|post|put|delete|patch)\(\"([^\"]+)\"",
                            line)
             if hit:
-                served[hit.group(1)] = path.name
+                handler = next((ln for ln in lines[index + 1:index + 4]
+                                if re.match(r"\s*(?:async )?def ", ln)), "")
+                served.append((hit.group(1).upper(), hit.group(2), path.name,
+                               handler.strip()))
     assert served, "no @app route decorators found under tortoise/"
-    wanted = re.sub(r"\{[\w]+\}", lambda m: m.group(0), route.group(1))
-    match = [pattern for pattern in served
-             if re.fullmatch(re.sub(r"\{\w+\}", r"[^/]+", pattern), wanted)]
-    assert match, (
-        f"D1 names the route {route.group(1)}; the served routes are "
-        f"{sorted(served)[:6]}…")
+    matches = [entry for entry in served
+               if entry[0] == verb.group(1).upper()
+               and re.fullmatch(re.sub(r"\{\w+\}", r"[^/]+", entry[1]), route.group(1))]
+    assert matches, (
+        f"D1 names {verb.group(1)} {route.group(1)}; no served decorator matches "
+        f"that verb and path")
+    # …and the sentence must name the module whose route it is, so a route that
+    # exists elsewhere cannot be borrowed
+    name, _, _ = matches[0][1], matches[0][2], matches[0][3]
+    assert matches[0][2].removesuffix(".py") in d1["the_read_that_can"] or \
+        "entity_reads" in d1["the_read_that_can"], (
+            f"D1 cites {name} but never names {matches[0][2]}, the module that "
+            "serves it")
 
     # ── D3: the namespaced counts are the PROBES' OWN, kind by kind
     probes = readback["bare_kind_probes"]
@@ -4093,23 +4115,47 @@ def test_a_door_finding_PROSE_claim_is_derived_not_merely_cited():
     # ⛔ AND THE RANGE MUST CARRY THE QUERY IT IS CITED FOR (#14691 review, round
     # 12, P3-4): a range ending at the `def` line and its comments kept 92 passed
     # while the `MATCH` the sentence quotes was outside it.
-    assert "MATCH" in lines.upper(), (
-        f"D6 cites {path}:{start}-{end} for its MATCH pattern; those lines contain "
-        f"none: {lines[:160]!r}")
+    # ⛔ THE QUOTED CONSTRUCT, not a token (#14691 review, round 13, P3-3): a range
+    # that kept `def` and the word MATCH in a comment passed while the quoted
+    # `MATCH (s:Subject)<-[:ownedBy]-(e)` sat outside it. The fragment the sentence
+    # quotes is taken from the sentence and looked for in the cited lines.
+    quoted = re.search(r'MATCH\s*\([^)]*\)\s*<-\[:\w+\]-\s*\([^)]*\)',
+                       d6["code_path"])
+    assert quoted, d6["code_path"]
+    fragment = re.sub(r"\s+", " ", quoted.group(0)).replace('"', "")
+    assert re.sub(r"\s+", " ", lines).replace('"', "").count(fragment) == 1, (
+        f"D6 quotes {fragment!r} as the ownership read; it is not in "
+        f"{path}:{start}-{end}: {lines[:200]!r}")
 
     # ── D5: "for every node asked about" must be the POPULATION it measured
+    # ⛔ D5 WITHOUT A GATE ON ITS OWN WORDING (#14691 review, round 13, P3-1).
+    # The arm was wrapped in `if "every" in text`, and the r12 fix removed "every"
+    # from the sentence — so the arm became UNREACHABLE: inserting `raise` as its
+    # first statement still left 92 passed. A guard that cannot fire is not a guard.
     d5 = findings.get("D5")
-    if d5:
-        text = d5["answer_over_mcp"]
-        evidence = d5.get("evidence") or {}
-        population = [v for v in evidence.values()
-                      if isinstance(v, (list, dict)) and v]
-        if "every" in text.lower():
-            # a claim about "every node asked about" needs the population it
-            # quantifies over to be IN the artifact — otherwise the sentence is
-            # unfalsifiable from the evidence beside it.
-            assert population, (
-                f"D5 says {text[:60]!r} and its evidence records no node "
-                f"population: {sorted(evidence)}")
-            named = {n for v in population if isinstance(v, dict) for n in v}
-            assert named, sorted(evidence)
+    assert d5, "the artifact no longer carries D5"
+    evidence = d5.get("evidence") or {}
+    asked = {name for name, w in readback["link_witness"].items()
+             if (w.get("graph_overview_topics") or {}).get("reply") is not None}
+    assert evidence.get("nodes_asked") == len(asked), (
+        f"D5 counts {evidence.get('nodes_asked')} nodes asked; the readback holds "
+        f"{len(asked)} topic probes: a failed probe is not a node asked")
+    failed = {name for name in asked
+              if "not found" in str(readback["link_witness"][name]
+                                    ["graph_overview_topics"]["reply"])}
+    reported = evidence.get("reported_not_found") or {}
+    assert set(reported) == failed, (sorted(reported), sorted(failed))
+    assert reported == {name: readback["link_witness"][name]["id"]
+                        for name in failed}, (
+        "D5 attributes a 'not found' to the wrong node id")
+    # the sentence's numerator and denominator must be those two populations
+    nums = re.findall(r"(\d+) of the (\d+) nodes asked", d5["answer_over_mcp"])
+    assert nums, d5["answer_over_mcp"]
+    assert tuple(map(int, nums[0])) == (len(failed), len(asked)), (
+        f"D5 says {nums[0]}; the evidence supports ({len(failed)}, {len(asked)})")
+    # …and its clause about the other two doors is a claim about THEM
+    if "two doors return" in d5["answer_over_mcp"]:
+        assert any((w.get("explore_neighbour_count") or 0) > 0
+                   for w in readback["link_witness"].values()), (
+            "D5 says the same nodes ARE returned by the other doors; no witness "
+            "records a single neighbour")
