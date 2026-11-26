@@ -1364,6 +1364,8 @@
         "warning": "narrative relation not written (#11237): transacts 'Helio Health' \u2192 'Lumen Field' \u2014 `transacts` binds no declared write path (relation_write_paths() -> ()) \u2014 it is neither in the structural writer's predicate set nor bound to a mechanism, so nothing is written"
       }
     ],
+    "passes_entities": true,
+    "passes_relations": true,
     "passes": true
   },
   "claim_layer": {

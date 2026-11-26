@@ -65,7 +65,7 @@ authored for this test and never derived from any existing graph. Delivered as t
 | `doc-04` | 2026-04-28 | **customers and market** — 2 customers, 1 customer segment |
 | `doc-05` | 2026-05-05 | **cross-links** — which team builds which component, which product each customer runs |
 
-**4,295 characters ≈ 1,074 tokens** (5 documents, 32 turns). The declared structure is machine-readable
+**4,295 characters ≈ 1,074 tokens** (5 documents, 30 turns). The declared structure is machine-readable
 in the fixture itself (`_declared_structure`), so every number below is compared against the corpus,
 not against a memory of it: 28 named elements, 5 containment pairs, 4 membership pairs, 4 role pairs,
 4 ownership pairs, 7 dependency pairs, 2 serves pairs.
@@ -165,15 +165,21 @@ service is not source code. Measured extras in the type axis (precision, all tra
 | person → role (`related`) | **4/4** | n/a — same | ⚠️ |
 | **team → role** | **0** | — | ❌ **the class does not exist** |
 | thing → owner (`ownedBy`) | **4/4** (6 rows) | **0/6 — every row INVERTED** | ❌ |
-
-**One line that counts it.** Of the **22 asymmetric structural rows** this run wrote (`hasPart` is
-symmetric and `related` has no direction), **7 assert what the corpus says and 15 assert the reverse**
-— **13 distinct pairs**, because 6 `ownedBy` rows are only 4 pairs. Seven of the twenty correctly
-aimed rows are all `dependsOn`; the other thirteen are `ownedBy` (6 rows), `managedBy` (2) and
-`produces` (7).
 | dependent → dependency (`dependsOn`) | **7/7** | **7/7** | ✅ |
 | team → component (`produces`) | 7/7 | **0/7 — every row INVERTED** | ❌ |
 | customer → product | 2/2 | carried only as `related` — the `transacts` rows were **dropped** | ⚠️ |
+
+**One line that counts it.** Of the **22 asymmetric structural rows** this run wrote (`hasPart` is
+symmetric and `related` has no direction), **7 assert what the corpus says and 15 assert the reverse**
+— **13 distinct pairs**, because 6 `ownedBy` rows are only 4 pairs. All seven correctly-aimed rows
+are `dependsOn`; the other fifteen — `ownedBy` (6 rows), `managedBy` (2) and `produces` (7) — assert
+the reverse.
+
+⛔ This paragraph sat INSIDE the table until the second review cycle, which closed the table after
+row 5 and rendered the last three rows (including the `produces` **0/7 INVERTED** one) as visible
+pipe text. `markdownlint` cannot see that — a headerless pipe block is a paragraph, not a table, so
+MD055/MD056 never fire — which is why the required `docs` leg stayed green over a broken evidence
+table. It is below the table now, and the new test pins one row from each half.
 
 **The mechanism, for each failure.**
 
@@ -314,14 +320,24 @@ Every one of these was measured through MCP; none was worked around.
 | id | question | answer over MCP | evidence |
 |---|---|---|---|
 | **D1** | is this structural edge oriented `src → dst`? | **No.** The edge and its type are visible; its direction is gone by the time a caller reads it. | `explore_connections` UNIONs `(n)-[r]->(m)` with `(n)<-[r]-(m)` and keeps `type(r)` only (`tortoise/navigation.py:172-179`). The one read that reports direction, `entity_reads.entity_relations`, is behind `GET /v1/entities/{id}/relations` and has **no MCP/SDK door** (`tortoise/entity_reads.py:533-559`). |
-| **D2** | does `expand_relationships` report an entity's STRUCTURAL edges? | **No — it returns `[]` for a node that has edges, so a connected entity reads as ISOLATED.** | Lumen Core: 1 row (its `IMPL` to `control-room customers`), 19 real neighbours. Amara Osei / Platform team / event-bus: **0 rows** each, while `explore_connections` sees 6 / 10 / 10. The read covers `IMPL\|NAND\|hasPart` only (`entity_reads.py:551-559`) — and `hasPart` only where it is an operator/point edge. |
+| **D4** | does `expand_relationships` report the STRUCTURAL edges of an entity, the way it reports the epistemic ones? | **No — it returns `[]` for a node that has edges, so a connected entity reads as ISOLATED.** | Lumen Core: 1 row (its `IMPL` to `control-room customers`), 19 real neighbours. Amara Osei / Platform team / event-bus: **0 rows** each, while `explore_connections` sees 6 / 10 / 10. The read covers `IMPL\|NAND\|hasPart` only (`entity_reads.py:551-559`) — and `hasPart` only where it is an operator/point edge. |
 | **D3** | does the full-scan door accept the **bare** kind the packs declare? | **No — a bare kind returns an EMPTY list with no error, while the namespaced spelling returns rows.** | `search_knowledge(kind="product", entity_type="object")` → `[]`; `kind="product-strategy:product"` → 2 rows. Same for `team`/`core:team`. A caller who reads `objectKinds: [product]` in a manifest and asks for it is told *"there is nothing"* — an answer, not a refusal (AX: a surface must not answer where it cannot know). |
-| **D4** | does `graph_overview(section="topics", entity_id=…)` resolve an entity that two other doors resolve? | **No — `{"error": "Entity … not found"}` for every node asked about.** | Lumen Core, Amara Osei, Platform team, event-bus — all four resolve through `get_entity` and walk through `explore_connections`. |
-| **D6** | does the product's **ownership** door return what a person owns? | **No — `[]` for all four owners**, on a graph holding 6 `ownedBy` rows. | `tortoise_get_entity(id, type="governance")` → `_get_owned_entities` reads `MATCH (s:Subject)<-[:ownedBy]-(e)` (`sdk.py:62739-62758`), the declared orientation; the written rows point the other way, so nothing points *into* a Subject. |
-| **D5** | can a structure element be resolved by NAME? | **Not reliably** — `explore_connections(query=…)` resolves names to **Points**, and one component's stored name carries a welded collective noun (`ingest-gateway` → `ingest-gateway component`, from the sentence *"owns the ingest-gateway component"*). | `out/readback.json` → `unresolved_elements`, `elements[].walk_root_kind` (empty on 5/5 retrieval walks). |
+| **D5** | does `graph_overview(section='topics', entity_id=…)` resolve an entity that `get_entity` and `explore_connections` both resolve? | **No — `{"error": "Entity … not found"}` for every node asked about.** | Lumen Core, Amara Osei, Platform team, event-bus — all four resolve through `get_entity` and walk through `explore_connections`. |
+| **D6** | does the product's OWNERSHIP door — `tortoise_get_entity(id, type='governance')` — return what each person owns? | **No — `[]` for all four owners**, on a graph holding 6 `ownedBy` rows. | `tortoise_get_entity(id, type="governance")` → `_get_owned_entities` reads `MATCH (s:Subject)<-[:ownedBy]-(e)` (`sdk.py:62739-62758`), the declared orientation; the written rows point the other way, so nothing points *into* a Subject. |
+| **D2** | can a declared structure element be resolved by NAME through the MCP doors? | **Not reliably** — `explore_connections(query=…)` resolves names to **Points**, and one component's stored name carries a welded collective noun (`ingest-gateway` → `ingest-gateway component`, from the sentence *"owns the ingest-gateway component"*). | `out/readback.json` → `unresolved_elements`, `elements[].walk_root_kind` (empty on 5/5 retrieval walks). |
 
-**Three of these compound into the finding that matters most.** D1 (no direction on read) + D2/D4
-(the expand door silent about structural edges) + D6 (the ownership door answering nothing) mean **an
+⛔ **THE IDs ABOVE ARE THE ARTIFACT'S OWN** (`out/t6-score.json` → `door_findings`,
+emitted by `score_t6.py`). An earlier revision of this section had D2/D4/D5 permuted
+against that file — D2 was labelled the expand door (the artifact's **D4**), D4 the
+overview door (**D5**) and D5 name resolution (**D2**) — so a reader cross-referencing
+"D2" between this report and `out/t6-score.json` (or `VERIFICATION-independent.md:44`,
+which cites the artifact's D2 for name resolution) landed on two different findings.
+Renumbered to the emitter, and the new test now pins each id to its ARTIFACT QUESTION
+rather than to the bare token, which is what let the permutation pass unnoticed.
+
+**Three of these compound into the finding that matters most.** D1 (no direction on read) + D4
+(the expand door silent about structural edges) + D5 (the overview door not resolving the entity) + D6
+(the ownership door answering nothing) mean **an
 agent cannot discover the `ownedBy` inversion through the product**. Every read it is offered says
 either "no edges" or "not found". That is precisely how #14606's inversion survived its own
 read-back: the graph was wrong and the reads said "nothing to see".
@@ -413,6 +429,19 @@ measurement. It is also the process fact worth carrying back: the pre-dispatch c
 | `out/t6-independent-verification.json` | its raw measurement | **not this bundle's producer** — §7 |
 | `out/t6-quote-audit.json` | its quote-fidelity audit (11 verbatim / 27 paraphrase / 12 not in corpus) | **not this bundle's producer** — §7 |
 | `out/events.jsonl` (**not committed**) | the SDK event log, scratch, reproducible via `run.sh` | `run_ingest.py` |
+
+⚠️ **`out/readback.json`'s provenance binding, stated exactly.** That artifact carries
+`provenance.probe_sha256`, the hash of the `run_readback.py` that produced it. It was produced at
+`d4fc8fe51ee5`, where that file hashed
+`5a441859d7f953a91d493d9606b8c8404018a40eac35b658a75e4fbe6200f192`; the file in this tree hashes
+`19f8ed1a7636aa9a38abb5e3670f926b0a2968a82f6a39c571329aff2406f190`, because a later commit renamed
+one unused loop variable (`element_kind` → `_element_kind`) to clear a `B007` finding on the
+required `agent-infra-ci / lint` leg. **The rename is inert** — mechanically verified by renaming
+it back and diffing against `d4fc8fe`: zero differences — so the artifact's numbers stand and only
+the binding is stale. It is stated here rather than silently regenerated, because regenerating a
+784 KB receipt would rewrite every number downstream of it to fix a comment-sized defect.
+`tests/test_14691_structure_evidence.py` pins the binding against that stated exception, so a future
+drift reds instead of going unnoticed (which is what let this one through the first review).
 
 ---
 
