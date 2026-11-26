@@ -5938,7 +5938,7 @@ _TOP_ALIGNING_JUSTIFY = frozenset({
 
 #: The values this reader can POSITIVELY say do not top-align a column flex box.
 #: Anything outside both of these sets is UNCLASSIFIED (`normal`, `initial`,
-#: `stretch`, `left`, a future value) and must not be treated as "the hatch does
+#: `stretch`, a future value) and must not be treated as "the hatch does
 #: not align this beat": that verdict silences the margin grading, so an
 #: unclassified arm with no `auto` margins returned `[]` over a top-aligned page
 #: (#14683 independent review, measured). Unclassified falls back to the old
@@ -6485,7 +6485,7 @@ def _short_viewport_centring_problems(html: str) -> list[str]:
                 values[-1])
             # Only a value POSITIVELY known to be non-top-aligning may be
             # recorded as "the hatch reaches it" — an unclassified value
-            # (`normal`, `stretch`, `left`) keeps the fail-closed absence
+            # (`normal`, `stretch`, a future value) keeps the fail-closed absence
             # problem, because "it does not top-align" was a false PASS over a
             # page with no auto margins (#14683 independent review, measured).
             named_only = bool(values) and _justify_content_classified(
@@ -7248,7 +7248,9 @@ class TestShortViewportCentringIsGradedPerBlock:
                    for p in _short_viewport_centring_problems(unreached)), (
             "a beat no hatch rule names was not reported as unreached")
 
-        # …and an UNCLASSIFIED value (`normal`, `stretch`, `left`) may not be
+        # …and an UNCLASSIFIED value (`normal`, `stretch`, a future value — NOT
+        # `left`/`right`, which `_TOP_ALIGNING_JUSTIFY` classifies and
+        # `test_left_and_right_top_align_a_column_flex_box` below pins) may not be
         # promoted to "the hatch reaches it": that silence is a false PASS over
         # a page with no auto margins. It keeps a problem of its own — and NOT
         # the absence claim, which would be a false diagnosis over a rule that
@@ -7288,6 +7290,39 @@ class TestShortViewportCentringIsGradedPerBlock:
         assert _short_viewport_centring_problems(with_pair) == [], (
             "`space-between` WITH the auto pair reds — the auto margins absorb "
             "the free space, so that page centres exactly like the shipped one")
+
+    def test_left_and_right_top_align_a_column_flex_box(self):
+        """`left`/`right` behave as `start` here, so the pair is required (P3).
+
+        css-align-3 §4.1: `left`/`right` behave as `start` when the property's
+        axis is not parallel with the left-right axis — "currently, the only
+        case ... is in a column flexbox", which is what the beats are. They are
+        therefore IN `_TOP_ALIGNING_JUSTIFY`, and must NOT be offered as
+        examples of an UNCLASSIFIED value: the comment above
+        `_NOT_TOP_ALIGNING_JUSTIFY` listed `left` as unclassified while the set
+        eight lines above it classifies it (`9fa1094` added the pair without
+        the prose). Unclassified would be wrong in the other direction too —
+        the same contradiction `space-between` had — so this row pins both
+        halves: the arm needs the pair, and a page that has it is CLEAN.
+        """
+        for spelling in ("left", "right"):
+            without_pair = self._page(hatch=self.ALIGNED_HATCH.replace(
+                "justify-content: flex-start",
+                f"justify-content: {spelling}"))
+            problems = _short_viewport_centring_problems(without_pair)
+            assert problems, (
+                f"`justify-content: {spelling}` left no problem at all — a "
+                "column flex treats it as `start`, so it top-pins the first "
+                "item and the margin grading must run")
+            assert "no `margin-top: auto` fires" in problems[0], problems
+
+            with_pair = self._page(hatch=self.CENTRED_HATCH.replace(
+                "justify-content: flex-start",
+                f"justify-content: {spelling}"))
+            assert _short_viewport_centring_problems(with_pair) == [], (
+                f"`justify-content: {spelling}` WITH the auto pair reds — that "
+                "page centres exactly like the shipped one, and this reader is "
+                "not allowed to call a classifiable value unclassifiable")
 
     def test_a_commented_out_beat_section_is_not_a_beat(self):
         """A comment is dead to the browser, so it is not a beat (#14683 F1).
