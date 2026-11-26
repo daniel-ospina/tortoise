@@ -1214,6 +1214,17 @@
     ],
     "declared_structure_untraceable": [],
     "structural_kind_untraceable": [],
+    "relation_name_variance": [
+      {
+        "doc": "doc-03",
+        "predicate": "dependsOn",
+        "src": "ingest-gateway component",
+        "dst": "event-bus",
+        "src_kind": "dev:code",
+        "dst_kind": "dev:code",
+        "write_path": "structural"
+      }
+    ],
     "untraceable_counts": {
       "all_entity_names": 2,
       "structural_kinds": 0,

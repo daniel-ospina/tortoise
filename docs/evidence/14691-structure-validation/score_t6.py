@@ -692,6 +692,29 @@ def _squash(text: str) -> str:
     return _QUOTE_KEY.sub("", _norm(text))
 
 
+#: The KIND nouns the corpus's own declared groups are named after. These are the
+#: words a writer can WELD onto an entity name (`ingest-gateway component`), so
+#: they are the only words the name-variance retry may drop — derived from
+#: `_declared_structure`, never a hand-typed list. A retry that dropped any word
+#: would be truncation, which turns `Northwind Logistics` into a different entity
+#: and grades an invented edge as stated (#14723 review, round 10, P2).
+_KIND_WORDS = {_squash(singular) for singular in (
+    "product", "feature", "team", "role", "person", "component",
+    "customer", "customer segment")}
+
+
+def _unweld(name) -> str:
+    """Drop ONE trailing kind word welded to a name (`ingest-gateway component`).
+
+    Names without a kind suffix are returned unchanged, so the retry is a
+    name-variance allowance and not a substring search.
+    """
+    parts = str(name or "").split()
+    if len(parts) > 1 and _squash(parts[-1]) in _KIND_WORDS:
+        return " ".join(parts[:-1])
+    return str(name or "")
+
+
 def a4_invention() -> dict:
     # (a) every structural ENTITY name appears in the corpus text
     structural = {}
@@ -821,18 +844,31 @@ def a4_invention() -> dict:
     sents = [s for s in re.split(r"(?<=[.!?])\s+|\n", CORPUS_TEXT) if s.strip()]
     invented_relations = []
     strict_relations = []
+    name_variance = []
     for e in EDGES:
         a, b = _squash(e["src"]), _squash(e["dst"])
         stated = any(a in _squash(d) and b in _squash(d) for d in doc_texts)
         if not any(a in _squash(s) and b in _squash(s) for s in sents):
             strict_relations.append(_compact(e))
         # A welded name (`ingest-gateway component`) is a NAME variance, not a
-        # missing fact: retry with the shorter of the two forms.
+        # missing fact: retry with the KIND WORD dropped, and nothing else.
+        # ⛔ NOT THE FIRST WORD (#14723 review, round 10, P2). The retry used to
+        # be `str(name).split(" ")[0]` — it truncated EVERY name to its first
+        # word, so `Northwind Logistics --dependsOn--> Lumen Field` was graded
+        # STATED because `northwind` and `lumen` both occur in doc-01, and A4
+        # still reported `passes: True` with `relations_not_co_stated: []`
+        # (MEASURED on the pre-fix code). Truncating a name is not the same
+        # operation as un-welding a kind word: the first word of `Northwind
+        # Logistics` is a different entity's name, while `ingest-gateway` IS the
+        # entity the corpus names. The corpus's own declared groups supply the
+        # kind words, so this list is derived, not typed.
         if not stated:
-            short_a = _squash(str(e["src"]).split(" ")[0])
-            short_b = _squash(str(e["dst"]).split(" ")[0])
+            short_a = _squash(_unweld(e["src"]))
+            short_b = _squash(_unweld(e["dst"]))
             stated = any(short_a and short_b and short_a in _squash(d)
                          and short_b in _squash(d) for d in doc_texts)
+            if stated:
+                name_variance.append(_compact(e))
         if not stated:
             invented_relations.append(_compact(e))
 
@@ -868,6 +904,9 @@ def a4_invention() -> dict:
                 u for u in untraceable
                 if any(_same_name(u["name"], d) for d in declared_names)],
             "structural_kind_untraceable": structural_kind_misses,
+            #: rows that only clear the check by DROPPING A WELDED KIND WORD —
+            #: recorded so the load-bearing fallback is visible instead of implied
+            "relation_name_variance": name_variance,
             "untraceable_counts": {
                 "all_entity_names": len(untraceable),
                 "structural_kinds": len(structural_kind_misses),
