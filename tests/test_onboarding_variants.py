@@ -1867,8 +1867,25 @@ def _inversion_form(pattern: str) -> re.Pattern[str]:
 # bound before the first form is built, which is why it lives here rather than
 # beside the doctrine comment below; that comment describes THIS constant, and
 # its removal measurements are re-taken over the whole table at this head.
+# ⛔ THE OPEN `\w+ly` CLASS IS NOT ENOUGH ON ITS OWN, and neither is a closed
+# remainder read as `now|still`. `always` was not a member, so ONE inserted
+# non-`-ly` adverb re-opened the pre-cue half of this pin — the exact defect the
+# `\w+ly` arm exists to refuse — while its `First confirm …` twin is a declared
+# RED row (#14679 review, two fresh contexts, measured at `8c96f5de`):
+#
+#     RED    First confirm the tools are actually there. Restart your client, …
+#     GREEN  Always confirm the tools are actually there. Restart your client, …
+#     RED    You must confirm the tools are actually there. Restart your client, …
+#     GREEN  You must always confirm the tools are actually there. Restart …
+#     GREEN  Please always confirm the tools are actually there. Restart …
+#
+# `_SEQUENCER_FRAGMENT_RE` already lists `always` as a word that "carries no
+# imperation", so the two arms of this file disagreed about the same closed
+# class. `often`/`never`/`ever` are the same frequency family and are added with
+# it: a bare adverb in front of the imperative is the ONE-INSERTED-WORD defect
+# whatever its family.
 _ADVERBS = (r"(?:\w+ly|very|so|too|quite|rather|first|already|just|also"
-            r"|now|still)")
+            r"|now|still|always|often|never|ever)")
 # ⛔ THE PRE-CUE VERB LIST, ONE DEFINITION — form (f) spelled it twice and a
 # THIRD copy sits inside the shared `_CONFIRM_PREDICATE`, which is how the same
 # hole opened four times (#14679 review rounds 3-6). Every arm of form (f) reads
@@ -2549,8 +2566,18 @@ _INVERSION_FORMS = (
         # is ungrammatical — mutating it out flips 0 rows (measured at `5f1c0cbec6cb`) and no
         # well-formed row can depend on it (#14679 review at `1dedd33da07e`,
         # measured). Declared rather than silently carried as an arm.
+        # ⛔ `become` IS A CHANGE-OF-STATE COPULA, not a synonym left out on
+        # purpose: `RESTART your client once the tools are available.` is a
+        # declared-RED row while its `become` twin measured GREEN — the same
+        # one-word gap the `visible`/`listed` arms exist to close (#14679 review
+        # at `8c96f5de`, measured):
+        #
+        #     RED    Restart your client once the tools are available.
+        #     GREEN  Restart your client once the tools become available.
+        #     GREEN  Restart your client when the tools become available.
+        #     GREEN  Restart your client after the tools become available.
         r"(?:are|is|appear|appears|show|shows|exist|exists|load|loads"
-        r"|listed)\b"
+        r"|become|becomes|became|listed)\b"
         # ⛔ AN ABSENCE IS NOT A PRESENCE CLAIM, and `when` is a CONDITIONAL —
         # the module's own doctrine. Admitting `when` without this arm redded the
         # symptom copy `when`-led clauses are made of: "Restart your client when
@@ -2774,7 +2801,18 @@ _STATEMENT_BREAK_RE = re.compile(
     # DOTTED TOKEN FOLLOWED BY A SPACE still splits (`e.g.: quit and reopen`
     # splits at `e.g.`), which is the same window truncation the colon doctrine
     # already accepts, not extra protection.
-    r"(?:[;—–…]\s*|:\s+|(?:(?<=\s)[-*+](?![-*+])\s+|(?<=\s)--\s+|^-+\s*)"
+    # ⛔ `*` AND `+` ARE DELIBERATELY ABSENT FROM THE WHITESPACE-BOUNDED ARM, and
+    # that is a CORRECTION of a claim the neighbouring comment still makes.
+    # `_PRE_CUE_PREFIX` strips the same markers, so the two mechanisms do one
+    # job: narrowing `[-*+]` to `[-]` here flips **0 of the 616 declared rows**
+    # (measured at `8c96f5de`, whole file: `668 passed` both ways) and every probe
+    # the block names — `* Confirm …\n* Restart …`, the `+` and `>` twins, the
+    # ordinal pair — returns the byte-identical verdict either way. An arm no row
+    # and no probe can reach is not protection, it is rot (the same call cycle 17
+    # made when it deleted the unexercised prefix strip on `pre_statement`).
+    # `>` and the ordinals were already moved out by the `^-`-anchor correction
+    # above; this is the last of them.
+    r"(?:[;—–…]\s*|:\s+|(?:(?<=\s)[-](?![-])\s+|(?<=\s)--\s+|^-+\s*)"
     # ⛔ A MARKDOWN LIST MARKER IS A STATEMENT BOUNDARY — the same doctrine the
     # leading `^-` arm has always applied, which is why the DASH bullet split and
     # its four twins did not. The dash-only arm left `*`, `>`, `+` and both
@@ -2798,9 +2836,12 @@ _STATEMENT_BREAK_RE = re.compile(
     #
     # Measured: narrowing to `^-+\s*` and dropping `^>\s*` keeps all 566 rows and
     # every `test_3232_*` / `test_5153_*` green while fixing both probes. The
-    # whitespace-bounded arms above do the `*`/`+`/`>`/ordinal pre-cue work, since
-    # the paragraph is flattened before splitting. `\s+` (not `\s*`) after the
-    # emphasis-capable markers keeps `**bold**` and `*emphasis*` inside their clause.
+    # `>`-and-ordinal arms below do the pre-cue work here, and `_PRE_CUE_PREFIX`
+    # does the `*`/`+` half — ⛔ NOT the whitespace-bounded arm, which carried
+    # `*`/`+` until cycle 50 and never matched a row or a probe (measured: 0 of 616
+    # rows and every named probe identical once they are removed; see the note on
+    # that arm). `\s+` (not `\s*`) after the emphasis-capable markers keeps
+    # `**bold**` and `*emphasis*` inside their clause.
     r"|(?<=\s)>\s+"
     r"|(?<=\s)(?:\(\d{1,2}\)|\d{1,2}[.)])\s+"
     r"|\.\s+(?=[A-Z\"'`(\[*_>])"
@@ -3599,6 +3640,23 @@ def _confirmation_predicate_setting_a_tool_list(clause: str) -> bool:
     return False
 
 
+# ⛔ A COMMA-DELIMITED PREPOSITIONAL ASIDE, stripped from a post-cue sentence
+# before it is split into clauses. One arm, one job: the split on `,` is what
+# grades the inversion inside the cue's own sentence, and an aside wedged between
+# the predicate and its object must not supply that break. Both ends are required
+# (an opening comma AND a closing comma), so a TRAILING aside and every ordinary
+# `, then|and|but|so` clause are left to the split exactly as before.
+#
+# Measured at `8c96f5de` with this arm removed vs present: 616 of 616 declared
+# rows and the 41 non-parametrized `test_3232_*` / `test_5153_*` tests return the
+# same verdict, so the arm is additive and cannot flip a pinned row — the rows
+# that GAIN a verdict from it are the declared-RED rows added below it.
+_ASIDE_RE = re.compile(
+    r",\s*(?:in|on|under|from|per|within|inside|via|at)\b[^,]{1,80}?,\s*",
+    re.IGNORECASE,
+)
+
+
 def _paragraph_cue_order_violation(para: str) -> str | None:
     flat = " ".join(para.split())
     cue_at = _cue_start(flat)
@@ -3632,6 +3690,24 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     # run `tortoise mcp-status --live`." is a separate statement (measured RED
     # while the dash was inside the window), exactly as the `;` twin is.
     post_sentence = _STATEMENT_BREAK_RE.split(after.lstrip(" \t,…"), maxsplit=1)[0]
+    # ⛔ A COMMA-DELIMITED PREPOSITIONAL ASIDE IS NOT A CLAUSE BREAK. Splitting on
+    # the comma cut the predicate away from its own object, so the canonical
+    # inversion walked straight through the split that the comment above says is
+    # what "keeps the inversion behind a parenthetical comma visible" (#14679
+    # review at `8c96f5de`, measured — its bare twin is RED):
+    #
+    #     RED    Restart your client after verifying the tools are actually there.
+    #     GREEN  Restart your client after verifying, in the client's MCP/tool
+    #            list, that the tools are actually there.
+    #     GREEN  … once you have confirmed, in the client's tool list, that …
+    #     GREEN  … after checking, under MCP in the client settings, that …
+    #
+    # The aside is stripped BEFORE the split, so `after verifying that the tools
+    # are actually there` is graded as the one clause it is. Only an aside that
+    # BOTH opens with a preposition AND is closed by a following comma is removed,
+    # so a trailing aside (no closing comma) and every `, then|and|but …` clause
+    # are untouched — the suite's 616 rows are the guard on that.
+    post_sentence = _ASIDE_RE.sub(" ", post_sentence)
     post_clauses = [c.strip() for c in post_sentence.split(",")]
     # ⛔ AN `and`-LED CLAUSE CONTINUES THE PREVIOUS ONE — UNLESS IT OPENS ITS OWN
     # FORWARD CLAUSE. Splitting at the comma made the second half its own clause,
@@ -4860,10 +4936,19 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # form (b), and `_SESSION_AND_CONJUNCT_RE`'s `load(?:ed|s)`, by
     # `_SESSION_PRESENCE_RE` — both measured: removing each alone changes no row,
     # though removing the presence copy flips `installed and they are loaded`).
+    # ⛔ AND THE ADVERB FAMILY ADDED AT CYCLE 50: `always` carries its own rows,
+    # while `often`/`never`/`ever` are LIVE (each flips a pre-cue shape RED) but
+    # row-less — they are the same bare-adverb class as `always`, so they are
+    # declared here rather than left as silent unexercised arms. The whole family
+    # was absent from `_ADVERBS` at `8c96f5de`, which is what made one inserted
+    # `always` re-open the pre-cue half of the pin.
     # ⛔ `when` used to be listed here and is NOT row-less: replacing form (a)'s
-    # `(?:if|when)` with `(?:if)` flips FOUR declared rows (measured; the fourth
-    # is the degree-intensifier row added later), so it is pinned and the claim
-    # that it carries no row was wrong in the safe direction but still wrong.
+    # `(?:if|when|whenever|as soon as)` with `(?:if|whenever|as soon as)` flips
+    # **5** declared rows (measured at `8c96f5de` — the fourth was the
+    # degree-intensifier row, the fifth arrived with the completive rows; the
+    # number here said FOUR, i.e. a count restated from a parent head that a later
+    # commit in the same branch had already invalidated). It is pinned, so the
+    # claim that it carries no row was wrong in the safe direction but still wrong.
     # ⛔ `list` is NOT redundant and is not in that list: it is load-bearing for
     # form (d) and row-pinned (`list the tools beforehand`), which is how a claim
     # of redundancy about a live arm was caught here — measured by deleting it
@@ -4947,10 +5032,15 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Restart your client if you see no tools in the list and check the config "
      "path first.", True),
     # (d) A BREAK GLYPH AFTER THE CUE HIDES AN EXPLICIT INVERSION MARKER. This is
-    #     the largest measured residual and it is PRE-EXISTING: 55 declared-RED
-    #     rows have a GREEN twin for each of `;` `:` ` - ` `—` `–` (275 shapes).
+    #     the largest measured residual and it is PRE-EXISTING: **70** declared-RED
+    #     rows have a GREEN twin for each of `;` `:` ` - ` `—` `–` (**350**
+    #     shapes). Measured at `8c96f5de` by replacing the FIRST `, ` after the cue
+    #     of every declared-RED row with the glyph and re-grading; the number here
+    #     said 55/275 and was a count restated from a parent head (a fresh review
+    #     measured 71/355 with its own replacement rule — quoting either without
+    #     the method is what makes a denominator drift, so both are named).
     #     The truncated post-cue window is what buys the forward shapes above, so
-    #     closing it is a design decision (it flips 3 forward rows RED for 55
+    #     closing it is a design decision (it flips 3 forward rows RED for 70
     #     recovered), not a patch. One representative is pinned here:
     ("Restart your client; having first confirmed the tools are actually there.",
      False),
@@ -5926,9 +6016,45 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # visible, and a future tightening shows up as a deliberate row flip.
     ("## Activate\n\n1. Confirm the tools are actually there.\n\n"
      "2. Restart your client, then run a query.", False),
-    ("| Step | Action |\n| --- | --- |\n"
-     "| 1 | Confirm the tools are actually there. |\n"
-     "| 2 | Restart your client, then run a query. |", False),
+    # ── CYCLE 50 — the PREPOSITIONAL ASIDE, the adverb family, and `become` ──
+    # ⛔ A COMMA-DELIMITED ASIDE. Each of these measured GREEN before
+    # `_ASIDE_RE`, so the canonical inversion walked through a shape the docs
+    # themselves use; the forward control below it is the guard on the other
+    # direction (an aside that is NOT between a predicate and its object).
+    ("Restart your client after verifying, in the client's MCP/tool list, that "
+     "the tools are actually there.", True),
+    ("Restart your client once you have confirmed, in the client's tool list, "
+     "that the tools are actually there.", True),
+    ("Restart your client after checking, under MCP in the client settings, "
+     "that the tools are actually there.", True),
+    ("Restart your client, in the client's MCP/tool list, then confirm the tools "
+     "are actually there.", False),
+    # ⛔ THE ADVERB FAMILY, not just the `-ly` arm: `always`/`often`/`never`/`ever`
+    # were absent from `_ADVERBS`, so one inserted word re-opened the pre-cue half
+    # while the `First` twin was a declared-RED row.
+    ("Always confirm the tools are actually there. Restart your client, then run "
+     "a query.", True),
+    ("You must always confirm the tools are actually there. Restart your client, "
+     "then run a query.", True),
+    ("Please always confirm the tools are actually there. Restart your client, "
+     "then run a query.", True),
+    # ⛔ THE CHANGE-OF-STATE COPULA — `are available` is RED, so `become
+    # available` must be too.
+    ("Restart your client once the tools become available.", True),
+    ("Restart your client when the tools become available.", True),
+    # ⛔ DECLARED RESIDUAL: A PRE-CUE APPOSITIVE. The clause that governs the cue
+    # is the LAST one, and an em-dash or comma appositive makes that last clause a
+    # NOUN PHRASE (`the ones listed under MCP`) rather than the confirmation, so
+    # nothing is graded (#14679 review at `8c96f5de`, measured — the bare twin
+    # two rows above is RED). Declared rather than fixed: folding a noun-phrase
+    # appositive back into its predecessor is clause-level coordination, and this
+    # file's own record is that THREE speculative cuts of that shape each shipped
+    # a fresh seam (see `_and_half_opens_its_own_clause`'s block). Pinned so the
+    # residual is MEASURED and a future tightening shows up as a deliberate flip.
+    ("Confirm the tools are actually there \u2014 the ones listed under MCP, then "
+     "restart your client.", False),
+    ("Confirm the tools are actually there, the ones listed under MCP, then "
+     "restart your client.", False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
