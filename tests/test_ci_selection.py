@@ -10329,7 +10329,7 @@ _H_14544_AGENT_NP_RE = re.compile(
     r"|time\b|far\b|mistake\b|accident\b)\w)")
 
 
-def _h_14544_foreign_agent(sentence: str, match: "re.Match[str]") -> bool:
+def _h_14544_foreign_agent(sentence: str, match: re.Match[str]) -> bool:
     """True when the change verb's `by <agent>` names someone OTHER than the cut.
 
     The pattern above excludes only the cut's OWN label, so a phrase that DESCRIBES the cut — "by
