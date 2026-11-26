@@ -86,19 +86,18 @@ version: 1
 # base that file is `main`'s (it landed with its own fold, and `fast_pool(main)` contains it), so
 # reading it as this lane's delta attributes a partition move to a row that had already merged.
 # ⛔ Every OTHER row this tree carries is `main`'s at this head, NOT this lane's (`#14597`'s
-# expansion-fusion row, `#14548`'s residue RATCHET — `tests/test_sdk_privatise_sweep.py`, the ONLY one
-# of the rows THIS SENTENCE NAMES whose weight is not the flat 2.0 s (28.0). ⛔ The quantifier is about
-# the rows NAMED HERE — never about the surface and never about this lane's delta. A `core`-wide "the
-# one" was FALSE (the surface carries many rows off 2.0), and so was the first repair of it, "the one
-# row THESE FOLDS ADDED": the rows THIS LANE's folds added are ALL at the flat 2.0 s, so a statement
-# about them cannot pick out a 28.0 s row — only this sentence's own rows can. Both are corrected here,
-# #14691 review 9th cycle P3) — `#14607`'s
-# `tests/test_mcp_selfcheck.py`,
-# `#14700`'s capture-refusal suite, and the rest): each landed before this fold, and reading one of
-# them as this lane's delta would attribute a partition move to a row that did not cause it. The
-# name lists above are what the guard COMPARES against the live emission
-# (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
-# about THIS head — a fold re-derives them with the verb, it never carries them.
+# expansion-fusion row, `#14548`'s residue RATCHET — `tests/test_sdk_privatise_sweep.py` — `#14607`'s
+# `tests/test_mcp_selfcheck.py`, `#14700`'s capture-refusal suite, and the rest): each landed before
+# this fold, and reading one of them as this lane's delta would attribute a partition move to a row
+# that did not cause it. ⛔ The weight quantifier here is about the ROWS NAMED, and both earlier
+# spellings of it were FALSE: a `core`-wide "the one" (the surface carries many rows off 2.0), and
+# the first repair of it, "the one row THESE FOLDS ADDED" (the rows THIS LANE's folds added are ALL
+# at the flat 2.0 s, so a statement about them cannot pick out a 28.0 s row). Only this sentence's
+# own rows can, and `tests/test_sdk_privatise_sweep.py` is the 28.0 s one among them. Both are
+# corrected here (#14691 review 9th cycle P3). The name lists above are what the guard COMPARES
+# against the live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so
+# they are a graded claim about THIS head — a fold re-derives them with the verb, it never carries
+# them.
 # ⛔ THIS BLOCK ARRIVES SPLICED, REPEATEDLY, and that is mechanical rather than mysterious:
 # `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
 # derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. It has now
@@ -107,8 +106,9 @@ version: 1
 # fold's earlier partition and a `1339` pool), on this lane's earlier rebase onto `f2d4f2408cf5`
 # (two copies, neither describing that tree), and AGAIN on the rebase onto `a0cea31078` measured
 # here, which produced THREE: `main`'s own, this lane's previous one, and an older derivation of
-# this lane's that named `tests/test_13450_ep_position_axis_participation.py` at the nine/two split
-# of a base long since folded in. ⛔ A clean rebase is NOT evidence that this block is correct:
+# this lane's that split NINE and TWO at a base long since folded in (it names
+# `tests/test_14691_structure_evidence.py` as this lane's row, correctly — the row this lane's delta
+# is NOT is named elsewhere, above). ⛔ A clean rebase is NOT evidence that this block is correct:
 # `git rebase` reports SUCCESS and writes NO conflict marker here, because the driver applies both
 # hunks — run the verb and the two header guards after every fold, not the git exit code. Neither
 # side is ever picked and no copy is re-pointed: every spliced passage is DELETED and the paragraph
