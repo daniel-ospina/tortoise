@@ -57,8 +57,8 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `bbef0b8840d7` folded in (the fold this
-# head carries, over the `f2d4f2408cf5` fold before it; the rows below landed across both and the
+# reader of the prose can see. On THIS tree — `origin/main` `a0cea3107867` folded in (the fold this
+# head carries, over the `bbef0b8840d7` fold before it; the rows below landed across both and the
 # folds before them), carrying
 # `#14597`'s expansion fusion over the residue RATCHET
 # (`tests/test_expansion_fusion_14344.py`, `core`, carrying a `durations` row),
@@ -72,13 +72,14 @@ version: 1
 # `tier1` member, so that ONE FILE reaches the pool through `core`, `eval` and `tier1` yet
 # contributes a SINGLE `fast_pool()` entry, because the pool is a SET — the two files are two
 # members, and the pool being a SET is the whole of the claim), `#14607`'s registrations
-# (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), and `#14671`'s
-# `tests/test_13450_ep_position_axis_participation.py` row in `durations` — `core`-registered —
-# the verb packs the pool into two est_seconds readings: nine shards at 827.4 s
-# (a, c, d, e, f, h, i, j, k) and two at 827.5 s (b, g), so `ceil(827.5/60 x 2)` = 28 m governs
-# (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.5 = 2.0302), so the two agree by
-# construction rather than by a hand re-read.
+# (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), `#14671`'s
+# `tests/test_13450_ep_position_axis_participation.py` row in `durations` — `core`-registered — and
+# `#14726`'s dual registration (`tests/test_own_site_fragment_targets.py`, on `core` AND
+# `onboarding`, beside its own `2.0` `durations` row) — the verb packs the pool into ONE
+# est_seconds reading: eleven shards at 827.6 s (a, b, c, d, e, f, g, h, i, j, k), so
+# `ceil(827.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
+# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
+# (1680 / 827.6 = 2.0300), so the two agree by construction rather than by a hand re-read.
 # ⛔ EVERY file named above is `main`'s at this head. ⛔ Not claiming "and every one is `core`":
 # registration status is a THIS-HEAD fact no arm in this block's family reads, and `#14544` is the
 # proof it moves (the sentence below records that file leaving `core`) — the fold's own doctrine is
@@ -153,21 +154,22 @@ version: 1
 # `rglob("test_*.py")` on purpose — a file added to a non-gating subtree must not silently re-enter
 # the gate), so re-measure the delta on the tree you are merging INTO rather than carrying this
 # sentence's zero.
-# The name lists are what the guard COMPARES against the live emission
+# The name lists above are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), and
 # `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
 # derivation, so they are a graded claim about THIS head — a fold re-derives them with the verb, it
 # never carries them.
-# ⛔ THIS BLOCK ARRIVED SPLICED AGAIN AT THE `origin/main` `4b2fba3e8a` MERGE, and the repair is
-# recorded rather than hidden: `config/ci-surfaces.yml` carries a `merge=union` driver, so the fold
-# applied BOTH parents' derivations — one naming `origin/main` `29bb16b5b6` with this branch's own
-# `tests/test_14592_read_parity.py`, one spelling the same base with `#14607`'s registrations
-# called this branch's own. The copies DISAGREED on the figures (826.7/826.6 against 826.9/826.8) and neither
-# describes this head. Neither side is picked: the sentence above is a fresh re-derivation with
-# `--emit-push-matrix` on this merged tree, and both parents' copies are deleted rather than
-# re-pointed. ⛔ The SAME splice arrived again at the `origin/main` `c1c8df1a38` fold — both
-# parents' re-derivations kept, the copies disagreeing on the bins — and is repaired the same way,
-# by the verb rather than around the splice.
+# ⛔ THIS BLOCK ARRIVES SPLICED ON EVERY FOLD, and that is mechanical rather than mysterious:
+# `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
+# derivations, raises no conflict marker, and the guard then reads `<est stated twice>` /
+# `<ceil stated 2 times>`. Measured on THIS fold: two copies arrived, one naming `origin/main`
+# `bbef0b8840d7` with this branch's derivation (827.4/827.5), one naming `origin/main` `bbef0b8840`
+# with `#14726`'s (827.6). They DISAGREED on the bins, and neither describes this head AS WRITTEN —
+# the second copy gets the figures right by coincidence and the ATTRIBUTION wrong, calling
+# `#14726`'s row "this change's own" when on this tree it arrived with the fold. Neither side is
+# picked: both are DELETED and the paragraph above is a fresh re-derivation with
+# `--emit-push-matrix` on this merged tree. Each earlier fold's figures live on the commit that
+# measured them (`git log`), which is where a spliced copy belongs.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: dropping that REGISTRATION cannot move a
 # bin, because the file's pool entry comes from the `eval` registration ALONE (as the sentence above
@@ -183,14 +185,8 @@ version: 1
 # about.
 #
 # ⛔ THIS SENTENCE IS A MERGE MAGNET, and that is why the partition is stated ONCE, above, in ONE
-# form. A fold that splices two re-derivations in makes the guard read `<est stated twice>` /
-# `<ceil stated 2 times>` — a red that no reader of the prose can see — so the repair is the one
-# stated here: re-derive with `--emit-push-matrix` on the tree you are merging INTO, then keep ONE
-# sentence. ⛔ The stacked per-fold paragraphs this block used to carry are collapsed rather than
-# re-pointed: restating each fold's numbers inline is what produced the duplicated spellings, and
-# `git log` holds each fold's own figures on the commit that measured them. The MINUTE has stood at 28 m at every reading since
-# the 2026-11-23 sweep, so NO arithmetic on the minute can catch a carried figure — only the
-# `est_seconds` partition can, which is why the sentence above is GRADED rather than trusted.
+# form. The repair is mechanical: re-derive with `--emit-push-matrix` on the tree you are merging
+# INTO, then keep ONE sentence.
 #
 # ⛔ NO PER-FILE SHARD LETTER IS RECORDED HERE. A letter is a measurement of the greedy packer, so
 # it is false one fold later and no test reads it; a sweep that deleted seven of eight false letters
@@ -3083,6 +3079,18 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_own_site_fragment_targets.py  # DUAL-REGISTERED with `onboarding` below, and BOTH rows
+  # are needed: a named-surface match REPLACES the `core` fallback (`.github/workflows`/this map's
+  # own `tools/ci_selection.py:1620` `#2938` note, restated at `tests/test_ci_selection.py:1545`),
+  # and a website-only
+  # diff (`website/docs.html`, `website/faq.html`, `website/apps/dashboard/src/*`,
+  # `website/functions/*`, the pasted `SKILL.md` copies) selects `onboarding`, NOT `core`. Measured
+  # with the `onboarding` row REMOVED — the counterfactual, not this head:
+  # `--changed-files website/docs.html` → `surfaces: ['onboarding']` with this file ABSENT from
+  # `test_files`. Without that row the guard never ran on the diffs that own its inputs, so deleting
+  # `id="appeal"` from `docs.html` in a website-only PR would merge green and only `main`'s push
+  # matrix would red afterwards. ⛔ Deleting the row again is caught, not silent:
+  # `test_the_own_site_fragment_guard_is_selected_by_every_tree_it_scans` reds naming the tree.
 
   # #14592 Phase A: the REST read parity suite (`/v1/objects`, `/v1/subjects`,
   # `/v1/sources`, `/v1/entities/{id}/relations`, `/v1/entities/{id}/belief`).
@@ -10638,6 +10646,10 @@ surfaces:
   # the `api` entry above).
   - test_9121_onboarding_residual_pins.py
   onboarding:
+  - test_own_site_fragment_targets.py  # the OTHER half of the dual registration above: every tree
+  # this guard reads on the website side selects `onboarding`, so this row is what makes the guard
+  # run on the diffs that can break it. `_html_links.extract_element_ids` and every `website/` read
+  # are hermetic (files only), which is why `core` is also safe.
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #9572 review P2-2 (round 9): MULTI-REGISTERED with `core` and `api`, for the
   # same reason as the `api` arm — `test_selfhost_seed_surface_does_not_fabricate_a_kind`
@@ -16188,6 +16200,19 @@ durations:
   test_extractor_cost_measure.py: 18.2
   test_longmem_ingest_profile.py: 0.1
   test_tier_naming.py: 0.4
+  test_own_site_fragment_targets.py: 2.0  # new in #11939 (PR #14726). The ENTRY RULE's row "must
+  # EXIST, not merely default" — “a default is not a reading” (#3400/#4348) — and a file a PR ADDS
+  # can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it
+  # takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local measurement, which this map
+  # forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). `tools/ci_timing.py --refresh-durations`
+  # replaces it from the first push-to-main junit sweep that includes the file. What the weight
+  # covers, hermetic (files only — no DB, no graph, no network, no model call): every own-site
+  # fragment link our sources emit resolved to the page file that serves it and checked against the
+  # ids that page declares — Python string literals via an AST walk (docstrings excluded), quoted
+  # own-host URLs in the dashboard and `website/functions` sources, own-host `href`s in
+  # `website/*.html`, markdown links and autolinks — plus same-page `href="#frag"` in
+  # `website/*.html`. ⛔ No local seconds figure is quoted on purpose: one beside a weight re-stales
+  # against the run it came from.
 # ── THE NON-GATING LANE (`on_demand:`) ──
 #
 # A file listed here RUNS but does not GATE: it is excluded from every pre-merge
