@@ -390,10 +390,48 @@ test('the INCIDENT GATE: what HAPPENED after a dismissal is not covered by it', 
   assert.deepEqual(after.current.map((e) => e.alert), [later])
   assert.deepEqual(after.dismissed.map((e) => e.alert), [seen], 'the old one stays dealt with')
 
-  // …and dismissing the OLDER of two live episodes covers the older history but
-  // not the newer row: you dismissed what you saw, not what came after.
-  const coversNewer = dismiss(emptyState(), key, NOW, later)
-  assert.equal(buildLedger({ alerts: [seen, later], state: coversNewer, now: NOW }).unresolved, 0)
+  // …and dismissing an episode does NOT reach BACKWARD to cover an earlier one
+  // that was never dismissed. This assertion used to be described as "dismissing
+  // the OLDER … not the newer row" while the code dismissed the NEWER, and its
+  // fixture gave `later` a `first_at` of NOW-5min — so the acknowledged window
+  // genuinely straddled `seen` and covering it was correct. The window is now set
+  // explicitly to show the case the incident register actually got wrong.
+  const coversNewer = dismiss(emptyState(), key, NOW, {
+    ...later, first_at: new Date(NOW.getTime() + 1 * HOUR).toISOString(),
+  })
+  assert.equal(
+    buildLedger({ alerts: [seen, later], state: coversNewer, now: NOW }).unresolved, 1,
+    'dismissing the NEWER incident must not swallow the OLDER, never-dismissed one',
+  )
+
+  // The INCIDENT register applies the same window test as ACTIVITY before its own
+  // watermark gate (`abuse.py`: `matched = overlap or (0 <= delta <= gap_s)`
+  // first, the `acked_through` check AFTER). Reproduced against
+  // `abuse._episode_acknowledged`: an older flag row is NOT covered by a newer
+  // acknowledgement, on the same rule and on a different one. The two rows share
+  // a client-visible key because a flag's message is a constant that omits the
+  // rule — so without the window test, dismissing one rule's row hid another's.
+  const oldFlag = alert({
+    message: 'Suspicious activity flagged on this Organization',
+    at: new Date(NOW.getTime() - 3 * DAY).toISOString(),
+    first_at: new Date(NOW.getTime() - 3 * DAY - 1 * HOUR).toISOString(),
+    episode: 'flag|rule-a|old',
+  })
+  const newFlag = alert({
+    message: 'Suspicious activity flagged on this Organization',
+    at: new Date(NOW.getTime() + 2 * HOUR).toISOString(),
+    first_at: new Date(NOW.getTime() + 1 * HOUR).toISOString(),
+    episode: 'flag|rule-b|new',
+  })
+  assert.equal(entryKeyOf(oldFlag), entryKeyOf(newFlag),
+    'precondition: one client-visible identity, two server episodes')
+  const dismissedNew = dismiss(emptyState(), entryKeyOf(newFlag), NOW, newFlag)
+  assert.equal(isDismissed(dismissedNew, entryKeyOf(oldFlag), oldFlag), false,
+    'an EARLIER incident was never dismissed and must stay current')
+  assert.equal(
+    buildLedger({ alerts: [oldFlag, newFlag], state: dismissedNew, now: NOW }).unresolved, 1,
+    'the older incident stays COUNTABLE — a hidden incident row is the worst case here',
+  )
 
   // An OBSERVATION is the opposite: a velocity row re-reported every five
   // minutes is the SAME ongoing measurement, so a newer row stays dismissed.

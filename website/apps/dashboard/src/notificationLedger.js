@@ -468,37 +468,65 @@ export function isDismissed(state, episode, alert = null) {
   if (!(state && state.dismissed && episode in state.dismissed)) return false
   if (!alert) return true
   const dismissedThrough = Number(state.dismissed[episode]) || 0
-  if (registerOf(alert) === REGISTER_ALERT) {
-    const happenedAt = atMsOf(alert)
-    return !(happenedAt && happenedAt > dismissedThrough)
-  }
-  // ACTIVITY — the server's gap arm, MIRRORED IN FULL. `abuse.py` matches
-  // `overlap or (0 <= delta <= gap_s)`; this file used to implement only the
-  // right-hand clause and, worse, without its `0 <=` floor — so it accepted every
-  // NEGATIVE delta and a dismissal of a NEWER bout also hid an EARLIER, never
-  // dismissed one. Two `read_velocity` episodes of one identity 8 h apart (beyond
-  // `EPISODE_GAP_S`, so `group_alert_episodes` keeps them as two rows) share one
-  // client key, and dismissing only the newer made the older report as dismissed:
-  // filed under "dismissed for you" and gone from the badge, never dismissed.
-  // That is the exact failure the per-row bucketing rewrite exists to remove.
+  // ⛔ THE SERVER APPLIES THE WINDOW TEST TO **BOTH** REGISTERS, AND ONLY THEN
+  // THE INCIDENT GATE (`abuse.py` `_episode_acknowledged`: `matched = overlap or
+  // (0 <= delta <= gap_s)` first, `if not matched: continue`, and the incident
+  // `acked_through` check AFTER it). This function used to test the watermark for
+  // the INCIDENT register and never consult the window at all — so dismissing a
+  // NEWER incident covered an OLDER, never-dismissed one, because the two share a
+  // client-visible key (`entryKeyOf` is `type|message`, and a flag's message is a
+  // constant that omits the rule). Measured against the shipped module and
+  // reproduced against `abuse._episode_acknowledged`: the server answers "not
+  // covered" for the older row on BOTH a different rule and the same rule, and
+  // this file answered "covered". That is a hidden incident — the register this
+  // module's own text calls "each row is a new FACT" — and it is the same defect
+  // the ACTIVITY arm had.
   //
-  // A store written before `dismissedLast` existed falls back to the watermark,
-  // which is the same server instant.
+  // An unmeasurable row (no `at`/`first_at` on either side) still stays DISMISSED:
+  // there is nothing to compare server-time against, and resurfacing a row the
+  // reader already cleared on the strength of a missing field is the worse error.
   const ackedLast =
     Number((state.dismissedLast || {})[episode]) || dismissedThrough
   const episodeStart = firstMsOf(alert)
   const episodeEnd = atMsOf(alert)
   if (!episodeStart || !ackedLast) return true
-  // `overlap` — the acknowledged window and this episode intersect. Needs both
-  // ends of the ack; a store written before `dismissedFirst` existed has only the
-  // END, so the ack window is reconstructed as that POINT. For a continuing bout
-  // the point falls inside the episode (still the same bout, correctly), and for
-  // an un-dismissed EARLIER bout it does not — so the fix holds for legacy stores
-  // too, instead of quietly preserving the bug until the next write.
+
+  // ── Half one: the window test, both registers.
+  // ⛔ BUT ONLY WHEN A WINDOW WAS ACTUALLY RECORDED. `dismissedLast` is 0 when the
+  // dismissal was taken without the row in hand (`dismiss(state, episode, now)`),
+  // and absent entirely in a store that predates it. In that case the only fact
+  // this store holds is the watermark, and the honest test is the watermark one —
+  // "did this HAPPEN after the dismissal?" — which is the documented legacy
+  // fallback and cannot resurface a row the reader already cleared. Applying the
+  // point-overlap to a watermark taken at `now` would UN-dismiss every row whose
+  // own `at` precedes it, which is a mass resurface, not a correction.
+  const recordedLast = Number((state.dismissedLast || {})[episode]) || 0
+  if (!recordedLast) {
+    const happenedAt = episodeEnd || episodeStart
+    return !(happenedAt && happenedAt > dismissedThrough)
+  }
+
+  // A store written before `dismissedFirst` existed has only the END, so the ack
+  // window is reconstructed as that POINT: it intersects a continuing episode
+  // (correctly) and does not intersect an earlier, separate one.
   const ackedFirst = Number((state.dismissedFirst || {})[episode]) || ackedLast
-  if (episodeEnd && ackedFirst <= episodeEnd && episodeStart <= ackedLast) return true
-  const delta = episodeStart - ackedLast
-  return delta >= 0 && delta <= EPISODE_GAP_MS
+  const overlaps =
+    Boolean(episodeEnd) && ackedFirst <= episodeEnd && episodeStart <= ackedLast
+  if (!overlaps) {
+    const delta = episodeStart - ackedLast
+    if (!(delta >= 0 && delta <= EPISODE_GAP_MS)) return false
+  }
+
+  // ── Half two: the INCIDENT gate. A row that HAPPENED after the dismissal is
+  // not covered, even when the window matched it. Each row is a new FACT, and
+  // folding it into the dismissed episode hides it. (An ACTIVITY row legitimately
+  // re-reports with a newer `at`, so it has no such gate — that asymmetry is the
+  // server's, not this file's.)
+  if (registerOf(alert) === REGISTER_ALERT) {
+    const happenedAt = atMsOf(alert)
+    return !(happenedAt && happenedAt > dismissedThrough)
+  }
+  return true
 }
 
 /** The server's opaque episode key — the key the ack route takes. */
@@ -539,11 +567,21 @@ export function episodeOf(alert) {
  *     identity.
  *
  * Consequence, stated rather than hidden: two SEPARATE bouts of the same type
- * (over different rules, in the flag case) share one local identity, so
- * dismissing one covers the other. Two things keep that from being the "new
- * incident silently suppressed" bug: `isDismissed`'s INCIDENT GATE re-opens an
- * incident that happened after the dismissal, and every dismissal is reversible
- * — the ledger keeps a Dismissed group (with Restore) so nothing is destroyed.
+ * (over different rules, in the flag case) share one local identity, so a
+ * dismissal taken on one is CONSIDERED for the other. What stops that from being
+ * "a new incident silently suppressed" is `isDismissed`, which applies the
+ * server's window test to BOTH registers before anything else: a row that does
+ * not intersect the acknowledged window and does not start inside the forward gap
+ * is NOT covered, so an earlier, separate bout stays current. On top of that the
+ * INCIDENT GATE re-opens anything that happened after the dismissal, and every
+ * dismissal is reversible — the ledger keeps a Dismissed group (with Restore), so
+ * nothing is destroyed.
+ *
+ * ⚠️ This paragraph used to end at "so dismissing one covers the other", which was
+ * the shipped behaviour and was wrong in the backward direction: dismissing the
+ * NEWER bout filed an OLDER, never-dismissed one under "dismissed for you" and
+ * dropped it from the badge. The window test is what makes the sentence above
+ * true; if it is ever relaxed, this comment is the claim that breaks.
  *
  * ⛔ This key is the DECISION identity only. Rows and the detail lookup are
  * identified by `rowKeyOf`; see the module header.
