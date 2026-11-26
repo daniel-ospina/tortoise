@@ -368,3 +368,36 @@ class _Slot:
 
     def hold_until(self, _fut) -> None:  # noqa: ANN001 - test double
         return None
+
+
+# ── 3. a CONDITION is not a VERDICT (#14707 review P1/P2) ─────────────────
+
+def test_the_drain_separates_transient_conditions_from_permanent_verdicts():
+    """⛔ Capacity / in-flight / our own 503 pass; 402/409/400 never do.
+
+    Pre-fix every drain failure spent one of `CAPTURE_INTAKE_MAX_ATTEMPTS`, so a
+    saturated box (transient) parked accepted turns `failed` — a lost turn — and
+    a permanent refusal burned four minutes re-learning an answer that cannot
+    change.
+    """
+    transient = [
+        ha.HTTPException(status_code=429, detail={"code": ha._CAPTURE_CAPACITY_CODE}),
+        ha.HTTPException(status_code=429, detail={"code": "ingest_rate_limited"}),
+        ha.HTTPException(status_code=503,
+                         detail={"code": "capture_intake_unavailable"}),
+        ha.HTTPException(status_code=409,
+                         detail=ha._CAPTURE_SESSION_IN_FLIGHT_DETAIL),
+        # unclassifiable (no HTTP verdict) is retried, never parked on a guess
+        ci.IntakeStoreUnavailable("graph down"),
+    ]
+    for exc in transient:
+        assert ha._capture_intake_fault_is_transient(exc) is True, exc
+
+    permanent = [
+        ha.HTTPException(status_code=402, detail={"code": "quota_exceeded"}),
+        ha.HTTPException(status_code=409, detail="Session recording is disabled"),
+        ha.HTTPException(status_code=400, detail="turn cap"),
+        ha.HTTPException(status_code=422, detail="blank transcript"),
+    ]
+    for exc in permanent:
+        assert ha._capture_intake_fault_is_transient(exc) is False, exc
