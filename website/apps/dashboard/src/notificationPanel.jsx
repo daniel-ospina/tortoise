@@ -30,13 +30,16 @@
 //   * show an empty detail pane — an alert with no recorded detail SAYS so, in
 //     words, because that absence is the second half of the owner's complaint.
 //
-// A11Y: the disclosure pattern the account menu settled on (#1148-ux, P2-1) —
-// `aria-expanded` + `aria-controls` + `aria-haspopup` on the trigger, a labelled
-// `role="group"` panel whose title is a real heading, plain buttons, Escape closes
-// and returns focus to the bell (from inside the panel too, not only from the
-// trigger), and a pointerdown outside closes. No `role="menu"`: the APG menu
-// contract needs roving arrow-key focus, and a declared menu without it is worse
-// than none.
+// A11Y: the DISCLOSURE pattern — `aria-expanded` + `aria-controls` on the trigger
+// (the two attributes the account-menu precedent in `main.jsx` actually carries),
+// a labelled `role="group"` panel whose title is a real heading, plain buttons,
+// Escape closes and returns focus to the bell (from inside the panel too, not only
+// from the trigger), and a pointerdown outside closes. No `role="menu"` and NO
+// `aria-haspopup`: that attribute's `true` token DECLARES A MENU (MDN
+// `aria-haspopup`, APG Menu Button), whose contract needs roving arrow-key focus —
+// a declared menu without it is worse than none, which is the same reason the
+// panel is not a `role="menu"` (review finding). The APG Disclosure pattern is
+// `aria-expanded` + `aria-controls` and omits `aria-haspopup`.
 import React from 'react'
 
 import {
@@ -51,6 +54,7 @@ import {
   DETAIL_UNDISPLAYABLE,
   DISMISS,
   DISMISSED_HIDE,
+  DISMISSED_LOCAL_NOTE,
   DISMISSED_TOGGLE,
   LEDGER_ALL_CLEAR,
   LEDGER_EMPTY,
@@ -388,11 +392,22 @@ export function NotificationBell({
   // (`rowKey` — the server's `episode`): what the reader clicked is the row on
   // screen. Resolving by the decision identity would open whichever episode of
   // that identity happened to come first in the feed.
+  // ⛔ `acked` IS in this set on purpose, even though those rows are not listed.
+  // An acknowledgement is written to the server and the parent then re-reads the
+  // feed, so the row the reader is looking at moves to the `acked` bucket mid-read.
+  // Leaving that bucket out meant `detailEntry` went null and the panel silently
+  // replaced the open detail with the bare ledger — the acknowledgement was
+  // recorded and the reader was told nothing, while `ACKED_NOTE` (the sentence
+  // written to say exactly that) sat in a branch that could never render. Keeping
+  // the row resolvable makes both branches live: the row only resolves here while
+  // its detail is already open, so no unlisted row becomes openable from the list
+  // (review finding).
   const everyEntry = [
     ...ledgerView.current,
     ...ledgerView.older,
     ...ledgerView.snoozed,
     ...ledgerView.dismissed,
+    ...ledgerView.acked,
   ]
   const detailEntry = detailKey ? everyEntry.find((e) => e.rowKey === detailKey) || null : null
   const detailAlert = detailEntry ? detailEntry.alert : null
@@ -431,7 +446,6 @@ export function NotificationBell({
         }}
         aria-expanded={open}
         aria-controls={panelId}
-        aria-haspopup="true"
         aria-label={bellLabel}
         title={bellLabel}
       >
@@ -571,7 +585,7 @@ export function NotificationBell({
                         <li key={entry.rowKey} className="notif-row">
                           <span className="notif-snoozed-text">
                             <strong>{entry.label}</strong>
-                            <span className="dim small"> · dismissed for you</span>
+                            <span className="dim small"> · {DISMISSED_LOCAL_NOTE}</span>
                           </span>
                           <button
                             type="button"

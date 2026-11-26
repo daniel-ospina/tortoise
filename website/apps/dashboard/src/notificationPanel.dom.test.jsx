@@ -39,8 +39,10 @@ import { cleanup, fireEvent, render } from '@testing-library/react'
 import './index.css'
 import { NotificationBell } from './notificationPanel.jsx'
 import {
+  ACKED_NOTE,
   DETAIL_NO_DETAIL,
   DETAIL_TITLE,
+  DISMISSED_LOCAL_NOTE,
   LEDGER_ALL_CLEAR,
   SAVE_FAILED,
   SNOOZE_PERIODS,
@@ -209,8 +211,13 @@ test('#14686: an activity row is chipped as a measurement, an incident row as an
   fireEvent.click(bell(container))
   const incident = rows(container).find((r) => /incident row/.test(r.textContent))
   const activity = rows(container).find((r) => /activity row/.test(r.textContent))
-  assert.match(incident.textContent, /alert/)
-  assert.match(activity.textContent, /activity/)
+  // ⛔ ASSERT THE CHIP, NOT THE ROW'S TEXT. The activity fixture's message is
+  // literally `'activity row'` and `LedgerRow` renders `entry.message`, so
+  // `/activity/` on the row is satisfied by the FIXTURE with the chip deleted —
+  // the assertion could not red under any mutation of the behaviour it names
+  // (review finding; agent-infra#3442 rule 3). The chip is the thing that varies.
+  assert.equal(incident.querySelector('.notif-chip').textContent, 'alert')
+  assert.equal(activity.querySelector('.notif-chip').textContent, 'activity')
   // The alarm weight is carried by the incident row only.
   assert.ok(incident.className.includes('notif-row-incident'))
   assert.ok(!activity.className.includes('notif-row-incident'))
@@ -350,7 +357,13 @@ test('#14686: the trigger declares what it controls', () => {
   const panelEl = panel(container)
   assert.ok(panelEl.id, 'the panel needs an id for aria-controls to point at')
   assert.equal(control.getAttribute('aria-controls'), panelEl.id)
-  assert.equal(control.getAttribute('aria-haspopup'), 'true')
+  // ⛔ `aria-haspopup` must be ABSENT. Its `true` token declares a MENU popup
+  // (MDN `aria-haspopup`, APG Menu Button), and this panel is a `role="group"`
+  // disclosure with no roving arrow-key focus — the APG Disclosure pattern is
+  // `aria-expanded` + `aria-controls` and omits `aria-haspopup` (review finding).
+  // Asserting the absence is an assertion that can red if it is ever re-added.
+  assert.equal(control.getAttribute('aria-haspopup'), null)
+  assert.equal(control.getAttribute('aria-expanded'), 'true')
   // The panel's own title is a real heading, reachable by heading navigation.
   assert.equal(panelEl.querySelector('h2').textContent, 'Notifications')
 })
@@ -390,6 +403,14 @@ test('#14686: dismissing removes the row and it stays dismissed after a RELOAD',
     .find((b) => /Dismissed \(1\)/.test(b.textContent))
   assert.ok(toggle, 'dismissed rows must stay reachable')
   fireEvent.click(toggle)
+  // The copy comes from the constant, not from a second hand-typed spelling in
+  // the render: the dismissed row says WHAT KIND of dismissal this is (local to
+  // this browser), and #10156's copy discipline exists so the render and its
+  // tests cannot hold two sentences (review finding).
+  assert.ok(
+    after.container.textContent.includes(DISMISSED_LOCAL_NOTE),
+    'a locally-dismissed row must say the dismissal is local',
+  )
   const restore = [...after.container.querySelectorAll('button')]
     .find((b) => /Restore/.test(b.textContent))
   fireEvent.click(restore)
@@ -616,6 +637,52 @@ test('#14686: the org-wide Acknowledge is in the detail view, owner-only, and ca
   fireEvent.click(bell(member.container))
   fireEvent.click(member.container.querySelector('.notif-open'))
   assert.doesNotMatch(member.container.textContent, /Acknowledge for everyone/)
+})
+
+test('#14686: a recorded acknowledgement is SAID in the detail view, not silently dropped', () => {
+  // The parent writes the acknowledgement and then re-reads the feed, so the row
+  // the reader is looking at moves from `current` into the `acked` bucket. If the
+  // open detail resolves only from the LISTED buckets, `detailEntry` goes null and
+  // the panel silently swaps the detail for the bare ledger: the acknowledgement
+  // was recorded and the reader was told nothing — while `ACKED_NOTE`, the one
+  // sentence written to say exactly that, sat in a branch that could never render
+  // (review finding).
+  const store = fakeStorage()
+  const row = alert({ message: 'ack me' })
+  function Harness() {
+    const [alerts, setAlerts] = React.useState([row])
+    return (
+      <NotificationBell
+        alerts={alerts}
+        userId={USER}
+        orgId={ORG}
+        canAcknowledge
+        onAcknowledge={(a) => setAlerts([{ ...a, acked: true }])}
+        now={NOW}
+        storage={store}
+      />
+    )
+  }
+  const { container } = render(<Harness />)
+  fireEvent.click(bell(container))
+  fireEvent.click(container.querySelector('.notif-open'))
+  const ackBtn = [...container.querySelectorAll('.notif-detail-actions button')]
+    .find((b) => /Acknowledge for everyone/.test(b.textContent))
+  assert.ok(ackBtn)
+  fireEvent.click(ackBtn)
+
+  const detail = container.querySelector('.notif-detail')
+  assert.ok(detail, 'the open detail must not vanish under the reader once the ack lands')
+  assert.ok(
+    detail.textContent.includes(ACKED_NOTE),
+    'a recorded acknowledgement must be stated, not implied by a disappearing row',
+  )
+  // …and the control that would re-send it is gone, not merely refusable.
+  assert.doesNotMatch(container.textContent, /Acknowledge for everyone/)
+  // Back still works, and the acknowledged episode is not listed as unresolved.
+  fireEvent.click(container.querySelector('.notif-back'))
+  assert.equal(container.querySelector('.notif-detail'), null)
+  assert.equal(bell(container).getAttribute('aria-label'), 'Notifications')
 })
 
 test('#14686: a refused acknowledgement renders in the detail view, not silently', () => {
