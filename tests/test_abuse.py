@@ -863,12 +863,158 @@ class TestR1Calibration:
                                        now=T0 + timedelta(seconds=1)) == "flag"
 
     def test_an_unreadable_allowance_keeps_the_absolute_level(self, notified):
-        """Fail toward the SENSITIVE level: a tier we cannot read must not
-        disable detection, and must not invent an allowance either."""
+        """Fail toward the SENSITIVE level on a COLD START: with no known floor
+        the answer is the configured absolute level, never a fabricated
+        allowance."""
         store = _TierStore(raiser=True)
         eng = AbuseEngine(store)
         assert eng.point_threshold("t1") == 500
         assert eng.record_point_create("t1", 501, now=T0) == "flag"
+
+    def test_a_failed_allowance_read_keeps_the_LAST_KNOWN_level(self, notified):
+        """#14687 round-2 review (P1): a read failure must not LOWER the level.
+
+        The first version answered 0 on any exception, so an expired cache + one
+        failed ``organizations`` read collapsed a pro org's 25 000 level to the
+        absolute 500 for as long as the reads failed — an org at 1 000 units/hour,
+        correctly silent, started flagging AND clearing on every retry: the
+        oscillation #14687 exists to remove, created by a store failure. A tier
+        does not change because a read failed, so the last known floor is reused.
+        """
+        store = _TierStore(allowance=50_000)
+        eng = AbuseEngine(store)
+        assert eng.point_threshold("t1") == 25_000
+        store._raiser = True          # the read starts failing…
+        # …and the 300 s TTL expires. EXPIRED, not deleted: the entry is still
+        # there, which is the real shape (pruning only runs on insert).
+        with eng._tier_lock:
+            eng._tier_floor_cache["t1"] = (time.monotonic() - 1, 25_000)
+        assert eng.point_threshold("t1") == 25_000, (
+            "a failed read moved the level down to the absolute floor")
+        assert eng.record_point_create("t1", 1000, now=T0) is None, (
+            "a store failure increased alert volume")
+
+    def test_a_failing_allowance_read_is_not_re_issued_per_request(self):
+        """The read sits on the capture path on a table the abuse path did not
+        touch before this change; during an outage one blocking read PER CAPTURE
+        (on the MCP write path too) is a cost, so the failure is remembered for a
+        short TTL."""
+        store = _TierStore(allowance=50_000)
+        eng = AbuseEngine(store)
+        eng.point_threshold("t1")
+        store._raiser = True
+        eng._tier_floor_cache.clear()
+        for _ in range(5):
+            eng.point_threshold("t1")
+        assert store.allowance_reads == 2, (
+            f"the failure was re-read on every call: {store.allowance_reads} "
+            "reads for 6 evaluations")
+
+    def test_the_clear_ratio_one_is_the_documented_off_switch(self, notified,
+                                                             monkeypatch):
+        """#14687 round-2 review (P1): the knob must be able to say OFF.
+
+        ``1.0`` means clear at the fire level — byte for byte the pre-#14687
+        rule. It used to be REFUSED (falling back to 0.5, a setting nobody
+        chose), while ``0.0`` — documented as the off switch — was in fact the
+        stickiest possible latch (an episode clears only after a full window of
+        literal zero traffic). Both are pinned here, in both directions.
+        """
+        monkeypatch.setenv("TORTOISE_ABUSE_POINT_WINDOW_S", "60")
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        monkeypatch.setenv("TORTOISE_ABUSE_CLEAR_RATIO", "1.0")
+        assert eng.clear_ratio() == 1.0
+        assert eng.record_point_create("t1", 700, now=T0) == "flag"
+        # 450 is under the fire level -> cleared, exactly as before #14687.
+        assert eng.record_point_create("t1", 450,
+                                       now=T0 + timedelta(seconds=61)) is None
+        assert store.org_flagged_at("t1") is None
+        # …and 0.0 is the STICKIEST setting, not the off switch.
+        monkeypatch.setenv("TORTOISE_ABUSE_CLEAR_RATIO", "0.0")
+        store2 = MemoryAbuseStore()
+        eng2 = AbuseEngine(store2)
+        assert eng2.record_point_create("t1", 700, now=T0) == "flag"
+        for i in range(3):
+            assert eng2.record_point_create(
+                "t1", 1, now=T0 + timedelta(seconds=61 * (i + 1))) == "breach"
+        assert store2.org_flagged_at("t1") is not None
+        # An impossible ratio falls back to the shipped default.
+        monkeypatch.setenv("TORTOISE_ABUSE_CLEAR_RATIO", "1.5")
+        assert AbuseEngine(MemoryAbuseStore()).clear_ratio() == 0.5
+
+    def test_a_zero_cap_cannot_silently_disable_the_rule(self, notified,
+                                                        monkeypatch,
+                                                        caplog):
+        """#14687 round-2 review: ``CAP=0`` wrote a zero-weight row per capture
+        and killed the rule with no warning anywhere — a deployment that looks
+        configured. A non-positive cap is refused."""
+        monkeypatch.setenv("TORTOISE_ABUSE_POINT_REQUEST_CAP", "0")
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        assert eng.point_request_cap() == 1000
+        assert eng.record_point_create("t1", 700, now=T0) == "flag"
+        assert store.window_sum("t1", abuse.EVENT_POINT_CREATE, 3600, T0) == 700
+
+    def test_a_band_dip_still_escalates_once(self, notified, monkeypatch):
+        """#14687 round-2 review: the latch keeps the episode OPEN, so its age
+        keeps accumulating and stage 2 becomes reachable across a band dip —
+        where the old clear-and-refire reset the clock. That is what stage 2
+        means (an episode a full window old, with continuity) and it fires ONCE
+        per episode; pinned so the trade is measured rather than accidental."""
+        monkeypatch.setenv("TORTOISE_ABUSE_POINT_WINDOW_S", "60")
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        assert eng.record_point_create("t1", 700, now=T0) == "flag"
+        # Inside the band: the episode stays open and gains age.
+        assert eng.record_point_create("t1", 400,
+                                       now=T0 + timedelta(seconds=61)) == "breach"
+        # A crossing a full window later escalates the SAME episode — the age
+        # accumulated across the dip, which the old clear-and-refire reset.
+        eng.record_point_create("t1", 700, now=T0 + timedelta(seconds=122))
+        stages = [r["event_type"] for r in store.rows
+                  if r["event_type"] in (abuse.EVENT_FLAG, abuse.EVENT_REVIEW)]
+        assert stages == [abuse.EVENT_FLAG, abuse.EVENT_REVIEW], stages
+
+    def test_r2_clears_at_half_its_own_level(self, notified, monkeypatch):
+        """#14687 round-2 review: `_evaluate` is shared, so the latch applies to
+        the key-creation rule too — 10/24h now clears at 5. Pinned, and stated in
+        ``.env.example``, so the R2 change is a decision rather than a side
+        effect nobody looked at."""
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        # 11 key_create events in the window -> R2 fires.
+        for _ in range(11):
+            store.record_event("t1", abuse.EVENT_KEY_CREATE, created_at=T0)
+        assert eng.evaluate_key_creates("t1", now=T0) == "flag"
+        # 8 keys: under the 10 fire level, above the 5 clear level -> stays open.
+        store.rows = [r for r in store.rows
+                      if r["event_type"] != abuse.EVENT_KEY_CREATE]
+        for _ in range(8):
+            store.record_event("t1", abuse.EVENT_KEY_CREATE, created_at=T0)
+        assert eng.evaluate_key_creates("t1", now=T0) == "breach"
+        assert store.org_flagged_at("t1") is not None
+        # 5 keys: at the clear level -> episode ends.
+        store.rows = [r for r in store.rows
+                      if r["event_type"] != abuse.EVENT_KEY_CREATE]
+        for _ in range(5):
+            store.record_event("t1", abuse.EVENT_KEY_CREATE, created_at=T0)
+        assert eng.evaluate_key_creates("t1", now=T0) is None
+        assert store.org_flagged_at("t1") is None
+
+    def test_a_historical_row_still_names_what_was_measured(self):
+        """#14687 round-2 review: rows written BEFORE the plumbing carry `rule`
+        but no `surface`, and there are ~4 500 of them in production. The name is
+        derived from the rule through the fixed customer-facing map, so an old
+        alert reads as precisely as a new one — and the raw token still never
+        reaches the payload."""
+        row = abuse._alert_dict({"event_type": "flag", "details": {
+            "rule": "point_create", "count": 2309, "threshold": 500,
+            "window_s": 3600}})
+        assert row["message"].startswith("Memory writes reached 2,309 units"), (
+            row["message"])
+        assert "rule" not in row["details"]
+        assert "point_create" not in row["message"]
 
     def test_the_allowance_read_is_cached_per_org(self, notified):
         """The read sits on the capture path, so it is cached; the cache is what

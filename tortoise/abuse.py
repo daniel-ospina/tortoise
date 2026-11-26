@@ -194,6 +194,13 @@ ALERT_REGISTER_OF = {
     # Acknowledge never stuck.
     EVENT_FLAG: REGISTER_ACTIVITY,
     EVENT_REVIEW: REGISTER_ACTIVITY,
+    # ⚠️ This is the CUSTOMER register only. The OPERATOR side still opens a
+    # tracked incident for the same event (`notify.ABUSE_INCIDENT_KINDS`), and
+    # that is deliberate, not drift: an incident is a human WORK ITEM with a
+    # lifecycle of its own (#14407), while this map answers "how may a customer
+    # be told about it" — and the answer for a re-derived rate is "as a
+    # measurement, with numbers, not as an event". Do not "fix" one to match the
+    # other without reading both.
     EVENT_AUTH_IP: REGISTER_ALERT,        # a credential event: new-country auth
     EVENT_READ_VELOCITY: REGISTER_ACTIVITY,
     EVENT_SIGNUP_VELOCITY: REGISTER_ACTIVITY,
@@ -286,13 +293,16 @@ def _int_env(name: str, default: int) -> int:
 
 
 def _ratio_env(name: str, default: float) -> float:
-    """A fraction in ``[0, 1)`` from the environment (#14687).
+    """A fraction in ``[0, 1]`` from the environment (#14687).
 
-    A value at or above ``1.0`` is refused rather than clamped: at ``1.0`` the
-    clear level equals the fire level, i.e. the hysteresis silently disappears
-    while the operator believes it is on — the one misconfiguration that looks
-    like a working setting. Out of range falls back to the shipped default, which
-    is the documented behaviour of every other reader in this module.
+    ``1.0`` is ACCEPTED and is the documented OFF SWITCH: at ``1.0`` the clear
+    level equals the fire level, which is exactly the pre-#14687 behaviour. An
+    earlier version refused anything >= 1.0 "because it silently means no
+    hysteresis" — but that left the knob with no way to say "off" at all, so an
+    operator who wanted the old rule got ``0.5`` (a setting they never chose) and
+    no way to tell. Above ``1.0`` is refused: a clear level above the fire level
+    is impossible (the episode would clear only when it should fire), and out
+    of range falls back to the shipped default like every other reader here.
     """
     raw = os.environ.get(name)
     if not raw or not raw.strip():
@@ -301,7 +311,7 @@ def _ratio_env(name: str, default: float) -> float:
         value = float(raw)
     except (TypeError, ValueError):
         return default
-    return value if 0.0 <= value < 1.0 else default
+    return value if 0.0 <= value <= 1.0 else default
 
 
 #: #14687: how long a successfully-read tier allowance is reused before the org's
@@ -310,6 +320,12 @@ def _ratio_env(name: str, default: float) -> float:
 #: than the rule's own 1-hour window, so a tier upgrade can never be hidden
 #: behind a stale HIGHER floor for longer than a fifth of it.
 _TIER_FLOOR_TTL_S = 300.0
+
+#: #14687: how long a FAILED allowance read is remembered before another attempt.
+#: Without it every capture request during a store outage issues its own
+#: ``organizations`` read (blocking, for the full timeout, on the MCP write path),
+#: on a table the abuse hot path did not touch at all before this change.
+_TIER_FLOOR_FAIL_TTL_S = 30.0
 
 
 #: #5493 review P2-3: window misconfigurations already warned about, keyed
@@ -1515,11 +1531,27 @@ def _point_rate_message(details: dict, *, sustained: bool) -> str:
     A field that was NOT recorded is stated as unknown rather than filled in —
     never a placeholder ``0``, never an assumed window. Old rows predate this
     plumbing and a rule that measures something else may carry none of it.
+
+    ⚠️ The claim is ``Nothing was disabled``, NOT ``did not change anything``.
+    The flag write sets the org's ``flagged_at``, which ``GET /v1/team`` renders
+    as ``status: "flagged"`` — so a whole-state "nothing changed" claim on this
+    row would be contradicted by another field of the same API (round-2 review
+    finding). What IS true, and is what the customer needs, is that no
+    enforcement followed: nothing was disabled, throttled or locked. That is also
+    the owner's own wording on the finding.
     """
     units = _as_int(details.get("count"))
     level = _as_int(details.get("threshold"))
     window_s = _as_int(details.get("window_s"))
-    surface = str(details.get("surface") or "").strip() or "Activity"
+    surface = str(details.get("surface") or "").strip()
+    if not surface:
+        # A row written BEFORE this plumbing carries the rule but no surface.
+        # Deriving it keeps ~4 500 historical rows as precise as new ones — and
+        # stays safe because the derived name is a fixed, customer-facing phrase
+        # from `_RULE_SURFACE`, never the raw token (which `_customer_details`
+        # strips from the payload).
+        surface = _RULE_SURFACE.get(details.get("rule"), "")
+    surface = surface or "Activity"
     if units is not None and window_s is not None:
         measured = (f"{surface} reached {units:,} units in the last "
                     f"{_human_window(window_s)}")
@@ -1536,7 +1568,7 @@ def _point_rate_message(details: dict, *, sustained: bool) -> str:
     route = ("If you need a higher limit, contact support@premiselabs.co."
              if sustained else
              "If this activity isn't yours, review your API keys in Keys.")
-    return (f"{measured} This is informational; it did not change anything. "
+    return (f"{measured} Nothing was disabled; this is informational. "
             f"{route}")
 
 
@@ -2243,10 +2275,22 @@ class AbuseEngine:
         """#14687: ``ratio * the org's ops_allowance``, cached per org.
 
         The read is cached (``_TIER_FLOOR_TTL_S``) because it sits on the capture
-        path, and a tier does not change between requests. Only a SUCCESSFUL read
-        is cached: a store failure must not freeze a lowered level in place for
-        the TTL, and the caller falls back to the absolute floor, which is the
-        shipped, more-sensitive level.
+        path, and a tier does not change between requests.
+
+        A FAILED read must not move the level DOWN — that is the direction that
+        creates alerts, and the module's standing rule is that a store failure
+        must reduce alert volume, never increase it. Returning 0 here (the first
+        version did) collapsed a pro org's 25 000 level to the absolute 500 for
+        as long as the reads failed, so an org at 1 000 units/hour — correctly
+        silent — started flagging AND clearing on every retry: exactly the
+        oscillation #14687 exists to remove. So a failure reuses the last KNOWN
+        floor even after its TTL expired (a tier does not change because a read
+        failed), and the answer is remembered for ``_TIER_FLOOR_FAIL_TTL_S`` so
+        the outage does not cost one blocking read per capture.
+
+        With no known floor at all (a cold start into a failing store) the answer
+        is 0 — the configured absolute level, which is the shipped, more
+        sensitive rule and the same one this org had before the tier term existed.
         """
         now = time.monotonic()
         with self._tier_lock:
@@ -2256,7 +2300,12 @@ class AbuseEngine:
         try:
             allowance = self.store.org_allowance(org_id)
         except Exception:  # an unreadable tier is not a verdict
-            return 0
+            with self._tier_lock:
+                stale = self._tier_floor_cache.get(org_id)
+                floor = stale[1] if stale is not None else 0
+                self._tier_floor_cache[org_id] = (
+                    now + _TIER_FLOOR_FAIL_TTL_S, floor)
+            return floor
         allowance = _as_int(allowance) or 0
         ratio = _ratio_env("TORTOISE_ABUSE_TIER_FLOOR_RATIO", 0.5)
         floor = int(allowance * ratio) if allowance > 0 else 0
@@ -2300,16 +2349,24 @@ class AbuseEngine:
         independently of any alerting (the owner's refinement 2, comment
         7174797019).
 
-        The shipped bound is ``2 * MAX_SESSION_TURNS`` (1000). Both terms of the
-        formula are bounded by the turn cap in the common path — at most one
-        turn Point per stored turn, plus the points extraction mints from them —
-        so 1000 is the ceiling of a LEGITIMATE single capture, not a sensitivity
-        knob. It stays well under the alert level a tier-relative floor computes
-        (pro: 25 000 units/hour), so the cap bounds the pathological request
-        without touching normal traffic. Pinned by
-        ``test_the_per_request_cap_is_the_turn_cap_twice``.
+        The shipped bound is ``2 * MAX_SESSION_TURNS`` (1000). ``len(conversation)``
+        is turn-capped by ``MAX_SESSION_TURNS``; ``len(extracted)`` is an
+        extraction result and is NOT itself turn-capped (one turn can mint
+        several points), so 1000 is the ceiling of a typical -- not a provable --
+        single capture. That is deliberate: the cap exists to bound the
+        pathological request, and clipping a legitimately enormous capture's abuse
+        weight costs nothing (this number is not billing; the write-op meter is a
+        separate leg). It stays well under the level a tier-relative floor
+        computes (pro: 25 000 units/hour), so normal traffic is untouched.
+        Pinned by ``test_the_per_request_cap_is_the_turn_cap_twice``.
+
+        A non-positive cap is REFUSED (falls back to the shipped bound): a cap of
+        0 writes a zero-weight row per capture and silently kills the rule, with
+        no warning anywhere — the failure mode that looks like a configured
+        deployment. "Disable the detector" is ``TORTOISE_ABUSE_DISABLED``.
         """
-        return _int_env("TORTOISE_ABUSE_POINT_REQUEST_CAP", 1000)
+        cap = _int_env("TORTOISE_ABUSE_POINT_REQUEST_CAP", 1000)
+        return cap if cap > 0 else 1000
 
     def point_window_s(self) -> int:
         return _window_env("TORTOISE_ABUSE_POINT_WINDOW_S", 3600)
@@ -2378,10 +2435,24 @@ class AbuseEngine:
             # new durable state is needed — `latest_flag_at` is the anchor the
             # staging logic already reads, so the latch survives a restart.
             #
-            # Cost, stated: the band costs ONE `latest_flag_at` read per
-            # evaluation inside it. Outside the band the path is unchanged — at
-            # or below the clear level the read/write pair below was already
-            # there, and above the fire level the staging read runs anyway.
+            # Cost, stated honestly: the band costs one `latest_flag_at` CALL per
+            # evaluation inside it, which on the Supabase store is TWO PostgREST
+            # queries (newest flag, then newest clear) — and R2's band
+            # `(5, 10]`/24h is a state an org with 6–10 keys in a day sits in for
+            # hours. Outside the band the path is unchanged: at or below the clear
+            # level the read/write pair below was already there, and above the
+            # fire level the staging read runs anyway.
+            #
+            # CONSEQUENCE, deliberate and pinned by
+            # `test_a_band_dip_still_escalates_once`: because the episode stays
+            # OPEN across a dip, its age keeps accumulating, so an org that
+            # oscillates between the two levels for a full window now reaches
+            # stage 2 (`review_needed` / "Sustained high activity") where the old
+            # engine's clear-and-refire kept resetting the clock. That is what
+            # stage 2 is FOR — an episode a full window old with continuity — and
+            # it fires ONCE per episode (the notify claim), so the trade is flag
+            # churn (105 -> 35 measured) for one escalation on a genuinely
+            # sustained bout.
             if total > threshold * self.clear_ratio():
                 return self._flag_still_open(org_id, rule)
             # Clean window → end any active flag episode for this rule, so a
@@ -2560,13 +2631,26 @@ class AbuseEngine:
         and must not be allowed to look like one (#3631's rule). It cannot end an
         episode either — ending one requires the confirmed clean-window write
         below, which only runs at or under the clear level.
+
+        #14407 CARRIED ACROSS THE LATCH: the pending episode-end retry used to be
+        reachable ONLY from the clean window. The band's early return would
+        otherwise postpone it for as long as the rate sits between the two levels
+        — and an episode whose incident close failed stays OPEN forever otherwise
+        (the comment on that branch says so). The retry is gated exactly as it is
+        there: only when NO episode is active (otherwise it could close the
+        incident of a NEW episode — the false all-clear #5143 forbids) and only
+        when the store's own backoff pace says it is due.
         """
         try:
-            return ("breach" if self.store.latest_flag_at(org_id, rule)
-                    is not None else None)
+            active = self.store.latest_flag_at(org_id, rule) is not None
         except Exception as e:  # reduce alert volume, never raise
             report_abuse_decision_fault("latest_flag_at", org_id, rule, e)
             return None
+        if (not active
+                and (org_id, rule) in self._pending_episode_resolves
+                and self._resolve_retry_due(org_id, rule)):
+            self._end_alert_episode(org_id, rule)
+        return "breach" if active else None
 
     def _flag(self, org_id: str, rule: str, details: dict, now: datetime,
               window_s: int) -> str:

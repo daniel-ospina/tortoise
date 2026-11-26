@@ -1435,8 +1435,8 @@ class TestAlertRegistersAndAcks:
             # this fixture exists to hold, checked against the string a customer
             # will actually read.
             "Memory writes reached 2,309 units in the last 1 hour, against an "
-            "alert level of 500 units. This is informational; it did not "
-            "change anything. If this activity isn't yours, review your API "
+            "alert level of 500 units. Nothing was disabled; this is "
+            "informational. If this activity isn't yours, review your API "
             "keys in Keys.",
             # …and the same phrase form where the whole phrase is
             # CUSTOMER-DETERMINED. Note the reason carefully: `engineering` is
@@ -1519,12 +1519,12 @@ class TestAlertRegistersAndAcks:
         assert not self._claims(velocity["message"])
         # …and the review row still says what it CAN know: what THIS alert did,
         # in the numbers it recorded. #14687 replaced "It did not disable
-        # anything" with the activity register's own"did not change anything"
-        # clause (one phrase for one fact, so the two registers cannot drift) and
-        # kept the route the tier-relative level makes true.
+        # anything" with the same narrow claim in one clause shared with stage 1
+        # (one phrase for one fact) and kept the route the tier-relative level
+        # makes true.
         msg = _alert_dict({"event_type": "review_needed", "details": {},
                            "created_at": "2026-09-25T17:19:05+00:00"})["message"]
-        assert "did not change anything" in msg, msg
+        assert "Nothing was disabled" in msg, msg
         assert "support@premiselabs.co" in msg, msg
         # Every RATE detector shares ONE shape (round-14 finding: recovery_velocity
         # was the only one without the informational clause and read as an
@@ -1540,10 +1540,17 @@ class TestAlertRegistersAndAcks:
                                     "created_at": "2026-09-25T17:19:05+00:00"}
                                    ).get("message") or "")
             # A rate is a measurement, so the LABEL must not be an incident word
-            # and the MESSAGE must say nothing changed and offer a route.
+            # and the MESSAGE must state that nothing was DISABLED and offer a
+            # route. #14687 narrowed the phrase for the two rate rules that DO
+            # write a state marker (`flagged_at` -> `GET /v1/team` status
+            # "flagged"): a whole-state "did not change anything" would be
+            # contradicted by another field of the same API, so the property the
+            # pin holds is the true one — "nothing was disabled" — and either
+            # wording passes.
             assert not re.search(r"(suspicious|incident|compromis|breach|"
                                  r"attack)", m, re.I), (etype, m)
-            assert "did not change anything" in body, (etype, body)
+            assert ("did not change anything" in body.lower()
+                    or "nothing was disabled" in body.lower()), (etype, body)
             assert ("keys" in body.lower() or "support@" in body.lower()), (
                 etype, body)
         # No WHOLE-STATE claim anywhere: the same panel can carry a suspension
