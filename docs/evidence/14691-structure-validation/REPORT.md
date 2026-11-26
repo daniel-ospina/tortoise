@@ -749,6 +749,16 @@ pinned by an arm that reds on its own mutation:
   stay green. The arrow-list is parsed out of the field, must be exactly
   `IMPL|NAND|hasPart`, and each token must be a predicate the graph actually has.
 
+### 8.11 What the ninth round closed (the citation's line range)
+
+The last survivor of the `code_path` class: the FILENAME and the predicate SET were
+pinned, the **line range** was not. `entity_reads.py:551-559` → `:533-541` is the
+same length, keeps the artifact at 809,812 bytes, re-derives cleanly, and moves the
+citation onto `entity_relations`' def line — the read that returns NO direction,
+i.e. exactly the contrast the field exists to draw. The cited lines are now read
+out of the file: the range must mention each predicate it claims to cover and must
+still say the read is epistemic-only.
+
 The generic coverage arm (`test_no_FIGURE_in_the_two_documents_is_free`) is a
 **floor, not a substitute for a pin**: it proves a number is carried by some
 artifact, never that it belongs to the field quoting it — which is why six of the

@@ -3467,6 +3467,24 @@ def test_D4_cannot_survive_its_witnesses_all_failing():
     assert tokens == {"IMPL", "NAND", "hasPart"}, claimed.group(1)
     known = set(_score()["directions"]) | {"IMPL", "NAND"}
     assert tokens <= known, (tokens - known)
+    # ⛔ AND THE LINE RANGE IS THE CITATION'S CONTENT (#14691 review, round 9).
+    # The filename and the predicate set were pinned, the range was not:
+    # `entity_reads.py:551-559` → `:533-541` (same length) left 86 passed and moved
+    # the citation onto `entity_relations`' def line — the read that returns NO
+    # direction, i.e. exactly the contrast this field exists to draw. The cited
+    # lines are read out of the file, so a moved range cannot stay green.
+    span = re.search(r"(tortoise/[\w/]+\.py):(\d+)-(\d+)",
+                     d4["evidence"]["code_path"])
+    assert span, d4["evidence"]["code_path"]
+    path, start, end = span.group(1), int(span.group(2)), int(span.group(3))
+    cited = (REPO / path).read_text().splitlines()[start - 1:end]
+    text = "\n".join(cited)
+    for token in tokens:
+        assert token in text, (
+            f"D4 cites {path}:{start}-{end} as the read that covers {token}, and "
+            f"those lines do not mention it: {text[:120]!r}")
+    assert "EPISTEMIC" in text.upper(), (
+        f"D4's cited range no longer states the read is epistemic-only: {text[:120]!r}")
     assert "tortoise/entity_reads.py" in d4["evidence"]["code_path"]
     assert (REPO / "tortoise" / "entity_reads.py").is_file(), (
         "D4's code_path names a file this tree does not have")
