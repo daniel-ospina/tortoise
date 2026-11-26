@@ -446,11 +446,14 @@ def test_report_headline_numbers_are_the_artifacts_numbers():
         f"mixed rows with distinct pairs in the sentence that warns they differ")
     # ...and no OTHER spelled count may contradict the artifact either.
     allowed = {_spell(v) for v in (correct, inverted, pairs, rows)}
+    # the lead-in is stripped EXPLICITLY rather than by splitting on the first
+    # period: "One" is not a count, and a dropped period would otherwise turn a
+    # legitimate edit into a red here (fail-closed on the wrong thing).
+    body = re.sub(r"^\*\*One line that counts it\.?\*\*", "", tally).lower()
     mentioned = set(re.findall(
         r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
         r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
-        r"twenty(?:-[a-z]+)?|thirty(?:-[a-z]+)?)\b",
-        tally.split(".", 1)[-1].lower()))
+        r"twenty(?:-[a-z]+)?|thirty(?:-[a-z]+)?)\b", body))
     assert mentioned <= allowed, (
         f"the A2 tally names a count its own artifact does not support: "
         f"{sorted(mentioned - allowed)} (artifact: rows={rows}, correct={correct}, "
