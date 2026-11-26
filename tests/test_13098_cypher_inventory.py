@@ -5032,9 +5032,18 @@ def test_the_rendered_document_is_not_tracked():
     so the assertion cannot drift from the constant `--render` writes.
     """
     rel = census.DOC_OUT.relative_to(ROOT).as_posix()
+    # ⛔ `env=census._git_env()` ON BOTH PROBES (#14625 review round 2, P3). Without it the
+    # arm answered about whichever index `GIT_INDEX_FILE` NAMED rather than the one in this
+    # worktree — the exact retargeting class `tools/cypher_inventory.py`'s
+    # `_GIT_RETARGETING_ENV` scrubs for every probe it ships, and which this file otherwise
+    # honours at ten call sites. Measured false pass: with the rendered doc `git add -f`-ed,
+    # `GIT_INDEX_FILE`
+    # pointing at a clean pre-add index made this arm PASS over a tracked document, which is
+    # the one state it exists to red. git sets that variable for hooks, and the fleet's own
+    # scratch-index tools set it too, so it is not a hypothetical.
     tracked = subprocess.run(
         ["git", "ls-files", "--error-unmatch", rel],
-        cwd=ROOT, capture_output=True, text=True,
+        cwd=ROOT, capture_output=True, text=True, env=census._git_env(),
     )
     # ⛔ `== 1`, NOT `!= 0` (#14625 review, P2). `--error-unmatch`'s documented NON-MATCH
     # is exit 1; a non-zero exit ALSO covers git saying it could not read the index
@@ -5049,7 +5058,9 @@ def test_the_rendered_document_is_not_tracked():
         "A modify/delete conflict resolved by keeping the incoming copy re-stages "
         "it, and no other arm in this suite reads the tracked path."
     )
-    ignored = subprocess.run(["git", "check-ignore", "-q", rel], cwd=ROOT)
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q", rel], cwd=ROOT, env=census._git_env(),
+    )
     assert ignored.returncode == 0, (
         f"{rel} is not gitignored — `--render`'s output must never be stageable; "
         "re-add the path to `.gitignore`'s #13098 block"
