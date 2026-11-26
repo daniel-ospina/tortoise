@@ -103,9 +103,12 @@ version: 1
 # `tests/test_sdk_privatise_sweep.py` row. ⛔ THE LIST IS POSITIVE ONLY — it names files above that
 # carry a `durations` entry, and it makes NO claim about the row status of the ones it omits: a
 # `--refresh-durations` sweep ADDS a row the first time it measures a `fast_pool()` member
-# (`tools/ci_timing.py`), so an absence claim would be false one sweep later with no arm able to see
-# it. What the block asserts about `#14574`'s file and `#14607`'s is the WORD REGISTRATION, which
-# stays true whether or not a row lands beside it. ⛔ `#14415`'s files are named BY PATH here on
+# (`tools/ci_timing.py`), so an ABSENCE stated in this LIST would be false one sweep later. ⛔ The
+# absence claims this block DOES make are the `carry NO row` names further down, and those ARE
+# graded in BOTH directions: `test_the_fast_shards_header_block_grades_the_carry_row_spelling` reds
+# the sentence the moment a sweep writes a row it calls absent, so they are re-derived on a sweep
+# rather than deleted on one. What the block asserts about `#14574`'s file and `#14607`'s is the
+# WORD REGISTRATION, which stays true whether or not a row lands beside it. ⛔ `#14415`'s files are named BY PATH here on
 # purpose: the earlier "`#14415`'s batch rows" — and, before this fix, `#14597`'s — named them by
 # ISSUE only, so no matcher could reach them and deleting that `durations` row left this block's
 # arm GREEN over a row claim it makes. Every row item above is therefore spelled with its path
