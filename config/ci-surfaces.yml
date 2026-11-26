@@ -57,7 +57,7 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `bdd2738c50929` folded in (the fold this
+# reader of the prose can see. On THIS tree — `origin/main` `f2d4f2408cf5` folded in (the fold this
 # head carries; the rows below landed across it and the folds before it), carrying
 # `#14597`'s expansion fusion over the residue RATCHET
 # (`tests/test_expansion_fusion_14344.py`, `core`, carrying a `durations` row),
@@ -73,10 +73,10 @@ version: 1
 # members, and the pool being a SET is the whole of the claim), `#14607`'s registrations
 # (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), and `#14671`'s
 # `tests/test_13450_ep_position_axis_participation.py` row in `durations` — `core`-registered —
-# the verb packs the pool into two est_seconds readings: seven shards at 827.2 s
-# (a, b, c, d, i, j, k) and four at 827.3 s (e, f, g, h), so `ceil(827.3/60 x 2)` = 28 m governs
+# the verb packs the pool into two est_seconds readings: nine shards at 827.4 s
+# (a, c, d, e, f, h, i, j, k) and two at 827.5 s (b, g), so `ceil(827.5/60 x 2)` = 28 m governs
 # (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.3 = 2.0307), so the two agree by
+# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.5 = 2.0302), so the two agree by
 # construction rather than by a hand re-read.
 # ⛔ EVERY file named above is `main`'s at this head. ⛔ Not claiming "and every one is `core`":
 # registration status is a THIS-HEAD fact no arm in this block's family reads, and `#14544` is the
@@ -157,24 +157,6 @@ version: 1
 # `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
 # derivation, so they are a graded claim about THIS head — a fold re-derives them with the verb, it
 # never carries them.
-# reader of the prose can see. On THIS tree — `origin/main` `c1c8df1a3817` folded in, plus THIS
-# lane's own row (`tests/test_14700_capture_in_flight_typed_refusal.py`, `api`, at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) — the verb packs nine shards at 827.4 s (a, c, d, e, f, h, i, j, k) and
-# two at 827.5 s (b, g), so `ceil(827.5/60 x 2)` = 28 m governs (a shard's job-level wall clock is
-# the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.03` (1680 / 827.5 = 2.0302), so the two agree by construction rather than
-# by a hand re-read.
-# ⛔ THAT PAIR IS THIS TREE'S ALONE, and the move is measurable: `fast_pool()` holds 1340 entries
-# here against 1339 on `origin/main` `c1c8df1a3817`, both read by loading each tree's OWN manifest
-# through the verb, and the set difference is exactly ONE entry —
-# `tests/test_14700_capture_in_flight_typed_refusal.py`, this PR's (`#14700`) own suite. `main`
-# carries nothing this tree lacks. ⛔ Every other row this tree carries is `main`'s at this head,
-# NOT this PR's; counting one as this PR's would contradict the 1340 − 1339 = 1 the two readings
-# give. The name lists above are what the guard COMPARES against the live emission
-# (`test_the_fast_shards_header_block_states_the_measured_emission`), and
-# `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
-# derivation, so they are a graded claim about THIS head — re-derived with the verb on every fold,
-# never carried.
 # ⛔ THIS BLOCK ARRIVED SPLICED AGAIN AT THE `origin/main` `4b2fba3e8a` MERGE, and the repair is
 # recorded rather than hidden: `config/ci-surfaces.yml` carries a `merge=union` driver, so the fold
 # applied BOTH parents' derivations — one naming `origin/main` `29bb16b5b6` with this branch's own
@@ -185,11 +167,6 @@ version: 1
 # re-pointed. ⛔ The SAME splice arrived again at the `origin/main` `c1c8df1a38` fold — both
 # parents' re-derivations kept, the copies disagreeing on the bins — and is repaired the same way,
 # by the verb rather than around the splice.
-# re-pointed.
-# ⛔ IT ARRIVED SPLICED ONCE MORE ON THIS LANE'S REBASE ONTO `origin/main` `c1c8df1a3817` — the same
-# driver, the same failure — and this time NEITHER copy described this tree: both stated the
-# 827.2/827.3 partition and a `fast_pool()` of 1339, against the 827.4/827.5 and 1340 the verb emits
-# here. Neither copy was picked either; the paragraph above is a third fresh re-derivation.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: dropping that REGISTRATION cannot move a
 # bin, because the file's pool entry comes from the `eval` registration ALONE (as the sentence above
