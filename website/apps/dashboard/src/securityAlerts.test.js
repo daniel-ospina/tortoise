@@ -475,6 +475,21 @@ test('#14686: an in-flight alerts read cannot land on the wrong Organization', (
     /if \(orgIdRef\.current !== orgAtCall\) return\s*\n\s+setAlertsUnavailable\(true\)/g) || []
   assert.equal(failureGuards.length, 2,
     'BOTH failure arms (non-2xx and throw) must be guarded — not only the success branch')
+  // …and the read must be FOR the Organization that is current when it STARTS.
+  // The in-flight guard compares the ref before and after the awaits, so it
+  // cannot see a caller that captured `tid` before an await of its own:
+  // `acknowledgeAlert` holds `tid` across the acknowledgement POST and then calls
+  // `loadAlerts(tid)`, so a switch during that POST leaves `orgAtCall` equal to
+  // the NEW Organization while `tid` is the OLD one — the guard compares B to B,
+  // passes, and writes the OLD Organization's rows under the NEW one's header,
+  // into the NEW one's ledger key. Pinned because nothing caught it: the suite
+  // stayed green while every other guard assertion held.
+  assert.match(body, /if \(orgAtCall && orgAtCall !== tid\) return/,
+    'a read whose TARGET is not the current Organization must be refused, not '
+    + 'merely one whose target changed mid-flight')
+  assert.ok(body.indexOf('if (orgAtCall && orgAtCall !== tid) return')
+    < body.search(/await fetch\(/),
+    'the target check must precede the request — after it, the read has already ' + 'been authorised and fetched for the wrong Organization')
 })
 
 // ── The durable write path (main.jsx) ───────────────────────────────────────

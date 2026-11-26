@@ -5442,6 +5442,20 @@ function claimIntentInFlight() {
     // Captured BEFORE the first await — this is what makes the guard below a
     // question about THIS read rather than about the current selection.
     const orgAtCall = orgIdRef.current
+    // …and the read must BE for the Organization that is current when it starts.
+    // The in-flight guard compares the ref before and after the awaits, so it
+    // cannot see a caller that captured `tid` BEFORE an await of its own and then
+    // handed us the stale value: `acknowledgeAlert` does exactly that (it holds
+    // `tid` across the acknowledgement POST at `main.jsx` acknowledgeAlert). If a
+    // switch lands during that POST, `orgAtCall` is the NEW Organization while
+    // `tid` is the OLD one — the guard then compares B to B, passes, and writes
+    // the OLD Organization's episodes under the NEW one's header, with the ledger
+    // key already switched, so a snooze taken there lands in the wrong key and
+    // `snoozedUntil` has no incident gate by design. The same stale read also
+    // stamps `alertsUnavailable` on the new Organization in its failure arm.
+    // A not-yet-known Organization (the first-organization read, `orgAtCall`
+    // null) is still allowed — that is a real read for the org being selected.
+    if (orgAtCall && orgAtCall !== tid) return
     try {
       // #3501: same-origin proxy; the `__Host-session` cookie authenticates.
       const res = await fetch(`${API_BASE}/v1/team/alerts?org_id=${encodeURIComponent(tid)}`)
