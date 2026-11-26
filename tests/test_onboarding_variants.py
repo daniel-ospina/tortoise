@@ -1675,9 +1675,26 @@ QUICKSTART = REPO_ROOT / "docs" / "quickstart-cloud.md"
 # graded (declared RED row -> GREEN). The cue is the IMPERATIVE `restart`, whose
 # position IS the order this pin grades; a passive participle is not an
 # instruction the user acts on. So the cue set stays exact and the PROSE ANCHOR
-# below uses a restart WORD instead — it asks "is the instruction still in prose",
-# never "where is the imperative".
-_RESTART_CUE_TEXT = r"restart(?:ing)?\s+(?:your|the|its)\s+(?:MCP\s+)?(?:client|app|IDE|editor|application)"
+# below accepts an imperative cue OR a passive restart — it asks "is the
+# instruction still in prose", never "where is the imperative".
+#
+# ⛔ AND WITHOUT A RIGHT BOUNDARY THE SHORTEST ALTERNATIVE WINS AND THE CUE SPAN
+# ENDS MID-WORD. `re.search` matches `restart the APP` inside `restart the
+# APPLICATION`, so the post-cue window starts at `lication`, `_NEGATED_CUE_LEAD_RE`
+# never sees its `until|unless` clause, and the `cue_under_inverting_subordinate`
+# fallback is suppressed — measured, every one of these shipped GREEN (#14679
+# review cycle 62):
+#
+#     GREEN  Don't restart the application until you have confirmed the tools …
+#     GREEN  Before you restart the application; confirm the tools …
+#     GREEN  Before you restart the editors; confirm the tools …
+#
+# Substituted over the 480 declared-RED rows, `application`/`clients`/`editors`/
+# `apps`/`applications` each flipped 41/480 RED→GREEN. `s?` is REQUIRED as well as
+# `\b`: `\b` alone leaves `restart the editors` with no cue at all, which is the
+# ungraded-paragraph false PASS the widening exists to prevent.
+_RESTART_CUE_TEXT = (r"restart(?:ing)?\s+(?:your|the|its)\s+(?:MCP\s+)?"
+                     r"(?:client|app|IDE|editor|application)s?\b")
 # ⛔ THE CUE IS A MORPHOLOGY NOT ONE SPELLING, for the same reason `_PRE_CUE_VERB`
 # is (see it): pinning ONE wording reds the legitimate reword that #3429 is about.
 # Measured at `e337fcd3d5` (#14679 review), all three of these are FORWARD
@@ -3306,22 +3323,24 @@ _FILLER_FRAME_RE = re.compile(
     # `via`, `during` and `after` are members (measured RED without them), and the
     # next preposition re-opens exactly this — the same bound the sequencer front
     # above states about itself.
-    # ⛔ AND `after` MUST NOT REACH A PARTICIPLE. A popped clause is DISCARDED,
-    # never graded — `_cue_governing_clause` returns `clauses[-1:]` and
-    # `_INVERSION_FORMS` is not consulted until after it returns — so letting
-    # `after` match `after confirming the tools are actually there` re-opened the
-    # file's canonical inversion:
+    # ⛔ `after` USED TO CARRY A PARTICIPLE LOOKAHEAD HERE, AND IT WAS REMOVED —
+    # this is the record, because it looked load-bearing and was not. Before cycle
+    # 60 the pop decision ran INSIDE the frame branch, so letting `after` match
+    # `after confirming the tools …` discarded the graded clause and re-opened the
+    # canonical inversion; the lookahead suppressed that. Cycle 60 hoisted the
+    # would-a-form-grade-it test ABOVE the frame test, and the lookahead's job moved
+    # with it — measured at cycle 62 with the lookahead deleted, in memory: the
+    # canonical inversion stays RED (`Then after confirming the tools …`), `after
+    # the config change` does not move, and a false PASS it had been CAUSING closes:
     #
-    #     RED    After confirming the tools are actually there, restart your client.
-    #     GREEN  Then after confirming the tools are actually there, restart your client.
-    #     GREEN  Then after checking the tools … / Finally after confirming the tools …
+    #     GREEN with the lookahead → RED without it
+    #     Confirm the tools are actually there. Then after saving the config,
+    #     restart your client.
     #
-    # (measured at cycle 56, a regression that commit introduced — its comment
-    # claimed form (a) graded the clause "before this walk-back ever runs", which
-    # is the reverse of the execution order). The negative lookahead keeps
-    # `after the config change`, which is 56e's pinned row.
-    r"|^(?:on|in|at|inside|within|from|under|with|via|during"
-    r"|after(?!\s+(?:\w+ing|confirmed|checked|verified|validated|ensured)\b))\b",
+    # (the lookahead blocked `after saving …` from being a locative, so the clause
+    # was kept and nothing graded it). So it was not redundant — it was actively
+    # suppressing a fix, which counting rows cannot see. Do not reinstate it.
+    r"|^(?:on|in|at|inside|within|from|under|with|via|during|after)\b",
     re.IGNORECASE)
 
 
@@ -4045,13 +4064,19 @@ _PAST_TIME_ADVERBIAL = (
     # copy, turning the verdict on a SYNONYM (`before the upgrade` vs `earlier`),
     # which this file's doctrine forbids (measured, review cycle 58):
     #
-    #     GREEN at d79d041845 → RED at cd1e01ad74
+    #     RED at cd1e01ad74 → GREEN at cycle 58
     #     If you verified the tools before the upgrade, restart your client, then confirm …
     #     If you confirmed the tools prior to this session, restart …
-    #     If you checked the tools before the restart, …
     #
     # …while `prior TO restarting` / `before you restart` stay graded. `(?=\s*$)`
     # was also positional, so a parenthetical defeated it.
+    #
+    # ⛔ CYCLE 60 REVERSED ONE OF THOSE THREE, and this is the record of it. Cycle 58
+    # also listed `before the restart` as a false-RED regression to avoid; it is not
+    # one. `the restart` is the restart being ORDERED, so checking before it is
+    # exactly #3232, and the table pins it RED on purpose. Cycle 58 called it a
+    # past-time adverbial and was wrong; only a QUALIFIED restart names a past
+    # event.
     # ⛔ RESTART-ADJACENCY IS A BOUNDED DISTANCE, NOT A SET OF SPELLINGS. Replacing
     # `(to )?(you )? restart` with a list of verb spellings still made the arm a
     # FINITE LIST: `before YOUR CLIENT restarts`, `before you ACTUALLY restart`,
@@ -4060,31 +4085,40 @@ _PAST_TIME_ADVERBIAL = (
     # outside the list and one word from a row this same file pins RED.
     #
     # The inversion is just "a restart within a short window after `before|prior`",
-    # so the window is spelled as a distance: `(?:\w+\s+){0,4}restart`. The arm
-    # exists to keep the OTHER reading — a past-time adverbial about a previous
-    # session, `before the upgrade` / `before this session` / `before the restart` —
-    # and that reading is exactly the one where the restart is a NOUN, so the noun
-    # spelling (determiner + optional `last|previous|earlier|first` + `restart`) is
-    # the only thing excluded.
-    # …and the arm is the ADVERBIAL reading, so it matches when `before|prior` is
-    # NOT restart-adjacent — a restart within a four-word window makes it an order
-    # claim, i.e. the inversion. The one exception is a QUALIFIED restart, which
-    # names a past event rather than the one being ordered: `before the LAST
-    # restart` is a past-time adverbial, `before THE RESTART` is the upcoming one.
-    # ⛔ AND THE QUALIFIER MAY BE FOLLOWED BY THE CLIENT NOUN, which is the same
-    # one-inserted-word defect one member over: the exclusion demanded
-    # `last|previous|earlier|first` IMMEDIATELY followed by `restart`, so
-    #     … before the last restart, …          GREEN  (pinned row)
-    #     … before the last CLIENT restart, …   RED    (measured at `724d094bd1e`)
-    #     … before YOUR FIRST client restart,…  RED
-    # — the verdict turned on inserting the very noun the instruction names, the
-    # "synonym decides the verdict" class this file forbids (#14679 review at
-    # `724d094bd1`). The noun set is the closed one `_RESTART_CUE_TEXT` uses.
+    # so the window is spelled as a distance: `(?:\w+\s+){0,4}restart`.
+    #
+    # This arm matches the OTHER reading — the past-time adverbial — so it matches
+    # when `before|prior` is NOT restart-adjacent: `before the upgrade`, `before
+    # this session`, `before,`. The ONE exception is a QUALIFIED restart, because a
+    # qualifier is what turns the noun into a PAST event: `before the LAST restart`
+    # is something that already happened, while bare `before THE RESTART` is the
+    # restart being ordered, i.e. the inversion.
+    #
+    # ⛔ THE LINE IS NOT "NOUN VS VERB" — cycle 60 wrote that here and it is false:
+    # `before the client restarts` and `before the IDE restarts` are verbs that ship
+    # RED. The line is qualifier-or-not.
+    #
+    # ⛔ AND IT IS NOT "QUALIFIER + `restart` WITH NOTHING BETWEEN" EITHER. That
+    # finite spacing was the same one-word-from-a-pinned-row defect in the exception
+    # slot: `before the LAST CLIENT restart` (a past event, identical in kind to one
+    # already GREEN) shipped RED. Measured at `724d094bd1e` by the peer lane and
+    # re-measured at cycle 62. Up to two words may sit between qualifier and
+    # `restart`, which reaches the noun slot WITHOUT a second finite noun list to
+    # drift (the peer cut used `(client|app|IDE|editor|application|session|server|
+    # connector)`; `before your last MCP client restart` is two nouns and fell
+    # through it).
+    #
+    # ⛔ `first` IS NOT A QUALIFIER HERE, and this is the one point the two lanes
+    # measured differently. The arm's own rule — stated above — is that a qualifier
+    # names a PAST event; `first` names the one that has NOT happened yet, so
+    # `before the FIRST restart` says the confirmation is ordered before the restart
+    # this very instruction is asking for: the inversion, i.e. RED. Cycle 63 pinned
+    # `before your first app restart` GREEN, which makes the arm's stated rule false
+    # for one member; that row is flipped here, with the disagreement recorded
+    # rather than the rule quietly dropped.
     r"|(?:before|prior)(?:(?!\s+(?:\w+\s+){0,4}restart(?:ing|s|ed)?\b)"
     r"|\s+(?:the|a|an|this|that|your|my|its|their|our)\s+"
-    r"(?:last|previous|earlier|first)\s+"
-    r"(?:(?:client|app|IDE|editor|application|session|server|connector)\s+)?"
-    r"restart(?:ing|s|ed)?\b)"
+    r"(?:last|previous|earlier)(?:\s+\w+){0,2}?\s+restart(?:ing|s|ed)?\b)"
     # ⛔ AND THE PREPOSITION+ARTICLE ARE OPTIONAL: `last session` / `last run` are
     # ordinary past-time prose, and requiring `in the` made the verdict turn on an
     # article — the one-synonym flip this file forbids (measured, review cycle 59).
@@ -7509,15 +7543,26 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "then confirm the tools are actually there.", False),
     ("If you confirmed the tools before your previous restart, restart your "
      "client, then confirm the tools are actually there.", False),
-    #    …and the QUALIFIER may carry the client noun: the exclusion demanded
-    #    `last|previous|…` IMMEDIATELY before `restart`, so inserting the very noun
-    #    the instruction names flipped the verdict GREEN→RED (measured at
-    #    `724d094bd1` — #14679 review). Same class as every other one-inserted-word
-    #    slot in this file; the noun set is `_RESTART_CUE_TEXT`'s.
+    #    …and the QUALIFIER may carry a noun: the exclusion demanded `last|previous|
+    #    …` IMMEDIATELY before `restart`, so inserting the very noun the instruction
+    #    names flipped the verdict GREEN→RED (measured — `724d094bd1`, peer lane).
+    #    Bounded as a DISTANCE now, not a second noun list.
     ("If you confirmed the tools before the last client restart, restart your "
      "client, then confirm the tools are actually there.", False),
-    ("If you confirmed the tools before your first app restart, restart your "
+    ("If you confirmed the tools before your last MCP client restart, restart "
+     "your client, then confirm the tools are actually there.", False),
+    ("If you confirmed the tools before your previous IDE restart, restart your "
      "client, then confirm the tools are actually there.", False),
+    #    ⛔ `first` is NOT a qualifier: it names the restart that has NOT happened,
+    #    so the confirmation is ordered before the very restart being asked for.
+    #    Cycle 63 pinned this GREEN; flipped to RED here, deliberately, and the
+    #    reason is in the arm's own comment 3,000 lines above — leaving it GREEN
+    #    makes the arm's stated rule ("a qualifier names a PAST event") false for
+    #    one member, and ships the inversion the pin exists to red.
+    ("If you confirmed the tools before the first restart, restart your client, "
+     "then confirm the tools are actually there.", True),
+    ("If you confirmed the tools before your first app restart, restart your "
+     "client, then confirm the tools are actually there.", True),
     #    (b) the would-a-form-grade-it gate is no longer nested inside the frame
     #    test, so a remainder with no recognised frame word reaches it too.
     ("Confirm the tools are actually there, then after saving the config verify "
@@ -7526,6 +7571,34 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "actually there, restart your client.", True),
     ("Confirm the tools are actually there, then all you need to do is verify "
      "the tools are actually there, restart your client.", True),
+
+    # ── cycle 62 — a MISSING WORD BOUNDARY in the cue made the shortest alternative
+    #    win, so `restart the application` was cued as `restart the app` and the
+    #    post-cue window began at `lication`. Every row below shipped GREEN, and
+    #    substituting the noun across the 480 declared-RED rows flipped 41/480 each.
+    ("Don't restart the application until you have confirmed the tools are "
+     "actually there.", True),
+    ("Before you restart the application; confirm the tools are actually there.",
+     True),
+    ("Before you restart the editors; confirm the tools are actually there.",
+     True),
+    ("You shouldn't restart the applications unless you have confirmed the tools "
+     "are actually there.", True),
+    ("Restart the clients after confirming the tools are actually there.", True),
+    #    …and the locative arm no longer needs its participle lookahead: with the
+    #    gate hoisted, the lookahead was suppressing this fix rather than enabling
+    #    one, so it is gone and the shape is graded.
+    ("Confirm the tools are actually there. Then after saving the config, restart "
+     "your client.", True),
+    #    …and the qualified-restart exception is spacing-bounded, not "nothing
+    #    between": a past event one noun over was a false RED, and `first` is not a
+    #    past event at all.
+    ("If you confirmed the tools before the last client restart, restart your "
+     "client, then confirm the tools are actually there.", False),
+    ("If you confirmed the tools before your previous IDE restart, restart your "
+     "client, then confirm the tools are actually there.", False),
+    ("If you confirmed the tools before the first restart, restart your client, "
+     "then confirm the tools are actually there.", True),
     ("If you confirmed the tools in the last session, restart your client, then "
      "confirm the tools are actually there.", False),
     ("If you checked the tools before, restart your client, then confirm the "
