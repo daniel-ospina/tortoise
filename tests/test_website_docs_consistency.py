@@ -458,19 +458,19 @@ def test_docs_scopes_the_outdated_flag_to_surfaces_that_drop_it() -> None:
 
     The `outdated` boolean is a dead marker for retrieval — `_terminal_excluded`
     ANDs its `coalesce(n.outdated, false) = false` conjunct by default
-    (`tortoise/live.py:159`) — but it is NOT hidden on every read.
-    `belief_timeline` (`tortoise/sdk.py:27720`) takes no opt-in flag: its
-    primary query (`:27821`) matches `{pointKind:'decision'}` and applies NO
+    (`tortoise/live.py:273`) — but it is NOT hidden on every read.
+    `belief_timeline` (`tortoise/sdk.py:28364`) takes no opt-in flag: its
+    primary query (`:28465`) matches `{pointKind:'decision'}` and applies NO
     status/outdated conjunct to the POINT (the terminal predicate sits on the
     topic OBJECT), so an invalidated decision Point — which keeps its
     `aboutObject` edge, `invalidate_point` transfers no edges — comes back
     as-is, and a superseded one is re-attached down the CORRECTS chain
-    (`:27834-27844`) — but only when the SUCCESSOR is itself a decision about
+    (`:28480-28490`) — but only when the SUCCESSOR is itself a decision about
     the topic: `supersede_point` hands the prior's `aboutObject` to the
-    successor, and the re-attach's `WHERE cur.id IN $ids` (`:27835`) can only
+    successor, and the re-attach's `WHERE cur.id IN $ids` (`:28481`) can only
     match when that successor is one of the topic's decisions, so a decision
     superseded by a point of another kind drops out of the history.
-    `get_point` (`:29952`) returns the row by address. That
+    `_get_point` (`:30650`) returns the row by address. That
     the prior SURVIVES is asserted by
     `tests/test_de2e6_temporal.py::TestDe2e6ReviewFixes::test_timeline_keeps_superseded_prior`
     (`:405`, its assertions at `:420-422`: `len(timeline) >= 2` plus a `CORRECTS`
