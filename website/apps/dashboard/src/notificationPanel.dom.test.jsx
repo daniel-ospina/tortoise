@@ -51,6 +51,7 @@ import {
   DISMISSED_LOCAL_NOTE,
   LEDGER_ALL_CLEAR,
   LEDGER_PENDING,
+  LEDGER_NOT_CHECKED,
   OLDER_HIDE,
   OLDER_TOGGLE,
   RESTORE,
@@ -116,6 +117,11 @@ function renderBell(props = {}) {
         // states it explicitly below, because `[]` alone is exactly the
         // conflation this prop exists to separate.
         feedLoaded={'feedLoaded' in props ? props.feedLoaded : true}
+        // #14694 (F5): whether a read was ever STARTED. Defaults to `false` like
+        // the component, so a caller testing the never-read state gets it by
+        // saying `feedLoaded: false` and nothing else; the in-flight cases below
+        // state `feedRequested: true` explicitly.
+        feedRequested={'feedRequested' in props ? props.feedRequested : false}
         userId={USER}
         orgId={props.orgId || ORG}
         canAcknowledge={props.canAcknowledge || false}
@@ -1333,6 +1339,34 @@ test('#14686: a failed read is not "you have no notifications"', () => {
   assert.ok(!container.textContent.includes('You have no notifications.'))
 })
 
+test('#14694: a feed nothing ever tried to read says so, instead of "checking" forever', () => {
+  // F5 of the `1c514bb2..5032520f` review. `loadAlerts` returns BEFORE its `fetch`
+  // when the session token or the Organization id is falsy (`main.jsx`, the
+  // `#308 (R7)` guard), and nothing re-runs it — it is not polled and is not in
+  // the `[currentOrgId]` effect. So `feedLoaded: false` alone is an ETERNAL state,
+  // and "Checking for notifications…" is a claim that a check is running. With no
+  // read started the only true sentence is that nothing has checked yet.
+  // ⛔ Pre-fix there was no `feedRequested` fact and this render printed
+  // `LEDGER_PENDING`, so the assertions below red on the pre-fix source.
+  const { container } = renderBell({ alerts: [], feedLoaded: false })
+  fireEvent.click(bell(container))
+  assert.ok(container.textContent.includes(LEDGER_NOT_CHECKED),
+    'no read started: the panel must not claim a check is running')
+  assert.ok(!container.textContent.includes(LEDGER_PENDING),
+    '"checking…" is reserved for a read that actually started')
+  assert.ok(!container.textContent.includes('You have no notifications.'),
+    'and it is still never an all-clear over an unread feed')
+
+  // The other half of the pair — a read DID start and has not settled. Both
+  // directions are asserted, because a panel that printed one sentence for both
+  // states would satisfy either assertion on its own.
+  const inflight = renderBell({ alerts: [], feedLoaded: false, feedRequested: true })
+  fireEvent.click(bell(inflight.container))
+  assert.ok(inflight.container.textContent.includes(LEDGER_PENDING),
+    'a started read that has not settled says it is checking')
+  assert.ok(!inflight.container.textContent.includes(LEDGER_NOT_CHECKED))
+})
+
 test('#14686: a cut scan is not "you have no notifications" either', () => {
   const { container } = renderBell({ alerts: [], scanSaturated: true })
   fireEvent.click(bell(container))
@@ -1352,7 +1386,9 @@ test('#14694: an UNREAD feed is never "you have no notifications"', () => {
   // chrome before `loadAlerts` settles and `switchTeam` clears the feed then
   // reads it, so `[]` with no flags is a REAL state with nothing measured — the
   // panel must not translate it into an all-clear about the Organization.
-  const { container } = renderBell({ alerts: [], feedLoaded: false })
+  // `feedRequested: true` states the other half: a read DID start and has not
+  // settled, which is the only case in which "checking…" is a true sentence.
+  const { container } = renderBell({ alerts: [], feedLoaded: false, feedRequested: true })
   fireEvent.click(bell(container))
   assert.ok(container.textContent.includes(LEDGER_PENDING),
     'an unread feed says it is still checking')
@@ -1369,7 +1405,7 @@ test('#14694: the unread arm outranks nothing — a failed or cut read still win
   // `feedLoaded` does. The discriminating claim is that each of the OTHER states
   // still renders its OWN sentence while unloaded, i.e. `feedLoaded` is not a
   // fourth gate that swallows them.
-  const unread = renderBell({ alerts: [], feedLoaded: false })
+  const unread = renderBell({ alerts: [], feedLoaded: false, feedRequested: true })
   fireEvent.click(bell(unread.container))
   assert.ok(unread.container.textContent.includes(LEDGER_PENDING))
   assert.ok(!unread.container.textContent.includes('You have no notifications.'))

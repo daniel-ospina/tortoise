@@ -3193,6 +3193,12 @@ function claimIntentInFlight() {
   // carries which kind), while a read DISCARDED by the staleness guard is not, so
   // those returns deliberately leave it alone for the next Organization's own read.
   const [alertsLoaded, setAlertsLoaded] = React.useState(false)
+  // #14694 (F5): whether a read for `alerts` was ever STARTED. `alertsLoaded`
+  // alone cannot distinguish "a read is in flight" from "nothing ever tried",
+  // and `loadAlerts` can return above its own `fetch` (no session token, no org
+  // id, stale `tid`) with nothing to re-run it — so the panel needs this fact to
+  // say "not checked yet" instead of claiming a check is running forever.
+  const [alertsRequested, setAlertsRequested] = React.useState(false)
   // #10156: the pending episode + the per-episode error. ONE row is disabled at
   // a time via `ackPending`, but that is a UI convention, NOT a single-flight
   // lock: clicking two rows starts two writes, and the first to finish clears
@@ -5468,6 +5474,11 @@ function claimIntentInFlight() {
     // A not-yet-known Organization (the first-organization read, `orgAtCall`
     // null) is still allowed — that is a real read for the org being selected.
     if (orgAtCall && orgAtCall !== tid) return
+    // Every guard that can abandon this call runs ABOVE this line, so setting it
+    // here means exactly "a request is starting now" — a discarded call leaves
+    // the feed honestly unrequested rather than claiming a check that never began
+    // (#14694 F5).
+    setAlertsRequested(true)
     try {
       // #3501: same-origin proxy; the `__Host-session` cookie authenticates.
       const res = await fetch(`${API_BASE}/v1/team/alerts?org_id=${encodeURIComponent(tid)}`)
@@ -6637,6 +6648,11 @@ function claimIntentInFlight() {
     setAlertsSaturated(false)
     setAlertsUnavailable(false)
     setAlertsLoaded(false)
+    // #14694 (F5): the "a read was started" fact is per FEED GENERATION, so it is
+    // reset with the settled one. If it survived, a switch whose re-read is itself
+    // discarded by `loadAlerts`' guards would restore "Checking…" forever — the
+    // exact defect the fact exists to close, reopened one window later.
+    setAlertsRequested(false)
     loadAlerts(orgId)
     // #14686 (review finding, P3): `ackError` is cleared only when the NEXT
     // acknowledgement starts, and the panel renders it in the ledger branch
@@ -6731,6 +6747,7 @@ function claimIntentInFlight() {
           setAlertsSaturated(false)
           setAlertsUnavailable(false)
           setAlertsLoaded(false)
+          setAlertsRequested(false)
           loadAlerts(prevOrgId)
           setTeam(null)
           setStaleFired(false) // #1858: the revert re-attaches the previous team — clear the latch so the restored team's skeleton gets a fresh floor (team is already null here, so the reset effect won't fire)
@@ -10857,6 +10874,7 @@ function claimIntentInFlight() {
           scanSaturated={alertsSaturated}
           unavailable={alertsUnavailable}
           feedLoaded={alertsLoaded}
+          feedRequested={alertsRequested}
           userId={sessionMetaRef.current?.id || sessionMetaRef.current?.email || ''}
           orgId={currentOrgId || ''}
           canAcknowledge={isOwnerAdmin}

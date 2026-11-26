@@ -61,6 +61,7 @@ import {
   DISMISSED_TOGGLE,
   LEDGER_ALL_CLEAR,
   LEDGER_EMPTY,
+  LEDGER_NOT_CHECKED,
   LEDGER_PENDING,
   OLDER_HIDE,
   OLDER_TOGGLE,
@@ -336,6 +337,15 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
  *    is precisely why the production wiring is pinned separately in
  *    `securityAlerts.test.js` ("main.jsx WIRES the fourth feed fact"): a harness
  *    default cannot see the mount, so the wiring needs a pin that can.
+ *  * `feedRequested` — whether a read for `alerts` was ever STARTED. Splits the
+ *    unsettled state in two, because they are different facts and only the
+ *    caller knows which holds: `true` + `!feedLoaded` is a read in flight
+ *    (`LEDGER_PENDING`, "Checking…"), while `false` + `!feedLoaded` is a feed
+ *    nothing has tried to read yet (`LEDGER_NOT_CHECKED`). Defaulting it to
+ *    `false` is the honest direction: it can only ever UNDER-claim (say "not
+ *    checked" about a read that started), never assert a check that is not
+ *    happening. Reachable because `loadAlerts` returns before its `fetch` when
+ *    the session token or Organization id is falsy, and nothing re-runs it (F5).
  *  * `userId` / `orgId` — the identity the local ledger is keyed by;
  *  * `canAcknowledge` + `onAcknowledge` — the owner/admin org-wide dismissal;
  *  * `ackPending` (episode) / `ackError` ({episode, orgId, label, message}) —
@@ -355,6 +365,7 @@ export function NotificationBell({
   scanSaturated = false,
   unavailable = false,
   feedLoaded = false,
+  feedRequested = false,
   userId = '',
   orgId = '',
   canAcknowledge = false,
@@ -771,7 +782,12 @@ export function NotificationBell({
                 <p className="dim small notif-note">
                   {feedLoaded
                     ? (!alerts.length ? LEDGER_EMPTY : LEDGER_ALL_CLEAR)
-                    : LEDGER_PENDING}
+                    // Two unsettled states, two sentences: `LEDGER_PENDING` claims a
+                    // check is RUNNING, so it may only be printed once one started
+                    // (`feedRequested`). With no read started the honest sentence is
+                    // `LEDGER_NOT_CHECKED` — printing "checking…" forever over a read
+                    // that was never made is an in-progress claim about nothing.
+                    : feedRequested ? LEDGER_PENDING : LEDGER_NOT_CHECKED}
                 </p>
               ) : null}
               {/* Two different failures, two different sentences: the store is

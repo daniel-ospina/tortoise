@@ -1024,6 +1024,18 @@ export const LEDGER_EMPTY = 'You have no notifications.'
 //: `ALERTS_UNAVAILABLE` exists to prevent, arriving through the one door no flag
 //: was wired to.
 export const LEDGER_PENDING = 'Checking for notifications…'
+//: …and this is the state that sits BESIDE it: nothing settled, and no read was
+//: ever STARTED, so "checking" would be false about the machinery. It is
+//: reachable, not theoretical — `loadAlerts` returns before its `fetch` when the
+//: session token or the Organization id is falsy (`main.jsx`, the `#308 (R7)`
+//: guard), and nothing re-runs it: it is not polled and is not in the
+//: `[currentOrgId]` effect. So an authed bell whose `/v1/team` settled without an
+//: `org_id` printed "Checking for notifications…" forever — an in-progress claim
+//: about a check that was never made, which is the same class of false statement
+//: as the all-clear `LEDGER_EMPTY` is forbidden over an unread feed (F5 of the
+//: `1c514bb2..5032520f` review). Both unsent facts are kept as two sentences
+//: rather than one, because only the caller knows which of them is true.
+export const LEDGER_NOT_CHECKED = 'Notifications have not been checked yet.'
 //: Every actionable row is put away — by acknowledgement, dismissal or a snooze.
 //: A snoozed row is NOT acknowledged or dismissed, so the earlier wording ("has
 //: been acknowledged or dismissed") printed an affirmative beside its own

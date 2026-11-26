@@ -438,6 +438,12 @@ test('#14686: a team switch drops the previous Organization\'s alerts', () => {
     + 'notifications" while the read is still in flight')
   assert.match(body, /loadAlerts\(orgId\)/,
     'and the NEW Organization must be read — an empty bell is not a correct one')
+  // #14694 (F5): the "a read was started" fact is per feed GENERATION, so it is
+  // reset at exactly the same two sites. Leaving it set across a switch would let
+  // a re-read that `loadAlerts`' own guards discard restore "Checking…" forever.
+  assert.equal((body.match(/setAlertsRequested\(false\)/g) || []).length, 2,
+    'BOTH reset sites must clear the "read started" fact too — otherwise this '
+    + 'switch window reopens the eternal "Checking…" F5 closes')
   // The WRITE state of the dropped feed goes with it: `ackError` is otherwise
   // cleared only when the next acknowledgement starts, and the panel renders it in
   // the ledger branch when no detail is open — so Organization A's refusal would be
@@ -701,4 +707,41 @@ test('#10156: the ack control is role-gated at the mount, not just in the panel'
     + 'who is shown the control gets a permanent 403 rendered as retryable')
   assert.match(main, /const isOwnerAdmin = roleIsOwnerAdmin\(\)/,
     'isOwnerAdmin must be derived from the membership role')
+})
+
+test('#14694: main.jsx WIRES the \'a read started\' fact — and only once a read really starts', () => {
+  // F5 of the `1c514bb2..5032520f` review, wired half. The rendered pins live in
+  // `notificationPanel.dom.test.jsx` and pass `feedRequested` themselves, so they
+  // cannot see the mount. Two mutations must red HERE:
+  //   * the mount line omitted → the default `false` takes over and a feed that
+  //     HAS been read says "not checked yet" forever (an under-claim, but wrong);
+  //   * `setAlertsRequested(true)` moved ABOVE either abandoning guard → a call
+  //     that never reaches `fetch` marks the feed requested, restoring the eternal
+  //     "Checking…" this fact exists to prevent.
+  const main = readFileSync(join(here, 'main.jsx'), 'utf8')
+  const bellAt = main.indexOf('<NotificationBell')
+  assert.ok(bellAt !== -1, 'main.jsx must mount the bell')
+  const mount = main.slice(bellAt, main.indexOf('/>', bellAt))
+  assert.match(mount, /feedRequested=\{alertsRequested\}/,
+    'the mount must pass the REAL requested fact — omitting it leaves the '
+    + 'default `false` claiming the feed was never checked after it was read')
+
+  const loadAt = main.indexOf('async function loadAlerts')
+  assert.ok(loadAt !== -1, 'loadAlerts must exist')
+  const loadBody = main.slice(loadAt, main.indexOf('\n  }', loadAt))
+  // ORDER, not presence: a `setAlertsRequested(true)` sitting above the guards is
+  // satisfied by a presence check while reintroducing the defect verbatim.
+  const requestedAt = loadBody.indexOf('setAlertsRequested(true)')
+  assert.ok(requestedAt !== -1, 'loadAlerts must record that a read started')
+  const sessionGuard = loadBody.indexOf('if (!sessionTokenRef.current || !tid) return')
+  const staleGuard = loadBody.indexOf('if (orgAtCall && orgAtCall !== tid) return')
+  const fetchAt = loadBody.indexOf('/v1/team/alerts')
+  assert.ok(sessionGuard !== -1 && staleGuard !== -1 && fetchAt !== -1,
+    'the two abandoning guards and the request must all still be in loadAlerts')
+  assert.ok(requestedAt > sessionGuard,
+    'a call with no session/org never reads, so it must leave the feed unrequested')
+  assert.ok(requestedAt > staleGuard,
+    'nor may a stale-`tid` call, which is discarded before the fetch')
+  assert.ok(requestedAt < fetchAt,
+    'and it must be set BEFORE the request it describes')
 })
