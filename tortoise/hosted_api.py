@@ -487,8 +487,10 @@ def _capture_session_in_flight_body() -> dict:
     """The TYPED body of the in-flight 409 (#14700).
 
     The same shape as the capacity 429 (`code` + `message` + `retry_after`), so
-    ONE client rule covers every refusal on this route: branch on `code`, honour
-    `retry_after`, never prose-match.
+    ONE client rule covers BOTH TYPED refusals on this route — this one and the
+    capacity `429` — so branch on `code`, honour `retry_after`, never prose-match. The
+    route's OTHER `409` carries NO `code` and NO `retry_after`, and that absence is
+    itself the terminal branch: an org policy no retry clears.
     """
     return {
         "code": _CAPTURE_SESSION_IN_FLIGHT_CODE,
@@ -1768,7 +1770,8 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
     TYPED condition since #14700 too — ``detail.code`` =
     ``capture_session_in_flight`` + ``detail.retry_after``, with the
     ``Retry-After`` header retained — the same envelope as the capacity 429
-    below, so ONE client rule covers every refusal on this route. It is NOT
+    below, so ONE client rule covers both TYPED refusals on this route (this `409`
+    and the capacity `429`); the policy `409` carries no `code` at all. It is NOT
     counted in ``_CAPTURE_CAPACITY_REFUSED_TOTAL``: a concurrent writer is a
     different class from saturation (#12992/#14700).
 
@@ -55061,7 +55064,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (727 distinct
+# ABSOLUTE line number from 208 tracked files (728 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
