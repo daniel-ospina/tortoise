@@ -466,6 +466,47 @@ _CAPTURE_SESSIONS: dict[str, int] = {}
 # constant so the raise site and the two carve-outs cannot drift.
 _CAPTURE_SESSION_IN_FLIGHT_DETAIL = (
     "a capture for this session_id is already in flight — retry shortly")
+# #14700: this was the ONLY refusal on `POST /v1/sessions` carrying no `code=`,
+# so a client could not tell it from the SIBLING 409 the same route answers —
+# "Session recording is disabled for this team/graph", an org-policy state that
+# no amount of waiting clears. Measured cost (2026-11-25): `reflect-hook` logged
+# `HTTP 409 retry_after=30s` for both, retried the policy one exactly like a
+# capacity refusal, and neither the log nor any surface said which fault it was.
+# The `code` is the branch key; the message stays byte-identical so a legacy
+# reader that matches prose keeps matching (#12992's rule for the 429).
+_CAPTURE_SESSION_IN_FLIGHT_CODE = "capture_session_in_flight"
+_CAPTURE_SESSION_IN_FLIGHT_RETRY_AFTER_S = 30
+
+
+def _capture_session_in_flight_body() -> dict:
+    """The TYPED body of the in-flight 409 (#14700).
+
+    The same shape as the capacity 429 (`code` + `message` + `retry_after`), so
+    ONE client rule covers every refusal on this route: branch on `code`, honour
+    `retry_after`, never prose-match.
+    """
+    return {
+        "code": _CAPTURE_SESSION_IN_FLIGHT_CODE,
+        "message": _CAPTURE_SESSION_IN_FLIGHT_DETAIL,
+        "retry_after": _CAPTURE_SESSION_IN_FLIGHT_RETRY_AFTER_S,
+    }
+
+
+def _is_capture_in_flight_refusal(detail: object) -> bool:
+    """Is this refusal the in-flight 409? (#3129's carve-out key, #14700)
+
+    Both carve-outs used to compare `detail` to the bare MESSAGE by equality, so
+    typing the body would have silently stopped the REST wrapper's org-visible
+    last-error exemption AND `mcp_server`'s twin from matching — repainting a
+    server concurrency condition as an org capture failure on the dashboard.
+    Code-based for the typed body, and it still accepts the legacy bare string,
+    so a replay (or a client) carrying the pre-#14700 shape keeps the exemption.
+    ONE function imported by both surfaces: a second copy is the drift this
+    exists to prevent.
+    """
+    if isinstance(detail, dict):
+        return detail.get("code") == _CAPTURE_SESSION_IN_FLIGHT_CODE
+    return detail == _CAPTURE_SESSION_IN_FLIGHT_DETAIL
 
 # ── #12992: the capacity refusal is TYPED, and its refusals are COUNTED ────
 # The capacity 429 used to answer a bare detail STRING while its sibling on the
@@ -1747,8 +1788,9 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
         if session_key in _CAPTURE_SESSIONS:
             raise HTTPException(
                 status_code=409,
-                detail=_CAPTURE_SESSION_IN_FLIGHT_DETAIL,
-                headers={"Retry-After": "30"})
+                detail=_capture_session_in_flight_body(),
+                headers={"Retry-After": str(
+                    _CAPTURE_SESSION_IN_FLIGHT_RETRY_AFTER_S)})
         if session_key is not None:
             _CAPTURE_SESSIONS[session_key] = 1
         _CAPTURE_IN_FLIGHT += 1
@@ -22860,7 +22902,7 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
         # Review PR #1827: a last-error state-write failure must never mask the
         # intended 403/402/503 with a 500.
         if (e.status_code >= 400 and e.status_code != 429
-                and e.detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
+                and not _is_capture_in_flight_refusal(e.detail)):
             try:
                 _record_capture_last_error(
                     org["org_id"],

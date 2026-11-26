@@ -10749,12 +10749,12 @@ def tortoise_session_capture(conversation: list[dict],
 
     from tortoise.hosted_api import (
         _CAPTURE_MARKER_EXECUTOR,
-        _CAPTURE_SESSION_IN_FLIGHT_DETAIL,
         SessionRequest,
         _capture_abandoned_marker,
         _capture_lane,
         _capture_session_impl,
         _capture_session_key,
+        _is_capture_in_flight_refusal,
         _observed_capture_harness,
         _record_capture_last_error,
         _reserve_capture_slot,
@@ -10872,7 +10872,7 @@ def tortoise_session_capture(conversation: list[dict],
         # failure — never paint it on the dashboard (REST does the same).
         # #3129: likewise the in-flight 409.
         if (status >= 400 and status != 429
-                and detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
+                and not _is_capture_in_flight_refusal(detail)):
             # #4898: attribute the failure to the SESSION's stored harness, NOT
             # the caller's raw ``harness`` argument — the SAME resolution the
             # REST capture applies to both per-harness keys
