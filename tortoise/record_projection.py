@@ -3961,6 +3961,32 @@ def _record_column_value(table: str, column: str, value: Any, *,
         # per occurrence on purpose: the graph's own `#7369` warning fires once per
         # STATEMENT (naming up to eight degraded keys), so neither store is
         # silent about the key and the record's line stays attributable per write.
+        #
+        # ⛔ SUPERSESSION NOTE — `20261102000002_record_point_search_keys_text.sql`
+        # (#11783 review round 1, P2). That migration's header was written when
+        # this arm REFUSED the value, and it still says so in three places that
+        # this arm's change makes FALSE:
+        #
+        #   * its "WHERE THE CONVERSION IS DELIBERATELY BROADER THAN THE WRITE
+        #     PATH" section states that `_record_column_value("point",
+        #     "search_keys", <dict>)` REFUSES (`RecordProjectionError`);
+        #   * it concludes from that "the write path's refusal is what keeps that
+        #     lenience from becoming a second representation going forward";
+        #   * it says `tests/test_record_searchkeys_10620.py` "executes each one
+        #     (**plus the writer's refusal of the object shape**)".
+        #
+        # At this head the arm never refuses: it OMITS the column on a
+        # create/upsert (`_OMIT`) and CLEARS it on a patch (`None`), per the two
+        # doors' measured behaviour above, and that test asserts THE OUTCOME
+        # (omitted/cleared), not a refusal. The migration file CANNOT be
+        # corrected in place — `.github/scripts/check-migration-append-only`
+        # refuses any `M` of a base-tree migration ("migrations are append-only
+        # history"), which its own header repeats — so the correction lives HERE,
+        # at the write rule the header mis-describes and where a reader sent to
+        # that section lands. What survives of its reasoning unchanged: this arm
+        # is still why no NEW row can arrive as an object, and the value is still
+        # never serialized (no second representation, #10620). What changed is
+        # only the FATE of the rest of the row.
         _LOGGER.warning(
             "record column %s (point.%s): the value arrived as a %s, which no "
             "property can hold. The graph's %s, and the column is %s — never "
