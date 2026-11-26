@@ -2039,9 +2039,22 @@ _PRE_CUE_ONLY = _inversion_form(
     # sentence exactly as `Now`/`Then` do, so they belong in the same run — and,
     # like the adverb run, they may be followed by the `first` slot
     # (`And first confirm …`). Measured at the review of `5ee54138490e`.
+    # ⛔ A LEADING ADVERSATIVE IS THE SAME CLASS, one member over, and it was
+    # still open after the conjunction slot closed: `But`/`Yet`/`Though`/
+    # `Although` in front of the imperative defeated form (f) — measured at
+    # `a46a2b21` by prefixing the table's own declared-RED pre-cue rows:
+    #   But confirm …   → 82 of 83 RED rows flipped GREEN
+    #   Yet confirm …   → 82 of 83
+    #   Though confirm …→ 82 of 83
+    #   And confirm …   → 0 of 83 (the control: the conjunction slot's own fix)
+    # `but`/`yet`/`though`/`although` introduce a sentence exactly as `and`/`so`
+    # do — the comment above already names `But first confirm …` as a
+    # declared-RED row, so the family was graded in one spelling and not the
+    # other. Inserted as members of the SAME run, not a second slot: two arms for
+    # one behaviour is the defect cycle 17 deleted.
     r"^(?:(?:(?:now|then|next|finally|lastly|immediately|again|simply|still"
     r"|afterwards?|subsequently|additionally|please|kindly"
-    r"|and|so|or|plus)\s*,?\s+)+)?"
+    r"|and|so|or|plus|but|yet|though|although)\s*,?\s+)+)?"
     # ⛔ THE ADVERB RUN **REPEATS** AND SITS ON BOTH SIDES OF THE SUBJECT, because
     # form (a) does both and a single optional slot defeated one word twice over:
     # `You first must confirm …` (adverb before the subject) and
@@ -3245,39 +3258,42 @@ def _is_continuation_fragment(clause: str) -> bool:
     rest = clause[lead.end():].strip()
     if not rest:
         return True
+    # ⛔ A FRAME WORD IS NOT ENOUGH WHEN THE CLAUSE ITSELF GRADES. The `after` arm
+    # originally carried a ONE-TOKEN negative lookahead, so a pronoun, an `-ly`
+    # adverb or a hyphen between `after` and the participle restored the canonical
+    # false PASS it had just closed (measured, review cycle 58):
+    #
+    #     RED    After you have confirmed the tools are actually there, restart …
+    #     GREEN  Then after you have confirmed the tools are actually there, restart …
+    #     GREEN  Then after carefully confirming / after double-checking / after
+    #            you've finished checking …
+    #
+    # `after you have confirmed the tools` is form (a)'s OWN listed spelling, so the
+    # pop decision is taken from the clause: a remainder that names the tools AND
+    # carries a confirmation predicate is a GRADED CONFIRMATION, not a filler frame,
+    # whatever word it happens to contain.
+    #
+    # ⛔ AND KEEPING A CLAUSE IS ONLY WORTH DOING IF SOMETHING CAN GRADE IT. If no
+    # form matches the kept clause it becomes the GOVERNING one, nothing is graded,
+    # and the confirmation BEFORE it is discarded with `clauses[:-1]` — one inserted
+    # clause re-opened a declared-RED row that way (measured, review cycle 59):
+    #
+    #     Confirm the tools are actually there, then after the config change verify
+    #     the tools are actually there, restart your client.
+    #
+    # So the test is not "does it look like a confirmation" but "would a form grade
+    # it"; otherwise the branch pops, which restores the earlier confirmation as the
+    # governor. ⛔ THIS TEST IS NOT INSIDE THE FRAME BRANCH, and that nesting was the
+    # defect: `after SAVING the config` never reaches a frame test at all (its `-ing`
+    # arm excludes every participle), so `_OWN_OBJECT_RE` saw `the` and kept it, and
+    # the identical inversion shipped GREEN for every frame word the list did not
+    # name — `after saving the config`, `once more`, `all you need to do is`
+    # (measured, review cycle 60). The rule has to hold for EVERY sequencer-led
+    # remainder, so it is evaluated before the frame test.
+    if (_TOOLS_OBJECT_RE.search(rest)
+            and re.search(_CONFIRM_PREDICATE, rest, re.IGNORECASE)):
+        return not any(p.search(clause) for p in _INVERSION_FORMS)
     if _FILLER_FRAME_RE.search(rest):
-        # ⛔ A FRAME MATCH IS NOT ENOUGH WHEN THE CLAUSE ITSELF GRADES. The `after`
-        # arm originally carried a ONE-TOKEN negative lookahead, so a pronoun, an
-        # `-ly` adverb or a hyphen between `after` and the participle restored the
-        # canonical false PASS it had just closed (measured, review cycle 58):
-        #
-        #     RED    After you have confirmed the tools are actually there, restart …
-        #     GREEN  Then after you have confirmed the tools are actually there, restart …
-        #     GREEN  Then after carefully confirming / after double-checking / after
-        #            you've finished checking …
-        #
-        # `after you have confirmed the tools` is form (a)'s OWN listed spelling,
-        # so the pop decision is taken from the clause: a remainder that names the
-        # tools AND carries a confirmation predicate is a GRADED CONFIRMATION, not
-        # a locative lead-in, whatever frame word it happens to contain.
-        # ⛔ BUT KEEPING A CLAUSE IS ONLY WORTH DOING IF SOMETHING CAN GRADE IT. A
-        # frame-led remainder that names the tools and carries a predicate is kept
-        # by the test above — and if no form matches it, the kept clause becomes
-        # the GOVERNING one, nothing is graded, and the confirmation before it is
-        # discarded with `clauses[:-1]`. One inserted clause re-opened a declared-RED
-        # row that way (measured, review cycle 59):
-        #
-        #     RED at cd1e01ad74 → GREEN at e337fcd3d5
-        #     Confirm the tools are actually there, then after the config change
-        #     verify the tools are actually there, restart your client.
-        #
-        # …and twelve variants of it (frame-noun, `on your machine`, `with the new
-        # config`, `via the tray`, split-sentence). So the test is not "does it look
-        # like a confirmation" but "would a form grade it" — the branch pops
-        # otherwise, which restores the earlier confirmation as the governor.
-        if (_TOOLS_OBJECT_RE.search(rest)
-                and re.search(_CONFIRM_PREDICATE, rest, re.IGNORECASE)):
-            return not any(p.search(clause) for p in _INVERSION_FORMS)
         return True
     return _OWN_OBJECT_RE.search(rest) is None
 
@@ -3949,13 +3965,28 @@ _PAST_TIME_ADVERBIAL = (
     #
     # …while `prior TO restarting` / `before you restart` stay graded. `(?=\s*$)`
     # was also positional, so a parenthetical defeated it.
-    # ⛔ RESTART-ADJACENCY IS A SET OF VERB SPELLINGS, not two tokens. `(to )?(you )?
-    # restart` exempted `before PROCEEDING TO restart`, `before GOING TO restart`,
-    # `before the client RESTARTS` and `before the client IS RESTARTED` — all
-    # restart-adjacent readings that shipped GREEN (measured, review cycle 59) —
-    # while the NOUN reading `before the restart` is a past-time adverbial and stays
-    # GREEN, which is the line this bound draws: noun vs verb.
-    r"|(?:before|prior)(?!\s+(?:(?:to|you)\s+)?(?:(?:proceeding|going|about)\s+to\s+)?(?:the\s+(?:client|session|editor|app|connector|server)\s+(?:is\s+)?)?restart)"
+    # ⛔ RESTART-ADJACENCY IS A BOUNDED DISTANCE, NOT A SET OF SPELLINGS. Replacing
+    # `(to )?(you )? restart` with a list of verb spellings still made the arm a
+    # FINITE LIST: `before YOUR CLIENT restarts`, `before you ACTUALLY restart`,
+    # `before the IDE restarts`, `before you PROCEED TO restart`, `before the client
+    # HAS RESTARTED` all shipped GREEN (measured, review cycle 60), each one word
+    # outside the list and one word from a row this same file pins RED.
+    #
+    # The inversion is just "a restart within a short window after `before|prior`",
+    # so the window is spelled as a distance: `(?:\w+\s+){0,4}restart`. The arm
+    # exists to keep the OTHER reading — a past-time adverbial about a previous
+    # session, `before the upgrade` / `before this session` / `before the restart` —
+    # and that reading is exactly the one where the restart is a NOUN, so the noun
+    # spelling (determiner + optional `last|previous|earlier|first` + `restart`) is
+    # the only thing excluded.
+    # …and the arm is the ADVERBIAL reading, so it matches when `before|prior` is
+    # NOT restart-adjacent — a restart within a four-word window makes it an order
+    # claim, i.e. the inversion. The one exception is a QUALIFIED restart, which
+    # names a past event rather than the one being ordered: `before the LAST
+    # restart` is a past-time adverbial, `before THE RESTART` is the upcoming one.
+    r"|(?:before|prior)(?:(?!\s+(?:\w+\s+){0,4}restart(?:ing|s|ed)?\b)"
+    r"|\s+(?:the|a|an|this|that|your|my|its|their|our)\s+"
+    r"(?:last|previous|earlier|first)\s+restart(?:ing|s|ed)?\b)"
     # ⛔ AND THE PREPOSITION+ARTICLE ARE OPTIONAL: `last session` / `last run` are
     # ordinary past-time prose, and requiring `in the` made the verdict turn on an
     # article — the one-synonym flip this file forbids (measured, review cycle 59).
@@ -4631,6 +4662,30 @@ def test_3232_generic_restart_lines_are_exact():
         "restart cue — 'restart' alone never tells the user what to look for, "
         "and a clause placed before the cue points them at tools the running "
         "session cannot have yet (#3232)")
+    # ⛔ AND THE PIN MUST BIND A PROSE INSTRUCTION, NOT MERELY "SOME PARAGRAPH".
+    # `_tools_appear_after_cue` grades EVERY cue paragraph (the fix above), which
+    # means the `--harness pi` blockquote at ~:80 — "restart the client and look
+    # for the `tortoise_*` tools" — satisfies it on its own. Measured at
+    # `a46a2b21`: DELETING the pinned paragraph outright left the whole suite
+    # GREEN (780 passed), because the blockquote alone satisfied both positive
+    # asserts. On `main` the same deletion REDded, because the cue was then the
+    # literal `"Restart your client"`, which occurs exactly once in the doc (:135)
+    # — so the widening of the cue to `your|the|its` + `client|app|IDE|…` moved
+    # the pin from line-bound to document-wide, and this assertion puts it back.
+    # The property is STRUCTURAL, not a wording (#3429): at least one cue
+    # paragraph that is not a blockquote must carry the tools bound. A blockquote
+    # is a caveat about one harness variant; the instruction a user follows is
+    # prose. Renaming or moving that prose stays GREEN; deleting it does not.
+    prose_cues = [p for p in quick.split("\n\n")
+                  if _RESTART_CUE_RE.search(p) and not p.lstrip().startswith(">")]
+    assert prose_cues, (
+        "docs/quickstart-cloud.md must keep a NON-blockquote paragraph that "
+        "restarts the client and then sends the user to the tools — the "
+        "`--harness pi` blockquote is a caveat, not the instruction (measured: "
+        "deleting the instruction left this suite green, 780 passed)")
+    assert all(_tools_appear_after_cue_in(p) for p in prose_cues), (
+        "every non-blockquote cue paragraph must keep its tools-appear clause "
+        "after the cue (#3232)")
     # ⛔ POSITION IS NOT ORDER — the index check above has a false PASS.
     # Measured on the landed pin: "Restart your client after confirming the
     # tools are actually there" places `tools` after the cue and is GREEN, while
@@ -4888,6 +4943,24 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # a PRE-CUE confirmation: the same inversion, one sentence earlier.
     ("Confirm the tools are actually there. Restart your client, then confirm "
      "the tools are actually there.", True),
+    # …and the SAME row behind a leading ADVERSATIVE — the one member of the
+    # conjunction family the leading run did not carry. Measured at `a46a2b21`
+    # before the slot was widened: `But confirm …` flipped 82 of the 83
+    # declared-RED pre-cue rows GREEN (and `Yet`/`Though` the same 82), while
+    # `And`/`So` — the members the conjunction slot already carried — flipped 0.
+    ("But confirm the tools are actually there. Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("Yet confirm the tools are actually there. Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("Though confirm the tools are actually there. Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("Although confirm the tools are actually there. Restart your client, then "
+     "confirm the tools are actually there.", True),
+    # …while an adversative in a FORWARD post-cue clause orders nothing: the
+    # restart still comes first, so this must stay GREEN (it does with and
+    # without the widened run — the slot only strips a PRE-cue lead).
+    ("Restart your client, then run a query. But the tools are actually there.",
+     False),
     # the config exclusion must not swallow a CONJUNCTION that confirms both:
     ("Restart your client after confirming the config is right and the tools "
      "are actually there.", True),
@@ -7197,8 +7270,13 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "client.", True),
     ("If you verified the tools before the upgrade, restart your client, then "
      "confirm the tools are actually there.", False),
+    # ⛔ FLIPPED at review cycle 60, with the reason: `before THE RESTART` names the
+    # restart being ORDERED, so checking before it is exactly #3232. Cycle 58 called
+    # it a past-time adverbial and declared it GREEN; the qualifier is what makes an
+    # adverbial — `before the LAST restart` is a past event, `before the restart` is
+    # this one.
     ("If you checked the tools before the restart, restart your client, then "
-     "confirm the tools are actually there.", False),
+     "confirm the tools are actually there.", True),
     # ⛔ DECLARED RESIDUAL, pinned at its CURRENT verdict. The NOMINAL spelling is
     # not closed: `_CONFIRM_PREDICATE` is a verb list, so `your confirmation` does
     # not satisfy it — and popping the clause instead of keeping it does not help
@@ -7211,9 +7289,12 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # ⛔ Cycle 58 first wrote a different mechanism here — "the retained clause keeps
     # its leading `then after`, which no form's `^` anchor accepts" — and that is
     # FALSE in both directions: form (f) IS `^`-anchored and DOES accept a `then`
-    # lead, and form (a), which grades the row this pin adds, has no `^` at all
-    # (measured, review cycle 59). The gap is vocabulary, not anchoring. EXPECTED
-    # AFTER a wider fix (a noun arm on the predicate): True.
+    # lead, and form (a) — the form that grades this row's `you have confirmed`
+    # TWIN (added in the same cycle), NOT this row — has no `^` at all (measured,
+    # review cycles 59 and 60; the distinction matters because the first draft of
+    # this sentence claimed form (a) grades the row it sits under, which it does
+    # not: its predicate vocabulary cannot see the noun). The gap is vocabulary, not
+    # anchoring. EXPECTED AFTER a wider fix (a noun arm on the predicate): True.
     ("Then after your confirmation that the tools are actually there, restart "
      "your client.", False),
 
@@ -7240,6 +7321,45 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "confirm the tools are actually there.", False),
     ("If you confirmed the tools last run, restart your client, then confirm "
      "the tools are actually there.", False),
+
+    # ── cycle 60 — the two arms were FINITE LISTS and a NESTED TEST, so both are
+    #    now structural. (a) restart-adjacency is a distance, not a spelling list:
+    #    every form below shipped GREEN one word outside the list, each one word
+    #    from a row this file pins RED.
+    ("If you checked the tools before your client restarts, restart your "
+     "client, then confirm the tools are actually there.", True),
+    ("If you checked the tools before you actually restart, restart your "
+     "client, then confirm the tools are actually there.", True),
+    ("If you checked the tools before the IDE restarts, restart your client, "
+     "then confirm the tools are actually there.", True),
+    ("If you checked the tools before you proceed to restart, restart your "
+     "client, then confirm the tools are actually there.", True),
+    ("If you checked the tools before the client has restarted, restart your "
+     "client, then confirm the tools are actually there.", True),
+    ("If you checked the tools before the editor restarts, restart your client, "
+     "then confirm the tools are actually there.", True),
+    ("If you checked the tools before the app restarts, restart your client, "
+     "then confirm the tools are actually there.", True),
+    ("If you checked the tools before the connector restarts, restart your "
+     "client, then confirm the tools are actually there.", True),
+    ("If you checked the tools before the server restarts, restart your client, "
+     "then confirm the tools are actually there.", True),
+    ("If you checked the tools before the session restarts, restart your "
+     "client, then confirm the tools are actually there.", True),
+    #    …while a QUALIFIED restart names a past event and stays GREEN, which is the
+    #    line the arm now draws (was: noun-vs-verb, which the reviewer falsified).
+    ("If you confirmed the tools before the last restart, restart your client, "
+     "then confirm the tools are actually there.", False),
+    ("If you confirmed the tools before your previous restart, restart your "
+     "client, then confirm the tools are actually there.", False),
+    #    (b) the would-a-form-grade-it gate is no longer nested inside the frame
+    #    test, so a remainder with no recognised frame word reaches it too.
+    ("Confirm the tools are actually there, then after saving the config verify "
+     "the tools are actually there, restart your client.", True),
+    ("Confirm the tools are actually there, then once more verify the tools are "
+     "actually there, restart your client.", True),
+    ("Confirm the tools are actually there, then all you need to do is verify "
+     "the tools are actually there, restart your client.", True),
     ("If you confirmed the tools in the last session, restart your client, then "
      "confirm the tools are actually there.", False),
     ("If you checked the tools before, restart your client, then confirm the "
@@ -7382,8 +7502,12 @@ def test_3232_every_cue_paragraph_is_graded():
     """⛔ NOT JUST THE FIRST CUE PARAGRAPH. A troubleshooting or FAQ paragraph
     that repeats the cue can invert the order, and `next(...)` graded only the
     first paragraph containing the cue — so the second one shipped with no signal
-    (measured). The doc-level test above cannot cover this: the real quickstart
-    has a single cue paragraph."""
+    (measured). The doc-level test above cannot cover this on its own: the real
+    quickstart carries TWO cue paragraphs (`:80`'s `--harness pi` blockquote and
+    the prose instruction at `:135`), so a document-wide "all cue paragraphs"
+    check is satisfiable by the blockquote alone — measured at `a46a2b21`, where
+    deleting `:135` left the suite green. This test pins the multi-paragraph
+    behaviour; the doc-level test pins the prose anchor."""
     good = "Restart your client, then confirm the tools are actually there."
     bad = "Restart your client after confirming the tools are actually there."
     assert _restart_cue_order_violation(f"{good}\n\n{good}") is None
