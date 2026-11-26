@@ -1832,7 +1832,7 @@ def test_every_TABLE_ROW_in_the_report_is_derived_from_an_artifact():
 
 
 def test_the_after_ingest_block_cost_table_and_remaining_figures_are_derived():
-    """Reds if §2's after-ingest block, the cost/token tables, or the §3/§7/§8
+    r"""Reds if §2's after-ingest block, the cost/token tables, or the §3/§7/§8
     figures drift from their artifacts.
 
     ⛔ #14691 review, 7th cycle, finding 5 (P2). Measured green on 1de08152, one
@@ -1897,8 +1897,50 @@ def test_the_after_ingest_block_cost_table_and_remaining_figures_are_derived():
            "relations are" in report, "§3/A4 un-stated relations"
     assert f"{strict} of {score['edge_count']} are not" in report, "§3/A4 strict"
     assert f"{claim['quotes_total']} `quote` spans" in report, "§3 quote spans"
-    assert f"Examples of the invented {claim['invented']}" in report, \
-        "§3 examples header"
+    # ⛔ LINE-SCOPED, and the reason matters: `Examples of the invented 12` occurs
+    # TWICE — here, and in §8.3's own record of this very mutant. A document-wide
+    # `in report` read is therefore satisfied by the RECORD and stays green while
+    # the CLAIM drifts (measured: mutating this line kept the suite green on
+    # cf9e1221). The claim line is the one that starts with it.
+    examples = _report_line(r"^Examples of the invented")
+    assert examples, "REPORT.md has no invented-examples header line"
+    assert examples.startswith(f"Examples of the invented {claim['invented']}"), (
+        "§3's invented-example header is not the artifact's population: "
+        f"{examples!r}")
+    # the claim layer's population is stated in two other shapes, both free before
+    # this arm: §1's `4,295 characters ≈ 1,074 tokens`, §2's token-budget corpus
+    # row, and §8's `(5 transcripts, 4,295 chars)` bundle row.
+    assert (f"**{score['corpus_chars']:,} characters ≈ "
+            f"{tokens['corpus_tokens_estimate']:,} tokens**") in report, (
+        "§1's corpus sentence")
+    budget = _report_line(r"^\| corpus \|")
+    assert budget, "§2's token-budget table has no corpus row"
+    assert (f"{score['corpus_chars']:,} chars ≈ "
+            f"{tokens['corpus_tokens_estimate']:,} tokens") in budget, budget
+    bundle_row = _report_line(r"^\| `corpus/structure-corpus\.json` \|")
+    assert bundle_row, "§8's bundle table has no corpus row"
+    assert (f"({len(_corpus()['documents'])} transcripts, "
+            f"{score['corpus_chars']:,} chars)") in bundle_row, bundle_row
+    # §3/A1's kind population, spelled twice in one sentence: the materialised
+    # counts (from the receipt's own post-write taxonomy) and the arithmetic that
+    # the Subjects are teams+roles+people — neither was pinned.
+    per_type = score["A1_type_coverage"]["per_type"]
+    population = _report_paragraph(r"^`core:role`, people are")
+    assert population, "REPORT.md has no kind-population paragraph"
+    assert (f"{after['taxonomy']['Object']} Objects and "
+            f"{after['taxonomy']['Subject']} Subjects") in population, (
+        "§3/A1's materialised population is not the receipt's")
+    assert (f"{after['taxonomy']['Subject']} Subjects is exactly "
+            f"{per_type['team']['present']} teams + "
+            f"{per_type['role']['present']} roles + "
+            f"{per_type['person']['present']} people") in population, (
+        "§3/A1's Subjects arithmetic is not the artifact's")
+    # §7's corroboration states the two pair counts in its opening sentence
+    same_pairs = _report_line(r"^It reaches the same numbers")
+    assert same_pairs, "§7 has no 'it reaches the same numbers' sentence"
+    assert (f"the same {len(score['A2_edges']['containment'])} `hasPart` and "
+            f"{len(score['A2_edges']['dependency'])} `dependsOn` **pairs**") in \
+        same_pairs, same_pairs
     assert (f"**{score['A2_edges']['totals']['asymmetric_pairs_inverted']}** — is "
             "the number this report's A2 line derives") in report, "§7 pairs"
 
