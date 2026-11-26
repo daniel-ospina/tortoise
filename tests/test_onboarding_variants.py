@@ -1848,7 +1848,10 @@ _CONFIRM_PREDICATE = (
 # spelling this file's own prose uses for the session's list) needs its own
 # branch. `list` is deliberately not a `_DOC_NOUN`: "the tools list" is the
 # SESSION's own list, not a page (#14679 review cycle 30, measured).
-_TOOLS_OBJECT = r"(?:\btools\b|\btool\s+lists?\b|\btools\s+lists?\b)"
+_TOOLS_OBJECT = (
+    r"(?:\btools\b|\btool\s+lists?\b|\btools\s+lists?\b"
+    r"|`?tortoise_\*`?|\bthey\b|\bthem\b)"
+)
 # …and the compiled form, for the ONE site that must LOCATE the object rather
 # than match it in sequence: `_confirmation_scopes_the_config` needs its offset
 # to decide which side of the object a config noun sits on. Built from the same
@@ -1885,7 +1888,7 @@ def _inversion_form(pattern: str) -> re.Pattern[str]:
 # it: a bare adverb in front of the imperative is the ONE-INSERTED-WORD defect
 # whatever its family.
 _ADVERBS = (r"(?:\w+ly|very|so|too|quite|rather|first|already|just|also"
-            r"|now|still|always|often|never|ever)")
+            r"|now|still|always|often)")
 # ⛔ THE PRE-CUE VERB LIST, ONE DEFINITION — form (f) spelled it twice and a
 # THIRD copy sits inside the shared `_CONFIRM_PREDICATE`, which is how the same
 # hole opened four times (#14679 review rounds 3-6). Every arm of form (f) reads
@@ -6092,6 +6095,40 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "restart your client.", False),
     ("Confirm the tools are actually there, the ones listed under MCP, then "
      "restart your client.", False),
+    # ── cycle 50b — the ANAPHOR and the doc's own token are the object too ──
+    # ⛔ `_TOOLS_OBJECT` graded only `tools` / `tool list` / `tools list`, so a
+    # PRONOUN standing for the tools — and the token `docs/quickstart-cloud.md:135`
+    # itself uses — shipped GREEN while the `the tools` twin one word away was a
+    # declared-RED row. Same class as #14717 (`tool list`): the pin's own docs
+    # ship a spelling its patterns could not see (#14679 review, third fresh
+    # context, measured at `6fc1b35c`):
+    #
+    #     RED    Restart your client after confirming the tools are actually there.
+    #     GREEN  Restart your client after confirming they are actually there.
+    #     GREEN  Restart your client once you have verified they're actually there.
+    #     GREEN  Restart your client once `tortoise_*` shows up in the client's
+    #            MCP/tool list.
+    #
+    # The anaphor is only a legitimate object where a CONFIRMATION predicate has
+    # already scoped what it refers to, which is exactly the position these forms
+    # grade — the forward controls below are the guard on the other direction.
+    ("Restart your client after confirming they are actually there.", True),
+    ("Restart your client once you have verified they're actually there.", True),
+    ("Restart your client once `tortoise_*` shows up in the client's MCP/tool "
+     "list.", True),
+    ("Restart your client, then confirm they are actually there.", False),
+    ("Restart your client, then confirm `tortoise_*` appears in the list.",
+     False),
+    ("Restart your client after saving the file, and they will appear in the "
+     "list.", False),
+    # ⛔ DECLARED RESIDUAL: THE PREDICATE'S NOMINALIZATION. `_CONFIRM_PREDICATE`
+    # is the VERB closure (plus the copula `be sure|certain`), so the noun form
+    # carries no row and is ungraded — a predicate-vocabulary gap of the same
+    # family the block above declares for `after making certain the tools …`.
+    # Pinned rather than fixed: a `confirmation that` arm is a second grammar
+    # (noun + complementiser), not a member of a verb list.
+    ("Restart your client after confirmation that the tools are actually "
+     "there.", False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
