@@ -3102,6 +3102,13 @@ def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
     # returns: leave it out and the vocabulary map may spell a size one short
     # (the #10021 defect this pin exists for) without reddening.
     returned.append("journal_collision")
+    # ⛔ #11783: `projection_refused` is the SECOND post-write token — the record
+    # WAS reached and the projection refused it before writing — split out of
+    # `write_failed` because 182 shape-refusals in production read exactly like a
+    # transport outage. It is a refusal a consumer must branch on (its remedy is
+    # a producer/schema fix, never a replay), so leaving it out here is the same
+    # one-value-short closed list this pin exists to catch.
+    returned.append("projection_refused")
     missing = [t for t in returned if t not in doc]
     assert not missing, (
         f"`record_writer` can return refusal={missing} and "

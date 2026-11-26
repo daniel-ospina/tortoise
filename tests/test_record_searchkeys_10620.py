@@ -699,18 +699,22 @@ def test_an_unreadable_verdict_is_never_published_as_not_refusing(monkeypatch):
 @pytest.mark.parametrize("reason", [
     "write_failed", "no_tenant", "malformed_dsn", "circuit_open",
     "no_journal", "seam_unimportable", "journal_collision",
+    "projection_refused",
 ])
 def test_every_counter_reason_reaches_the_payload_with_its_own_identity(
         monkeypatch, reason):
-    """The runbook's SEVEN-row reason table has a code side (#10620 review, 2).
+    """The runbook's EIGHT-row reason table has a code side (#10620 review, 2).
 
     `no_journal` and `seam_unimportable` are the two the first cut omitted, and
     they are the two whose remedy is NOT a replay — a reason that never reaches
     the payload cannot name its own fix. `journal_collision` (#9318) is the
     third of that kind and the only POST-write one, so its omission would be
-    the same defect for the token where a replay actively re-raises. Driven
-    through the PUBLIC writer, so an allowlist hidden inside the window reader
-    fails here instead of silently dropping a reason from the operator's
+    the same defect for the token where a replay actively re-raises.
+    `projection_refused` (#11783) is the FOURTH non-replay-healable one and the
+    one whose absence cost the most: while it shared `write_failed`, 182
+    shape-refusals in production were indistinguishable from a transport outage.
+    Driven through the PUBLIC writer, so an allowlist hidden inside the window
+    reader fails here instead of silently dropping a reason from the operator's
     diagnosis.
     """
     from tortoise import monitoring
@@ -1224,6 +1228,56 @@ def test_a_mapping_valued_property_cannot_drop_the_update_arm_either():
         )
     assert "content = %s" in patches[0].sql, (
         f"the rest of the update must still land: {patches[0].sql}"
+    )
+
+
+class _FakeConn:
+    """Enough of a connection for the door to open, fail and dispose of one."""
+
+    def close(self) -> None:  # pragma: no cover - recorded by the caller
+        self.closed = True
+
+    def commit(self) -> None:
+        pass
+
+    def rollback(self) -> None:
+        pass
+
+
+def test_a_projection_refusal_is_counted_apart_from_write_failed(monkeypatch):
+    """#11783 — the counter must say WHICH failure this is.
+
+    Both arms used to land on `write_failed`, so the 182 value-shape refusals the
+    hosted app accumulated read exactly like a transport outage while every
+    database probe was healthy (2.5–3.6 ms) — the reason the cause took a full
+    day to attribute. Driven through the LIVE door: the record is armed (a fake
+    DSN), the store is reached (a fake connection), and the PROJECTION refuses
+    the record before any statement runs.
+    """
+    from tortoise import monitoring, record_writer
+
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://fake")
+    monkeypatch.setattr(record_writer, "_default_connect",
+                        lambda dsn: _FakeConn())
+    record_writer._close_live_breaker()
+    before = dict(monitoring.record_write_failure_counts())
+
+    write = record_writer.write_live_record(
+        {"type": "NoSuchRecordType", "id": "pt-11783"},
+        seq=7, tenant=("org-t", "graph-t"))
+
+    after = dict(monitoring.record_write_failure_counts())
+    assert write is not None
+    assert write.outcome is record_writer.RecordWriteOutcome.REFUSED
+    assert write.refusal == "projection_refused", (
+        "the door must name the projection refusal as its OWN token — a consumer "
+        "branching on `write_failed` would replay a record that re-refuses"
+    )
+    assert after.get("projection_refused", 0) == before.get("projection_refused", 0) + 1
+    assert after.get("write_failed", 0) == before.get("write_failed", 0), (
+        "a projection refusal must NOT also count as `write_failed`: the whole "
+        "point of the split is that the two name different failures"
     )
 
 
