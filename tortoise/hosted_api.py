@@ -8800,6 +8800,10 @@ def _record_health() -> dict:
     #                         while every database probe was healthy). ⛔ Not a
     #                         store fact: a statement that RAN and failed (a CHECK
     #                         constraint) stays `write_failed`.
+    #                         ⛔ ONE CAUSE IS A DEPLOYMENT FACT: a record schema
+    #                         that is not on disk raises INSIDE the plan build, so
+    #                         that reading is fixed by a REDEPLOY (a wheel with
+    #                         `record_migrations`), not by the producer.
     #   ``journal_collision`` the position row cannot be indexed by this write —
     #                         a different record type, a different capture time,
     #                         identities this write's payload CONTRADICTS, or (for

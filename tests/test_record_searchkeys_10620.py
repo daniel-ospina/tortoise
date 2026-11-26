@@ -1378,8 +1378,9 @@ def test_a_store_refusal_after_the_plan_was_built_stays_write_failed(monkeypatch
     bypasses RLS, the cutover guard's failed `SELECT`). ⚠️ A schema that is NOT
     on disk is the one such refusal on the OTHER side of the boundary — it
     raises inside the plan build, so it counts `plan_refused` and its remedy is
-    a redeploy (see the sibling test below) — which is why the rule is the
-    PHASE and not a hand-maintained list of classes. The first cut of this token
+    a redeploy (`test_a_missing_schema_is_plan_refused_because_it_raises_IN_the_
+    plan_build`, below) — which is why the rule is the PHASE and not a
+    hand-maintained list of classes. The first cut of this token
     tested the CLASS, so a connection whose
     scope could not be verified — a broken role or pooler — was counted as
     `plan_refused`, i.e. the operator was told "check the producer" about a
@@ -1414,6 +1415,61 @@ def test_a_store_refusal_after_the_plan_was_built_stays_write_failed(monkeypatch
         "a store/config refusal must NOT be counted as a plan-build refusal: its "
         "remedy is the DSN or the role, never the producer"
     )
+
+
+def test_a_missing_schema_is_plan_refused_because_it_raises_IN_the_plan_build(
+        monkeypatch, tmp_path):
+    """#11783 review round 4 — the PIN behind nine prose sites' claim.
+
+    `table_columns()` scans the migrations for `CREATE TABLE` and raises
+    "the record schema is not on disk" from INSIDE `replay_plan`, so a missing
+    migration is a plan-build refusal: no statement ran, counted `plan_refused`,
+    and its remedy is a REDEPLOY. Nine sites (four modules, the runbook, the
+    capability docs and two test docstrings) state that, and until this test the
+    only evidence was a measurement in a commit message — so a later narrowing
+    of the stamp, or `table_columns()` moving outside the `try`, would have made
+    all nine false with every gate green (measured: exactly that edit leaves the
+    suite green without this pin).
+    """
+    from tortoise import monitoring, record_projection, record_writer
+
+    empty = tmp_path / "no-migrations"
+    empty.mkdir()
+    monkeypatch.setattr(record_projection, "_migrations_dir", lambda: empty)
+    record_projection._release_schema_cache()
+    # ⛔ THE CLEAR RUNS AGAIN IN `finally`, and that is load-bearing rather than
+    # tidy: this test poisons the RESIDENT schema read with a MISSING tree, and
+    # the memo it takes would outlive `monkeypatch`'s restore of
+    # `_migrations_dir` — measured, without the `finally` every later leg in the
+    # same process fails with "the record schema is not on disk" (36 of them).
+    # `tests/test_4625_schema_reads_off_write_path.py` does the same, for the
+    # same reason.
+    try:
+        monkeypatch.setattr(record_writer, "record_dsn",
+                            lambda dsn=None: "postgresql://fake")
+        monkeypatch.setattr(record_writer, "_default_connect",
+                            lambda dsn: _FakeConn())
+        record_writer._close_live_breaker()
+        before = dict(monitoring.record_write_failure_counts())
+
+        write = record_writer.write_live_record(
+            {"type": "PointAdded",
+             "point": {"eventId": "pt-11783-schema", "id": "pt-11783-schema",
+                       "content": "a claim", "point_kind": "statement"}},
+            seq=12, tenant=("org-t", "graph-t"))
+
+        after = dict(monitoring.record_write_failure_counts())
+        assert write is not None
+        assert write.refusal == "plan_refused", (
+            "a missing record schema raises inside the plan build, so it must be "
+            f"`plan_refused` — got {write.refusal!r}"
+        )
+        assert after.get("plan_refused", 0) == before.get("plan_refused", 0) + 1
+        assert after.get("write_failed", 0) == before.get("write_failed", 0), (
+            "and NOT `write_failed`: no statement ever ran"
+        )
+    finally:
+        record_projection._release_schema_cache()
 
 
 class _UnserializableConn(_FakeConn):
