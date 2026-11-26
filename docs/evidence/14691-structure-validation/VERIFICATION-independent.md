@@ -23,9 +23,11 @@ The primary record's verdicts are `A1 PASS · A2 FAIL · A3 PASS · A4 PASS · A
 | Assertion | Primary record | Second measurement (independent) | Agree? |
 |---|---|---|---|
 | **A1** types | PASS — 28/28 declared elements present with the right kind | every family holds its declared kind: 2 `product-strategy:product`, 5 `product-strategy:feature`, 3 `core:team`, **4 `core:role`**, 4 `core:naturalPerson`, 7 `dev:code`, 2 `product-strategy:customer`, 1 segment | ✅ — with the caveat in W0 |
-| **A2** containment | PASS half — 5/5 present, parent is the product | 5 distinct `hasPart` pairs: `Lumen Core → {Grid Map, Outage Alerts, Load Forecast}`, `Lumen Field → {Crew Dispatch, Asset Register}`, whole → part | ✅ |
+| **A2** containment | PASS half — 5/5 present, parent is the product (`hasPart` is symmetric, so orientation is not at stake; the parent END is) | 5 distinct `hasPart` pairs: `Lumen Core → {Grid Map, Outage Alerts, Load Forecast}`, `Lumen Field → {Crew Dispatch, Asset Register}`, whole → part | ✅ |
 | **A2** dependency | PASS half — 7/7 oriented correctly | 7 `dependsOn` rows, every one dependent → dependency (`event-bus → fact-store`, `web-dashboard → signal-engine`, `auth-service → identity-db`, …) | ✅ |
-| **A2** ownership | **FAIL** — 0/4 correctly oriented | 4 `ownedBy` rows read in the graph, every one `subject --ownedBy--> object`; the declared `->` means **the target owns the source**, so each row asserts *the thing owns the person* | ✅ agree, and see W1/W2 |
+| **A2** ownership | **FAIL** — 0/6 rows correctly oriented | 4 distinct `ownedBy` pairs, every row `subject --ownedBy--> object`: the declared `->` means **the target owns the source**, so each row asserts *the thing owns the person* | ✅ agree, and see W1/W2 |
+| **A2** production (`produces`) | **FAIL** — 0/7 inverted | 7 rows, all `team --produces--> component`; `produces` is `<-` (*the target brought the source into existence*), so each row asserts **the component produced the team** — same mechanism, opposite predicate | ✅ agree, W5 |
+| **A2** `managedBy` | **FAIL** — 0/2 inverted | `Jonas Bauer --managedBy--> Northwind Logistics` / `Helio Health`; `managedBy` is `Entity → Subject`, so the row says **the customer manages the person** | ✅ agree, W5 |
 | **A3** hierarchy | PASS — 5 pairs under 2 products, not a flat list; 8 write rows for 5 pairs (3 rewritten by a later doc) | 5 distinct parent→child pairs under 2 product parents; the receipt's 8 rows confirm the 3 rewrites | ✅ — see W3 |
 | **A4** invention | PASS — 0 invented structure elements of 35 | all 24 objects and 11 subjects trace to corpus text | ✅ for **structure**; ❌ for **claims** — see W4 |
 | **A5** retrieval | PARTIAL — search text answers 5/5, the structural walk resolves to an entity 0/5 | all four T6 questions answer correctly from `tortoise_search`; `explore_connections("Lumen Core")` returns **one** row and it is an epistemic `IMPL`, not one of its three `hasPart` children | ✅ agree, and W2 names the mechanism |
@@ -115,6 +117,25 @@ that is not in the corpus at all:
 nowhere in the corpus (verified by substring search). The structure is not
 invented; **the analysis around it is**, and it is presented as a quotation,
 which defeats the provenance anchor the record depends on (§2.0 record-is-truth).
+
+### W5 — one mechanism, three predicates: the write path never reconciles word order with declared direction
+
+The direction map is `SEMANTICS_DIRECTIONS` (`tortoise/pack_registry.py`), identical to ONTOLOGY §8:
+
+| predicate | declared | what a row `src --p--> dst` therefore asserts | rows written | correct |
+|---|---|---|---|---|
+| `dependsOn` | `->` | the dependent falls when the precondition is absent | 7 | **7** |
+| `ownedBy` | `->` | **the target owns the source** | 6 (4 pairs) | **0** |
+| `managedBy` | `->` | the target is the responsible party | 2 | **0** |
+| `produces` | `<-` | **the target brought the source into existence** | 7 | **0** |
+| `hasPart` | `<->` | composition (symmetric — orientation not at stake) | 8 (5 pairs) | n/a |
+
+So of the **20 asymmetric structural pairs** this run wrote, **7 are correctly oriented and 13 are
+inverted** — and the inversion is not one predicate's quirk: `ownedBy`, `managedBy` and `produces` are
+all written in the sentence's word order, two of them against a `->` declaration and one against a
+`<-`. The writer (`tortoise/relation_write.py`) passes the model's endpoints straight to
+`link_entities(predicate, src_id, dst_id)` with no re-ordering and no per-predicate branch, so there
+is one mechanism behind all three failures.
 
 ## The one-sentence answer
 
