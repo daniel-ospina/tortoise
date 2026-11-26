@@ -11559,8 +11559,8 @@ _DERIVATION_END = "⛔ EVERY file named above"
 #: that sibling's own comment records: a matcher bound to `row` alone would read a TRUE rewrite into
 #: `entry in `durations`` as no item at all, the one-spelling class `#14730` files, and this block
 #: spells its vocabulary in CAPS too, so a lowercase-bound noun drops a CAPS row claim out of the
-#: scan — measured before the flag was carried: `\`#14415\`'s batch ROWS` returned `([], 0)`, GREEN
-#: over an unpathed row claim, against `([‘14415’], 1)` for the lowercase spelling. Only an item that
+#: scan — measured before the flag was carried: `` `#14415`'s batch ROWS `` returned `([], 0)`, GREEN
+#: over an unpathed row claim, against `(['14415'], 1)` for the lowercase spelling. Only an item that
 #: carries the noun makes a ROW claim, which is why an item naming a registration (`` `#14574`'s
 #: drift-reporter registration ``) is not refused for the path it does not owe.
 _DERIVATION_LABEL_RE = re.compile(r"`#(?P<issue>\d+)`'s")
