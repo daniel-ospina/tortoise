@@ -63,7 +63,7 @@ CORPUS_NORM = _norm(CORPUS_TEXT)
 try:
     from tortoise.pack_registry import SEMANTICS_DIRECTIONS as DIRECTIONS
     DIRECTIONS_SOURCE = "tortoise.pack_registry.SEMANTICS_DIRECTIONS"
-except Exception as exc:  # noqa: BLE001 — a read that fails is RECORDED
+except Exception as exc:
     DIRECTIONS = {}
     DIRECTIONS_SOURCE = f"UNAVAILABLE: {type(exc).__name__}: {exc}"
 
@@ -682,7 +682,7 @@ def a5_retrieval() -> dict:
         walk = (probe.get("walk") or {}).get("reply")
         walk_names = []
         if isinstance(walk, dict):
-            for layer, lst in (walk.get("connected") or {}).items():
+            for _layer, lst in (walk.get("connected") or {}).items():
                 for n in lst or []:
                     walk_names.append(str(n.get("name") or n.get("content")
                                           or n.get("id") or ""))
