@@ -10165,8 +10165,14 @@ _H_14544_EXEMPTION_OPEN_RE = re.compile(r"The one cause this paragraph does NOT 
 #: POSITIVE ones stay paragraph-bounded, where a lost claim reds instead of passing.
 _H_14544_UNTOUCHED_ANAPHOR_RE = re.compile(
     r"neither\s+of\s+which"
-    r"|#14544[`]?['\u2019]?(?:s)?[\s\S]{0,40}?(?:never|not|did\s+not|didn['\u2019]?t|has\s+not)"
-    r"\s+(?:\w+\s+){0,3}touch(?:ed|es|ing)?",
+    # ACTIVE: `#14544` … (never|not|did not|didn't|has not) … touch…, at any distance.
+    r"|#14544[`]?['\u2019]?(?:s)?[\s\S]{0,400}?(?:never|not|did\s+not|didn['\u2019]?t|has\s+not)"
+    r"\s+(?:\w+\s+){0,3}touch(?:ed|es|ing)?"
+    # PASSIVE / ROW-FIRST: `<the row> was never touched by `#14544`` — the same claim with the
+    # label at the END, which no `#14544`-first arm can reach. Bounded by the ROW noun rather than
+    # by distance on the label, because the noun is what makes it a claim about the row.
+    r"|\brow\b[\s\S]{0,400}?(?:never|not|did\s+not|didn['\u2019]?t|has\s+not)"
+    r"\s+(?:\w+\s+){0,3}touch(?:ed|es|ing)?[\s\S]{0,80}?#14544",
     re.IGNORECASE)
 #: The POSITIVE half: the paragraph must state the row's provenance as `#14544`'s own edit, with the
 #: POLARITY pinned — `row IS `#14544`'s own edit`, never `is NOT`. Without the polarity the pattern
@@ -10308,16 +10314,30 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
         "paragraph DOES exclude`) — it grades `exclude` without the polarity, so a fold that "
         "restored the false reading `#14612` deletes would keep this arm GREEN")
     # …and the anaphor ban reads the paraphrase too, not only the pronoun form it was cut for, in
-    # BOTH orders and at any distance — the two shapes measured GREEN at `d1f14298` are fixtures now.
+    # BOTH orders and at any distance — the shapes measured GREEN at `d1f14298` are fixtures now.
+    # ⛔ BOTH ORDERS, because the ban is only as wide as the reading order it asserts: a `#14544`-first
+    # arm certifies `that row was never touched by `#14544`` as CLEAN (measured at `148ab7c1`, when
+    # this comment already claimed "both orders"). The two orders are separate alternatives
+    # above, and each is asserted here rather than assumed.
     for paraphrase in (
             "`#14544` never touched that row",
             "`#14544`'s cut did not touch the row",
+            "that row was not touched by `#14544`",
+            "the row itself was never touched by `#14544`",
             "And `#14544`'s cut touched neither of which.",
-            "neither of which " + "x" * 95 + " `#14544` touched"):
+            "neither of which " + "x" * 95 + " `#14544` touched",
+            "`#14544`'s cut took the file off `core`, and that row was never touched"):
         assert _H_14544_UNTOUCHED_ANAPHOR_RE.search(paraphrase), (
             f"the anaphor ban misses the paraphrase {paraphrase!r} — it grades the pronoun rather "
-            "than the claim, or bounds a pronoun form by DISTANCE (escapable by padding), so the "
-            "same false reading returns in other words")
+            "than the claim, bounds a pronoun form by DISTANCE (escapable by padding), or reads only "
+            "ONE ORDER of the claim, so a false reading labelled at the other end passes clean")
+    # …and the LIVE block must stay clean of all of them, or the ban is a false red rather than a
+    # grade: the shapes above are the claim, this is the prose the repository actually ships.
+    live_anaphor = _H_14544_UNTOUCHED_ANAPHOR_RE.search(_emission_block_header(
+        cs.MANIFEST.read_text(encoding="utf-8")))
+    assert live_anaphor is None, (
+        "the block now contains an `untouched`/`neither of which` reading, so the ban above reds the "
+        f"live prose rather than a fold's: {live_anaphor.group(0)!r}")
 
 
 def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
