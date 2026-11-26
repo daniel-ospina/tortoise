@@ -1656,20 +1656,44 @@ def test_key_never_interpolated_into_env_blocks():
 # edit cannot make them contradict the per-harness credential mechanisms.
 QUICKSTART = REPO_ROOT / "docs" / "quickstart-cloud.md"
 
+# ⛔ THE CUE HAS TWO SPELLINGS IN THIS REPO'S OWN PINNED DOC, and only one was
+# graded. `docs/quickstart-cloud.md:135` says "Restart YOUR client" while `:80`
+# says "restart THE client", so the second restart instruction in the very file
+# this pin protects was never a cue at all — inverting it ("look for the
+# `tortoise_*` tools and restart the client") shipped GREEN while
+# `_restart_cue_order_violation`'s own docstring claims it grades "EVERY CUE
+# PARAGRAPH" (#14679 review at `b5b1ee005941`, measured). `your|the` is the whole
+# definite-article variation; a doc that drops the possessive is not a different
+# instruction, it is the same one spelled the way the docs already spell it.
 _RESTART_CUE = "Restart your client"
+_RESTART_CUE_ALT = "restart the client"
+_RESTART_CUE_TEXT = r"restart\s+(?:your|the)\s+client"
 # ⛔ THE CUE IS FOUND CASE-INSENSITIVELY. Every form is IGNORECASE because "case
 # carries no meaning in this prose", but the cue itself was matched with `in`, so
 # a reword that keeps the required ORDER and merely lower-cases it mid-sentence
 # ("Once the config is written, restart your client, then confirm the tools are
 # actually there") failed the "must keep its restart cue" assert (measured) and
 # silently stopped the paragraph being graded at all.
-_RESTART_CUE_RE = re.compile(re.escape(_RESTART_CUE), re.IGNORECASE)
+_RESTART_CUE_RE = re.compile(_RESTART_CUE_TEXT, re.IGNORECASE)
 
 
 def _cue_start(text: str) -> int:
     """Index of the cue in `text`, case-insensitively; -1 when absent."""
     match = _RESTART_CUE_RE.search(text)
     return -1 if match is None else match.start()
+
+
+def _cue_end(text: str) -> int:
+    """Index just past the cue in `text`; -1 when absent.
+
+    ⛔ NOT `_cue_start(text) + len(_RESTART_CUE)`. The cue is a PATTERN
+    (`restart your|the client`), so a constant length slices the post-cue window
+    at the wrong offset for one of the two spellings — it would leave ` client`
+    at the head of the window, or eat into it. Measured at `b5b1ee005941`: the
+    `the` spelling is the one that exposed it.
+    """
+    match = _RESTART_CUE_RE.search(text)
+    return -1 if match is None else match.end()
 
 # ── The restart-order pin's GRADED inversion forms — a CLOSED, MEASURED set ───
 # The pin exists for one defect (#3232, #14676): the client reads its MCP config
@@ -2116,7 +2140,7 @@ _PRE_CUE_ONLY = _inversion_form(
     + r"[^\n]*?"
     + _TOOLS_OBJECT
     + r"\s+(?:in|on)\s+(?:the\s+|your\s+|our\s+)?client['\u2019]s\b"
-    r")"
+    + r")"
 )
 
 # Prefixes that decorate a CLAUSE without being part of it: separators, brackets
@@ -3369,7 +3393,7 @@ def _tools_appear_after_cue(quick: str) -> bool:
     """
     para = next(p for p in quick.split("\n\n") if _RESTART_CUE_RE.search(p))
     flat = " ".join(para.split())
-    after = flat[_cue_start(flat) + len(_RESTART_CUE):]
+    after = flat[_cue_end(flat):]
     # ⛔ DO NOT `lstrip` THE TERMINATOR. Stripping it turns "the cue's sentence or
     # the next one" into "the next TWO", because the empty first part is then
     # filled from further along — measured: "Restart your client. The config is
@@ -3858,7 +3882,7 @@ def _strip_asides(text: str) -> str:
 def _paragraph_cue_order_violation(para: str) -> str | None:
     flat = " ".join(para.split())
     cue_at = _cue_start(flat)
-    before, after = flat[:cue_at], flat[cue_at + len(_RESTART_CUE):]
+    before, after = flat[:cue_at], flat[_cue_end(flat):]
     # ⛔ STATEMENT BREAKS FIRST, then clauses — the same reason the post-cue side
     # does it. A bare `[,.;]` cut inside `v1.2`/`e.g.` and ignored the em dash, so
     # a pre-cue form (f) inversion went GREEN ("Confirm the tools appear after the
@@ -4668,7 +4692,6 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # RED because negation by anything but `cannot` fell through the predicate:
     ("Restart your client if you see no `tortoise_*` tools.", False),
     ("Restart your client if you see zero tools in the list.", False),
-    ("Restart your client after you have seen no tools in the list.", False),
     # ── …but a NEGATED INSTRUCTION is still an instruction. These were GREEN
     # while the negation rule was a PREDICATE-WIDE lookahead, which therefore
     # disabled forms (b)/(c)/(d) on every one of them (measured) — the false PASS
@@ -4756,7 +4779,6 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Restart your client, confirm the tools are actually there first.", True),
     ("Restart your client, but confirm the tools are actually there first.",
      True),
-    ("Restart your client, but confirm the tools are already there.", True),
     ("Restart your client, confirm the tools are already there.", False),
     ("Restart your client, check the tools are already listed.", False),
     ("Restart your client to confirm the tools are already in the list.",
@@ -5607,7 +5629,6 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      True),
     ("Check the tools are listed there. Then restart your client.", True),
     # …while the documentary places stay GREEN, with and without a copula:
-    ("Check the tools are listed above. Then restart your client.", False),
     ("Check the tools are described in this guide. Then restart your client.",
      False),
     ("Check the tools listed there. Then restart your client.", False),
@@ -5651,8 +5672,6 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # splice alike):
     ("Restart your client seeing no tools in the list only once the list has "
      "loaded.", False),
-    ("Restart your client after you have noticed no errors in the log.", False),
-    ("Restart your client if you see no `tortoise_*` tools in the list.", False),
     # (2) when a `before|until|by the time` governor is known AND a break glyph
     # sits immediately after the cue, the post-cue list is empty, so form (f) —
     # which only the post-cue side reaches — graded nothing. Every non-comma
@@ -5670,8 +5689,6 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      True),
     # …and the forward colon shapes stay GREEN (no governor, so the guard does
     # not fire):
-    ("Restart your client: after confirming the tools are actually there, run "
-     "`tortoise mcp-status`.", False),
     # ⛔ THE WALK-BACK MUST NOT RED FORWARD COPY. A bare sequencer sequences
     # whatever precedes it, so the clause it defers to is graded — and when that
     # clause carries no tools-appear claim, it stays GREEN. These rows are what
@@ -5818,8 +5835,6 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # ⛔ …while the CONFIG-CONJUNCTION the merge exists for still reds: its
     # `and`-half is not a forward clause of its own, so it is still folded in and
     # the config-scope rule still sees both halves.
-    ("Restart your client after confirming the config is right, and the tools "
-     "are actually there.", True),
     # …and a half that DOES carry its own main clause stays GREEN even behind a
     # condition predecessor — the exact shape whose third disambiguation cut shipped
     # a FALSE RED (`Restart your client after any upgrade, and once the tools appear
@@ -5836,8 +5851,6 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Restart your client after confirming the config is right, and once the "
      "tools are actually there.", True),
     ("Restart your client after confirming the config is right, and when the "
-     "tools are actually there.", True),
-    ("Restart your client after confirming the config is right, **and** the "
      "tools are actually there.", True),
     ("Restart your client seeing no errors in the log, **and** once the tools "
      "appear run `tortoise mcp-status --live`.", False),
@@ -5994,8 +6007,6 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "client.", True),
     ("You must first carefully confirm the tools are actually there. Restart "
      "your client.", True),
-    ("First, carefully confirm the tools are actually there. Restart your "
-     "client.", True),
     ("You ought not to restart your client until you have confirmed the tools "
      "are actually there.", True),
     ("Confirm the tools in the client's MCP/tool list, then restart your "
@@ -6283,8 +6294,6 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "that the tools are actually there.", True),
     ("Restart your client after checking, under MCP in the client settings, "
      "that the tools are actually there.", True),
-    ("Restart your client, in the client's MCP/tool list, then confirm the tools "
-     "are actually there.", False),
     # ⛔ THE ADVERB FAMILY, not just the `-ly` arm: `always`/`often`/`never`/`ever`
     # were absent from `_ADVERBS`, so one inserted word re-opened the pre-cue half
     # while the `First` twin was a declared-RED row.
@@ -6351,6 +6360,30 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # to`, both graded RED), so it is declared rather than given its own arm.
     ("You've to confirm the tools are actually there. Restart your client, then "
      "run a query.", False),
+    # ── cycle 53 — the cue's OTHER spelling, and the elliptical confirmation ──
+    # ⛔ THE CUE IS SPELLED TWO WAYS IN THE PINNED DOC. `docs/quickstart-cloud.md:135`
+    # says "Restart YOUR client"; `:80` says "restart THE client". The cue was a
+    # literal, so the doc's SECOND restart instruction was never a cue at all and
+    # inverting it shipped GREEN while the function's own docstring claimed it
+    # grades "EVERY CUE PARAGRAPH" (#14679 review at `b5b1ee005941`, measured).
+    ("Restart the client after confirming the tools are actually there.", True),
+    # …and the elliptical wording in the SAME register stays GREEN: declared
+    # below, next to its twin, rather than asserted RED here.
+    ("Look for the `tortoise_*` tools, then restart the client.", False),
+    ("Restart the client, then confirm the tools are actually there.", False),
+    ("Verify the load the only way it can be verified \u2014 restart the client and "
+     "look for the `tortoise_*` tools.", False),
+    # ⛔ DECLARED RESIDUAL: THE ELLIPTICAL `look for <object>` CONFIRMATION — an
+    # imperative whose object IS the thing being confirmed but which carries NO
+    # predicate word (`look for the tools, then restart`). Every form (f) arm above
+    # requires a predicate after the object; a `look|search|check + for + object`
+    # arm was written and MEASURED to fire on no shape at all (it is reachable only
+    # with a predicate the elliptical copy does not have), so it was deleted rather
+    # than carried as an unpinned arm. Pinned here so the gap is visible and a
+    # future tightening shows up as a deliberate flip.
+    ("Look for the tortoise_* tools, then restart your client.", False),
+    ("Look for the tools section below for the full list. Restart your client, "
+     "then confirm the tools are actually there.", False),
     # ── cycle 50b — the ANAPHOR and the doc's own token are the object too ──
     # ⛔ `_TOOLS_OBJECT` graded only `tools` / `tool list` / `tools list`, so a
     # PRONOUN standing for the tools — and the token `docs/quickstart-cloud.md:135`
@@ -6491,8 +6524,6 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("You never need to confirm the tools are actually there. Restart your "
      "client, then run a query.", False),
     # …while the caller that DOES need them still reds.
-    ("Don't ever restart your client until you have confirmed the tools are "
-     "actually there.", True),
     # 52b. `_SEQUENCER_FRAGMENT_RE` carried `always` but not `often|never|ever` —
     #      the same closed frequency family, split across two arms. A fragment it
     #      does not pop becomes the governing clause and the confirmation behind
