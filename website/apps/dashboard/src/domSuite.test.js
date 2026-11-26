@@ -79,6 +79,19 @@ test('#4915: the DOM lane runs with the primary suite, and collects every DOM fi
     assert.equal(report.success, true,
       'vitest reported success:false — the DOM lane did not pass '
       + `(stdout tail: ${childOutput(run.stdout)})`)
+    // ⛔ THE PARTITION MUST BE TOTAL. A vitest worker that OOMs mid-file still writes
+    // a report — with `success: true`, the rows it managed to record, and NOTHING
+    // saying the rest vanished. MEASURED: a 137 MB inspect string in one assertion
+    // killed the worker over a REAL regression, and this guard passed on
+    // `57 passed + 0 failed` against `62 collected`, so the CI leg stayed green while
+    // five rows were never attributed. `numTotalTests` alone cannot catch that (it
+    // still read 62); only the identity can.
+    assert.equal((report.numPassedTests ?? 0) + (report.numFailedTests ?? 0),
+      report.numTotalTests ?? 0,
+      `the DOM lane collected ${report.numTotalTests} test(s) but reported only `
+      + `${(report.numPassedTests ?? 0) + (report.numFailedTests ?? 0)} pass+fail — a `
+      + 'worker died mid-run and its rows were never attributed '
+      + `(stdout tail: ${childOutput(run.stdout)})`)
     assert.ok((report.numTotalTests ?? 0) >= domTestFiles.length,
       `only ${report.numTotalTests} DOM test(s) ran for ${domTestFiles.length} file(s) — `
       + 'a file that collected nothing would otherwise pass this guard vacuously')

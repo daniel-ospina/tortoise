@@ -1080,6 +1080,52 @@ test('#14694: opening a detail TAKES focus, it does not drop it to <body>', () =
     'focus must move INTO the detail view, so the next Tab starts inside it')
 })
 
+test('#14694: a refusal with no MESSAGE is silent at BOTH render sites', () => {
+  // The chrome and `DetailView` admit on exact complements of the same condition
+  // — the chrome draws the refusal whenever the open detail is NOT that episode,
+  // `DetailView` whenever it IS — so any asymmetry in WHAT they admit makes one
+  // state draw twice or neither. Both therefore key on `message`, the field both
+  // actually draw: a payload carrying a `label` with no `message` must be SILENT
+  // in both, not "label — " followed by nothing.
+  //
+  // Reverting EITHER gate to its pre-parity form left every suite green, so this
+  // is the assertion that makes the pair hold: with an empty `message` there is no
+  // refusal to announce anywhere, and `role="alert"` is how both sites would say
+  // it — so the count of those is the invariant.
+  const row = alert({ message: 'no message on the refusal' })
+  const props = {
+    alerts: [row],
+    canAcknowledge: true,
+    onAcknowledge: () => {},
+    ackError: {
+      episode: row.episode,
+      orgId: ORG,
+      label: row.label,
+      message: '',
+    },
+  }
+  const emptyAnnouncements = (c) => [...c.querySelectorAll('[role="alert"]')]
+    .map((el) => el.textContent.trim())
+
+  // (i) DETAIL CLOSED — the state where the CHROME owns the refusal. This is the
+  // arm that can actually red: the pre-parity chrome admitted on `label || message`,
+  // so an empty message still drew a dangling `Suspicious activity — ` here.
+  const closed = renderBell(props)
+  fireEvent.click(bell(closed.container))
+  assert.deepEqual(emptyAnnouncements(closed.container), [],
+    'the chrome must not announce a refusal that has no message — it drew a '
+    + 'dangling `label — ` before both sites agreed on `message`')
+  assert.ok(!closed.container.textContent.includes('— \u00a0'), 'no dangling label separator')
+
+  // (ii) DETAIL OPEN on the refused episode — the state where `DetailView` owns it.
+  const open = renderBell(props)
+  fireEvent.click(bell(open.container))
+  fireEvent.click(open.container.querySelector('.notif-open'))
+  assert.ok(open.container.querySelector('.notif-detail'), 'precondition: the detail is open')
+  assert.deepEqual(emptyAnnouncements(open.container), [],
+    'and the detail must not announce one either — the pair is exact complements')
+})
+
 // ── 6. The feed's "we could not look" facts survive the move ────────────────
 
 test('#14686: a failed read is not "you have no notifications"', () => {
@@ -1290,11 +1336,20 @@ test('#14694: an acknowledgement landing while the reader is on another control 
     .find((b) => /Dismiss/.test(b.textContent))
   assert.ok(dismissBtn, 'precondition: the Dismiss control is present')
   dismissBtn.focus()
-  assert.equal(document.activeElement, dismissBtn, 'precondition: focus is where the reader put it')
+  assert.ok(document.activeElement === dismissBtn, 'precondition: focus is where the reader put it')
 
   act(() => { confirm() })
   assert.doesNotMatch(container.textContent, /Acknowledge for everyone/,
     'precondition: the control was replaced by its receipt')
-  assert.equal(document.activeElement, dismissBtn,
+  // ⛔ `assert.ok(a === b, msg)` and NOT `assert.equal(a, b, msg)`. On FAILURE,
+  // `strictEqual` formats both operands, and a DOM element here expands to tens of
+  // megabytes through its React-fiber expandos — which exhausts the vitest worker's
+  // heap instead of reporting a row. The crash then leaves the child's JSON report
+  // saying `success: true, numPassedTests: 57, numFailedTests: 0` over 62 collected,
+  // and `domSuite.test.js` (the command CI actually runs) passed on exactly that:
+  // MEASURED by deleting the reclaim gate — the regression the test exists to catch
+  // — and watching `node --test src/domSuite.test.js` stay GREEN. The assertion form
+  // was the whole difference; with `assert.ok` the same mutant reds this row by name.
+  assert.ok(document.activeElement === dismissBtn,
     'the reclaim must not STEAL focus from a control the reader chose')
 })
