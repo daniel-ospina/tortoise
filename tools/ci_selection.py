@@ -3893,7 +3893,26 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # one that weakens `_gate_uri` or `_source_unchanged`. With the entry:
              # `surfaces: ['core']` and the pin is selected. Pinned by
              # tests/test_spool_drain_rehearsal.py::test_a_tool_only_diff_selects_this_pin.
-             "tools/spool_drain_rehearsal.py")
+             "tools/spool_drain_rehearsal.py",
+             # #14691 / PR #14723 review F1: the T6 structure bundle. Its own guard
+             # (`tests/test_14691_structure_evidence.py`, registered `core`) reads the
+             # committed `out/*.json` receipts, `REPORT.md` and the corpus fixture — so the
+             # diffs that can re-stale every number it pins are BUNDLE edits, and `docs/` is
+             # a flat `NON_PYTHON_PREFIXES` entry. MEASURED before this entry, on the head
+             # manifest: `select(['docs/evidence/14691-structure-validation/out/t6-score.json'],
+             # 'pull_request')` -> `surfaces: []` (same for `REPORT.md`, `score_t6.py`,
+             # `run_readback.py`, `corpus/structure-corpus.json`), so the guard ran when
+             # someone edited the TEST and never when someone edited its SUBJECT — a PR that
+             # hand-rewrote the score artifact or restated the report's headline numbers
+             # shipped with the falsifiers absent. Same #1349/#3332/#3616 silent-drop class.
+             # ⛔ A PREFIX, not five concrete files, and NOT a `SOURCE_PATTERNS['core']` row
+             # (which is what the review suggested): every `core` row in `SOURCE_PATTERNS` is
+             # SKIPPED twice — by `_selection_relevant` (`if surface != "core"`) and by the
+             # match loop — so a core pattern is dead on arrival and would look like a fix
+             # while changing nothing. `CORE_ALSO` is the one mechanism both loops consult.
+             # Pinned by
+             # tests/test_14691_structure_evidence.py::test_a_bundle_only_diff_selects_this_suite.
+             "docs/evidence/14691-structure-validation/")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
