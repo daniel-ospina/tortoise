@@ -10541,9 +10541,16 @@ def _h_14544_banned_claim(block: str) -> str | None:
 #: POLARITY pinned — `row IS `#14544`'s own edit`, never `is NOT`. Without the polarity the pattern
 #: certified the exact false sentence this PR deletes (measured: `IS` -> `is NOT` kept it GREEN), and
 #: without the direction at all a fold could satisfy the anaphor ban by simply DELETING the row
-#: clause, which loses the correction rather than making it. The window is generous on purpose: a
-#: reflow inside a TRUE clause reds this arm (a false block) rather than letting a false claim
-#: through, and the clause runs 39 characters today. `which is` and `durations`-first spellings are
+#: clause, which loses the correction rather than making it. ⛔ NO REFLOW CAN RED THIS ARM, and what
+#: used to be written here was false in BOTH halves (#14623 round 21, P3): it claimed "a reflow inside
+#: a TRUE clause reds this arm (a false block)" — measured GREEN with the live clause wrapped in
+#: `config/ci-surfaces.yml`, because `_emission_block_header` joins comment line breaks before this
+#: pattern sees the block and the gap below is `[\s\S]`, which spans one either way (no arm is added
+#: for it: an assertion nothing can redden is dead weight). And "the clause runs 39 characters today"
+#: reproduces for NO span of the live clause (14 between the `durations` row and the copula, 36 up to
+#: the `#14544` anchor, 55 for the whole match) — the restated-figure class this block exists to
+#: remove, so the figure is deleted rather than re-stated. The window is the pattern's own `{0,400}`
+#: gap: code, so it cannot rot. `which is` and `durations`-first spellings are
 #: accepted because a TRUE rewording that this pattern refused was measured as a false block (#14623
 #: review round 4, P3): “the `durations` entry for it, which is `#14544`'s own edit”.
 _H_14544_ROW_PROVENANCE_RE = re.compile(
