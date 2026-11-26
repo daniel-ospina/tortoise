@@ -1739,9 +1739,12 @@ _CONFIRM_PREDICATE = (
 # own docs ship the spelling its patterns cannot see. Defined ONCE and appended
 # wherever the object is graded, so a third spelling has one home rather than
 # nine (nine copies of `\btools\b` is how this gap opened).
-# ⛔ The plural branch is listed FIRST and covers `tools list` on its own; the
-# second branch exists only for the singular head, and `list` is deliberately
-# not a `_DOC_NOUN` ("the tools list" is the session's own list, not a page).
+# ⛔ THREE BRANCHES, because the plural HEAD alone is not enough where a
+# PREDICATE must follow the object: `\btools\b` matches inside `tools list`, but
+# form (e) then demands whitespace and finds `list` — so `tools list` (the
+# spelling this file's own prose uses for the session's list) needs its own
+# branch. `list` is deliberately not a `_DOC_NOUN`: "the tools list" is the
+# SESSION's own list, not a page (#14679 review cycle 30, measured).
 _TOOLS_OBJECT = r"(?:\btools\b|\btool\s+lists?\b|\btools\s+lists?\b)"
 # …and the compiled form, for the ONE site that must LOCATE the object rather
 # than match it in sequence: `_confirmation_scopes_the_config` needs its offset
@@ -2056,15 +2059,36 @@ _INVERSION_FORMS = (
         # the module's own doctrine. Admitting `when` without this arm redded the
         # symptom copy `when`-led clauses are made of: "Restart your client when
         # the tools are MISSING" / "… are not visible in the panel" / "… are gone
-        # from the list" went GREEN→RED at `b2f9a12f` and none of the two skips
-        # applied before every form could save them (`_INSTALL_SIDE_RE` wants an
-        # install participle; `_OBSERVATION_NEGATION_RE` wants `see|saw|notice`).
-        # A restart cannot be once-conditioned on an ABSENCE, so the inversion
-        # reading is impossible and the RED asserted something the copy does not
-        # say — the #3429 shape that gets a pin deleted (#14679 review cycle 30,
-        # measured; the four declared-GREEN `when`-led symptom rows survived only
-        # because an observation verb kept them out of the 2-token window).
-        r"(?!\s+(?:not|never|no|missing|gone|absent|broken|empty|stale)\b)"
+        # from the list" went GREEN→RED at `b2f9a12f`, and neither skip applied
+        # before every form could save them (`_INSTALL_SIDE_RE` wants an install
+        # participle; `_OBSERVATION_NEGATION_RE` wants `see|saw|notice`).
+        #
+        # ⛔ AND THE ARM GRADES THE POLARITY OF THE STATE, NOT A TOKEN LIST. The
+        # first cut of it listed the tokens right after the predicate, which is
+        # wrong in BOTH directions (measured, #14679 review cycle 31):
+        #   - it swallowed a PRESENCE claim stated as a negated absence —
+        #     "once the tools are NOT MISSING" / "… are NO LONGER EMPTY" went RED
+        #     to GREEN, failing open on the property this form exists to grade;
+        #   - and one adverb re-opened the false RED it was written to close —
+        #     "when the tools are STILL MISSING" / "… are DEFINITELY NOT there"
+        #     stayed RED.
+        # So: an optional adverbial run is skipped, then the arm suppresses the
+        # claim ONLY when it resolves to an absence — a bare absence word, a
+        # negation whose complement is not one (`not visible`, `still not there`,
+        # `no longer visible`), NEVER `not <absence>` / `no longer <absence>`,
+        # which is a presence claim and must be graded.
+        r"(?!\s+"
+        r"(?:(?:still|currently|now|definitely|really|again|always|actually)"
+        r"\s+)*"
+        r"(?:"
+        r"(?:missing|gone|absent|broken|empty|stale)\b"
+        r"|(?:not|never|no)\b"
+        r"(?!\s+(?:longer\s+)?"
+        r"(?:missing|gone|absent|broken|empty|stale)\b)"
+        r"|no\s+longer\s+"
+        r"(?!\s*(?:missing|gone|absent|broken|empty|stale)\b)"
+        r")"
+        r")"
     ),
     _PRE_CUE_ONLY,
 )
@@ -3571,7 +3595,27 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Restart your client when the tools are missing.", False),
     ("Restart your client when the tools are not visible in the panel.", False),
     ("Restart your client when the tools are gone from the list.", False),
+    # ⛔ This row is a CONJUNCTION guard, and it is labelled as one because it
+    # pins nothing on its own (measured): it stays GREEN with the absence arm
+    # removed, with `if` admitted to form (e), and with the arm narrowed to
+    # `not|never`. It flips only when TWO of those hold at once, which is the
+    # only state in which it carries information.
     ("Restart your client if the tools are missing.", False),
+    # ── CYCLE 31 (#14679's review at `006c2038`): the absence arm's FIRST cut
+    # graded the token, not the POLARITY, and was wrong in both directions.
+    # An adverb re-opened the presence false-RED it was written to close:
+    ("Restart your client when the tools are still missing.", False),
+    ("Restart your client when the tools are definitely not there.", False),
+    ("Restart your client when the tools are still not visible.", False),
+    ("Restart your client when the tools are no longer visible.", False),
+    # …and a PRESENCE claim stated as a NEGATED ABSENCE failed OPEN — the
+    # negation of an absence is presence, which is exactly the condition form
+    # (e) grades. These were GREEN on the first cut of the arm:
+    ("Restart your client once the tools are not missing.", True),
+    ("Restart your client only once the tools are no longer missing.", True),
+    ("Restart your client once the tools are no longer empty.", True),
+    ("Restart your client once the tools are no longer absent.", True),
+    ("Restart your client once the tools are never gone.", True),
     # …while a real PRESENCE condition stays graded:
     ("Restart your client when the tools are actually there.", True),
     ("Restart your client when the tools appear.", True),
