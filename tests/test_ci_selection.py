@@ -9169,7 +9169,19 @@ _EMISSION_CEIL_RE = re.compile(
 #: Absence is legal (the block's doctrine is GRADED-OR-ABSENT — deleting the parenthetical drops the
 #: claim without falsifying it); a PRESENT ratio must be the one the code computes.
 _EMISSION_RATIO_RE = re.compile(
-    r"\((?P<window>\d+)\s*/\s*(?P<est>\d+\.\d+)\s*=\s*(?P<ratio>\d+\.\d+)\)")
+    r"\((?P<window>\d+)\s*(?:/|\u00f7|\bper\b)\s*(?P<est>\d+\.\d+)\s*s?\s*"
+    r"(?:=|\u2248|~)\s*(?P<ratio>\d+\.\d+)\s*s?\)")
+#: ⛔ THE SEPARATOR AND THE RELATION ARE OPEN SPELLINGS, not literals. The first cut of the pattern
+#: above admitted only `/` and `=`, so a PRESENT, FALSE ratio re-spelled `(1680 ÷ 827.6 = 2.0400)` —
+#: ONE character — passed every arm (measured, 52 passed; #14623 review round 30, P2). Widening the
+#: separator alone would just move the escape to the next spelling, so it is paired with a SHAPE
+#: detector below: a ratio-shaped parenthetical the reader does not consume REDs as a figure nobody
+#: reads, which is the same no-op-gate class `_EMISSION_UNREAD_SENTENCE_RE` closes for shard
+#: sentences. ⛔ The shape requires a DECIMAL ON BOTH SIDES of the relation, so ordinary prose
+#: parentheticals in this block ("(measured at 90.0 s = the row's weight)") do not trip it —
+#: measured: the live block carries exactly ONE such parenthetical, the real ratio.
+_EMISSION_RATIO_SHAPE_RE = re.compile(
+    r"\([^()]*\d[^()]*\d+\.\d+[^()]*(?:\u00f7|\u2248|=)[^()]*\d+\.\d+[^()]*\)")
 _EMISSION_RANGE_RE = re.compile(r"(?P<lo>[a-z])\s*[\u2013\u2014-]\s*(?P<hi>[a-z])")
 #: A shard-figure sentence the CLAUSE parser above cannot read: a seconds figure
 #: immediately followed by a shard-name list opener. `_EMISSION_CLAUSE_RE` needs one
@@ -9857,6 +9869,17 @@ def _emission_block_claims(
     # — reds here instead of reading as verified. Tolerance is half the stated precision, so the
     # block may round to as many places as it likes without the arm owning a spelling.
     ceil_by_est = {float(e): int(m) for e, _h, m in ceil_matches}
+    # ⛔ A FIGURE NOBODY READS IS NOT AN ABSENT FIGURE. Every ratio-SHAPED parenthetical must be
+    # CONSUMED by the reader below; one that is not is a live claim graded by nothing, which is this
+    # block's whole subject. This is what makes the widening above safe rather than one more
+    # spelling to escape: a future re-spelling REDs here as unread instead of passing as absence.
+    for shaped in _EMISSION_RATIO_SHAPE_RE.finditer(header):
+        assert _EMISSION_RATIO_RE.search(shaped.group(0)) is not None, (
+            "the block states a headroom ratio in a spelling the reader does not consume "
+            f"({shaped.group(0)!r}), so that figure is graded by NOTHING — the same no-op-gate "
+            "class `_EMISSION_UNREAD_SENTENCE_RE` closes for the shard sentences. Re-spell it in "
+            "the reader's form, or widen `_EMISSION_RATIO_RE` (this detector then covers the next "
+            "one).")
     for window_str, ratio_est_str, ratio_str in _EMISSION_RATIO_RE.findall(header):
         ratio_est = float(ratio_est_str)
         assert ratio_est in ceil_by_est, (
@@ -9974,7 +9997,105 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
         f"cannot read ({unread}), so that figure is graded by NOTHING while its "
         "neighbours are graded by this test — re-spell it as `N shards at S.S s "
         "(names)`, or delete it. A rebase that splices two re-derivations is how it "
-        "gets there.")
+        "gets there.")    # ⛔ THE STATED HEADROOM RATIO, driven in BOTH directions and across SPELLINGS.
+    # The first cut of `_EMISSION_RATIO_RE` admitted only `/` and `=`, so a PRESENT, FALSE ratio
+    # re-spelled `(1680 ÷ 827.6 = 2.0400)` — ONE character — passed every arm (measured, 52 passed;
+    # #14623 review round 30, P2). These fixtures are what stop a re-narrowing going silent again:
+    # the reader must CONSUME each legal spelling (so it is graded, not skipped) and the SHAPE
+    # detector must RED an illegal one as "a figure nobody reads" rather than read it as absence.
+    def _ratio_header(rationale: str) -> str:
+        return ("# eleven shards at 827.6 s (a, b, c, d, e, f, g, h, i, j, k), so "\
+                "`ceil(827.6/60 x 2)` = 28 m governs " + rationale + "\n\nfast_shards: 11\n")
+
+    for legal in ("(1680 / 827.6 = 2.0300)",
+                  "(1680 ÷ 827.6 = 2.0300)",
+                  "(1680 per 827.6 ≈ 2.0300)",
+                  "(1680 / 827.6 = 2.03)"):
+        assert _emission_block_claims(_ratio_header(legal)) is not None, (
+            f"`_emission_block_claims` refuses the legal ratio spelling {legal!r}, so the arm "
+            "skips a figure it should grade — a widening that refused true prose would be the "
+            "false-block twin of the round-30 finding")
+    for illegal in ("(1680 over 827.6 = 2.0300)", "(1680 :: 827.6 = 2.0300)"):
+        try:
+            _emission_block_claims(_ratio_header(illegal))
+        except AssertionError as exc:
+            assert "does not consume" in str(exc), (
+                f"the ratio {illegal!r} was refused for the wrong reason — it must be reported as "
+                f"a figure nobody READS, not as a bad value: {exc}")
+        else:
+            raise AssertionError(
+                f"a ratio-shaped parenthetical in a spelling the reader does not consume "
+                f"({illegal!r}) was read as ABSENT, so that figure is graded by nothing — the "
+                "class this PR exists to remove (#14623 review round 30, P2)")
+    # …and the VALUE is still checked under a widened spelling, so the widening traded no grading
+    # for its tolerance: `÷` with a false quotient must RED as a wrong figure.
+    try:
+        _emission_block_claims(_ratio_header("(1680 ÷ 827.6 = 2.0400)"))
+    except AssertionError as exc:
+        assert "watchdog_headroom" in str(exc), (
+            f"the wrong quotient under `÷` was refused for the wrong reason: {exc}")
+    else:
+        raise AssertionError(
+            "a FALSE quotient re-spelled with `÷` passed every check — the widening admitted the "
+            "spelling without grading the figure, which is the round-30 P2 itself")
+
+
+#: The block's own label for the fold it carries — `On THIS tree — `origin/main` `a0be10ac456b`
+#: folded in`. ⛔ READ rather than trusted, because this label has been WRONG four times inside this
+#: PR (`90c125a736a0c`, `d6a2104518762`, `cc7b1f3f2c6a3`, and `dc479c6f`) and each time the repair
+#: was a hand-check that nothing graded — the carried-claim shape the block forbids two lines above
+#: itself (#14623 review round 30, P3).
+_FOLD_LABEL_RE = re.compile(
+    r"On THIS tree \u2014 `origin/main` `(?P<sha>[0-9a-f]{7,40})` folded in")
+
+
+def test_the_fast_shards_header_block_names_the_fold_this_head_carries():
+    """The `origin/main <sha>` the block labels as "the fold this head carries" must BE that fold.
+
+    The block states the derivation is a PER-TREE measurement "never carried", and labels the tree
+    with `origin/main`'s tip. That label is the one part of the sentence nothing could disagree with,
+    so it rotted: FOUR hand-corrections inside this PR, the last being `dc479c6f` re-pointing a label
+    one fold stale. Graded here against `git rev-parse origin/main`, which is the only authority for
+    "the fold this head carries".
+
+    ⛔ SKIPPED, announced and out loud, where `origin/main` does not resolve (a depth-1 CI checkout
+    or a detached clone has no such ref). A bare `skipped` would let a green run read as "the label
+    was verified", which is the vacuous pass this arm exists to prevent.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    labelled = _FOLD_LABEL_RE.search(header)
+    assert labelled is not None, (
+        "the block no longer opens its derivation with `On THIS tree — `origin/main` `<sha>` "
+        "folded in`, so this arm grades nothing — re-point `_FOLD_LABEL_RE` at the sentence the "
+        "block uses rather than letting the label go back to a hand-check")
+    named = labelled.group("sha")
+    live = subprocess.run(["git", "rev-parse", "--verify", "origin/main"],
+                          cwd=REPO, capture_output=True, text=True)
+    if live.returncode != 0:
+        reason = (
+            "origin/main does not resolve in this checkout ("
+            f"{live.stderr.strip().splitlines()[:1]}), so the fold label the block carries "
+            f"(`{named}`) is UNVERIFIED here. Announced rather than silent: a skip must not read "
+            "as a pass. Run this arm from a clone with `origin/main` fetched.")
+        print(reason)
+        pytest.skip(reason)
+    live_sha = live.stdout.strip()
+    assert live_sha.startswith(named), (
+        f"the block labels `{named}` as the fold this head carries, but `origin/main` is "
+        f"`{live_sha[:12]}` — the label is stale, which is the carried-claim shape the block "
+        "forbids two lines above it. Fold `origin/main` in, then re-point the label at the sha "
+        "actually folded; do NOT delete the phrase 'the fold this head carries'.")
+    # NON-VACUITY: the pattern really reads a label, and a WRONG one really reds. Driven on a
+    # fixture so re-pointing the regex at something that matches nothing REDs here rather than
+    # passing silently over the live block.
+    fixture = "On THIS tree — `origin/main` `deadbeef1234` folded in, carrying"
+    fixture_sha = _FOLD_LABEL_RE.search(fixture).group("sha")
+    assert fixture_sha == "deadbeef1234", (
+        "the fold-label pattern does not read even its own fixture, so the assertion above is "
+        f"decoration: {_FOLD_LABEL_RE.pattern!r}")
+    assert not live_sha.startswith(fixture_sha), (
+        "the non-vacuity fixture's sha happens to prefix the real one, so the RED direction above "
+        "is unproven — pick a fixture sha that differs")
 
 
 def test_the_fast_shards_header_block_states_no_span_twice():
