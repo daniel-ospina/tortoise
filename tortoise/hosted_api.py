@@ -460,10 +460,15 @@ _CAPTURE_IN_FLIGHT_LOCK = threading.Lock()
 # is genuinely finished. Bounded by _CAPTURE_IN_FLIGHT (one key per in-flight
 # capture).
 _CAPTURE_SESSIONS: dict[str, int] = {}
-# The detail string is the carve-out key for the org-visible last-error state
-# (both surfaces): an in-flight refusal is a SERVER concurrency condition, not
-# an org capture failure — same rationale as the capacity 429. A shared
-# constant so the raise site and the two carve-outs cannot drift.
+# The MESSAGE of the in-flight refusal, kept byte-identical to the pre-#14700
+# detail string (`#14700`: the body is now typed —
+# `_capture_session_in_flight_body` — and this constant is its `message` field,
+# so a legacy client matching the prose, a log line and the `#3129` carve-out's
+# legacy arm all still match).
+# ⛔ It is NO LONGER the carve-out KEY: that is `_is_capture_in_flight_refusal`,
+# which both surfaces import — an equality compare on this string would stop
+# matching the typed body the moment the raise site was typed, which is the
+# regression that predicate exists to prevent.
 _CAPTURE_SESSION_IN_FLIGHT_DETAIL = (
     "a capture for this session_id is already in flight — retry shortly")
 # #14700: this was the ONLY refusal on `POST /v1/sessions` carrying no `code=`,
@@ -1759,9 +1764,15 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
     write, instead of racing the first capture's `capture_ok` write. The
     caller passes a key already scoped by TENANT AND RESOLVED GRAPH
     (`_capture_session_key`, whose graph component is `_data_graph_name` —
-    the graph the request will actually open, #3365).
+    the graph the request will actually open, #3365). That refusal is a
+    TYPED condition since #14700 too — ``detail.code`` =
+    ``capture_session_in_flight`` + ``detail.retry_after``, with the
+    ``Retry-After`` header retained — the same envelope as the capacity 429
+    below, so ONE client rule covers every refusal on this route. It is NOT
+    counted in ``_CAPTURE_CAPACITY_REFUSED_TOTAL``: a concurrent writer is a
+    different class from saturation (#12992/#14700).
 
-    #12992: a CAPACITY refusal is now a typed condition (``detail.code`` +
+    #12992: a CAPACITY refusal is a typed condition (``detail.code`` +
     ``detail.retry_after``, with the ``Retry-After`` header retained) and every
     one of them is counted for ``/health`` — see ``_CAPTURE_CAPACITY_CODE``.
     """
