@@ -273,7 +273,7 @@ The two surfaces a human actually **copies into a shell** — the install snippe
 above and the dashboard's `PI_CAPTURE_INSTALL`
 (`website/apps/dashboard/src/harnesses.js`, pinned by `harnesses.test.js` and the
 wizard snapshots) — shipped the disproven dotfile rule as an instruction until
-#14342 review round 8: following them retired nothing. Both now perform the
+review round 8 of #14342: following them retired nothing. Both now perform the
 entry-point retirement and the second producer's, in the installer's order. If
 the routine changes, change all of them in one commit — a snippet that drifts
 from this section is the false claim, not a stale measurement.
