@@ -187,6 +187,36 @@ def test_a2_ownership_is_present_and_inverted_in_the_committed_receipt():
     assert len(rows) == 6, f"expected 6 ownedBy rows, got {len(rows)}"
 
 
+def test_every_owner_was_actually_ASKED_the_ownership_door():
+    """D6 must rest on a measurement, not on an absent probe.
+
+    #14691 review, 3rd cycle: the emitter treated a MISSING `governance_owned_by`
+    as a measured `[]` (`.get(...) in ([], None)`), so D6 — the bundle's headline
+    mechanism finding — could be asserted from witness rows that never asked the
+    door. Driven pre-fix: deleting the probe from every row still emitted D6 with
+    all four owners listed. The committed artifact was honest, which is exactly
+    why nothing caught it: a fail-open needs a pin, not a lucky fixture.
+    """
+    seen = _readback()["link_witness"]
+    owners = {"Amara Osei", "Dana Whitlock", "Tomas Ferreira", "Jonas Bauer"}
+    asked = {n: w for n, w in seen.items() if n in owners}
+    assert asked, "the readback carries no ownership-door witness at all"
+    for name, w in asked.items():
+        probe = w.get("governance_owned_by")
+        assert isinstance(probe, dict) and "reply" in probe, (
+            f"{name}'s witness has no governance-door probe — D6 would report an "
+            "answer for a question that was never asked")
+        # the door's empty answer is `[]` here (the MCP envelope's result list),
+        # and this asserts EMPTINESS rather than one spelling of it
+        assert probe["reply"] in ([], {"result": []}), (
+            f"{name}'s governance door answered {probe['reply']!r}, not the "
+            "empty result D6 asserts")
+    a2 = _score()["A2_edges"]["ownership_door"]
+    assert a2["owners_not_asked"] == [], a2["owners_not_asked"]
+    assert set(a2["owners_asked"]) == owners, a2["owners_asked"]
+    assert a2["total_rows"] == 0
+
+
 def test_a3_hierarchy_has_two_parents_and_five_children():
     """Reds if the product tree collapses or a feature loses its parent."""
     a3 = _score()["A3_hierarchy"]
@@ -502,8 +532,8 @@ def test_readback_provenance_binds_to_its_producer_or_the_stated_exception():
     """
     claimed = (_readback().get("provenance") or {}).get("probe_sha256")
     assert claimed, "readback.json carries no provenance binding at all"
-    actual = hashlib.sha256(
-        (BUNDLE / "run_readback.py").read_bytes()).hexdigest()
+    script = (BUNDLE / "run_readback.py")
+    actual = hashlib.sha256(script.read_bytes()).hexdigest()
     produced_by = (
         "5a441859d7f953a91d493d9606b8c8404018a40eac35b658a75e4fbe6200f192")
     assert claimed in (actual, produced_by), (
@@ -512,6 +542,23 @@ def test_readback_provenance_binds_to_its_producer_or_the_stated_exception():
     assert produced_by in _report(), (
         "REPORT.md §8 no longer states the producing-commit hash the artifact "
         "actually carries")
+    # ⛔ THE EXCEPTION IS PINNED AS A DELTA, NOT ACCEPTED AS A LITERAL (#14691
+    # review, 3rd cycle). `claimed in (actual, produced_by)` passes on the
+    # literal alone, so `run_readback.py` could be edited to anything and the
+    # suite stayed green (measured: a producer edit moved the hash and 16 tests
+    # still passed) while REPORT §8's "the file in this tree hashes 19f8ed1a…"
+    # became false — the next instance of the very drift §8 exists to disclose.
+    # Two arms close it: the documented delta must REPRODUCE `produced_by` when
+    # reverted (so any edit other than that one rename reds), and §8's stated
+    # CURRENT hash must be the file's real hash.
+    reverted = script.read_text().replace("_element_kind", "element_kind")
+    assert hashlib.sha256(reverted.encode()).hexdigest() == produced_by, (
+        "run_readback.py no longer differs from the producing commit by ONLY the "
+        "`element_kind` -> `_element_kind` rename, so REPORT.md §8's stated "
+        "delta and the artifact's provenance binding no longer describe it")
+    assert actual in _report(), (
+        "REPORT.md §8 does not state the hash this tree's run_readback.py "
+        f"actually has ({actual})")
 
 
 def test_a4_reds_for_an_invented_RELATION_too():

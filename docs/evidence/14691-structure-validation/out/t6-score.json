@@ -1078,7 +1078,8 @@
         "Tomas Ferreira": 0,
         "Jonas Bauer": 0
       },
-      "total_rows": 0
+      "total_rows": 0,
+      "owners_not_asked": []
     },
     "totals": {
       "containment_present": "5/5",
