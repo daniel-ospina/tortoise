@@ -376,11 +376,23 @@ this record — and the graded figures below are re-derived by `--refresh` rathe
 sentence. The one figure here that NO `--refresh` row and no test grades is the `27` itself, which is
 why it names the PRs it comes from instead of standing alone. Each block carries a
 count this PR re-derived
-(`157` distinct cite targets above the pivot from `726` in all, over `208` citing files —
+(`7` distinct cite targets above the pivot from `484` in all, over `207` citing files —
 `uv run python tools/hosted_api_cite_census.py --json` prints every one of those three, and
 `--check` grades the two note blocks against the same measurement, so none of them is a hand
 count), not a
-change to what the code does.
+change to what the code does. ⛔ A reader comparing these with a PRE-#13098 reading sees larger
+figures, and neither reading is a hand-count error: the census appendix used to be a TRACKED
+document, and its machine-written rows carried cite targets of their own — 244 distinct ones, of
+which 243 were cited nowhere else — so untracking it shrank this population by exactly those 243.
+⛔ **THIS IS A BASE CHANGE, NOT A CORRECTION OF AN ERROR.** At `939e37f664` — the base this
+sentence was first written against — that base's OWN pivot was `28477`, not this base's `29666`,
+and on ITS pivot the appendix's 244 split **150 above it / 93 below / 1 at it**, so the pivot
+ITSELF was among the rows, and **two** of them were also cited elsewhere (that pivot `28477`,
+line `19186`), so 244 − 2 = **242**, which was right. `main`'s
+`#14592` restamped the appendix, and at this branch's shipping base it reads 244 split
+**150 / 93 / 1** with neither of those two rows present and only the pivot shared, so
+244 − 1 = **243**. Both counts are right at their own base;
+`tortoise/activation_scorecard.py`'s `--refresh` note carries the reconciliation.
 
 ---
 

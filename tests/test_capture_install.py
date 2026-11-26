@@ -818,7 +818,9 @@ def test_pi_install_disables_a_legacy_symlink_without_touching_its_target(home):
 
 def test_pi_install_disables_a_legacy_directory_non_destructively(home):
     """A real ``tortoise-capture/`` directory is RENAMED, never deleted — its
-    files must survive under the dot-prefixed name Pi's loader skips.
+    files must survive under the dot-prefixed name, and the ENTRY POINT inside
+    it is retired too (the dot prefix alone retires nothing: Pi's loader has no
+    dotfile filter, so ``.tortoise-capture.disabled/index.ts`` is still LOADED).
 
     Mutation: `shutil.rmtree(legacy)` (the user's files are gone)."""
     ext_dir = home / ".pi" / "agent" / "extensions"
@@ -831,9 +833,67 @@ def test_pi_install_disables_a_legacy_directory_non_destructively(home):
     assert res.ok, res.error
     assert not legacy.exists()
     disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
-    assert (disabled / "index.ts").read_text() == "// legacy producer\n", (
+    # #14342: the rename alone does NOT retire it. Pi's loader applies no
+    # dot-prefix filter and resolves EVERY subdirectory through its
+    # `index.ts`/`index.js`, so `.tortoise-capture.disabled/index.ts` was still
+    # loaded — the guard left both producers registered. The entry point is
+    # retired inside the preserved directory.
+    assert (disabled / "index.ts.disabled").read_text() == "// legacy producer\n", (
         "the legacy extension's files were not preserved")
+    assert not (disabled / "index.ts").exists(), (
+        "the legacy directory was moved aside but its entry point still loads")
+    assert _registered_producers(ext_dir) == [
+        capture_install.PI_EXTENSION_NAME], _registered_producers(ext_dir)
     assert (ext_dir / capture_install.PI_EXTENSION_NAME).read_bytes() == _PI
+
+
+def test_pi_install_retires_a_legacy_directory_an_older_install_renamed(home):
+    """THE UPGRADE PATH (#14342 review round 2, finding 1).
+
+    A box that already ran the PRE-fix installer has ``tortoise-capture/``
+    GONE and ``.tortoise-capture.disabled/`` present — the rename already
+    happened, and nothing renamed it again. The entry-point retirement used to
+    live INSIDE the rename branch, so on that shape it never ran: the install
+    retired the second producer, exited 0 and reported the duplication
+    removed, while the loader kept registering
+    ``.tortoise-capture.disabled/index.ts`` (``discoverExtensionsInDir`` has
+    no dot-prefix filter). Two producers, a receipt saying one.
+
+    Mutation: drop the ``legacy_retirable`` block in ``_install_pi`` — the dot
+    directory stays LOADED and two producers come back."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    already = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    already.mkdir(parents=True)
+    body = "// legacy producer an older install renamed aside\n"
+    (already / "index.ts").write_text(body)
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).write_text(
+        "// the other producer\n")
+    assert not (ext_dir / capture_install.LEGACY_PI_DIRNAME).exists(), (
+        "fixture defect: this must be the UPGRADE shape, where the original "
+        "name is already gone")
+    assert set(_registered_producers(ext_dir)) == {
+        capture_install.PI_SECOND_PRODUCER_NAME,
+        f"{capture_install.PI_DISABLED_DIRNAME}/index.ts",
+    }, (
+        "fixture defect: this is the two-producer state the guard exists to "
+        f"remove — got {_registered_producers(ext_dir)}")
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    assert (already / "index.ts.disabled").read_text() == body, (
+        "the entry point was not retired, or its bytes were lost")
+    assert not (already / "index.ts").exists()
+    producers = _registered_producers(ext_dir)
+    assert producers == [capture_install.PI_EXTENSION_NAME], (
+        f"a session would be captured by more than one producer: {producers}")
+
+    # Healing is a ONE-OFF: a re-run finds nothing to retire and reports no
+    # change (a guard that re-renames forever is the legacy guard's own bug).
+    second = install_capture("pi", home=home)
+    assert second.ok, second.error
+    assert second.changed is False, f"re-run reported changes: {second.actions}"
+    assert second.actions == (), second.actions
 
 
 def test_pi_install_is_a_clean_no_op_on_rerun(home):
@@ -926,6 +986,2330 @@ def test_pi_install_fails_loudly_when_a_legacy_disable_would_destroy_state(home)
     assert not res.ok
     assert "already exists" in res.error
     assert (ext_dir / capture_install.PI_DISABLED_DIRNAME / "keep.ts").exists()
+
+
+def test_pi_install_disables_the_second_capture_producer_non_destructively(home):
+    """#3512 — agent-infra's ``reflect-hook.ts`` is a SECOND producer: it writes
+    one record per quit session into ``~/.tortoise/session-events/`` on top of
+    this seam's per-turn spool, so left registered every session is stored and
+    filed twice. Installing this seam must leave ONE producer, and must do it
+    without destroying the other's bytes.
+
+    Mutation: drop the ``_disable_pi_second_producer`` call from ``_install_pi``
+    (both producers stay registered — the install reports success over the
+    duplication), or ``unlink()`` the file (the user's copy is gone)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    original = "// agent-infra reflect-hook — the other producer\nexport default 1\n"
+    producer.write_text(original)
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    assert not producer.exists(), (
+        "the second capture producer is still registered: every session would "
+        "be written to both ~/.tortoise/capture-spool and "
+        "~/.tortoise/session-events")
+    disabled = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    assert disabled.read_text() == original, (
+        "the second producer's bytes were not preserved by the disable")
+    assert any("second capture producer" in a for a in res.actions), res.actions
+    assert (ext_dir / capture_install.PI_EXTENSION_NAME).read_bytes() == _PI
+
+    # A re-run finds nothing to disable and is a clean no-op — otherwise every
+    # install would report a change forever (the legacy guard's own lesson).
+    second = install_capture("pi", home=home)
+    assert second.ok, second.error
+    assert second.changed is False, f"re-run reported changes: {second.actions}"
+    assert second.actions == ()
+
+
+def test_pi_install_refuses_when_the_second_producer_and_its_disabled_name_both_exist(
+        home):
+    """Both ``reflect-hook.ts`` and ``reflect-hook.ts.disabled`` present → the
+    rename would clobber a file (or raise), and doing nothing silently leaves
+    two registered producers. Refuse loudly, exactly like the legacy guard, and
+    touch neither.
+
+    Mutation: ``active.rename(disabled)`` unconditionally."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    active = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    active.write_text("// live producer\n")
+    kept = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    kept.write_text("// keep me\n")
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok
+    assert "already exists" in res.error, res.error
+    assert "captured twice" in res.error, res.error
+    assert kept.read_text() == "// keep me\n"
+    assert active.read_text() == "// live producer\n", (
+        "a refused install moved the producer anyway")
+
+
+def test_pi_install_never_disables_the_second_producer_before_the_seam_is_verified(
+        home, monkeypatch):
+    """ORDERING IS THE SAFETY PROPERTY: disabling the other producer before the
+    replacement is verified in place can leave a box with NO producer at all —
+    capture silently stops, which is strictly worse than the duplication.
+
+    Mutation: move the ``_disable_pi_second_producer`` call above the
+    ``assert_seam_target`` block."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.write_text("// live producer\n")
+    # The seam write does not land — the install must fail (it cannot verify).
+    monkeypatch.setattr(capture_install, "_atomic_bytes",
+                        lambda dst, data, mode: None)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok
+    assert producer.read_text() == "// live producer\n", (
+        "the only working producer was disabled by an install that then failed "
+        "— this box now captures nothing")
+    assert not (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).exists()
+
+
+def test_pi_install_dry_run_names_the_second_producer_without_touching_it(home):
+    """A dry run reports the rename it would do and mutates nothing.
+
+    Mutation: put the disable outside the ``dry_run`` branch (a `--dry-run`
+    silently changes what the box captures)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.write_text("// live producer\n")
+
+    res = install_capture("pi", home=home, dry_run=True)
+
+    assert res.ok, res.error
+    assert producer.read_text() == "// live producer\n"
+    assert any(a.startswith("[dry-run] would retire")
+               and "reflect-hook" in a for a in res.actions), res.actions
+
+
+def test_pi_install_dry_run_names_the_legacy_retirement_on_the_fresh_directory_shape(
+        home):
+    """On the FRESH legacy-directory shape the real run renames the directory
+    aside **and then** retires the entry point inside it — two actions, and the
+    second is the one that actually stops the producer. The dry run read the
+    disabled name from DISK, where it does not exist yet, so it reported the
+    rename only and omitted the step that matters (#14342 review round 8,
+    finding 3).
+
+    Mutation: read `legacy_disabled` under `--dry-run` (the retirement line
+    disappears from the plan while the real run still performs it)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    legacy = ext_dir / capture_install.LEGACY_PI_DIRNAME
+    legacy.mkdir(parents=True)
+    (legacy / "index.ts").write_text("// legacy producer\n")
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert dry.ok, dry.error
+    # Nothing was touched...
+    assert (legacy / "index.ts").read_text() == "// legacy producer\n"
+    assert not (ext_dir / capture_install.PI_DISABLED_DIRNAME).exists()
+    # ...but BOTH steps the real run performs are named.
+    assert any("[dry-run] would rename" in a for a in dry.actions), dry.actions
+    assert any("[dry-run] would retire" in a
+               and "entry point inside" in a for a in dry.actions), dry.actions
+
+    real = install_capture("pi", home=home)
+    assert real.ok, real.error
+    assert any("renamed" in a for a in real.actions), real.actions
+    assert any("retired the legacy extension's entry point inside" in a
+               for a in real.actions), real.actions
+
+
+def test_retire_pi_entry_refuses_to_overwrite_a_preserved_symlink_copy(home):
+    """The symlink branch renames the LINK, and `Path.rename` OVERWRITES on
+    POSIX — so a retired copy already sitting at the produced name is destroyed
+    silently, unlike the directory branch and the second producer's collision
+    arm, which both refuse. Silent byte loss inside an install that can still
+    report success (#14342 review round 8, finding 1, second facet).
+
+    Mutation: drop the `lexists(produced)` guard — the preserved bytes are
+    replaced by the link."""
+    ext_dir = home / "extensions"
+    ext_dir.mkdir()
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// legacy producer\n")
+    link = ext_dir / "tortoise-capture"
+    link.symlink_to(target, target_is_directory=True)
+    kept = ext_dir / "tortoise-capture.disabled"
+    kept.write_text("// DO NOT LOSE ME\n")
+
+    error = capture_install._retire_pi_entry(link)
+
+    assert error and "already exists" in error, error
+    assert kept.read_text() == "// DO NOT LOSE ME\n", (
+        "the preserved copy was overwritten by the rename")
+    assert link.is_symlink(), "the refused retirement still mutated the link"
+
+
+def test_pi_install_refuses_a_loaded_legacy_entry_point_behind_a_symlink(home):
+    """A SYMLINK at ``.tortoise-capture.disabled`` pointing at a directory with
+    ``index.ts`` is a legacy producer Pi STILL loads.
+
+    `_retire_pi_entry` renamed the LINK to ``….disabled.disabled``, which
+    `discoverExtensionsInDir` still resolves through
+    `resolveExtensionEntries` (a symlinked subdirectory is a subdirectory),
+    while the post-retirement assertion read the path the rename started FROM —
+    gone, so "not loadable" — and the install reported "retired the legacy
+    extension's entry point" over two live producers: the exact false PASS this
+    PR exists to remove (#14342 round 8, finding 1).
+
+    The refusal is also STICKY: it refuses before mutating anything, so the
+    natural response to a failed install (re-run) reads the same shape and
+    refuses again instead of going green over two producers.
+
+    Mutation: assert on the vacated path (or drop the shape check) — run 1
+    reports ok; rename-then-assert-a-produced-path — run 2 reports ok."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    body = "// legacy producer, checked out elsewhere\n"
+    (target / "index.ts").write_text(body)
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+
+    first = install_capture("pi", home=home)
+
+    assert not first.ok, first.actions
+    assert "SYMLINK" in (first.error or ""), first.error
+    # Non-destructive: the link and the checkout it points at are untouched.
+    assert disabled.is_symlink()
+    assert (target / "index.ts").read_text() == body
+
+    second = install_capture("pi", home=home)
+
+    assert not second.ok, second.actions
+    assert "SYMLINK" in (second.error or ""), second.error
+    assert disabled.is_symlink()
+
+
+def test_pi_install_does_not_claim_an_install_the_noop_run_skipped(home):
+    """A REAL run whose seam is already current writes NOTHING (the byte
+    guard skips the copy), then reaches the legacy-symlink refusal — and used
+    to report "The capture seam at … WAS installed" beside its own
+    ``actions=()`` and ``changed_artifacts=()``.
+
+    That is the #10241 report shape on the REAL plane, and it is ordinary, not
+    exotic: every box that has run ``tortoise install pi`` before is in it. The
+    sentence is now keyed on the write, not on the mode (#14342 round 13).
+
+    Mutation: key the branch on ``dry_run`` alone (the pre-fix code) — this row
+    REDs on "WAS installed"."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    seeded = install_capture("pi", home=home)
+    assert seeded.ok, seeded.error
+    assert capture_install.PI_EXTENSION_NAME in seeded.changed_artifacts, (
+        "the seeding run was expected to WRITE the seam — the row's whole "
+        f"premise is that run 2 skips that copy: {seeded.changed_artifacts}")
+
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// legacy producer, elsewhere\n")
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert res.changed_artifacts == (), res.changed_artifacts
+    assert res.actions == (), res.actions
+    assert "WAS installed" not in error, (
+        f"a no-op run claimed it installed the seam: {error!r}")
+    assert "ALREADY in place" in error, error
+
+
+def test_pi_install_second_producer_refusal_does_not_claim_an_install_it_skipped(
+        home):
+    """The `wrote=False` branch on the SECOND producer's plane: a re-run on a
+    box whose seam is already current skips the copy, then refuses on a retired
+    name that still loads — and used to point at "the actions above" when the
+    same InstallResult carries no actions at all.
+
+    This is the pin for the `seam_written=` argument and the helper's `wrote=False`
+    branch: without it, reverting either leaves the whole suite green (#14342
+    round 14)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    seeded = install_capture("pi", home=home)
+    assert seeded.ok, seeded.error
+    assert capture_install.PI_EXTENSION_NAME in seeded.changed_artifacts, (
+        "the seeding run was expected to WRITE the seam — the row's whole "
+        f"premise is that run 2 skips that copy: {seeded.changed_artifacts}")
+
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// the other producer, elsewhere\n")
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert res.actions == (), res.actions
+    assert res.changed_artifacts == (), res.changed_artifacts
+    assert "see the actions above" not in error, (
+        f"a no-op run pointed at action lines it does not have: {error!r}")
+    assert "ALREADY in place" in error, error
+
+
+#: The names Pi's loader would REGISTER from ``~/.pi/agent/extensions``.
+#: ``dist/core/extensions/loader.js``: a direct entry loads iff its name ENDS
+#: WITH ``.ts`` / ``.js`` (``isExtensionFile``); **every** subdirectory is
+#: resolved through ``resolveExtensionEntries`` (``package.json``
+#: ``pi.extensions``, else ``index.ts`` / ``index.js``) — and there is NO
+#: dot-prefix filter in ``discoverExtensionsInDir``. That absence is the whole
+#: point of enumerating through this helper rather than an exact path: the
+#: #3713 guard renamed a legacy directory to a dot-prefixed name and Pi kept
+#: loading it (#14342).
+_PRODUCER_STEMS = ("tortoise-capture", "reflect-hook")
+
+
+def _registered_producers(ext_dir: Path) -> list[str]:
+    """Every entry Pi would LOAD that is one of the capture producers.
+
+    The RULE, not the exact path, and not a name-prefix guess: a
+    ``.bak.ts`` / ``.disabled.js`` / ``.dot-dir/index.ts`` variant is loaded
+    one level down from the name an exact-path test looks at (agent-infra
+    tracked a version of that as #2147 for a different stem).
+
+    ⛔ THE MANIFEST BRANCH IS PART OF THE RULE (#14342 round 17, finding 3).
+    This helper used to check only ``index.ts`` / ``index.js`` while its own
+    docstring stated the full rule, so a directory declaring
+    ``pi.extensions`` (with the named file present) read as ``[]`` here and
+    ``True`` in ``capture_install._pi_entry_is_loadable`` — two oracles that
+    disagree, which is exactly how a one-producer assertion over such a shape
+    becomes a silent false PASS. The reader is the MODULE's, not a third
+    transcription: ``_pi_manifest_entries`` is the same function the refusal
+    used, so a rule change reaches both.
+
+    Modelling matches ``_pi_entry_is_loadable`` exactly, including the
+    fall-through: an UNREADABLE manifest is Pi's `catch { return null }`, so it
+    is NOT a registration and the index files are consulted instead.
+
+    ⛔ AND IT TESTS THE DIRENT, BUT NOT BY SKIPPING THE TARGET (#14342 round 19,
+    finding 1 — the round-18 attempt was MEASURED WRONG). A previous cut skipped
+    every `*.ts`-named link to a directory on the theory that Pi "attempts it as
+    a file and fails". Executed against real Pi
+    (`discoverAndLoadExtensions`, `pi-coding-agent` 1.2.0) that is false:
+
+    | ``reflect-hook.ts`` → dir containing …    | Pi registers it? |
+    |---|---|
+    | ``index.ts``                              | **YES** |
+    | ``package.json`` with ``main``            | **YES** |
+    | ``package.json`` with only ``pi.extensions`` | no |
+    | nothing                                    | no |
+
+    Pi pushes the path (``isFile() || isSymbolicLink()``) and then resolves the
+    directory by NODE resolution (``main``, else ``index.ts``/``index.js``) —
+    the npm-manifest path, NOT ``resolveExtensionEntries``. An instrument that
+    under-counts is LENIENT, which is the false-PASS direction, so this oracle
+    must never be stricter than Pi. It models both halves — ``main`` and the
+    index names — and it does NOT take the ``pi.extensions`` branch for a
+    suffix-named link, which is exactly where it agrees with Pi.
+    """
+    found: list[str] = []
+    for entry in ext_dir.iterdir():
+        suffix_ok = entry.name.endswith((".ts", ".js"))
+        if entry.is_dir():
+            # ⛔ CONSERVATIVE, NEVER A MODEL OF NODE (#14342 round 21). Hand-
+            # modelling node's resolution for a suffix-named symlink produced a
+            # NEW UNDER-COUNT each time — and an under-count is the false-PASS
+            # direction, where the one-producer assertion passes while real Pi
+            # registers two. So this oracle mirrors
+            # `capture_install._pi_entry_is_loadable`: a suffix-named link to a
+            # NON-EMPTY directory counts (as `name/*`), an empty one does not.
+            # Over-counting only ever produces a spurious red.
+            if entry.is_symlink() and suffix_ok:
+                if any(True for _ in entry.iterdir()):
+                    found.append(f"{entry.name}/*")
+                continue
+            entries, unreadable = capture_install._pi_manifest_entries(entry)
+            if not unreadable and entries:
+                resolved = [name for name in entries
+                            if (entry / name).exists()]
+                if resolved:
+                    found.extend(f"{entry.name}/{name}" for name in resolved)
+                    continue
+            for index in ("index.ts", "index.js"):
+                # `exists`, not `is_file` — Pi uses `fs.existsSync`, and a
+                # DIRECTORY named `index.ts` is a producer it registers.
+                if (entry / index).exists():
+                    found.append(f"{entry.name}/{index}")
+        elif suffix_ok:
+            found.append(entry.name)
+    # `lstrip(".")` because a dot-prefixed directory is still LOADED — the
+    # stem match must not be defeated by the dot a guard adds.
+    return [f for f in found
+            if any(f.split("/")[0].lstrip(".").startswith(stem)
+                   for stem in _PRODUCER_STEMS)]
+
+
+def test_pi_install_leaves_exactly_one_registered_capture_producer(home):
+    """THE INVARIANT the whole guard exists for: after an install, a session is
+    captured ONCE. Read through the loader's own rule rather than an exact
+    path, so a suffixed variant of the producer cannot pass the test while Pi
+    still loads it.
+
+    Mutation: drop the second-producer guard (two entries come back), or rename
+    to ``reflect-hook.disabled.ts`` — a name the loader DOES load, which the
+    exact-path assertion in the sibling test would not catch."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    (ext_dir / "tortoise-capture").mkdir(parents=True)
+    (ext_dir / "tortoise-capture" / "index.ts").write_text("// legacy producer\n")
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).write_text(
+        "// agent-infra producer\n")
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    producers = _registered_producers(ext_dir)
+    assert producers == [capture_install.PI_EXTENSION_NAME], (
+        f"a session would be captured by more than one producer: {producers}")
+
+
+def test_pi_install_re_asserts_a_farm_recreated_identical_second_producer(home):
+    """The farm RE-MATERIALIZES ``reflect-hook.ts`` from agent-infra's
+    ``manifest.json``, so "both names present" is the steady state, not an
+    accident. A re-created copy whose bytes are IDENTICAL to the retired one
+    must be re-asserted (the bytes already survive at the retired path, so
+    nothing is destroyed) — otherwise every farm sync turns the product's own
+    install into a hard failure while the duplication stays live.
+
+    Mutation: refuse unconditionally when the retired name exists (the install
+    is permanently red on the boxes the guard targets)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    body = "// agent-infra producer\nexport default 1\n"
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.write_text(body)
+    recreated = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    recreated.write_text(body)
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    assert not recreated.exists(), "the re-created duplicate is still registered"
+    assert retired.read_text() == body, "the preserved bytes were lost"
+    assert any("re-asserted" in a for a in res.actions), res.actions
+    assert _registered_producers(ext_dir) == [
+        capture_install.PI_EXTENSION_NAME]
+
+
+def test_pi_install_dry_run_re_assert_mutates_nothing(home):
+    """The RE-ASSERT arm is the one path in this module that DELETES a live
+    producer, so its ``dry_run`` gate is the only thing between a preview and a
+    deleted capture producer. Every other refusal here is evaluated outside
+    ``if not dry_run`` by construction; this unlink cannot be, so it needs its
+    own proof rather than the argument that the surrounding code is careful
+    (#14695 review round 1, P2 — measured: deleting the ``if dry_run:`` return
+    made a ``--dry-run`` unlink the live producer, and the whole suite stayed
+    green at 291 passed).
+
+    No other test reaches this shape: the plain dry-run test exercises
+    ``active`` with NO ``retired`` copy present, which returns at an earlier
+    arm, so it never exercises this gate.
+
+    Mutation: delete the ``if dry_run: return ...`` above ``active.unlink()``
+    (a preview silently changes what the box captures)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    body = "// agent-infra producer\nexport default 1\n"
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.write_text(body)
+    recreated = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    recreated.write_text(body)
+
+    res = install_capture("pi", home=home, dry_run=True)
+
+    assert res.ok, res.error
+    # Nothing was touched: the live producer still exists and the preserved
+    # bytes are intact.
+    assert recreated.read_text() == body, "a dry run removed the live producer"
+    assert retired.read_text() == body, "a dry run lost the preserved bytes"
+    assert res.changed_artifacts == (), res.changed_artifacts
+    # ...but the step the real run performs is named.
+    assert any("[dry-run] would re-assert" in a for a in res.actions), res.actions
+
+    # And the real run on the SAME shape does perform it, so the preview is not
+    # a different story from what happens.
+    real = install_capture("pi", home=home)
+    assert real.ok, real.error
+    assert not recreated.exists(), "the re-created duplicate is still registered"
+    assert any("re-asserted" in a for a in real.actions), real.actions
+
+
+def test_pi_install_refuses_a_symlinked_preservation_target(home):
+    """The re-assert path deletes the live copy, so the PRESERVATION TARGET must
+    be a real, distinct file. `_sha256_file` follows symlinks: a `retired` that
+    is a LINK TO the live file yields two equal digests read from ONE file, and
+    unlinking the live copy then destroys the only copy while the receipt says
+    the bytes were preserved (#14342 review round 2, measured).
+
+    Mutation: drop the `is_symlink()` / `is_file()` guard on `retired` — the
+    install reports ok over deleted bytes.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    body = "// the producer\nexport default 1\n"
+    live = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    live.write_text(body)
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.symlink_to(live)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, res.actions
+    assert "not a regular file" in res.error, res.error
+    assert live.read_text() == body, "the only copy of the producer was deleted"
+    assert retired.is_symlink(), "the preservation target was rewritten"
+
+
+def test_pi_install_does_not_claim_a_byte_comparison_it_did_not_run(home):
+    """A DIRECTORY producer beside a regular FILE at the retired name: both
+    paths exist, neither is touched, and the install refuses — but there is no
+    digest of the directory's entry point to compare against, so the receipt
+    must not say the retired copy "holds DIFFERENT bytes".
+
+    That sentence reports a comparison the code cannot support: the branch
+    fires on ``live_digest is None``, which is the ABSENCE of a comparison, and
+    the pre-fix text invented the evidence for its own refusal. A receipt that
+    fabricates the measurement behind it is the class this module refuses
+    elsewhere for an unreadable seam (#14342 round 15, note 4).
+
+    Mutation: key the sentence on the branch CONDITION alone (``live_digest is
+    None or live_digest != retired_digest`` → "holds DIFFERENT bytes") — this
+    row REDs on the claimed comparison, on a shape whose remedy is unchanged."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    active = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    active.mkdir(parents=True)
+    body = "// a producer shipped as a directory\n"
+    (active / "index.ts").write_text(body)
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    kept = "// the copy we retired, as a regular FILE\n"
+    retired.write_text(kept)
+
+    res = install_capture("pi", home=home)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "DIFFERENT bytes" not in error, (
+        f"the receipt claimed a byte comparison that never ran: {error!r}")
+    assert "NOT compared" in error, error
+    assert "is a directory" in error, error
+    # The refusal still names the consequence and the remedy, so saying LESS
+    # about the comparison does not make it less actionable.
+    assert "captured twice" in error, error
+    assert "move one" in error.lower(), error
+    # Non-destructive, and the duplication is still reported honestly: BOTH
+    # paths survive, so the box really does still have two producers.
+    assert (active / "index.ts").read_text() == body
+    assert retired.read_text() == kept
+    assert capture_install.PI_EXTENSION_NAME in _registered_producers(ext_dir)
+
+
+def test_pi_install_does_not_claim_two_producers_it_could_not_verify(home):
+    """An UNREADABLE `package.json` is the one refusal that fires because the
+    reader could not MEASURE — and the receipt used to state the fail-closed
+    guess as a fact: "TWO producers are registered".
+
+    The reader that produced the refusal (`_pi_manifest_entries`) returned a
+    reason, not an answer, so no code path here established that the second
+    producer registers at all. Measured on disk: this shape carries no
+    `index.ts`, real Pi's `readPiManifest` catches the unreadable file and falls
+    through to an index that does not exist, so exactly ONE producer is
+    registered while the receipt claimed two (#14342 round 16, finding 1).
+
+    Mutation: word the unverified arm with the measured sentence (drop the
+    `_pi_retirement_unverifiable` call, always `unverified=False`) — this row
+    REDs on the false claim while the remedy stays intact.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    # A DIRECTORY producer with an unreadable manifest and NO index.ts.
+    active = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    active.mkdir(parents=True)
+    (active / "main.ts").write_text("// declared by the manifest\n")
+    manifest = active / "package.json"
+    manifest.write_text('{"pi": {"extensions": ["main.ts"]}}')
+    os.chmod(manifest, 0o000)
+    try:
+        res = install_capture("pi", home=home)
+        # The dry run must not claim a measurement either, and must not claim a
+        # write: same predicate, subjunctive mood.
+        dry = install_capture("pi", home=home, dry_run=True)
+        # ⛔ MEASURE THE DISK WHILE THE MANIFEST IS STILL UNREADABLE — that is the
+        # state the receipt describes. Restoring the mode first would let the
+        # oracle see a READABLE manifest naming an existing `main.ts`, which real
+        # Pi DOES register (a stronger, different shape — and one where the
+        # receipt's "could not be VERIFIED" would no longer be the right
+        # sentence either).
+        registered = _registered_producers(ext_dir)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "could not be VERIFIED" in error, error
+    # ⛔ CAPITALISED AT THE SENTENCE BOUNDARY (#14342 round 18, finding 2): every
+    # call site splices this after ". ", so a lower-case subject emitted
+    # "… by hand. the second producer could not be VERIFIED …".
+    assert "The second producer could not be VERIFIED" in error, error
+    assert "producers are registered" not in error.lower(), error
+    assert "producers would stay registered" not in error.lower(), error
+    # The remedy and the consequence survive, so saying LESS is not less useful.
+    assert "captured twice" in error, error
+    assert "by hand" in error, error
+    # …and the doubled period the interpolated message produced is gone.
+    assert "hand.. " not in error, error
+
+    # The disk agrees with the weaker sentence: ONE producer is registered.
+    assert registered == [capture_install.PI_EXTENSION_NAME], (
+        f"the shape must carry exactly one registered producer while its "
+        f"manifest is unreadable — that is the premise of the assertion "
+        f"above; got {registered}")
+    # Non-destructive: the unreadable producer is untouched.
+    assert (active / "main.ts").read_text() == "// declared by the manifest\n"
+
+    dry_error = dry.error or ""
+    assert not dry.ok, dry.actions
+    assert "could not be VERIFIED" in dry_error, dry_error
+    assert "producers are registered" not in dry_error.lower(), dry_error
+    assert dry.changed_artifacts == (), dry.changed_artifacts
+
+
+def test_legacy_install_does_not_claim_two_producers_it_could_not_verify(home):
+    """The legacy directory's sibling arm of the same class (#14342 round 16,
+    finding 1): `{…} could not be retired ({unreadable}), so both producers stay
+    registered` reports a registration on the branch that could not read it.
+
+    Mutation: same as its sibling — always pass `unverified=False`, and this row
+    REDs on "both producers are registered" for a tree where the real loader
+    registers only the seam.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    legacy = ext_dir / capture_install.LEGACY_PI_DIRNAME
+    legacy.mkdir(parents=True)
+    (legacy / "main.ts").write_text("// declared by the manifest\n")
+    manifest = legacy / "package.json"
+    manifest.write_text('{"pi": {"extensions": ["main.ts"]}}')
+    os.chmod(manifest, 0o000)
+    try:
+        res = install_capture("pi", home=home)
+        # Measured while unreadable, for the same reason as the sibling row.
+        registered = _registered_producers(ext_dir)
+    finally:
+        # ⛔ THE REAL RUN RENAMES THE DIRECTORY FIRST, then retires inside it, so
+        # the unreadable manifest is no longer at the source path afterwards.
+        # Restore whichever of the two the run landed on, or the fixture's temp
+        # tree keeps a mode-000 file that pytest cannot clean up.
+        for candidate in (manifest,
+                          ext_dir / capture_install.PI_DISABLED_DIRNAME
+                          / "package.json"):
+            if candidate.exists():
+                os.chmod(candidate, 0o644)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "could not be VERIFIED" in error, error
+    assert "The legacy capture extension could not be VERIFIED" in error, error
+    # ⛔ THE FALSE CLAIM: neither measured sentence may appear (case-insensitive,
+    # since the clause is capitalised).
+    assert "producers are registered" not in error.lower(), error
+    assert "producers stay registered" not in error.lower(), error
+    # ⛔ AND IT MUST NOT NAME A PRODUCER THIS RUN NEVER READ (#14342 round 17,
+    # finding 2): the legacy block returns before `_disable_pi_second_producer`
+    # runs, so on a legacy-only box `reflect-hook.ts` does not even exist.
+    assert "second producer" not in error.lower(), error
+    # The legacy remedy is the one that was already there.
+    assert "by hand" in error, error
+    assert "hand.. " not in error, error
+    assert registered == [capture_install.PI_EXTENSION_NAME], (
+        f"no index.ts and an unreadable manifest ⇒ the legacy directory "
+        f"registers nothing, so the assertion above must match the disk; "
+        f"got {registered}")
+
+
+def test_a_guessed_loadability_is_not_reported_as_a_measured_one(home):
+    """A RETIRED name that Pi's reader cannot read: `_pi_entry_is_loadable`
+    answers True for it because it fails CLOSED, and the refusal used to report
+    that guess as a measurement — "is still an extension Pi loads" plus an
+    invented cause ("resolved through `resolveExtensionEntries` under ANY
+    name") — over a shape where real Pi registers nothing (#14342 round 17,
+    finding 1).
+
+    Mutation: drop the `_pi_loadability_is_guessed` branch so both shapes share
+    the measured sentence — this row REDs on the false claim.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.mkdir(parents=True)
+    (retired / "main.ts").write_text("// declared by the manifest\n")
+    manifest = retired / "package.json"
+    manifest.write_text('{"pi": {"extensions": ["main.ts"]}}')
+    os.chmod(manifest, 0o000)
+    try:
+        res = install_capture("pi", home=home)
+        registered = _registered_producers(ext_dir)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "could not be VERIFIED" in error, error
+    # ⛔ The measured sentence AND its invented cause must both be gone.
+    assert "still an extension Pi loads" not in error, error
+    assert "resolveExtensionEntries" not in error, error
+    # The remedy and the consequence survive.
+    assert "captured twice" in error, error
+    assert "by hand" in error, error
+    # …and the disk is what the weaker sentence describes: one producer.
+    assert registered == [capture_install.PI_EXTENSION_NAME], (
+        f"an unreadable manifest with no index registers nothing, so this "
+        f"shape must carry exactly one producer; got {registered}")
+
+
+def test_a_guessed_loadability_behind_a_symlink_is_not_reported_as_measured(home):
+    """The legacy arm's sibling (#14342 round 17, finding 1): the SYMLINK-to-a-
+    directory half of its sentence is measured, but "Pi resolves a symlinked
+    subdirectory through its index file" presumes the target could be READ.
+    With an unreadable `package.json` in the target, Pi's reader throws and
+    falls through to a missing index — nothing registers — while the receipt
+    named a cause and claimed two producers.
+
+    `_pi_retirement_unverifiable` cannot answer this (it excludes symlinks), so
+    the read must FOLLOW the link. Mutation: drop the `_guessed` branch — REDs.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "main.ts").write_text("// declared by the manifest\n")
+    manifest = target / "package.json"
+    manifest.write_text('{"pi": {"extensions": ["main.ts"]}}')
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+    os.chmod(manifest, 0o000)
+    try:
+        res = install_capture("pi", home=home)
+        registered = _registered_producers(ext_dir)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "COULD NOT be verified" in error, error
+    # ⛔ The invented cause, and the measured two-producer claim, are gone.
+    assert "index file under ANY suffixed name" not in error, error
+    assert "producers stay registered" not in error.lower(), error
+    assert "producers are registered" not in error.lower(), error
+    # ⛔ AND SO IS THE COUNT ONE CLAUSE LATER: "this box now runs BOTH
+    # producers" presumes exactly what the sentence just said it could not
+    # verify, so the guessed branch must not assert it either.
+    assert "runs BOTH producers" not in error, error
+    assert "may run both producers" in error, error
+    # ⛔ THE RECEIPT MUST ATTRIBUTE THE SEAM TO THIS RUN (#14342 round 19,
+    # finding 4 — mutant C3_5 reworded this branch to the already-current
+    # sentence and the whole suite stayed green).
+    assert "WAS installed" in error, error
+    assert "ALREADY in place" not in error, error
+    # The link is untouched and the checkout it points at survives.
+    assert disabled.is_symlink(), "the symlink was renamed or removed"
+    assert (target / "main.ts").exists()
+    assert registered == [capture_install.PI_EXTENSION_NAME], (
+        f"the link's target registers nothing while its manifest is "
+        f"unreadable; got {registered}")
+
+
+def _legacy_symlink_with_unreadable_manifest(home):
+    """Shared fixture: ``.tortoise-capture.disabled`` is a LINK to a directory
+    whose ``package.json`` cannot be read, and which carries no index file.
+
+    The shape matters: the link half is MEASURED (it is a symlink to a
+    directory), the loadability half is a GUESS, and real Pi registers nothing.
+    Returns ``(ext_dir, disabled, target, manifest)`` so a caller can restore the
+    mode — pytest cannot clean a mode-000 file up on its own.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    # `exist_ok` because a caller may already have installed the seam, which
+    # creates this directory (the already-current row does exactly that).
+    ext_dir.mkdir(parents=True, exist_ok=True)
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "main.ts").write_text("// declared by the manifest\n")
+    manifest = target / "package.json"
+    manifest.write_text('{"pi": {"extensions": ["main.ts"]}}')
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+    os.chmod(manifest, 0o000)
+    return ext_dir, disabled, target, manifest
+
+
+def test_legacy_symlink_dry_run_guessed_arm_is_subjunctive_and_unattributed(home):
+    """The legacy arm's ``_guessed and dry_run`` branch (#14342 round 18,
+    finding 3 — unpinned: the mutant that collapsed it survived the whole suite).
+
+    A preview writes nothing, so it must say the box WOULD run both producers —
+    not that it does — and it must still attribute the guess to the thing it
+    could not read, not to the second producer it never looked at.
+
+    Mutation: make the guessed dry-run branch fall through to the measured
+    wording (`if _guessed and dry_run` -> `if dry_run`) — this row REDs.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir, _disabled, _target, manifest = (
+        _legacy_symlink_with_unreadable_manifest(home))
+    try:
+        res = install_capture("pi", home=home, dry_run=True)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "WOULD be installed" in error, error
+    assert "WAS installed" not in error, (
+        f"a dry run claimed the seam landed: {error!r}")
+    assert "may run both producers" in error, error
+    assert "runs BOTH producers" not in error, error
+    assert "second producer" not in error.lower(), error
+    assert res.changed_artifacts == (), res.changed_artifacts
+    assert not (ext_dir / capture_install.PI_EXTENSION_NAME).exists(), (
+        "a dry run wrote the seam")
+
+
+def test_legacy_symlink_already_current_guessed_arm_says_may(home):
+    """The legacy arm's real-run / seam-ALREADY-current ``_guessed`` branch
+    (#14342 round 18, finding 3 — unpinned).
+
+    On a second run the seam is current, so nothing was written; the receipt
+    must attribute the state to that ("was ALREADY in place") rather than claim
+    a write, and must keep the count a possibility because the manifest is
+    unreadable.
+
+    Mutation: collapse the innermost `if _guessed` to the measured wording —
+    this row REDs on `runs BOTH producers`.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    # First run with NO legacy shape: the seam lands and is current afterwards.
+    assert install_capture("pi", home=home).ok
+    _ext_dir, _disabled, _target, manifest = (
+        _legacy_symlink_with_unreadable_manifest(home))
+    try:
+        res = install_capture("pi", home=home)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "ALREADY in place" in error, error
+    assert "WAS installed" not in error, (
+        f"a run with a current seam claimed it installed one: {error!r}")
+    assert "may run both producers" in error, error
+    assert "runs BOTH producers" not in error, error
+    assert "second producer" not in error.lower(), error
+
+
+def test_legacy_symlink_measured_arm_names_the_manifest_branch_not_the_index(home):
+    """The measured branch of the legacy symlink arm named a FILE the shape does
+    not have (#14342 round 18, finding 1).
+
+    With a READABLE ``package.json`` declaring an existing ``main.ts`` and no
+    index file, Pi's ``resolveExtensionEntries`` takes the MANIFEST branch first
+    (``loader.js:593-621``) and never falls back to the index — so "resolves a
+    symlinked subdirectory through its index file" describes a file that is not
+    there. The refusal and the two-producer measurement are right; only the
+    stated mechanism was wrong.
+
+    Mutation: revert to "through its index file" — this row REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "main.ts").write_text("// declared by the manifest\n")
+    (target / "package.json").write_text(
+        '{"pi": {"extensions": ["main.ts"]}}')
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    # The measured branch: the entry really does register, so it says so.
+    assert "BOTH producers" in error, error
+    assert "could not be VERIFIED" not in error, error
+    # …but the mechanism it names must be one the shape actually uses.
+    assert "resolveExtensionEntries" in error, error
+    assert "through its index file" not in error, (
+        f"the receipt named the index-file branch for a manifest-declaring "
+        f"shape: {error!r}")
+    assert "package.json" in error, error
+
+def test_legacy_symlink_measured_dry_run_says_would_not_does(home):
+    """Branch 2 of the legacy arm's six-way conditional (#14342 round 18,
+    finding 3 — the reviewer's M5 survived the whole suite).
+
+    MEASURED (a readable manifest naming an existing entry) + ``--dry-run``: the
+    receipt must say the box WOULD run both producers, and must not use the
+    guessed "may" wording. Collapsing ``if _guessed and dry_run`` to
+    ``if dry_run`` is behaviourally identical for every GUESSED case — this row
+    is the only one that separates them, because it is the measured one.
+
+    Mutation: `if _guessed and dry_run` -> `if dry_run` — this row REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "main.ts").write_text("// declared by the manifest\n")
+    (target / "package.json").write_text(
+        '{"pi": {"extensions": ["main.ts"]}}')
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home, dry_run=True)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "WOULD be installed" in error, error
+    assert "this box would run BOTH producers" in error, (
+        f"a measured dry-run refusal must state the count, not hedge: {error!r}")
+    assert "may run both producers" not in error, error
+    assert res.changed_artifacts == (), res.changed_artifacts
+
+def test_legacy_symlink_measured_already_current_says_both(home):
+    """Branch 6: MEASURED + the seam is ALREADY current (#14342 round 18,
+    finding 3). Nothing was written, so the receipt must say so, and the
+    measured count must stay BOTH rather than hedge.
+
+    Mutation: collapse the innermost `if _guessed` to the measured wording in
+    the wrong direction (swap branches 5 and 6) — this row REDs.
+    """
+    assert install_capture("pi", home=home).ok
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "main.ts").write_text("// declared by the manifest\n")
+    (target / "package.json").write_text(
+        '{"pi": {"extensions": ["main.ts"]}}')
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "ALREADY in place" in error, error
+    assert "this box now runs BOTH producers" in error, (
+        f"a measured, already-current refusal must state the count, not "
+        f"hedge: {error!r}")
+    assert "may run both producers" not in error, error
+
+def test_install_refuses_a_main_resolving_js_producer_link(home):
+    """THE ROUND-20 P1 (#14342): a `.js`-named SYMLINK to a directory whose
+    ``package.json`` resolves via ``main``.
+
+    MEASURED before the fix: ``install_capture("pi")`` returned ``ok=True`` and
+    real Pi registered ``['reflect-hook.js', 'tortoise-capture.ts',
+    'tortoise-volunteer.ts']`` — two live producers, GREEN. Two things had to be
+    right for this to be caught: ``_pi_entry_is_loadable`` had to learn that node
+    resolution honours ``main`` (it only modelled ``resolveExtensionEntries``),
+    AND the ``PI_SECOND_PRODUCER_OTHER_NAMES`` sweep had to exist.
+
+    Mutation: either half alone — restore the manifest-else-index-only dir
+    branch, or drop the sweep — this row REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "hook"
+    target.mkdir(parents=True)
+    (target / "hook.js").write_text("export default function () {}\n")
+    (target / "package.json").write_text('{"main": "hook.js"}')
+    link = ext_dir / "reflect-hook.js"
+    link.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+    # ⛔ AND THE PREVIEW MUST NOT CLAIM THE WRITE IT NEVER MADE (#14342 round
+    # 20, finding 3): the message opened with a hard-coded "the capture seam is
+    # installed" beside a `changed_artifacts=()` and its own "WOULD be in place".
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert not res.ok, (
+        f"a main-resolving `reflect-hook.js` link was reported GREEN: "
+        f"{res.actions}")
+    assert "reflect-hook.js" in (res.error or ""), res.error
+    assert not dry.ok, dry.actions
+    assert "WOULD be in place" in (dry.error or ""), dry.error
+    assert "seam is installed" not in (dry.error or ""), (
+        f"a dry run claimed a write: {dry.error!r}")
+    assert dry.changed_artifacts == (), dry.changed_artifacts
+    # The link and its target survive; the installer displaces nothing here.
+    assert link.is_symlink()
+    assert (target / "hook.js").exists()
+
+
+def test_a_main_resolving_ts_producer_link_is_retired_not_reported_green(home):
+    """The .ts sibling, and WHY it is not the same case (#14342 round 20,
+    finding 1 — checked, because the reviewer's report named both).
+
+    `_retire_pi_entry` renames the LINK to `reflect-hook.ts.disabled`; that name
+    is non-suffixed, so Pi resolves it through `resolveExtensionEntries`, which
+    does not read `main`. MEASURED on the post-install tree with real Pi: it
+    loads ONLY the seam. So the install is legitimately green, and this row pins
+    the end state rather than the receipt.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "hook"
+    target.mkdir(parents=True)
+    (target / "hook.js").write_text("export default function () {}\n")
+    (target / "package.json").write_text('{"main": "hook.js"}')
+    link = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    link.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    assert not os.path.lexists(link), "the live name was left in place"
+    assert (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).is_symlink()
+    # The safety property, through the oracle: ONE producer registers.
+    assert _registered_producers(ext_dir) == [capture_install.PI_EXTENSION_NAME], (
+        f"the retired name must be inert; got {_registered_producers(ext_dir)}")
+
+
+def test_oracle_and_predicate_are_conservative_on_a_suffix_link(home):
+    """A suffix-named SYMLINK to a NON-EMPTY directory counts; an empty one does
+    not — one rule, for BOTH planes (#14342 round 21).
+
+    Hand-modelling node's resolution for this shape produced a NEW UNDER-COUNT
+    on three consecutive attempts (`main` absent -> index fallback; extensionless
+    `main` -> `.js` appended; `main` -> a directory), and an under-count is the
+    false-PASS direction: `test_pi_install_leaves_exactly_one_registered_capture_
+    producer` passes while real Pi registers two. So neither plane models node
+    any more. The predicate answers "may this register", and the oracle counts
+    the producer. Over-counting costs a spurious red; that is the safe side.
+
+    Mutation: make the predicate answer `False` for this shape (the round-20
+    `main` branch) — this row REDs, and so do the two end-to-end P0 rows below.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    for name in (capture_install.PI_SECOND_PRODUCER_NAME, "reflect-hook.js"):
+        target = home / "checkout" / f"t-{name}"
+        target.mkdir(parents=True)
+        (target / "hook.js").write_text("export default function () {}\n")
+        (target / "package.json").write_text('{"main": "hook.js"}')
+        link = ext_dir / name
+        link.symlink_to(target, target_is_directory=True)
+
+        assert capture_install._pi_entry_is_loadable(link) is True, (
+            f"a non-empty target MAY register, so the predicate must not deny "
+            f"it ({name})")
+        assert _registered_producers(ext_dir) == [f"{name}/*"], (
+            f"the oracle must count it conservatively: "
+            f"{_registered_producers(ext_dir)}")
+
+        # An EMPTY target cannot register anything, on either plane.
+        link.unlink()
+        empty = home / "checkout" / f"e-{name}"
+        empty.mkdir(parents=True)
+        link.symlink_to(empty, target_is_directory=True)
+        assert capture_install._pi_entry_is_loadable(link) is False
+        assert _registered_producers(ext_dir) == [], (
+            _registered_producers(ext_dir))
+
+
+def test_install_refuses_when_main_does_not_resolve_but_an_index_exists(home):
+    """ROUND-21 P0, a REGRESSION the round-20 `main` branch introduced.
+
+    `{index.js, package.json {"main":"hook.js"}}` with no `hook.js`: node's
+    LOAD_AS_DIRECTORY falls through to `index.js`, so real Pi REGISTERS the
+    producer. The round-20 branch returned `False` as soon as `main` was
+    unresolvable and never consulted the index, so `install_capture` reported
+    `ok=True` over `['reflect-hook.js', 'tortoise-capture.ts']` — two live
+    producers, GREEN.
+
+    Mutation: restore `return False` when `main` does not resolve — REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "hook"
+    target.mkdir(parents=True)
+    (target / "index.js").write_text("export default function () {}\n")
+    (target / "package.json").write_text('{"main": "hook.js"}')
+    link = ext_dir / "reflect-hook.js"
+    link.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, (
+        f"GREEN over two live producers: {res.actions} / "
+        f"{_registered_producers(ext_dir)}")
+    assert "reflect-hook.js" in (res.error or ""), res.error
+
+
+def test_install_refuses_an_extensionless_main_that_node_resolves(home):
+    """ROUND-21 P0 — node appends `.js` to an extensionless `main`.
+
+    `{"main": "hook"}` with `hook.js` present: real Pi registers the producer.
+    Both planes answered `False`/`[]`, so `install_capture` reported `ok=True`
+    over two live producers AND no row could see it.
+
+    Mutation: tighten the predicate so a target must match exactly — REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "hook"
+    target.mkdir(parents=True)
+    (target / "hook.js").write_text("export default function () {}\n")
+    (target / "package.json").write_text('{"main": "hook"}')
+    (ext_dir / "reflect-hook.js").symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, (
+        f"GREEN over two live producers: {res.actions} / "
+        f"{_registered_producers(ext_dir)}")
+
+
+def test_install_refuses_when_the_index_entry_is_a_directory(home):
+    """ROUND-22 P1 — PI TESTS `fs.existsSync`, NOT `is_file`.
+
+    A DIRECTORY named `index.ts` (containing its own `index.js`) is a producer
+    Pi REGISTERS, and `is_file()` counted it as nothing: `ok=True` over two live
+    producers, measured on the first run, on a re-run, and on the legacy rename
+    path too. One word, and the forbidden direction.
+
+    ⛔ AND THIS ROW DOES NOT SEE THAT MUTANT (#14695 review, MEASURED): its
+    fixture is suffix-named SYMLINKS, which the predicate answers with the
+    CONSERVATIVE rule above the index loop, so mutating the predicate's index
+    test to `.is_file()` left this row GREEN. The rows that RED on it are
+    `test_a_legacy_index_entry_that_is_a_directory_IS_retired` and
+    `test_dry_run_and_real_run_agree_when_the_index_entry_is_a_directory`, both
+    of which build a real, non-suffixed directory — the only shape that reaches
+    the loop. This row's own property is the conservative answer per name plus
+    the install refusing, and it keeps pinning those.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    for name in (capture_install.PI_SECOND_PRODUCER_NAME, "reflect-hook.js"):
+        target = home / "checkout" / f"t-{name}"
+        (target / "index.ts").mkdir(parents=True)
+        (target / "index.ts" / "index.js").write_text(
+            "export default function () {}\n")
+        (ext_dir / name).symlink_to(target, target_is_directory=True)
+
+        assert capture_install._pi_entry_is_loadable(ext_dir / name) is True, (
+            f"a directory named index.ts exists, and Pi registers it ({name})")
+
+    res = install_capture("pi", home=home)
+    assert not res.ok, (
+        f"GREEN over two live producers: {res.actions}")
+
+
+def test_oracle_counts_an_index_entry_that_is_a_directory(home):
+    """The oracle counts a suffix-named symlink to a directory carrying a
+    nested `index.ts` DIRECTORY, by the CONSERVATIVE rule — the same arm the
+    predicate takes on that shape.
+
+    ⛔ IT USED TO CLAIM THE ORACLE'S `.exists()` INDEX TEST AND COULD NOT SEE IT
+    (#14695 review). A suffix-named symlink is answered by the conservative arm
+    (`entry.is_symlink() and suffix_ok` -> non-empty target => `name/*`) BEFORE
+    the index loop, so `.exists()` -> `.is_file()` in the oracle left this row
+    GREEN — measured, not reasoned. Its assertion could not fail either: `assert
+    got == [...] or got` is truthy for ANY non-empty list, so the comparison was
+    dead weight while its prose read as a strict equality. Both are fixed: the
+    value is PINNED, and the mutation named below is the arm this shape
+    actually reaches.
+
+    Mutation: drop the conservative arm from `_registered_producers` — the
+    oracle falls through to the index loop and answers
+    `reflect-hook.ts/index.ts` instead of `reflect-hook.ts/*`, so the pin REDs.
+
+    The oracle's `exists`-not-`is_file` index test IS real and IS guarded — by
+    `test_oracle_counts_a_legacy_index_entry_that_is_a_directory`, whose fixture
+    is a real non-suffixed directory (the only shape that reaches the loop).
+    MEASURED: with the oracle's index test mutated to `.is_file()`, that row
+    REDs and this one stays green, which is why the attribution moved there.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "t"
+    (target / "index.ts").mkdir(parents=True)
+    (target / "index.ts" / "index.js").write_text("// nested\n")
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).symlink_to(
+        target, target_is_directory=True)
+
+    got = _registered_producers(ext_dir)
+    assert got == [f"{capture_install.PI_SECOND_PRODUCER_NAME}/*"], (
+        "a suffix-named symlink to a non-empty directory is counted by the "
+        "conservative rule; an `index.ts` answer means the oracle fell through "
+        f"to the index loop — got {got}")
+
+
+def test_dry_run_does_not_claim_a_mechanism_on_an_unreadable_target(home):
+    """ROUND-22 P1 (a regression) — the preview asserted the mechanism AND the
+    count on the fail-closed branch, contradicting its own real run.
+
+    Measured: real -> "could not be VERIFIED … MAY still register";
+    dry (before the fix) -> "Pi still resolves it through resolveExtensionEntries
+    … so both producers would stay registered"; real Pi on that shape registers
+    NOTHING.
+
+    Mutation: drop the `_post_unreadable` branch — REDs, and so does
+    `test_dry_run_agrees_with_the_real_run_on_a_main_only_ts_link` if the
+    removal inverts a verdict.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "hook"
+    target.mkdir(parents=True)
+    (target / "hook.js").write_text("export default function () {}\n")
+    manifest = target / "package.json"
+    manifest.write_text('{"main": "hook.js"}')
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).symlink_to(
+        target, target_is_directory=True)
+    os.chmod(manifest, 0o000)
+    try:
+        dry = install_capture("pi", home=home, dry_run=True)
+        real = install_capture("pi", home=home)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    dry_err = dry.error or ""
+    assert not dry.ok, dry.actions
+    assert "COULD NOT be verified" in dry_err, dry_err
+    assert "resolveExtensionEntries" not in dry_err, dry_err
+    assert "both producers would stay registered" not in dry_err, dry_err
+    # The real run says the same thing, and neither claims a mechanism.
+    real_err = real.error or ""
+    assert not real.ok
+    assert "could not be VERIFIED" in real_err or \
+        "COULD NOT be verified" in real_err, real_err
+
+
+def test_a_legacy_index_entry_that_is_a_directory_IS_retired(home):
+    """ROUND-23 P2, on the plane where the transcription is load-bearing.
+
+    `resolveExtensionEntries` tests `fs.existsSync(indexTs)`, so a DIRECTORY
+    named `index.ts` (containing its own `index.js`) IS the legacy entry point
+    and Pi registers it. The predicate learned that in round 22, but
+    `_retire_pi_entry` still gated on `is_file() or is_symlink()` and renamed
+    NOTHING — while the receipt claimed "retired the legacy extension's entry
+    point inside … (files preserved)". Measured: `--dry-run` returned `ok=True`
+    on the same tree the real run refused, i.e. the two moods disagreed in the
+    false-PASS direction.
+
+    With the fourth transcription fixed the retirement SUCCEEDS, so the correct
+    assertion is the safety property, not a refusal.
+
+    Mutation: `.exists()` -> `.is_file()` in `_retire_pi_entry`'s index gate —
+    the rename stops happening and this row REDs on `ok`.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    legacy = ext_dir / capture_install.LEGACY_PI_DIRNAME
+    (legacy / "index.ts").mkdir(parents=True)
+    (legacy / "index.ts" / "index.js").write_text(
+        "export default function () {}\n")
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    # The entry point was ACTUALLY retired — the receipt says so, and the disk
+    # agrees: no plain `index.ts`, the preserved name is in place.
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    assert not (disabled / "index.ts").exists(), (
+        "the receipt claimed a retirement that did not happen")
+    assert (disabled / "index.ts.disabled").exists()
+    # The safety property, through the oracle.
+    assert _registered_producers(ext_dir) == [capture_install.PI_EXTENSION_NAME], (
+        f"one producer must register after the retirement; got "
+        f"{_registered_producers(ext_dir)}")
+
+
+def test_dry_run_and_real_run_agree_when_the_index_entry_is_a_directory(home):
+    """The two moods must not disagree (#14342 round 23, findings 2 and 3).
+
+    Before the fix: dry `ok=True` / real `ok=False` on this tree — a dry-run
+    false PASS on the plane whose whole job is previewing the real run. The
+    same class the reviewer's S5/N1 mutants showed was unpinned.
+
+    Mutation: `.exists()` -> `.is_file()` in the dry-run post-rename model, or
+    drop its `index.js` clause — this row REDs on the disagreement.
+    """
+    # BOTH index names, each as a DIRECTORY: the post-rename model has an
+    # `index.ts` clause and an `index.js` clause and a mutant can survive in
+    # either one, so both planes are exercised.
+    for index_name in ("index.ts", "index.js"):
+        sub_home = home / index_name.replace(".", "-")
+        ext_dir = sub_home / ".pi" / "agent" / "extensions"
+        ext_dir.mkdir(parents=True)
+        target = home / f"checkout-{index_name}" / "hook"
+        (target / index_name).mkdir(parents=True)
+        (target / index_name / "nested.js").write_text("// nested\n")
+        (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).symlink_to(
+            target, target_is_directory=True)
+        assert capture_install._pi_entry_is_loadable(
+            ext_dir / capture_install.PI_SECOND_PRODUCER_NAME) is True, (
+            "premise: the link IS loadable before the run")
+
+        dry = install_capture("pi", home=sub_home, dry_run=True)
+        real = install_capture("pi", home=sub_home)
+
+        assert dry.ok == real.ok, (
+            f"the moods disagree on a `{index_name}`-as-directory target: dry "
+            f"ok={dry.ok} ({dry.error!r}) vs real ok={real.ok} "
+            f"({real.error!r})")
+
+
+def test_the_landed_action_and_its_error_never_contradict(home):
+    """ROUND-23 finding 1 — one `InstallResult`, one epistemic state.
+
+    A suffix-named SYMLINK to a directory is renamed to
+    `reflect-hook.ts.disabled`, which is a NON-SUFFIXED SYMLINK TO A DIRECTORY
+    (not a plain file), so with an unreadable `package.json` the post-state
+    assertion is a guess. The action line hard-coded "it is STILL an extension
+    Pi loads" beside an error saying "could not be VERIFIED" — and real Pi
+    registers nothing there.
+
+    Mutation: hard-code the action clause to `_STILL_LOADED` — this row REDs.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "hook"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// resolvable entry point\n")
+    manifest = target / "package.json"
+    manifest.write_text('{"pi": {"extensions": ["index.ts"]}}')
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).symlink_to(
+        target, target_is_directory=True)
+    os.chmod(manifest, 0o000)
+    try:
+        res = install_capture("pi", home=home)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    action = " ".join(res.actions)
+    error = res.error or ""
+    assert action, "a landed rename reported no action"
+    if "could not be VERIFIED" in error:
+        assert "STILL an extension Pi loads" not in action, (
+            f"the action asserts the registration its own error declines to "
+            f"assert: action={action!r} error={error!r}")
+
+
+def test_oracle_counts_a_legacy_index_entry_that_is_a_directory(home):
+    """Same rule, in the oracle — which transcribed the same `.is_file()` and
+    is why no row could see the class (#14342 round 22, findings 1 and 5).
+
+    Mutation: `.exists()` -> `.is_file()` in the oracle's index test — REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    legacy = ext_dir / capture_install.LEGACY_PI_DIRNAME
+    (legacy / "index.ts").mkdir(parents=True)
+    (legacy / "index.ts" / "index.js").write_text("// nested\n")
+
+    got = _registered_producers(ext_dir)
+    assert got, (
+        "a real directory whose index.ts is a DIRECTORY is a producer Pi "
+        "registers (fs.existsSync); the oracle must not count nothing")
+
+
+def test_a_conservative_answer_is_reported_as_a_guess_not_a_measurement(home):
+    """The conservative rule answers True for ANY non-empty target, which is a
+    refusal-safe assumption and NOT a measurement — Pi ignores some of them
+    (#14342 round 22, finding 4).
+
+    Measured: `reflect-hook.js` → a directory containing only `notes.txt`; real
+    Pi registers nothing, while the receipt said "is registered at
+    reflect-hook.js". Safe verdict, false claim.
+
+    Mutation: drop the conservative branch from `_pi_loadability_is_guessed` —
+    REDs on the "could not be VERIFIED" wording.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "t"
+    target.mkdir(parents=True)
+    (target / "notes.txt").write_text("nothing Pi loads here\n")
+    (ext_dir / "reflect-hook.js").symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "could not be VERIFIED" in error, (
+        f"the conservative answer was reported as a measurement: {error!r}")
+    assert "is registered" not in error, error
+    obstacle = capture_install.legacy_extension_obstacle("pi", ext_dir)
+    assert "could not be VERIFIED" in obstacle, obstacle
+
+
+def test_pi_install_refuses_a_js_second_producer_rather_than_report_green(home):
+    """NAME-EXACT IS NOT LOADABLE (#14342 round 19, finding 6).
+
+    Pi's ``isExtensionFile`` accepts ``*.ts`` **or** ``*.js``, so
+    ``reflect-hook.js`` is the same second capture producer under a name the
+    guard never looked at. MEASURED before the fix: with it present,
+    ``install_capture("pi")`` returned ``ok=True`` with ``actions`` naming only
+    the seam and the ``.js`` copy untouched — a GREEN install with TWO producers
+    registered, which is precisely the failure this guard exists to report.
+
+    Mutation: drop the ``PI_SECOND_PRODUCER_OTHER_NAMES`` sweep — this row REDs
+    on ``ok``.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    other = ext_dir / "reflect-hook.js"
+    other.write_text("// a .js copy of the second producer\n")
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, (
+        f"a loadable `reflect-hook.js` beside the seam was reported GREEN: "
+        f"{res.actions}")
+    error = res.error or ""
+    assert "second copy of the second capture producer" in error, error
+    assert "reflect-hook.js" in error, error
+    assert "captured twice" in error, error
+    assert other.read_text() == "// a .js copy of the second producer\n"
+    assert set(_registered_producers(ext_dir)) == {
+        capture_install.PI_EXTENSION_NAME, "reflect-hook.js"}, (
+        f"the tree really does carry two loadable producers: "
+        f"{_registered_producers(ext_dir)}")
+
+
+def test_assert_not_loadable_says_unverified_for_an_unreadable_entry(home):
+    """The guard's own PROOF must not report its fail-closed guess as a
+    measurement (#14342 round 19, finding 3).
+
+    Mutation: drop the ``_pi_loadability_is_guessed`` branch — this row REDs.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    (target / "main.ts").write_text("// declared by the manifest\n")
+    manifest = target / "package.json"
+    manifest.write_text('{"pi": {"extensions": ["main.ts"]}}')
+    link = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    link.symlink_to(target, target_is_directory=True)
+    os.chmod(manifest, 0o000)
+    try:
+        msg = capture_install._assert_pi_entry_not_loadable(link)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    assert msg, "an unreadable-but-guessed-loadable entry passed the assertion"
+    assert "could not be VERIFIED" in msg, msg
+    assert "STILL an extension Pi loads" not in msg, msg
+
+
+def test_dry_run_agrees_with_the_real_run_on_a_main_only_ts_link(home):
+    """The preview must not refuse a shape the real run completes GREEN (#14342
+    round 21, finding 3 — the arm asked `_pi_loadability_is_guessed(retired)`
+    about a path that does not exist under `--dry-run`, always got False, and
+    refused anyway, while the real run renamed the link to a NON-suffixed name
+    and finished `ok=True`).
+
+    Mutation: make the dry-run symlink arm refuse unconditionally — this row
+    REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "hook"
+    target.mkdir(parents=True)
+    (target / "hook.js").write_text("export default function () {}\n")
+    (target / "package.json").write_text('{"main": "hook.js"}')
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).symlink_to(
+        target, target_is_directory=True)
+
+    dry = install_capture("pi", home=home, dry_run=True)
+    real = install_capture("pi", home=home)
+
+    assert dry.ok, (
+        f"the preview refused a shape the real run completes: {dry.error!r}")
+    assert real.ok, real.error
+    assert dry.changed_artifacts == (), dry.changed_artifacts
+    assert "WOULD" in " ".join(dry.actions) or dry.actions, dry.actions
+
+
+def test_legacy_obstacle_says_unverified_when_the_producer_cannot_be_read(home):
+    """The hint must not assert a registration the predicate only GUESSED
+    (#14342 round 21, finding 4): the installer says "could not be VERIFIED — it
+    may still register" on that branch, so the mirror saying "is registered"
+    made two surfaces of one guard contradict each other.
+
+    Mutation: drop the `_pi_loadability_is_guessed` split from the mirror — REDs.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "hook"
+    target.mkdir(parents=True)
+    (target / "hook.js").write_text("export default function () {}\n")
+    manifest = target / "package.json"
+    manifest.write_text('{"pi": {"extensions": ["hook.js"]}}')
+    (ext_dir / "reflect-hook.js").symlink_to(target, target_is_directory=True)
+    os.chmod(manifest, 0o000)
+    try:
+        obstacle = capture_install.legacy_extension_obstacle("pi", ext_dir)
+        res = install_capture("pi", home=home)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    assert obstacle, "a refusing box reported no obstacle"
+    assert "could not be VERIFIED" in obstacle, obstacle
+    assert "is registered" not in obstacle, (
+        f"the hint asserted a registration the predicate guessed: {obstacle!r}")
+    assert not res.ok and "could not be VERIFIED" in (res.error or ""), res.error
+
+
+def test_legacy_obstacle_mirrors_the_js_producer_refusal(home):
+    """The hint predicate must not name a command that refuses (#14342 round
+    20, finding 5). ``legacy_extension_obstacle`` is documented as "a
+    human-readable sentence when install_capture would REFUSE"; the new `.js`
+    refusal had no mirror, so `hooks status` stayed silent over a refusing box.
+
+    Mutation: drop the `PI_SECOND_PRODUCER_OTHER_NAMES` loop from the predicate
+    — this row REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "reflect-hook.js").write_text("// a .js copy\n")
+
+    obstacle = capture_install.legacy_extension_obstacle("pi", ext_dir)
+    assert obstacle, "a refusing box reported no obstacle"
+    assert "reflect-hook.js" in obstacle, obstacle
+    assert not install_capture("pi", home=home).ok, (
+        "the predicate and the installer disagree")
+
+
+def test_legacy_obstacle_names_a_still_loadable_retired_name_with_no_live_producer(
+        home):
+    """The retired name is GUARD STATE, not a by-product of this run (#14342
+    round 24, finding 2).
+
+    The installer re-reads ``retired`` on EVERY run and refuses whenever Pi
+    still loads it. The mirror's arm was gated on ``lexists(active)``, so a box
+    that carries ONLY the retired name — the exact shape this repo's REMOVED
+    dashboard snippet produced, since it renamed a ``reflect-hook.ts``
+    DIRECTORY to a name Pi still resolves — got a refusing installer and a
+    SILENT hint. ``hooks status`` said nothing about a command that refuses.
+
+    MEASURED before the fix: ``install_capture`` → ``ok=False`` ("every session
+    is captured twice"), ``legacy_extension_obstacle`` → ``''``.
+
+    Mutation: re-gate the mirror's retired arm on ``lexists(active)`` — this row
+    REDs on the disagreement.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.mkdir()
+    # A suffixed DIRECTORY is still resolved through `resolveExtensionEntries`,
+    # so Pi loads it under any name — the retired name does not retire it.
+    (retired / "index.ts").write_text("export default function () {}\\n")
+    assert not (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).exists(), (
+        "this row is about the shape with NO live producer")
+
+    obstacle = capture_install.legacy_extension_obstacle("pi", ext_dir)
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, (
+        "the installer no longer refuses this shape, so this row pins nothing")
+    assert obstacle, (
+        "a refusing box reported no obstacle — the hint is silent over a verb "
+        f"that refuses ({res.error!r})")
+    assert capture_install.PI_SECOND_PRODUCER_DISABLED_NAME in obstacle, obstacle
+
+
+def test_legacy_obstacle_stays_silent_on_a_converged_retired_name(home):
+    """The new retired-name arm must not OVER-fire (#14342 round 24, finding 2).
+
+    A converged box carries ``reflect-hook.ts.disabled`` as a plain FILE — the
+    name ``isExtensionFile`` rejects (it ends ``.disabled``, not ``.ts``/``.js``)
+    — so it is guard state, not a producer, and naming it would withhold a
+    command that works.
+
+    Mutation: drop the ``_pi_entry_is_loadable`` test from the mirror arm (refuse
+    on any ``retired`` that exists) — this row REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.write_text("// the retired producer, preserved\n")
+
+    obstacle = capture_install.legacy_extension_obstacle("pi", ext_dir)
+    assert obstacle == "", (
+        f"a converged box reported an obstacle: {obstacle!r}")
+    assert install_capture("pi", home=home).ok, (
+        "the predicate is silent but the installer refuses — they disagree")
+
+
+def test_retire_pi_entry_refuses_to_overwrite_a_preserved_copy(home):
+    """The plain-FILE branch must refuse like its siblings (#14342 round 25,
+    finding 1).
+
+    Every sibling branch refuses when the produced name already exists. This
+    one called ``path.rename`` straight through, and ``Path.rename`` OVERWRITES
+    on POSIX — so it was the single branch able to destroy a preserved copy
+    while reporting success. MEASURED on the drift it enables: the preserved
+    file's bytes became the live copy's and the install returned ``ok=True``.
+
+    Mutation: drop the ``lexists(produced)`` guard — this row REDs on the bytes.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    live = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    live.write_text("// NEW VERSION FROM THE FARM\n")
+    preserved = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    preserved.write_text("// PRESERVED OLD BYTES\n")
+
+    # The preview must refuse too: the refusal is evaluated by the same code
+    # that performs the rename, so a dry run cannot plan what the real one
+    # refuses.
+    planned = capture_install._retire_pi_entry(live, dry_run=True)
+    assert planned and "overwrite preserved bytes" in planned, planned
+
+    error = capture_install._retire_pi_entry(live)
+    assert error and "overwrite preserved bytes" in error, error
+    assert preserved.read_text() == "// PRESERVED OLD BYTES\n", (
+        "the only preserved copy was overwritten")
+    assert live.exists(), "the live producer was moved despite the refusal"
+
+
+def test_retire_pi_entry_does_not_half_retire_a_two_entry_directory(home):
+    """A refusal must describe an UNTOUCHED disk (#14695 review round 1, P2).
+
+    The directory branch retires ``index.ts`` and ``index.js``, and it used to
+    interleave check-and-rename per name. With BOTH present and an existing
+    ``index.js.disabled`` it renamed ``index.ts`` first and then refused on
+    ``index.js`` — so a retirement LANDED while the caller returned
+    ``(False, [], msg)`` with no action naming it (the #10241 doctrine, which
+    this module enforces on every other path). The same function serves both the
+    second producer's plane and the legacy plane, so both were affected.
+
+    Why this survived: the sibling collision test
+    (``test_pi_install_refuses_to_overwrite_a_preserved_entry_point``) puts only
+    ONE entry point in the directory, so it never exercises the ordering.
+
+    Mutation: restore the per-name interleaved check-and-rename — this row REDs
+    because ``index.ts`` is gone from the live directory despite the refusal."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "index.ts").write_text("// ts entry\n")
+    (producer / "index.js").write_text("// js entry\n")
+    # The obstacle is on the SECOND name only, so a per-name loop renames the
+    # first one before it ever looks at it.
+    (producer / "index.js.disabled").write_text("// DO NOT LOSE ME\n")
+
+    # The preview must refuse too: the refusal is evaluated by the same code
+    # that performs the renames.
+    planned = capture_install._retire_pi_entry(producer, dry_run=True)
+    assert planned and "overwrite preserved bytes" in planned, planned
+
+    error = capture_install._retire_pi_entry(producer)
+    assert error and "overwrite preserved bytes" in error, error
+
+    # ⛔ The whole point: the refusal left NOTHING retired. A caller that gets
+    # an error may not have a change on disk to discover by inspection.
+    assert (producer / "index.ts").exists(), (
+        "the retirement half-ran: index.ts was renamed away by a refusing call")
+    assert not (producer / "index.ts.disabled").exists(), (
+        "a refusing call left a retired entry point behind, named by no action")
+    assert (producer / "index.js.disabled").read_text() == "// DO NOT LOSE ME\n", (
+        "the only preserved copy was overwritten")
+
+
+def test_retire_pi_entry_names_what_landed_when_a_later_rename_raises(
+        home, monkeypatch):
+    """An OSError on the SECOND rename must name what already landed (#14695
+    review round 2, finding 2).
+
+    The reorder above makes every REFUSAL describe an untouched disk, but the
+    renames still raise inside ``_retire_pi_entry``'s function-wide
+    ``except OSError`` arm — and that arm's own comment names "an immutable
+    target", a PER-FILE condition that can hit the second entry and not the
+    first. MEASURED before the fix: with ``Path.rename`` failing on
+    ``index.js``, ``index.ts`` was already ``index.ts.disabled`` while the
+    caller reported ``actions=()``.
+
+    Mutation: return the bare ``except OSError`` message (drop the landed
+    naming) — the ``PARTLY`` assertion below REDs over a modified disk.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "index.ts").write_text("// ts entry\n")
+    (producer / "index.js").write_text("// js entry\n")
+
+    real_rename = Path.rename
+
+    def rename_fails_on_js(self, target, *args, **kwargs):
+        if self.name == "index.js":
+            raise PermissionError(1, "Operation not permitted", str(self))
+        return real_rename(self, target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rename", rename_fails_on_js)
+
+    landed: list[Path] = []
+    error = capture_install._retire_pi_entry(producer, renamed=landed)
+
+    assert error and "PARTLY" in error, error
+    assert "index.ts" in error, error
+    assert [p.name for p in landed] == ["index.ts"], landed
+    # The rename landed BEFORE the failure, and the bytes are preserved.
+    assert (producer / "index.ts.disabled").read_text() == "// ts entry\n"
+    assert not (producer / "index.ts").exists()
+
+
+def test_retire_pi_entry_does_not_call_an_untouched_directory_partly_retired(
+        home, monkeypatch):
+    """The FIRST rename can raise too, and then NOTHING was retired (#14695
+    review round 3).
+
+    The half-landed arm above was written for an OSError on the SECOND rename,
+    but the same ``except`` serves the first one — and a single-entry producer
+    (``index.ts`` only, no ``index.js``) has no second rename at all, so it
+    reaches an arm whose message still read "this directory is PARTLY retired;
+    move the rest aside by hand". MEASURED before the fix: ``landed == []``,
+    ``index.ts`` still present, and the install relayed "PARTLY retired" to the
+    user. A receipt may not describe a disk state it did not measure — the
+    rule the unreadable-manifest arms of this same function are written to keep.
+
+    Mutation: drop the ``if not landed_here`` arm (fall back to the shared
+    half-landed message) — the ``PARTLY``/``UNTOUCHED`` assertions below RED
+    over an unmodified disk.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "index.ts").write_text("// ts entry\n")
+
+    real_rename = Path.rename
+
+    def rename_fails_on_ts(self, target, *args, **kwargs):
+        if self.name == "index.ts":
+            raise PermissionError(1, "Operation not permitted", str(self))
+        return real_rename(self, target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rename", rename_fails_on_ts)
+
+    landed: list[Path] = []
+    error = capture_install._retire_pi_entry(producer, renamed=landed)
+
+    assert error and "PARTLY" not in error, error
+    assert "UNTOUCHED" in error, error
+    assert landed == [], landed
+    # Nothing moved: the entry is still the live one and no retired name exists.
+    assert (producer / "index.ts").read_text() == "// ts entry\n"
+    assert not (producer / "index.ts.disabled").exists()
+
+
+def test_install_does_not_report_a_partly_retired_producer_when_nothing_moved(
+        home, monkeypatch):
+    """The wrapper plane must not relay a state the disk is not in (#14695
+    review round 3).
+
+    ``_disable_pi_second_producer`` splices ``_retire_pi_entry``'s message into
+    the receipt the USER reads, so a wrong claim one function down reaches the
+    terminal verbatim. MEASURED before the fix: on a one-entry directory whose
+    rename raises, ``install_capture`` printed "this directory is PARTLY
+    retired; move the rest aside by hand" while ``index.ts`` was still in place
+    and no action named any retirement.
+
+    Mutation: drop the ``if not landed_here`` arm in ``_retire_pi_entry`` — the
+    ``PARTLY`` assertion REDs, because the wrapper relays the claim.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "index.ts").write_text("// ts entry\n")
+
+    real_rename = Path.rename
+
+    def rename_fails_on_ts(self, target, *args, **kwargs):
+        if self.name == "index.ts":
+            raise PermissionError(1, "Operation not permitted", str(self))
+        return real_rename(self, target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rename", rename_fails_on_ts)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, "the install certified a box with two live producers"
+    assert "PARTLY" not in (res.error or ""), res.error
+    assert "nothing was retired" in (res.error or ""), res.error
+    # No action may name a retirement: none happened.
+    assert not [a for a in res.actions if "retired" in a], res.actions
+    assert (producer / "index.ts").exists(), (
+        "the entry point moved despite the refusal")
+
+
+def test_legacy_plane_names_a_half_landed_retirement_in_its_receipt(
+        home, monkeypatch):
+    """The LEGACY plane's half of the same receipt rule (#14695 review round 3).
+
+    ``_install_pi``'s legacy arm gained an action for a rename that landed
+    before an OSError — and it had NO test at all: deleting the ``else`` branch
+    that appends it left 315 rows green, so the receipt this branch exists to
+    produce could regress silently. The second producer's plane gets its own row
+    (``test_retire_pi_entry_names_what_landed_when_a_later_rename_raises``);
+    this is the same fact on the plane the legacy extension is retired from,
+    and the failure it prevents is a user told only FAILED over a disk where an
+    entry point has already moved.
+
+    Mutation: drop the ``else: for moved in legacy_renamed`` arm in
+    ``_install_pi`` — the ``could not be fully retired`` assertion REDs while
+    ``index.ts.disabled`` is on disk and named by no action.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    legacy_disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    legacy_disabled.mkdir(parents=True)
+    (legacy_disabled / "index.ts").write_text("// legacy ts entry\n")
+    (legacy_disabled / "index.js").write_text("// legacy js entry\n")
+
+    real_rename = Path.rename
+
+    def rename_fails_on_js(self, target, *args, **kwargs):
+        if self.name == "index.js":
+            raise PermissionError(1, "Operation not permitted", str(self))
+        return real_rename(self, target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rename", rename_fails_on_js)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, "the install certified a half-retired legacy extension"
+    # ⛔ The receipt must name what moved: the disk is modified, so a bare
+    # FAILED leaves the user to discover it by inspection.
+    named = [a for a in res.actions if "could not be fully retired" in a]
+    assert named, (
+        "a rename landed on disk and no action named it: "
+        f"actions={res.actions} error={res.error!r}")
+    assert "index.ts" in named[0], named[0]
+    assert str(legacy_disabled) in named[0], named[0]
+    assert (legacy_disabled / "index.ts.disabled").read_text() == (
+        "// legacy ts entry\n"), "the retired bytes were not preserved"
+    assert not (legacy_disabled / "index.ts").exists()
+
+
+def test_legacy_obstacle_names_a_symlinked_directory_second_producer(home):
+    """The hint must not stay silent on a shape the installer REFUSES and
+    MUTATES (#14695 review round 2, finding 1).
+
+    ``reflect-hook.ts`` as a SYMLINK to a directory holding ``index.ts``, with
+    no retired copy yet: the installer renames the link and then refuses,
+    because a non-suffixed ``.disabled`` link still resolves through
+    ``resolveExtensionEntries`` and Pi registers the target's entry point — so
+    ``tortoise install pi`` fails on EVERY attempt. The predicate answered
+    ``''``, which is precisely the silent-over-a-refusing-verb drift it exists
+    to stop.
+
+    Mutation: delete the symlink-to-a-directory arm from
+    ``legacy_extension_obstacle`` — the obstacle assertion REDs while the
+    installer keeps refusing.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// producer\n")
+    link = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    link.symlink_to(target, target_is_directory=True)
+
+    obstacle = capture_install.legacy_extension_obstacle("pi", ext_dir)
+    assert obstacle, "the hint is silent over a verb that refuses on every run"
+    assert "SYMLINK" in obstacle, obstacle
+
+    res = install_capture("pi", home=home)
+    assert not res.ok, "the installer certified a box this shape keeps refusing"
+    # The mutating refusal is the fact that made the silence wrong.
+    assert not link.is_symlink(), "the link was not renamed"
+    assert (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).exists()
+
+
+def test_legacy_obstacle_stays_silent_on_a_symlinked_INERT_directory(home):
+    """The new arm must not over-report (#14695 review round 2, finding 1).
+
+    A link to a directory with NO entry point and no manifest is retired
+    silently by the installer (nothing Pi resolves through it), so the hint must
+    stay silent — otherwise the fix for the silent shape becomes a hint that
+    withholds a command which works, the opposite drift.
+
+    Mutation: answer on ``is_symlink() and is_dir()`` alone, dropping the
+    entry-point test — this row REDs on a successful install.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    (target / "notes.txt").write_text("nothing Pi resolves\n")
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).symlink_to(
+        target, target_is_directory=True)
+
+    assert capture_install.legacy_extension_obstacle("pi", ext_dir) == ""
+    res = install_capture("pi", home=home)
+    assert res.ok, res.error
+
+
+def test_legacy_obstacle_names_a_symlinked_retired_copy(home):
+    """The mirror must use the installer's PREDICATE, not a digest (#14342
+    round 25, finding 2).
+
+    ``_sha256_file`` follows a link, so a ``retired`` that IS a link to the live
+    producer yields two equal digests read from ONE file — the hint answered
+    ``''`` while the installer refused at its ``is_symlink() or not is_file()``
+    guard. MEASURED before the fix: hint ``''``, ``ok=False`` ("…exists and is
+    not a regular file").
+
+    Mutation: put the digest comparison back ahead of the link/regular-file
+    test — this row REDs on the missing obstacle.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    live = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    live.write_text("// the live producer\n")
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.symlink_to(live)
+
+    obstacle = capture_install.legacy_extension_obstacle("pi", ext_dir)
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, (
+        "the installer no longer refuses this shape, so this row pins nothing")
+    assert obstacle, (
+        f"the hint was silent over a refusing verb ({res.error!r})")
+    assert "not a regular file" in obstacle, obstacle
+
+
+
+def test_registered_producers_helper_models_the_manifest_branch(home):
+    """The TEST ORACLE must model the same rule the module does, including
+    ``resolveExtensionEntries``' manifest branch (#14342 round 17, finding 3).
+
+    It used to read only ``index.ts`` / ``index.js`` while its own docstring
+    stated the full rule, so a directory declaring ``pi.extensions`` read as
+    ``[]`` here and ``True`` in ``_pi_entry_is_loadable`` — two oracles that
+    disagree, which is exactly how a future one-producer assertion over such a
+    shape becomes a silent false PASS.
+
+    Mutation: drop the manifest branch from the helper (back to index files
+    only) — this row REDs on the disagreement.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "main.ts").write_text("// declared by the manifest\n")
+    (producer / "package.json").write_text(
+        '{"pi": {"extensions": ["main.ts"]}}')
+
+    assert capture_install._pi_entry_is_loadable(producer) is True, (
+        "the module's predicate must register a manifest-declared entry")
+    assert _registered_producers(ext_dir) == [
+        f"{capture_install.PI_SECOND_PRODUCER_NAME}/main.ts"], (
+        "the test oracle must agree with the module's predicate — a manifest "
+        "declaring an existing entry IS a registration")
+
+
+def test_pi_install_refuses_a_farm_recreated_second_producer_that_differs(home):
+    """A re-created copy that DIFFERS is not a farm sync of the same bytes — a
+    human or another tool changed it, and deleting it would destroy that. Refuse.
+
+    Mutation: compare nothing (remove the live copy regardless)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.write_text("// the copy we retired\n")
+    recreated = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    recreated.write_text("// a DIFFERENT producer, edited by hand\n")
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok
+    assert "DIFFERENT bytes" in res.error, res.error
+    assert recreated.read_text() == "// a DIFFERENT producer, edited by hand\n"
+
+
+def test_pi_install_refuses_a_second_producer_that_is_a_package_directory(home):
+    """A directory at ``reflect-hook.ts`` declaring ``pi.extensions`` is
+    loadable AND cannot be retired by renaming its files (the manifest would
+    point at nothing), so the install must refuse rather than rename a
+    directory into a name the loader treats as a subdirectory and still loads.
+
+    Mutation: rename the directory (``reflect-hook.ts.disabled/`` is still
+    resolved through its index file — a green install over a live producer)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    # The declared entry must EXIST: Pi's `resolveExtensionEntries` takes the
+    # manifest branch only when it resolves, and otherwise falls back to
+    # `index.ts` (which this installer WOULD retire) — so a manifest naming a
+    # missing file is a retirable shape, not a refusal (#14342 cycle 3).
+    (producer / "package.json").write_text('{"pi": {"extensions": ["a.ts"]}}\n')
+    (producer / "a.ts").write_text("// producer\n")
+    (producer / "index.ts").write_text("// producer\n")
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok
+    assert "pi.extensions" in res.error, res.error
+    assert producer.is_dir(), "a directory producer was renamed by the installer"
+    assert (producer / "index.ts").exists(), (
+        "the refusal half-retired the directory: its entry point was renamed "
+        "even though the install reported failure")
+    assert not (producer / "index.ts.disabled").exists()
+    assert not (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).exists(), (
+        "a directory was renamed to a name Pi still loads as a subdirectory")
+    assert set(_registered_producers(ext_dir)) == {
+        capture_install.PI_EXTENSION_NAME,
+        f"{capture_install.PI_SECOND_PRODUCER_NAME}/a.ts",
+    }, (
+        f"the producer must still be LOADED after the refusal — the box would "
+        f"otherwise have stopped capturing: {_registered_producers(ext_dir)}")
+    # ⛔ NOT `index.ts`: Pi's `resolveExtensionEntries` takes the MANIFEST branch
+    # when it resolves and never falls back to the index, so `a.ts` is what
+    # registers here. Asserting `index.ts` asserted a rule Pi does not implement
+    # — and the oracle only agreed with it because it did not model the manifest
+    # branch either (#14342 round 17, finding 3).
+
+
+def test_pi_entry_is_loadable_mirrors_resolve_extension_entries(tmp_path):
+    """`_pi_entry_is_loadable` is `resolveExtensionEntries`, not "is the array
+    non-empty".
+
+    Pi filters the declared entries down to the ones that RESOLVE and takes the
+    manifest branch only when something survives; with nothing surviving it
+    falls through to `index.ts`/`index.js`. `readPiManifest` drops the field
+    entirely unless every element is a string.
+
+    Mutation: `if isinstance(entries, list) and entries: return True` — the two
+    NOT-loadable rows go True and the installer then calls a producer it has
+    already retired "STILL an extension Pi loads", on every run."""
+    def mk(name: str, manifest: str | None, files: tuple[str, ...]) -> Path:
+        d = tmp_path / name
+        d.mkdir()
+        if manifest is not None:
+            (d / "package.json").write_text(manifest)
+        for f in files:
+            (d / f).write_text("// producer\n")
+        return d
+
+    # A declaration whose entries do not RESOLVE contributes no entry point,
+    # so the index fallback decides — and with no index there is none.
+    assert capture_install._pi_entry_is_loadable(
+        mk("missing-only", '{"pi": {"extensions": ["missing.ts"]}}', ())
+    ) is False
+    assert capture_install._pi_entry_is_loadable(
+        mk("missing-then-index", '{"pi": {"extensions": ["missing.ts"]}}',
+           ("index.ts",))
+    ) is True
+    # A declaration that resolves IS an entry point, index or no index.
+    assert capture_install._pi_entry_is_loadable(
+        mk("declared", '{"pi": {"extensions": ["a.ts"]}}', ("a.ts",))
+    ) is True
+    # A mixed array is not a manifest Pi reads, so it falls through to index.
+    assert capture_install._pi_entry_is_loadable(
+        mk("mixed-no-index", '{"pi": {"extensions": ["a.ts", 5]}}',
+           ("a.ts",))
+    ) is False
+    assert capture_install._pi_entry_is_loadable(
+        mk("mixed-index", '{"pi": {"extensions": ["a.ts", 5]}}',
+           ("a.ts", "index.ts"))
+    ) is True
+
+
+def test_pi_install_retires_a_directory_producer_whose_manifest_names_a_missing_file(home):
+    """A manifest naming only a missing file is a RETIRABLE shape: Pi falls
+    back to `index.ts`, so retiring the entry point does stop the producer —
+    and the install must converge instead of refusing forever.
+
+    Mutation: model the manifest branch of `_pi_entry_is_loadable` as "the
+    array is non-empty". The retirement lands, the post-retirement assertion
+    then calls the very same directory loadable, and `tortoise install pi`
+    fails on this shape on every run with a message that is false on both
+    counts ("STILL an extension Pi loads — … both capture producers stay
+    live")."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "package.json").write_text('{"pi": {"extensions": ["missing.ts"]}}\n')
+    (producer / "index.ts").write_text("// producer\n")
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    assert (producer / "index.ts.disabled").read_text() == "// producer\n"
+    assert (producer / "package.json").exists(), "the user's manifest was edited"
+    assert "reflect-hook.ts/index.ts" not in _registered_producers(ext_dir), (
+        f"the producer is still registered: {_registered_producers(ext_dir)}")
+    # CONVERGENCE, not a one-shot: the shape is stable, so run 2 is green too.
+    assert install_capture("pi", home=home).ok
+
+
+def test_pi_install_retires_a_directory_producer_whose_manifest_is_not_a_string_array(home):
+    """`{"pi": {"extensions": ["a.ts", 5]}}` is not a manifest Pi reads at all
+    (`readPiManifest` requires EVERY element to be a string), so the loader
+    falls through to `index.ts`: the directory is retirable, and refusing it
+    would leave a live producer while blaming a manifest the loader ignores.
+
+    Mutation: filter the declared entries per element instead of requiring the
+    array Pi requires — the refusal fires and the producer stays registered."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "package.json").write_text('{"pi": {"extensions": ["a.ts", 5]}}\n')
+    (producer / "a.ts").write_text("// a resolved entry Pi IGNORES\n")
+    (producer / "index.ts").write_text("// producer\n")
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    assert (producer / "index.ts.disabled").read_text() == "// producer\n"
+    assert (producer / "a.ts").read_text() == "// a resolved entry Pi IGNORES\n", (
+        "the installer edited a manifest entry the loader does not honour")
+    assert "reflect-hook.ts/index.ts" not in _registered_producers(ext_dir), (
+        f"the producer is still registered: {_registered_producers(ext_dir)}")
+
+
+def test_pi_install_retires_a_directory_second_producer_in_place(home):
+    """A directory at ``reflect-hook.ts`` with no ``pi.extensions`` (only
+    ``index.ts``) cannot be retired by renaming the DIRECTORY — a suffixed
+    directory is still resolved through its index file — so its entry point is
+    retired INSIDE it and the directory keeps its own name.
+
+    The fail-closed assertion that follows the retirement has to read the path
+    the loader consults. ``_assert_pi_entry_not_loadable(retired)`` is INERT
+    here: ``retired`` (``reflect-hook.ts.disabled``) is never created on this
+    shape, so ``lexists`` is False and the guard can never fire (#14342 review
+    round 2, finding 3). This pins the outcome AND the receipt: the action must
+    name the entry point it retired, not a rename to a path this shape never
+    creates.
+
+    Mutation: word the action as a rename to ``retired`` — the receipt
+    assertion below REDs over a path that does not exist."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    body = "// the other producer, shipped as a directory\n"
+    (producer / "index.ts").write_text(body)
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    assert (producer / "index.ts.disabled").read_text() == body, (
+        "the entry point's bytes were not preserved")
+    assert not (producer / "index.ts").exists()
+    assert producer.is_dir(), (
+        "the directory was renamed: a dot/suffixed directory is STILL loaded")
+    assert not (ext_dir
+                / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).exists(), (
+        "a directory was renamed to a name Pi still loads as a subdirectory")
+    producers = _registered_producers(ext_dir)
+    assert producers == [capture_install.PI_EXTENSION_NAME], producers
+    retirement = next(a for a in res.actions
+                      if "second capture producer" in a)
+    assert "index.ts" in retirement, retirement
+    assert str(ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME) not in (
+        retirement), (
+        f"the receipt names a path this shape never creates: {retirement}")
+
+
+def test_pi_install_refuses_when_the_retired_second_producer_still_loads(home):
+    """A SYMLINK to a directory at ``reflect-hook.ts`` retires NOTHING by
+    being renamed: ``discoverExtensionsInDir`` resolves symlinks through
+    ``resolveExtensionEntries`` too, so ``reflect-hook.ts.disabled`` (a link to
+    a directory holding ``index.ts``) is STILL a loaded extension. The install
+    must fail closed and say the producer is still live.
+
+    This is also the NON-VACUITY proof for the post-retirement assertion: it is
+    the shape where ``retired`` exists AND is loadable, so a guard reading the
+    wrong path (or none) would report success over two live producers.
+
+    Mutation: assert only on ``active`` (absent after the rename, so the
+    fail-closed guard cannot fire) — the install reports ok here."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    real = home / "checkout" / "reflect-hook"
+    real.mkdir(parents=True)
+    body = "// the other producer, checked out elsewhere\n"
+    (real / "index.ts").write_text(body)
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).symlink_to(
+        real, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, res.actions
+    assert "STILL an extension Pi loads" in (res.error or ""), res.error
+    # Non-destructive: the link was moved aside, never deleted, and the
+    # checkout it points at is untouched.
+    assert (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+            ).is_symlink()
+    assert (real / "index.ts").read_text() == body
+    # #10241's doctrine, applied to a failure AFTER the mutation: the rename
+    # DID land, so the receipt names it. A failure reporting zero actions over
+    # a modified disk is what that doctrine exists to prevent (#14342 review,
+    # final round finding 3).
+    assert any("retired" in action for action in res.actions), res.actions
+
+
+def test_pi_install_refuses_a_still_loadable_retired_second_producer_every_run(home):
+    """The retired name is GUARD STATE, not a by-product of the run that wrote
+    it: a refusal that fires only once is not a guard.
+
+    Run 1 renames a SYMLINK-to-directory producer and correctly refuses (the
+    renamed link still loads). Run 2 — the natural response to a failed
+    install — used to find ``reflect-hook.ts`` absent, answer "nothing to do",
+    and report a GREEN install with two producers live: the same false PASS,
+    one re-run later (#14342 review, final round finding 1).
+
+    Mutation: check ``retired`` only right after a same-run rename — run 2
+    returns ok.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    body = "// the other producer, checked out elsewhere\n"
+    (target / "index.ts").write_text(body)
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.symlink_to(target, target_is_directory=True)
+
+    for attempt in (1, 2):
+        res = install_capture("pi", home=home)
+
+        assert not res.ok, f"run {attempt} reported a green install: {res.actions}"
+        assert "still" in (res.error or "").lower(), res.error
+        # Non-destructive: nothing is touched, so the refusal repeats.
+        assert retired.is_symlink()
+        assert (target / "index.ts").read_text() == body
+
+
+def test_pi_legacy_obstacle_names_the_second_producers_collision(home):
+    """The obstacle predicate is a MIRROR of the installer's own refusals, and
+    its whole job is to keep `hooks status`/`doctor` from naming a command that
+    refuses. A second producer + a DIFFERENT retired copy is a refusal the
+    installer makes, so the mirror must report it too.
+
+    Mutation: extend the installer without extending the mirror (status
+    recommends a verb that now exits 1, naming no obstacle)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).write_text("// live\n")
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).write_text(
+        "// different\n")
+
+    hint = capture_install.legacy_extension_obstacle("pi", ext_dir)
+
+    assert hint, "the mirror did not report a collision the installer refuses"
+    assert "move one aside" in hint
+    # ...and the installer really does refuse that exact shape, so the two
+    # cannot drift apart silently.
+    res = install_capture("pi", home=home)
+    assert not res.ok and "DIFFERENT bytes" in res.error, res.error
+
+
+def test_pi_install_never_unlinks_a_legacy_symlink_before_the_seam_is_verified(home):
+    """The legacy SYMLINK branch is the one early step that really stops a
+    producer loading (a dot-directory rename stops nothing), so unlinking it
+    before the write left a box with ZERO producers when that write failed —
+    measured on a fresh home with ENOSPC (#14342 review cycle 3).
+
+    Mutation: restore `legacy.unlink()` inside the pre-write block."""
+    checkout = home / "agent-infra" / "extensions" / "tortoise-capture"
+    checkout.mkdir(parents=True)
+    (checkout / "index.ts").write_text("// legacy producer\n")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    legacy = ext_dir / "tortoise-capture"
+    legacy.symlink_to(checkout, target_is_directory=True)
+    real_atomic = capture_install._atomic_bytes
+
+    def _fails(target, data, mode):
+        if target.name == capture_install.PI_EXTENSION_NAME:
+            raise OSError(28, "No space left on device")
+        return real_atomic(target, data, mode)
+
+    capture_install._atomic_bytes = _fails
+    try:
+        res = install_capture("pi", home=home)
+    finally:
+        capture_install._atomic_bytes = real_atomic
+
+    assert not res.ok
+    assert legacy.is_symlink(), (
+        "a failed install unlinked the only working producer symlink")
+    assert "tortoise-capture/index.ts" in _registered_producers(ext_dir), (
+        f"the box now captures nothing: {_registered_producers(ext_dir)}")
+
+
+def test_pi_install_refuses_to_overwrite_a_preserved_entry_point(home):
+    """`Path.rename` overwrites on POSIX, so retiring `index.ts` over an
+    existing `index.ts.disabled` would destroy preserved bytes inside an
+    install that reports success (#14342 review cycle 3).
+
+    Mutation: drop the `lexists(preserved)` guard."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    legacy = ext_dir / "tortoise-capture"
+    legacy.mkdir(parents=True)
+    (legacy / "index.ts").write_text("// the live producer\n")
+    preserved_dir = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    preserved_dir.mkdir(parents=True)
+    (preserved_dir / "index.ts.disabled").write_text("// DO NOT LOSE ME\n")
+    # Move the live dir aside manually so only the retirement step is exercised.
+    (ext_dir / "tortoise-capture").rename(ext_dir / "legacy-live")
+    (preserved_dir / "index.ts").write_text("// the live producer\n")
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, res.actions
+    assert (preserved_dir / "index.ts.disabled").read_text() == "// DO NOT LOSE ME\n", (
+        "a preserved entry point was overwritten by the retirement")
+    assert (preserved_dir / "index.ts").exists(), (
+        "the retirement half-ran over a preserved copy")
 
 
 def test_pi_install_asserts_the_resolved_target_instead_of_trusting_the_write(
@@ -1541,8 +3925,24 @@ def test_pi_install_write_failure_reports_the_actions_that_already_landed(home):
         res.actions)
     assert any("backed up" in a for a in res.actions), res.actions
     assert "NOT fully installed" in res.error, res.error
-    # The state those actions describe really is on disk.
-    assert (ext_dir / capture_install.PI_DISABLED_DIRNAME / "index.ts").exists()
+    # The state those actions describe really is on disk: the legacy directory
+    # WAS moved aside. Its entry point is deliberately NOT retired yet — the
+    # write that would have replaced it failed, so retiring it here would leave
+    # the box with NO capture producer at all (#14342 review round 2). The
+    # rename alone stops nothing, because a dot-prefixed directory is still
+    # loaded by Pi; that is exactly why it is the safe early step.
+    assert (ext_dir / capture_install.PI_DISABLED_DIRNAME / "index.ts").exists(), (
+        "a failed install stopped capturing: it retired the only working "
+        "producer before the replacement was verified")
+    # Capture still works after the failed install: the pre-existing (stale but
+    # real) seam is untouched, AND the legacy producer is still loaded — the
+    # rename stopped nothing. That is the ordering property, read end to end.
+    assert set(_registered_producers(ext_dir)) == {
+        capture_install.PI_EXTENSION_NAME,
+        f"{capture_install.PI_DISABLED_DIRNAME}/index.ts",
+    }, (
+        f"capture stopped on a failed install — loaded producers: "
+        f"{_registered_producers(ext_dir)}")
     assert (ext_dir / (capture_install.PI_EXTENSION_NAME + ".bak")).exists()
 
 
@@ -6083,7 +8483,8 @@ def _stale_pi_seam(home: Path) -> Path:
 
 
 @pytest.mark.parametrize("shape", ["absent", "renameable", "taken", "file_taken",
-                                   "symlink", "symlink_taken"])
+                                   "symlink", "symlink_taken",
+                                   "disabled_symlink_loaded"])
 def test_pi_legacy_obstacle_matches_the_installers_own_refusal(shape, home):
     """The hint predicate is a MIRROR of the installer's own refusal, so pin
     the mirror to the thing it mirrors.
@@ -6097,6 +8498,9 @@ def test_pi_legacy_obstacle_matches_the_installers_own_refusal(shape, home):
     then block a repair the installer performs), or widen `is_dir()` to
     `exists()` (a regular FILE at the legacy name — `file_taken` — is IGNORED
     by the installer, but `exists()` would call it a collision); either REDs.
+    Dropping the `disabled_symlink_loaded` clause REDs the new shape: the hint
+    goes quiet while the installer refuses, repeatedly (#14342 round 9,
+    finding 4).
     """
     ext = home / ".pi" / "agent" / "extensions"
     ext.mkdir(parents=True)
@@ -6114,6 +8518,15 @@ def test_pi_legacy_obstacle_matches_the_installers_own_refusal(shape, home):
         legacy.symlink_to(target, target_is_directory=True)
     if shape in ("taken", "file_taken", "symlink_taken"):
         disabled.mkdir()
+    if shape == "disabled_symlink_loaded":
+        # #14342 round 9, finding 4: the STICKIEST refusal the installer has.
+        # `_retire_pi_entry` renames the LINK, and a suffixed link to a
+        # directory is still resolved through `resolveExtensionEntries`, so the
+        # installer refuses before mutating — and refuses again on every re-run.
+        # The mirror used to answer "no obstacle" here, so `hooks status`
+        # recommended a verb that could never succeed.
+        (target / "index.ts").write_text("// legacy producer\n")
+        disabled.symlink_to(target, target_is_directory=True)
 
     obstacle = capture_install.legacy_extension_obstacle("pi", ext)
     # The installer's REAL verdict, write-free: `--dry-run` runs every guard
@@ -6453,3 +8866,335 @@ def test_a_SHIPPED_generation_is_frozen_and_the_bump_is_why():
         "generation 33 must NOT carry this branch's bytes — that is the re-cut that "
         "reads as modified-artifact for an install made from main")
     assert _READ_SEAM_GENERATION_DIGESTS[33] != _READ_SEAM_GENERATION_DIGESTS[34]
+
+
+def test_pi_symlink_refusal_receipt_states_the_seam_it_installed(home):
+    """A refusal that is CORRECT must still report what landed.
+
+    The symlinked-``.tortoise-capture.disabled`` refusal fires *after* the seam
+    write — that ordering is the PR's safety property — so by the moment it
+    returns, the box has gone from ONE producer to TWO. A receipt claiming
+    "Nothing was touched" contradicts its own ``actions``/``changed_artifacts``
+    in the same object (the report shape #10241 exists to prevent) and hides
+    from the operator that capture just doubled (#14342 round 9, finding 2).
+
+    Mutation: restore the "Nothing was touched" sentence, or return before the
+    seam write — either REDs (the first on the claim, the second on the actions).
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// legacy producer, checked out elsewhere\n")
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, res.actions
+    error = res.error or ""
+    assert "SYMLINK" in error, error
+    # It says what LANDED: the seam write is in the same receipt...
+    assert any("installed" in a for a in res.actions), res.actions
+    assert capture_install.PI_EXTENSION_NAME in res.changed_artifacts, (
+        f"the seam WAS written, so the receipt must name it: {res.changed_artifacts}")
+    assert "WAS installed" in error, (
+        f"the refusal must state that the seam landed: {error!r}")
+    # ...and it must NOT claim the disk is untouched.
+    assert "Nothing was touched" not in error, (
+        "the receipt says nothing was touched while its own actions name an install")
+    # The one producer it actually made worse is named too, not implied.
+    assert "BOTH producers" in error, error
+    # And the link it refused to rename is still there, pointing where it did.
+    assert disabled.is_symlink(), "the refused retirement still mutated the link"
+    assert (target / "index.ts").exists(), "the foreign checkout was edited through the link"
+
+
+def test_pi_dry_run_refuses_where_the_real_run_refuses(home):
+    """A preview must never report a plan the real run REFUSES.
+
+    Shape: the disabled legacy directory declares ``pi.extensions``, which
+    ``_retire_pi_entry`` refuses by design (retiring it would mean editing the
+    user's manifest). The real run fails; the dry run used to answer ``ok`` with
+    a "would retire" line — a dry-run false PASS on precisely the broken-looking
+    shape an operator previews *because* it looks broken (#14342 round 9,
+    finding 3a).
+
+    Mutation: report the dry-run line without asking ``_retire_pi_entry`` — the
+    preview goes green over a run that refuses.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.mkdir(parents=True)
+    (disabled / "index.ts").write_text("// legacy producer\n")
+    (disabled / "package.json").write_text(
+        '{"pi": {"extensions": ["index.ts"]}}\n', encoding="utf-8")
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert not dry.ok, (
+        "the dry run previewed success for a shape the real run refuses: "
+        f"{dry.actions}")
+    assert "package.json" in (dry.error or ""), dry.error
+    # A refused preview still touches nothing.
+    assert (disabled / "index.ts").exists()
+    assert not (ext_dir / capture_install.PI_EXTENSION_NAME).exists(), (
+        "a dry run wrote the seam")
+
+    real = install_capture("pi", home=home)
+    assert not real.ok
+    assert "package.json" in (real.error or ""), real.error
+
+
+def test_pi_dry_run_names_the_second_producer_entry_point_when_it_is_a_directory(
+        home):
+    """For a DIRECTORY producer the real run retires the entry point IN PLACE and
+    never creates ``reflect-hook.ts.disabled``.
+
+    The dry run named that rename anyway, and omitted the step that actually
+    stops the producer — the mirror image of round 8's finding, still wrong in
+    both directions (#14342 round 9, finding 3b).
+
+    Mutation: word the dry-run line as a bare rename for every shape — the plan
+    then names a path the real run never creates.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "index.ts").write_text("// live producer\n")
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert dry.ok, dry.error
+    line = " ".join(dry.actions)
+    assert "entry point inside" in line, (
+        f"the plan must name the in-place retirement: {dry.actions}")
+    assert "reflect-hook.ts →" not in line, (
+        f"the plan named a rename the real run never performs: {dry.actions}")
+    assert not (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).exists()
+
+    real = install_capture("pi", home=home)
+    assert real.ok, real.error
+    assert not (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).exists(), (
+        "the real run created the name the directory shape never uses")
+    assert (producer / "index.ts.disabled").exists()
+
+
+def test_pi_dry_run_refuses_the_legacy_directory_shape_the_real_run_refuses(home):
+    """The preview must evaluate the refusal against the path the REAL run
+    retires from.
+
+    On the FRESH legacy-directory shape the real run renames
+    ``tortoise-capture/`` aside and then retires the entry point INSIDE it. The
+    dry run asked about ``.tortoise-capture.disabled`` — a path that does not
+    exist while the rename is only planned — so every branch fell through and
+    the preview answered "no refusal" for a shape the real run refuses, after
+    mutating (#14342 round 10, finding 1). The rename preserves the directory's
+    contents, so the source answers every refusal the destination would.
+
+    Mutation: ask about ``legacy_disabled`` under ``--dry-run`` — the preview
+    goes green and the real run renames, refuses, and leaves two producers.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    legacy = ext_dir / capture_install.LEGACY_PI_DIRNAME
+    legacy.mkdir(parents=True)
+    (legacy / "index.ts").write_text("// legacy producer\n")
+    (legacy / "package.json").write_text(
+        '{"pi": {"extensions": ["index.ts"]}}\n', encoding="utf-8")
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert not dry.ok, (
+        f"the dry run previewed success for a shape the real run refuses: {dry.actions}")
+    assert "package.json" in (dry.error or ""), dry.error
+    assert not (ext_dir / capture_install.PI_DISABLED_DIRNAME).exists(), (
+        "a dry run renamed the legacy directory")
+
+    real = install_capture("pi", home=home)
+    assert not real.ok
+    assert "package.json" in (real.error or ""), real.error
+
+
+def test_pi_dry_run_refuses_a_preserved_entry_on_the_legacy_directory_shape(home):
+    """The sibling refusal on the same path: a preserved ``index.ts.disabled``
+    already inside the legacy directory. The real run renames first and then
+    refuses (`Path.rename` must not overwrite preserved bytes); the preview must
+    say so instead of planning a retirement that cannot happen.
+
+    Mutation: as above — the preview omits the refusal (#14342 round 10,
+    finding 1).
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    legacy = ext_dir / capture_install.LEGACY_PI_DIRNAME
+    legacy.mkdir(parents=True)
+    (legacy / "index.ts").write_text("// legacy producer\n")
+    (legacy / "index.ts.disabled").write_text("// PRESERVED\n")
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert not dry.ok, (
+        f"the dry run previewed success for a shape the real run refuses: {dry.actions}")
+    assert "already exists" in (dry.error or ""), dry.error
+    # The receipt is a PREVIEW: subjunctive, no claim of a write, and it names
+    # the path it actually evaluated (the source — the destination does not
+    # exist yet) so the operator is not told to move a directory that is not
+    # there (#14342 round 11, finding 2).
+    error = dry.error or ""
+    assert "Nothing was written" in error, error
+    assert str(legacy) in error, error
+    assert str(ext_dir / capture_install.PI_DISABLED_DIRNAME) not in error, error
+    assert dry.changed_artifacts == (), dry.changed_artifacts
+    assert (legacy / "index.ts").exists(), "a dry run retired the entry point"
+    assert (legacy / "index.ts.disabled").read_text() == "// PRESERVED\n"
+
+
+def test_pi_dry_run_refuses_a_symlinked_second_producer_that_still_loads(home):
+    """A second producer that is a SYMLINK to a loadable directory is refused by
+    the real run — after renaming the link, which still resolves. The dry run
+    previewed ``ok`` because it modelled only ``_retire_pi_entry``'s refusal and
+    not the post-mutation assertion (#14342 round 10, finding 2).
+
+    Mutation: drop the symlink-to-directory arm — the preview reports a shape
+    as fine that the real run refuses.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// live producer\n")
+    active = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    active.symlink_to(target, target_is_directory=True)
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert not dry.ok, (
+        f"the dry run previewed success for a shape the real run refuses: {dry.actions}")
+    assert "SYMLINK" in (dry.error or ""), dry.error
+    assert "nothing was written" in (dry.error or "").lower(), dry.error
+    assert active.is_symlink(), "a dry run renamed the producer"
+    assert not (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME).exists()
+
+
+def test_pi_second_producer_refusals_do_not_claim_the_disk_is_untouched(home):
+    """Every refusal that runs AFTER the seam write carries the install in the
+    same receipt, so none of them may say the disk was not touched.
+
+    Round 9 reworded one arm; its two siblings kept asserting "Nothing was
+    touched" beside ``actions=('installed …')`` and
+    ``changed_artifacts=('tortoise-capture.ts',)`` — the #10241 report shape
+    (#14342 round 10, finding 3).
+
+    Mutation: restore "Nothing was touched." in either arm — this row REDs on
+    the claim while the action set still shows the install.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// live producer\n")
+    # `retired` is a symlink to a loadable directory: the stickiest refusal.
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, res.actions
+    error = res.error or ""
+    assert "Nothing was touched" not in error, (
+        f"the receipt claims an untouched disk beside its own actions: {error!r}")
+    assert any("installed" in a for a in res.actions), res.actions
+    assert capture_install.PI_EXTENSION_NAME in res.changed_artifacts
+    assert "is in place" in error, (
+        f"the refusal must state that the seam landed: {error!r}")
+
+
+def test_pi_dry_run_receipt_does_not_claim_a_write(home):
+    """The legacy-symlink refusal is reached under ``--dry-run`` too (it is
+    evaluated before the dry-run branch), and it used to say the seam "WAS
+    installed" on a run that wrote nothing — the same false-report class as
+    round 9's finding, one branch over (#14342 round 10, finding 4).
+
+    Mutation: use the past-tense sentence unconditionally — this row REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// legacy producer\n")
+    legacy = ext_dir / capture_install.LEGACY_PI_DIRNAME
+    legacy.symlink_to(target, target_is_directory=True)
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert not dry.ok, dry.actions
+    error = dry.error or ""
+    assert "WOULD be installed" in error, error
+    assert "WAS installed" not in error, (
+        f"a dry run claimed the seam landed: {error!r}")
+    assert "WOULD stay registered" in error, (
+        f"a dry run described a disk it never touched: {error!r}")
+    assert "producers stay registered" not in error, error
+    assert dry.changed_artifacts == (), dry.changed_artifacts
+    assert not (ext_dir / capture_install.PI_EXTENSION_NAME).exists(), (
+        "a dry run wrote the seam")
+
+
+def test_pi_dry_run_second_producer_refusal_is_subjunctive(home):
+    """The preview-only refusal arm must not read as the past-tense receipt.
+
+    `_disable_pi_second_producer`'s `planned` arm runs ONLY under `--dry-run`,
+    yet it used the real run's sentence ("the capture seam is installed … TWO
+    producers ARE registered") on an install that wrote nothing
+    (#14342 round 11, finding 1).
+
+    Mutation: use the real-run sentence in that arm — this row REDs on both
+    claims while `changed_artifacts` stays empty.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "index.ts").write_text("// live producer\n")
+    # `_retire_pi_entry` refuses this shape: the preserved entry already exists.
+    (producer / "index.ts.disabled").write_text("// PRESERVED\n")
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert not dry.ok, dry.actions
+    error = dry.error or ""
+    assert "WOULD be in place" in error, error
+    assert "capture seam is installed" not in error, (
+        f"a dry run used the real-run receipt: {error!r}")
+    assert "would stay registered" in error, error
+    assert dry.changed_artifacts == (), dry.changed_artifacts
+    assert not (ext_dir / capture_install.PI_EXTENSION_NAME).exists()
+
+
+def test_pi_dry_run_retired_name_refusal_speaks_in_the_subjunctive(home):
+    """The retired-name-still-loadable refusal is reachable under `--dry-run`,
+    and its consequence clause used to be past tense on a run that wrote
+    nothing — "both producers stay registered" beside a `seam_state` that says
+    they merely WOULD be (#14342 round 12).
+
+    Mutation: drop the `_both_producers_clause(dry_run=...)` call at this arm —
+    this row REDs while `changed_artifacts` stays empty.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// live producer\n")
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.symlink_to(target, target_is_directory=True)
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert not dry.ok, dry.actions
+    error = dry.error or ""
+    assert "WOULD stay registered" in error, error
+    assert "producers stay registered" not in error, (
+        f"the preview described an untouched disk in the past tense: {error!r}")
+    assert dry.changed_artifacts == (), dry.changed_artifacts
+    assert not (ext_dir / capture_install.PI_EXTENSION_NAME).exists()

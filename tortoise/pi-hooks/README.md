@@ -24,22 +24,32 @@ thirteen required pieces, the four exclusions and the two-part verification — 
 
 ## Install (done by the product, not by hand)
 
-`HARNESS_INSTALL.pi` (and `HARNESS_CAPTURE_INSTALL.pi`) copy this file into
-Pi's global extension directory:
+`HARNESS_INSTALL.pi` (and `HARNESS_CAPTURE_INSTALL.pi`) name the install
+command — the product's own path, which copies this file into Pi's global
+extension directory:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions
-# #3713 collision guard (see below): disable a pre-existing tortoise-capture/
-if [ -L ~/.pi/agent/extensions/tortoise-capture ]; then
-  rm ~/.pi/agent/extensions/tortoise-capture
-elif [ -d ~/.pi/agent/extensions/tortoise-capture ]; then
-  mv ~/.pi/agent/extensions/tortoise-capture ~/.pi/agent/extensions/.tortoise-capture.disabled
-fi
-cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts \
-   ~/.pi/agent/extensions/tortoise-capture.ts
-cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-volunteer.ts \
-   ~/.pi/agent/extensions/tortoise-volunteer.ts
+# The SUPPORTED install, and the only one this record ships: the product's own
+# seam installer, which VERIFIES the end state and refuses — naming what it
+# found — rather than reporting success while two producers stay registered.
+# Its order is the safety property: the copies, then the legacy entry-point
+# retirement, then the second producer's, so no failure can leave the box with
+# no producer at all.
+tortoise install pi
 ```
+
+⛔ **A hand-copied duplicate of this procedure used to ship here, and it was
+REMOVED rather than patched (#14342 round 9).** It re-implemented the
+installer's shape analysis in shell, so it silently diverged from it on three
+shapes a user can actually have: it renamed a `reflect-hook.ts` DIRECTORY to
+`reflect-hook.ts.disabled` (which Pi still loads through the directory's
+`index.ts`), it edited THROUGH a symlinked `.tortoise-capture.disabled` and so
+renamed `index.ts` inside a foreign checkout, and it unlinked the legacy
+producer symlink *before* the copies — the zero-producer window the installer
+defers for a measured reason (`ENOSPC` on a fresh home). Each was a silent
+non-fix, reported by nothing. A snippet that must reproduce the installer's
+refusal conditions will drift again; the installer is the surface with the
+tests, so it is the one that ships.
 
 Pi auto-discovers `~/.pi/agent/extensions/*.ts` on the next start. Installing
 the extensions *is* the opt-in — there is deliberately no `autoCapture`-style
@@ -96,8 +106,10 @@ keep talking.
 
 ## Migration: the install must not leave two capture producers (#3713, #3512)
 
-Pi's extension loader (`collectAutoExtensionEntries`) enumerates directory
-entries and does **no basename dedupe**: a top-level `tortoise-capture.ts` and
+Pi's extension loader (`discoverExtensionsInDir` in `dist/core/extensions/loader.js`)
+enumerates directory entries and does **no basename dedupe** — and, unlike the
+package manager's `collectAutoExtensionEntries`, it applies **no dot-prefix
+filter**: a top-level `tortoise-capture.ts` and
 a `tortoise-capture/index.ts` are **two** independent extensions. On a host
 that already has the legacy agent-infra extension at
 `~/.pi/agent/extensions/tortoise-capture/` (a symlink to
@@ -106,13 +118,32 @@ that already has the legacy agent-infra extension at
 it makes both producers POST `/v1/sessions` for the same `session_id` —
 doubled work, and the server's in-flight dedup hands the loser a 409.
 
-The install step therefore disables the legacy entry before copying this one:
+The install step therefore disables the legacy entry — but only **after** the
+replacement seam is written and verified, so a failed copy can never leave a box
+with no producer at all:
 
 - a **symlink** is unlinked (`rm`, no `-r`) — the agent-infra checkout it
   points at is untouched;
 - a **real directory** is moved to `~/.pi/agent/extensions/.tortoise-capture.disabled`
-  — a dot-prefixed name the loader skips (`entry.name.startsWith(".")`), so
-  its files are preserved but it no longer registers.
+  **and its entry point is retired inside it** (`index.ts` → `index.ts.disabled`).
+  On the **upgrade** shape — an older install already performed the rename, so
+  `tortoise-capture/` is gone and `.tortoise-capture.disabled/` is what is on
+  disk — the entry point is retired *there*, with no second rename; that step
+  runs **after** the replacement seam is verified, so a failed write never
+  leaves a box with no producer at all.
+
+⛔ **The dot prefix alone retires NOTHING, and this record claimed it did
+(#14342).** Pi's `discoverExtensionsInDir` applies **no** dot-prefix filter: a
+direct entry loads iff its name *ends with* `.ts`/`.js` (`isExtensionFile`), and
+**every** subdirectory is resolved through `resolveExtensionEntries`
+(`package.json` `pi.extensions`, else `index.ts`/`index.js`). So
+`.tortoise-capture.disabled/index.ts` was a **loaded** extension — the guard
+moved the producer aside and Pi kept registering it, leaving exactly the
+duplication the guard exists to remove, plus a receipt that said otherwise. The
+entry point is retired by the loader's own rule and the result is **asserted**:
+a retirement that still loads fails the install rather than reporting success.
+The same rule is why the second producer below is retired to
+`reflect-hook.ts.disabled` — a name `isExtensionFile` rejects.
 
 It never runs `rm -rf`. If you deliberately keep **both** producers, the
 collision is the runtime problem tracked by **#3713** — the artifact-side
@@ -123,11 +154,251 @@ install guard.
 
 ### The second producer, and the disposition of the agent-infra copy (#3512)
 
-The guard above covers **one** of the two producers agent-infra installs. The
-other is a **top-level file**, `~/.pi/agent/extensions/reflect-hook.ts` — a
+The guard above covers the legacy **directory**. The other producer agent-infra
+installs is a **top-level file**, `~/.pi/agent/extensions/reflect-hook.ts` — a
 second, independent extension whose only handler is the `session_shutdown`
 (`quit`) capture: it writes a JSONL fallback into
 `~/.tortoise/session-events/` and POSTs the same `/v1/sessions` endpoint.
+
+**The installer disables it too, as of #14342.** After the capture artifact is
+VERIFIED in place (`assert_seam_target`), `_disable_pi_second_producer` renames
+it to `reflect-hook.ts.disabled` — a name Pi's loader does not load (it takes
+top-level `*.ts` / `*.js`, so a `.disabled` suffix is not a loadable extension),
+with the bytes preserved. A **directory** at that name is retired in place
+instead (`index.ts` → `index.ts.disabled` inside it, directory name unchanged):
+a suffixed *directory* is still resolved through its index file, so renaming it
+would retire nothing. A retired copy that already exists is RE-ASSERTED
+when its bytes are identical (the bytes survive at the retired path, so removing
+the live duplicate destroys nothing — and the farm re-materializes this file, so
+that is the steady state), and refused when they differ or when the retired path
+is not a regular file. The
+ORDERING is the safety property, not a style choice: disabling the other
+producer before the replacement is verified would open a window with NO producer
+at all, and capture silently stopping is worse than the duplication. A seam that
+installs while both producers stay registered is reported as a failure, never as
+a green install.
+
+#### Why it is a duplicate — measured, not inferred (#14342)
+
+On the reference box, 2026-11-25:
+
+| | capture spool (this seam) | `session-events/` (reflect-hook) |
+|---|---|---|
+| sessions / records | 265 | 17 894 |
+| writes when | every `turn_end` (plus `session_shutdown`) | `quit` only |
+| on disk | 265 sessions' meta + turn logs | 22 day-files, 106 MB |
+| filed by | `capture_spool` / `store_sync` | `session_events_drain` (the store-sync leg) |
+
+**265 of 265** spool sessions were also in `session-events` — spool-only: zero.
+Compared turn for turn: **179 byte-identical**, and the other **86 differ only
+by the truncation marker** (the spool annotates a 5 000-character cut,
+reflect-hook hard-slices), i.e. 1 415 559 vs 1 415 558 characters of content.
+The four fields only reflect-hook records
+(`metadata.team/projectRoot/prs/charCount`) are **dropped at filing time**:
+`session_events_drain`'s payload builder forwards only
+`harness`/`session_id`/`conversation`/`machine_id`/`source`/`model`. Nothing
+unique reaches the graph — so this is a duplicate payload in a second substrate,
+not a second capability.
+
+#### The residual, stated
+
+agent-infra's farm **re-materializes** `extensions/reflect-hook.ts` from its
+`manifest.json` (entry 13), so this guard holds on a box where
+`tortoise install pi` runs and is **reverted by the next farm sync** — observed:
+every agent-infra extension carries the same farm mtime while a hand-disabled
+copy keeps its own. The durable removal is the #3512 decision above (reduce
+agent-infra's copy to a shim of `tortoise/pi-hooks/`, carrying no capture code
+of its own), which is `daniel-ospina/agent-infra#1671`. Until that lands, the
+installer's guard is the product-side answer and the farm is the reason it can
+regress. The harder half, stated: any agent-infra release that EDITS
+`reflect-hook.ts` lands new bytes, which the guard refuses (it will not delete
+bytes it cannot prove are preserved) — so `tortoise install pi` fails on every
+box until a human moves the retired copy aside, one box at a time. That is a
+designed fail-closed choice, not a data-safety defect.
+
+#### What this costs, stated — the `#10017` census authority
+
+`tools/turn_parity_census.py` takes its local record from
+`~/.tortoise/session-events/` (`--local-record-dir`) and its module records the
+owner's ruling that *that substrate, not the hosted store, is the authority*.
+Its only writer is `reflect-hook` — this seam writes `capture-spool/`. So a box
+that installs this seam and disables the second producer keeps **no** record
+rows, and a future census run has nothing to compare against. That is a
+consequence of the recorded decision ("the authority is the local record"), not
+a bug in this guard, so it is **disclosed rather than silently absorbed**: the
+authority has to move (the census reading the spool, or this seam also emitting
+the census record) before the census is meaningful on an installed box. Raised
+on #14342; not decided here.
+
+#### The shapes this guard does and does not cover
+
+Covered, by the loader's rule: a top-level `reflect-hook.ts` (retired to
+`.disabled`) and a directory entry point (retired to `index.ts.disabled`). A
+directory declaring `pi.extensions` in `package.json` is **refused**, because
+retiring its files would leave that manifest pointing at nothing — the operator
+moves it aside.
+
+Not covered, and named so it is not mistaken for coverage: a *variant* name
+inside the extensions directory (`reflect-hook.ts.bak.ts`,
+`reflect-hook.old/index.ts`) is a producer Pi loads, and neither guard touches
+it. `agent-infra`'s `pi-bootstrap/cell-install.sh` has a by-pattern deny for
+extension VARIANTS (`denied_extension_stem`) — and its deny list is
+`(cmux-session.ts tortoise-capture)`, so it does **not** cover a
+`reflect-hook*` variant either. Nothing currently refuses those: the hole is
+named here so it is not mistaken for coverage.
+
+⛔ **ONE MEASURED INSTANCE IS LIVE — IT EXECUTES, AND IT RESHAPES THE REAL
+PRODUCER'S ENVIRONMENT.** The reference box carries
+`extensions/reflect-hook.test.ts` beside the `reflect-hook.ts` this guard
+retires (the provenance table in this README already lists it as a real file,
+not a symlink). It is a loadable `*.ts` with the producer stem, so Pi's
+`discoverExtensionsInDir` pushes it and the loader **runs the module at
+startup**, then drops it for having no default export — agent-infra's whole
+recorder suite executing inside every Pi start, whose tail is
+`if (failed > 0) process.exit(1)`: a Pi that exits during extension load.
+
+The suite also **assigns `process.env.TORTOISE_FALLBACK_DIR`** to a `mkdtemp`
+directory it later deletes (`reflect-hook.test.ts:28`), and the real producer
+binds that variable at module scope when it is imported (`reflect-hook.ts:61`,
+`process.env.TORTOISE_FALLBACK_DIR || ~/.tortoise/session-events`). So whether
+the LIVE producer's local record is diverted into a temp directory depends on
+**load order** — and this is where this record states its own limit instead of
+reassuring: on this box the consequence is NOT observed
+(`~/.tortoise/session-events/<day>.jsonl` is still growing and no
+`/tmp/reflect-hook-test-*` survives), so either the live startup path differs
+from `discoverAndLoadExtensions` in a way not yet found, or those records are
+written by a process that does not load the suite. **UNRESOLVED — do not read
+this as harmless.**
+
+What IS established: the suite swaps `fetch` out for its own run, so it cannot
+file a duplicate *session*, and the install is not wrong to report green. It is
+deliberately NOT added to `PI_SECOND_PRODUCER_OTHER_NAMES`: refusing on it would
+make `tortoise install pi` red on that box for a file that cannot
+double-capture. The durable fix belongs in **agent-infra: do not ship
+`extensions/*.test.ts` into the live extensions directory** — not a wider guard
+here.
+
+#### Other records still describe the pre-install state
+
+`docs/architecture/PI-CAPTURE-ARCHITECTURE.md` and the onboarding skills
+(`tortoise/onboarding/SKILL.md`, mirrored under
+`website/apps/dashboard/public/skills/`) describe `reflect-hook` as a live
+producer. Those are dated measurements of a machine in its BOTH-producers state,
+and they remain accurate about it — but on a box where this seam is installed
+the producer is retired, so read them as the precondition this section removes.
+
+The two surfaces a human actually **copies into a shell** — the install snippet
+above and the dashboard's `PI_CAPTURE_INSTALL`
+(`website/apps/dashboard/src/harnesses.js`, pinned by `harnesses.test.js` and the
+wizard snapshots) — shipped the disproven dotfile rule as an instruction until
+review round 8 of #14342: following them retired nothing. Both now name
+`tortoise install pi`, which performs the entry-point retirement and the second
+producer's, in that order — neither surface re-implements it. If
+the routine changes, change all of them in one commit — a snippet that drifts
+from this section is the false claim, not a stale measurement.
+
+#### Residuals this guard does NOT close (filed as notes, not chased)
+
+- **The legacy DIRECTORY has no convergence arm.** The farm's manifest also
+  carries `extensions/tortoise-capture/`, so a copy-mode or second-clone farm
+  can re-materialize the legacy directory after an install renamed it aside.
+  The install then refuses (both names present) and — because that refusal
+  returns early — the second producer's convergence never runs on that box, so
+  `tortoise install pi` stays red until a human moves one aside, once per farm
+  cycle. The measured reference box's farm denies that stem by name and
+  converges green.
+- **`legacy_extension_obstacle` mirrors every refusal it can EXPRESS, and the
+  arms it cannot are named here.** It covers: the legacy rename collision, a
+  symlinked `.tortoise-capture.disabled` that Pi still loads, the second
+  producer's taken-name collision, a **symlinked or non-regular preservation
+  target** at the second producer's retired name, a **still-loadable RETIRED
+  name** for the second producer (a suffixed link to a directory, which refuses
+  on every re-run), a loadable **`reflect-hook.js`** — the same producer under
+  the other extension Pi accepts (`PI_SECOND_PRODUCER_OTHER_NAMES`) — and a
+  **symlink to an index-bearing directory** at the second producer's name (the
+  install renames the link and then still refuses, so it refuses on every run
+  while mutating on each one).
+  NOT mirrored, so `hooks status`/`doctor` can still name a verb that refuses
+  for them: a manifest-declared or unreadable-`package.json` directory (at
+  either producer's name), and an existing
+  `index.ts.disabled`/`index.js.disabled` inside a directory producer.
+  ⛔ **DERIVE THIS LIST FROM THE ARMS — DO NOT TRUST IT, AND DO NOT COUNT IT.**
+  A count is what drifted before, and hand-maintenance drifted it again: an
+  earlier revision of this bullet called two arms UNMIRRORED that the predicate
+  had already gained (the still-loadable retired name, round 24; the symlinked
+  preservation target, round 25) while omitting the `reflect-hook.js` arm
+  entirely — and still closed with "it is the full set". The symlink-to-a-
+  directory arm was a third instance: the installer refused (and renamed the
+  link) on a shape the hint answered `''` for. Re-read
+  :func:`legacy_extension_obstacle` before quoting it. The mirror is the one
+  thing that drifts; that is its documented hazard, not a new one, and
+  `test_pi_legacy_obstacle_matches_the_installers_own_refusal` pins the shape it
+  covers.
+- **A TOCTOU window** remains between the digest comparison and the
+  `unlink()` in the re-assert arm; the farm never writes the retired path, so
+  the window needs a concurrent writer on the same box.
+- **A symlink at a producer path pointing at a DIRECTORY** is a genuinely
+  awkward shape, and the earlier sentence here ("loaded by Pi as a file attempt
+  (which fails)") was WRONG — measured against real Pi in round 20: a
+  `*.ts`-named link to a directory IS registered when the target carries
+  `index.ts`/`index.js` **or** a `package.json` `main`, and is ignored when the
+  target carries only `pi.extensions` or nothing. Retiring it renames the LINK
+  to `*.ts.disabled`, which is NON-suffixed, so Pi then resolves it through
+  `resolveExtensionEntries` (manifest, else index) and **not** through `main`:
+  an index-bearing target is therefore STILL loaded, the installer REFUSES
+  (the renamed link is checked, not just the path it came from), and a
+  `main`-only target becomes inert, so that install legitimately succeeds. A
+  loaded link already at `PI_DISABLED_DIRNAME` is refused BEFORE any rename, so
+  every re-run sees the same shape instead of the second run finding the name
+  vacated and going green. The `index`-bearing form is not converged — a human
+  moves it aside.
+- **The loader rule is TRANSCRIBED, not executed, and nothing pins it to Pi's
+  version.** `_pi_entry_is_loadable` (`tortoise/capture_install.py`)
+  models `dist/core/extensions/loader.js`, and the test helper
+  `_registered_producers` (`tests/test_capture_install.py`) models the
+  same rule again. They share the MANIFEST reader (`_pi_manifest_entries`), so
+  that half cannot drift between them — but the suffix test and the
+  `index.ts`/`index.js` fallback are written twice, and
+  `_assert_pi_entry_not_loadable` (`tortoise/capture_install.py`) grades
+  the end state with the SAME function that decided the retirement, so it adds
+  no independent signal. ⛔ **Measured against real Pi, not read off the source**
+  (`discoverAndLoadExtensions`, `pi-coding-agent` 1.2.0): a ``reflect-hook.ts``
+  that is a SYMLINK TO A DIRECTORY is **registered** when the target carries
+  ``index.ts`` or a ``package.json`` ``main``, and is ignored when the target
+  carries only ``pi.extensions`` or nothing at all — Pi pushes the path
+  (``isFile() || isSymbolicLink()``) and then resolves the directory by NODE
+  resolution, NOT through ``resolveExtensionEntries``. An earlier revision of
+  this note claimed the opposite ("attempted as a file and counted as
+  nothing") and the test oracle was made stricter to match; that was WRONG, and
+  a stricter oracle is the LENIENT direction — it would let a regression that
+  leaves the producer as a link to a directory pass the one-producer assertion
+  while Pi registered two. **The oracle must never under-count.** The
+  `pi.extensions`-only target is therefore correctly NOT counted by the oracle
+  (it agrees with Pi there), while `_pi_entry_is_loadable` is deliberately
+  coarser still: it answers loadable for that shape too, which is why the
+  residual below refuses rather than retiring. Both are correct against the Pi measured on 2026-11-26:
+  `isExtensionFile` is `endsWith('.ts') || endsWith('.js')`, and every
+  subdirectory is resolved through `resolveExtensionEntries` (manifest, else
+  `index.ts`/`index.js`) with **no dot-prefix filter** anywhere in
+  `discoverExtensionsInDir`. ⛔ If a later Pi adds a dot filter —
+  `collectAutoExtensionEntries` already has one, which is why the dot-prefix
+  contrast is accurate today but not guaranteed — or renames the suffix rule,
+  then `reflect-hook.ts.disabled` starts loading while every transcription still
+  answers "not loadable": a GREEN install with TWO producers, and no test reds.
+  **Re-measure the rule on every Pi bump.** The durable fix — pin it as a
+  versioned fixture table consumed by both call sites, so a bump shows up as a
+  diff to re-measure instead of as three transcriptions agreeing — is tracked as
+  tortoise#14724 (agent-infra#1671 is the separate shim decision). This note is
+  the tripwire until then.
+
+#### The backlog is a decision, not a delete
+
+Where the product seam is NOT installed, `session-events/` is the **only**
+local capture on the box — so it is not a duplicate there, it is the sole copy,
+and deleting it destroys undelivered work (the failure #10479 exists to
+prevent). The order is: restore the product seam, then drain the backlog
+through its existing store-sync leg, then apply a retention (seal/compress with
+`tools/seal_session_events.py`) — never a delete to make a directory small.
 
 **Its egress gate changed under this record.** Until agent-infra `7e77470e4`
 (2026-10-16 UTC, agent-infra #803 / #848) `reflect-hook` uploaded whenever the API
