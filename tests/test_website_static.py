@@ -5862,21 +5862,55 @@ def _ground_selector_matches(simple: str, element: GroundElement | None) -> bool
 #: The positional pseudo-classes that name one END of a box, spelled the ways
 #: CSS lets you spell it. Each alias is exactly true of the first/last child the
 #: markup declares, so accepting them grades BEHAVIOUR, not spelling (#14683
-#: independent review: `:nth-child(1)` was a fail-open, and its `-of-type` and
-#: integer-syntax twins were the same fail-open one table row over).
+#: independent review: `:nth-child(1)` was a fail-open, and its `-of-type`,
+#: case and `an+b` twins were the same fail-open one table row over).
 #:
-#: `(?:0*[nN]\s*\+\s*)?\+?0*1` accepts `1`, `+1`, `01`, `0n+1` and `0n + 1` —
-#: every spelling of the index 1 that a formatter or a human produces.
-_INDEX_ONE = r"(?:(?:[-+]?\d*[nN]\s*\+\s*)?\+?0*1)"
+#: The `nth-*` arms CAPTURE their argument and are judged by
+#: `_nth_includes_index_one`, not by a regex for "1": `:nth-child(2n+1)`,
+#: `:nth-child(-n+3)`, `:nth-child(2n-1)` and the `odd` keyword all include index
+#: 1, while `:nth-child(2)` and `even` do not.
 _SIDE_PSEUDO_ALIASES = {
-    "first-child": (r"(?i:first-child)", rf"(?i:nth-child)\(\s*{_INDEX_ONE}\s*\)",
-                    r"(?i:first-of-type)",
-                    rf"(?i:nth-of-type)\(\s*{_INDEX_ONE}\s*\)"),
-    "last-child": (r"(?i:last-child)",
-                   rf"(?i:nth-last-child)\(\s*{_INDEX_ONE}\s*\)",
-                   r"(?i:last-of-type)",
-                   rf"(?i:nth-last-of-type)\(\s*{_INDEX_ONE}\s*\)"),
+    "first-child": (
+        r"(?i:first-child)", r"(?i:first-of-type)",
+        r"(?i:nth-child)\(([^)]*)\)",
+        r"(?i:nth-of-type)\(([^)]*)\)"),
+    "last-child": (
+        r"(?i:last-child)", r"(?i:last-of-type)",
+        r"(?i:nth-last-child)\(([^)]*)\)",
+        r"(?i:nth-last-of-type)\(([^)]*)\)"),
 }
+
+
+def _nth_includes_index_one(argument: str) -> bool:
+    """Does this `an+b` argument select the child at index 1? PURE.
+
+    The CSS rule is "there is an integer `k >= 0` with `a*k + b == 1`", which is
+    what makes `odd`(`2n+1`), `2n+1`, `2n-1`, `-n+3` and a bare `1` all match
+    while `2` / `even` do not. Deciding it arithmetically is what closes the
+    `:nth-child(2n+1)` / `:nth-child(-n+3)` fail-open that a `b = 1` regex left
+    (#14683 independent review, measured).
+    """
+    text = "".join(argument.split()).lower()
+    if not text:
+        return False
+    if text == "odd":
+        return True
+    if text == "even":
+        return False
+    step = re.fullmatch(r"([+-]?\d*)n([+-]\d+)?", text)
+    if step is None:
+        try:
+            return int(text) == 1
+        except ValueError:
+            return False
+    coefficient = step.group(1)
+    a = 1 if coefficient in ("", "+") else (-1 if coefficient == "-"
+                                           else int(coefficient))
+    b = int(step.group(2) or "+0")
+    if a == 0:
+        return b == 1
+    k = (1 - b) / a
+    return k.is_integer() and k >= 0
 
 
 #: The `justify-content` values that TOP-ALIGN a column flex container. `start`
@@ -5896,8 +5930,14 @@ _TOP_ALIGNING_JUSTIFY = frozenset({"flex-start", "start"})
 #: `_beat_ground_margin_candidates` states for unmodelled conditions.
 _NOT_TOP_ALIGNING_JUSTIFY = frozenset({
     "center", "safe center", "unsafe center", "end", "flex-end", "right",
-    "space-between", "space-around", "space-evenly",
+    "space-around", "space-evenly",
 })
+#: ⛔ `space-between` is NOT in the set above, and must not be: it pins the
+#: FIRST item to main-start (the top) in a column flex, so it is not centring and
+#: its free space is not shared out. Classifying it as "does not top-align"
+#: silenced the margin grading over a hatch that leaves the copy spread and
+#: pinned (#14683 independent review, measured: `space-between` with the two
+#: `auto` rules deleted returned `[]`). Unclassified -> the absence path -> RED.
 
 
 def _justify_content_top_aligns(value: str) -> bool:
@@ -5995,6 +6035,16 @@ def _beats_whose_ground(
             aliases = "|".join(_SIDE_PSEUDO_ALIASES[side])
             match = re.search(
                 rf"{subject_re}([^\s>]*?):(?:{aliases})(?![\w-])", compact)
+            # The `nth-*` arms CAPTURE their argument (groups 2 and 3 — one per
+            # alternative, whichever matched) and the index-1 question is
+            # decided arithmetically, so `odd`, `2n+1`, `2n-1` and `-n+3` are
+            # collected while `2` and `even` are not.
+            if match:
+                argument = (match.group(2) if match.group(2) is not None
+                            else match.group(3))
+                if argument is not None and not _nth_includes_index_one(
+                        argument):
+                    match = None
             if match and _ground_selector_matches(match.group(1),
                                                   sides.get(side)):
                 out.append(beat)
@@ -6395,12 +6445,14 @@ def _short_viewport_centring_problems(html: str) -> list[str]:
     against the one committed page.
     """
     arms: dict[str, set[int]] = {}
-    #: Beats some hatch rule NAMES, whether or not it top-aligns. A `center` arm
-    #: is the neighbour row's finding, and reporting it here as "no
-    #: `max-height` rule sets its `justify-content`" claimed absence of a rule
-    #: that is right there (#14683 independent review, measured: replacing the
-    #: hatch's `flex-start` with `center` produced 7 absence messages).
+    #: Beats some hatch rule NAMES with an alignment this reader POSITIVELY knows
+    #: does not top-align. A `center` arm is the neighbour row's finding, and
+    #: reporting it here as "no `max-height` rule sets its `justify-content`"
+    #: claimed absence of a rule that is right there (#14683 independent review).
     named: set[str] = set()
+    #: Beats whose only hatch alignment is UNCLASSIFIED, with the values seen:
+    #: they keep a problem (fail-closed) but are not told that no rule exists.
+    unclassified: dict[str, set[str]] = {}
     beat_ids = _beat_section_ids(html)
     for height, body in _max_height_media_blocks(html):
         for rule in re.finditer(r"([^{}]+)\{([^{}]*)\}", body):
@@ -6425,6 +6477,8 @@ def _short_viewport_centring_problems(html: str) -> list[str]:
             for beat in _beats_addressed(prelude, beat_ids):
                 if named_only:
                     named.add(beat)
+                elif values and not top_aligns:
+                    unclassified.setdefault(beat, set()).add(values[-1])
                 if top_aligns:
                     arms.setdefault(beat, set()).add(height)
 
@@ -6435,6 +6489,17 @@ def _short_viewport_centring_problems(html: str) -> list[str]:
             if beat in named:
                 # The hatch reaches it, it just does not top-align it — the
                 # neighbour row owns that grading.
+                continue
+            seen = unclassified.get(beat)
+            if seen:
+                # A rule IS there; it is the READER that cannot classify it.
+                # Saying "no rule sets its justify-content" was a false diagnosis
+                # over a value that may well top-align (#14683 review, measured).
+                problems.append(
+                    f"{beat}: the hatch sets `justify-content: "
+                    f"{'/'.join(sorted(seen))}`, which this reader cannot "
+                    f"classify — on a column flex it may top-align, so the "
+                    f"`margin-*: auto` pair is required under it")
                 continue
             problems.append(
                 f"{beat}: no `@media (max-height: …)` rule sets its "
@@ -7109,6 +7174,9 @@ class TestShortViewportCentringIsGradedPerBlock:
                 ("#beat-hero > :nth-child(0n+1)", "margin-top: 0", "first"),
                 ("#beat-hero > :nth-child(-n+1)", "margin-top: 0", "first"),
                 ("#beat-hero > :nth-child(2n+1)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-child(2n-1)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-child(-n+3)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-child(odd)", "margin-top: 0", "first"),
                 ("#beat-hero > :FIRST-CHILD", "margin-top: 0", "first"),
                 ("#beat-hero > :nth-LAST-child(1)", "margin-bottom: 0", "last"),
                 ("#beat-hero > :nth-child( 1 )", "margin-top: 0", "first")):
@@ -7164,13 +7232,33 @@ class TestShortViewportCentringIsGradedPerBlock:
 
         # …and an UNCLASSIFIED value (`normal`, `stretch`, `left`) may not be
         # promoted to "the hatch reaches it": that silence is a false PASS over
-        # a page with no auto margins, so it must keep the fail-closed problem.
+        # a page with no auto margins. It keeps a problem of its own — and NOT
+        # the absence claim, which would be a false diagnosis over a rule that
+        # is right there.
         unclassified = self._page(hatch=self.ALIGNED_HATCH.replace(
             "justify-content: flex-start", "justify-content: normal"))
-        assert any("the hatch never reaches it" in p
-                   for p in _short_viewport_centring_problems(unclassified)), (
+        problems = _short_viewport_centring_problems(unclassified)
+        assert any("cannot classify" in p for p in problems), (
             "`justify-content: normal` silenced the margin grading — an "
-            "unclassified value is not evidence that the hatch aligns it")
+            "unclassified value is not evidence that the hatch aligns it:",
+            problems)
+        assert not any("never reaches it" in p for p in problems), (
+            "an unclassified hatch was reported as no hatch at all:", problems)
+
+    def test_space_between_is_not_treated_as_non_aligning(self):
+        """`space-between` pins the first item to the top — it is not centring (P2).
+
+        It was in the "positively non-top-aligning" set, which skipped the
+        margin grading, so `justify-content: space-between` with the two `auto`
+        rules deleted returned `[]` over a page whose copy is spread and pinned
+        at the top (#14683 independent review, measured).
+        """
+        page = self._page(hatch=self.ALIGNED_HATCH.replace(
+            "justify-content: flex-start", "justify-content: space-between"))
+        problems = _short_viewport_centring_problems(page)
+        assert problems, (
+            "`space-between` left no problem at all — the margin grading was "
+            "skipped for an arm that top-pins its first item")
 
     def test_a_commented_out_beat_section_is_not_a_beat(self):
         """A comment is dead to the browser, so it is not a beat (#14683 F1).
