@@ -10550,9 +10550,13 @@ def _h_14544_banned_claim(block: str) -> str | None:
 #: `config/ci-surfaces.yml`, because `_emission_block_header` joins comment line breaks before this
 #: pattern sees the block and the gap below is `[\s\S]`, which spans one either way (no arm is added
 #: for it: an assertion nothing can redden is dead weight). And "the clause runs 39 characters today"
-#: reproduces for NO span of the live clause (14 between the `durations` row and the copula, 36 up to
-#: the `#14544` anchor, 55 for the whole match) — the restated-figure class this block exists to
-#: remove, so the figure is deleted rather than re-stated. The window is the pattern's own `{0,400}`
+#: reproduces for NO span of the live clause — the restated-figure class this block exists to
+#: remove, so NO figure is restated in its place: re-derive the span you mean from the pattern and
+#: the block rather than reading a number here. ⛔ That is not fastidiousness: the correction which
+#: replaced "39" first re-stated three span lengths, and one of them (the `durations`-to-copula gap)
+#: was off by one against the anchor it named, so a `+/-1` correction of a figure sentence was itself
+#: a false figure sentence (#14623 round 24, P3). The figure is what rots; the measurement is one
+#: expression away. The window is the pattern's own `{0,400}`
 #: gap: code, so it cannot rot. `which is` and `durations`-first spellings are
 #: accepted because a TRUE rewording that this pattern refused was measured as a false block (#14623
 #: review round 4, P3): “the `durations` entry for it, which is `#14544`'s own edit”.
