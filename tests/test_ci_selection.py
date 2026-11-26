@@ -10661,15 +10661,15 @@ _H_14544_INVERTED_RE = re.compile(
 #: graded by `_h_14544_row_exempted` below, which reads the STRUCTURE of a sentence — is the row the
 #: subject of an exemption, or the complement of an additive marker — rather than a list of spellings
 #: of it. The non-vacuity loops beside the arm drive that function directly, in both directions.
-#: THE ROW-EXEMPTION CLASS, graded STRUCTURALLY (#14623 rounds 27-29).
+#: THE ROW-EXEMPTION CLASS, graded STRUCTURALLY (#14623 rounds 27-31).
 #: The paragraph's false reading is that the `durations` ROW is exempt as well as the REGISTRATION.
 #: English says that two ways, and both are GRAMMATICAL:
 #:   * the row (or its weight, in EITHER order — `the row's weight` / `the weight of the row`) is
 #:     the SUBJECT of an exemption predicate; and
 #:   * the row is the COMPLEMENT of an additive marker — `so is` / `as is` / `as well as` /
 #:     `likewise` / `along with` / an elliptical `…, and the row is too`.
-#: ⛔ FIVE ROUNDS OF HISTORY, AND WHAT THEY TAUGHT — read this before widening ANY of it. Rounds 26
-#: to 30 each enumerated a class of words and each bought one gap by opening another:
+#: ⛔ SIX ROUNDS OF HISTORY, AND WHAT THEY TAUGHT — read this before widening ANY of it. Rounds 26
+#: to 31 each enumerated a class of words and each bought one gap by opening another:
 #:   26  enumerated conjunctions               -> `as is the durations row` (ONE inserted adjective)
 #:                                             escaped, and `row is too` FALSE-BLOCKED ordinary English
 #:   27  enumerated the copula+adverb run      -> the elliptical `…, and the row is too` went GREEN
@@ -10677,18 +10677,34 @@ _H_14544_INVERTED_RE = re.compile(
 #:                                             row noun lost its boundary so `rows` was refused
 #:   28  turned it into a function             -> the adverb run was STILL an enumerated six-item list,
 #:                                             so `the row is equally exempt` escaped
-#:   29  THIS revision                          -> see the three rules below
+#:   29  graded the post-copula run as tokens -> the adverb run stopped being a six-item list and
+#:                                             became a token run; the VERB kept its own membership
+#:                                             test, which is the gap round 31 measured
 #:   30  graded the noun phrase's SECOND ORDER -> the phrase was `the row's weight` and the additive
 #:                                             branch anchored the noun AT its marker, so the reverse
 #:                                             `as is the weight of the row` went GREEN in five
 #:                                             spellings (`_H_14544_ROW_NOUN`'s prefix stops one
 #:                                             word short of `row` there); the ORDER of a noun
 #:                                             phrase is as open a class as an adverb list
-#: ⛔ RULE 1 — NEVER ENUMERATE AN OPEN LEXICAL CLASS; do enumerate a CLOSED grammatical one. Adverbs
-#: are open: no list of six covers `equally` / `similarly` / `therefore` / `fully` / `just as`. The
-#: COPULA is closed: every English spelling of "the row is exempt" passes through a form of be,
-#: remain or stay, so `_H_14544_COPULA` is exhaustive in a way an adverb list never can be. The words
-#: BETWEEN copula and `exempt` are therefore graded as a RUN of tokens, not a membership test.
+#:   31  graded the VERB as a token too        -> round 29's fix graded the words AFTER the verb as
+#:                                             a run while leaving the VERB itself a membership test
+#:                                             against `_H_14544_COPULA`, and that set is NOT closed:
+#:                                             `becomes` / `seems` / `appears` / `turns` / `gets` /
+#:                                             `goes` all returned `None`, so `The row becomes
+#:                                             exempt.` shipped GREEN — and the note beside the
+#:                                             constant justified the enumeration as EXHAUSTIVE
+#:                                             ("every English spelling … passes through a form of
+#:                                             be, remain or stay"), which was false in the one
+#:                                             place a later widener reads
+#: ⛔ RULE 1 — NEVER ENUMERATE AN OPEN LEXICAL CLASS — and the COPULA is one, which is the correction
+#: round 31 forced. An adverb list is open (no six items cover `equally` / `similarly` / `therefore`
+#: / `fully` / `just as`), and so is the verb slot: `become` / `seem` / `appear` / `turn` / `grow` /
+#: `get` / `go` are copular substitutions, so the earlier claim that a be/remain/stay set is
+#: "exhaustive" was the same enumeration defect one level up. The WHOLE predicate is therefore graded
+#: as tokens — ONE verb token, then a run of up to three words, then `exempt` — never as membership in
+#: any list. `_H_14544_COPULA` is NOT used here at all: it is the admitted spellings of the two
+#: MARKER idioms (`so is` / `as is`, the elliptical `… is too`) and of the scope pin's positive forms,
+#: where the set is what the pattern READS rather than a limit on what the writer may write.
 #: ⛔ RULE 2 — PRECEDENCE OVER STRUCTURE: an explicit NEGATION anywhere in the sentence means the
 #: sentence does not affirmatively state the row's exemption, so it is tolerated. That is what keeps
 #: `The row is NOT exempt.`, `No \`durations\` row is exempt from being a packing cause.` and
@@ -10708,8 +10724,17 @@ _H_14544_INVERTED_RE = re.compile(
 #:   * a NEGATION in a sentence that nonetheless affirms the row's exemption (`No one disputes that
 #:     the row is also exempt`) — Rule 2 is a precedence choice, not a parser;
 #:   * an ANAPHORIC weight that names no row at all (`as is the weight it carries`, `as is its
-#:     weight`) — the noun phrase is required to NAME one, in either order (round 30).
-_H_14544_COPULA = r"(?:is|are|was|were|stays|remains|stayed|remained)"
+#:     weight`) — the noun phrase is required to NAME one, in either order (round 30);
+#:   * a VERB PHRASE longer than one token between the noun and `exempt` (`the row would eventually
+#:     be exempt`, `the row is, in effect, exempt`) — Rule 1 grades that slot as ONE token (round 31).
+_H_14544_COPULA = (
+    r"(?:is|are|was|were|stays|remains|stayed|remained"
+    # ⛔ THE SUBSTITUTION COPULAS (#14623 round 31). `become` / `seem` / `appear` state the SAME
+    # exemption as `is`; omitting them made `The REGISTRATION becomes exempt.` a FALSE BLOCK in the
+    # scope pin (a positive pin that REFUSES a true claim) and an unread shape in the row branches.
+    # They are here rather than in a second list because a private copula run per arm is how the two
+    # drift apart (§ the note above `_H_14544_SCOPE_RE`).
+    r"|becomes|became|seems|seemed|appears|appeared)")
 #: The row, and the names this family uses for the SAME row. ``the `durations` ENTRY`` is an
 #: accepted TRUE rewording elsewhere in this block (`_H_14544_ROW_PROVENANCE_RE`), so a ban that
 #: read only `row` left the false claim reachable by renaming its subject (measured round 29).
@@ -10735,14 +10760,21 @@ _H_14544_ROW_WEIGHT_REVERSE = (
 #: `the row` inside it. Used by EVERY branch below — the reverse order is not a spelling of the
 #: subject test alone.
 _H_14544_ROW_NOUN_ANY = r"(?:" + _H_14544_ROW_WEIGHT_REVERSE + r"|" + _H_14544_ROW_NOUN + r")"
-#: Rule 1: the run between copula and `exempt` is graded as tokens, never as a list of members.
+#: Rule 1: the verb AND the run between it and `exempt` are graded as tokens, never as a list of
+#: members — the verb slot included, because a copula set is an open lexical class (round 31).
+#: ⛔ IT IS ONE TOKEN, and the reason is MEASURED rather than argued: one token closes the class that
+#: was measured escaping (`becomes` / `seems` / `appears` / `turns` / `gets` / `goes`), while a
+#: `(?:\w+\s+){0,3}` slot was ALSO measured against every TRUE-prose fixture here and read none of
+#: them, so it is not refused on a false-block ground it does not have. It is left narrower because
+#: escaping a token (`the row would eventually be exempt`) is a residual DECLARED below — widen it
+#: when a shape is measured shipping, not before.
 #: ⛔ NOT `_H_14544_ROW_SUBJECT_RE` — that name is TAKEN (`:10309`, the anaphor check's row-subject
 #: guard), and reusing it here silently re-pointed that check at this narrower pattern: the retired
 #: `neither of which` sentence stopped being read and the non-vacuity pin beside the arm REDed. A
 #: name collision between two unrelated guards is invisible at the definition site and only shows up
 #: as a guard that no longer fires.
 _H_14544_ROW_EXEMPT_SUBJECT_RE = re.compile(
-    _H_14544_ROW_NOUN_ANY + r"\s+" + _H_14544_COPULA + r"\s+(?:\w+\s+){0,3}exempt", re.IGNORECASE)
+    _H_14544_ROW_NOUN_ANY + r"\s+\w+\s+(?:\w+\s+){0,3}exempt", re.IGNORECASE)
 #: Rule 3: `too` is clause-terminal only when it ENDS the sentence — `[.!?]` or end of string.
 _H_14544_ROW_ADDITIVE_RE = re.compile(
     r"(?:so|as)\s+(?:too\s+)?" + _H_14544_COPULA + r"\s+" + _H_14544_ROW_NOUN_ANY
@@ -10915,6 +10947,10 @@ _H_14544_ROW_PROVENANCE_RE = re.compile(
 #: NOTHING at `30972df4fffe`. A TRUE rewording that reuses NONE of those five structures is refused
 #: as well — e.g. `The exemption applies to the REGISTRATION alone.` Both are residuals of reading
 #: English with an alternation, named so a later round widens them knowingly instead of re-deriving.
+#: ⛔ AND SO IS A `to be` COMPLEMENT inside the copula slot (`The exempt half appears to be the
+#: REGISTRATION.`), measured NOT read at round 31: the set admits the copula and not the infinitive
+#: that follows it. It is named rather than widened because the same slot in the ROW branches is a
+#: single token (Rule 1), and one `(?:\w+\s+){0,2}` there reads the appositive Rule 3 keeps GREEN.
 #: The POLARITY is NOT widened with any of them: every structure names the REGISTRATION on the
 #: exempt side and none tolerates a negation between noun and copula, so the half-swap mutation and
 #: "Both halves stay exempt" still red — see the fixtures in the arm.
@@ -11070,9 +11106,23 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The REGISTRATION is exempt; the row is every bit exempt",
             "The REGISTRATION is exempt; the row is just as exempt",
             # other attested copulas — this block describes a PAST commit, and `stays`/`remains` are
-            # the same claim in the present, so the copula set is exhaustive where an adverb list is not
+            # the same claim in the present. ⛔ NOT because the copula set is "exhaustive" — that
+            # claim was FALSE and round 31 measured it: the subject branch used to require a member
+            # of `_H_14544_COPULA`, so `becomes` / `seems` / `appears` / `turns` / `gets` / `goes`
+            # all returned `None` and `The row becomes exempt.` shipped GREEN. The verb slot is a
+            # TOKEN now, and the six substitutions below are fixtures because they were the
+            # measured gap, not because they complete a list.
             "The REGISTRATION was exempt, and so was the row",
             "The REGISTRATION remains exempt; the row stays exempt",
+            "The row becomes exempt",
+            "The REGISTRATION is exempt; the row seems exempt",
+            "The REGISTRATION is exempt; the row appears exempt",
+            "The REGISTRATION is exempt; the row turns exempt",
+            "The REGISTRATION is exempt; the row gets exempt",
+            "The REGISTRATION is exempt; the row goes exempt",
+            "The REGISTRATION alone is exempt; the row's weight becomes exempt",
+            "The REGISTRATION is exempt; the weight of the row becomes exempt too",
+            "The REGISTRATION is exempt; the `durations` entry becomes exempt",
             # ⛔ THE ADDITIVE MARKERS, including the ELLIPTICAL form (round 27's fail-open): the
             # false reading with NO predicate after the row at all.
             "The REGISTRATION is exempt, and so is the row",
@@ -11151,6 +11201,17 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The weight of the row is 90.0 s.",
             "The weight of the row is not exempt.",
             "The weight of the row was re-read by the cut.",
+            # ⛔ AND THE SUBSTITUTION VERBS IN TRUE PROSE (round 31): widening the verb slot from a
+            # copula list to a token must not turn the negation carve-out or the `too` rule off.
+            # `… becomes exempt from nothing` / `… never becomes exempt` are TRUE and are read by
+            # the token slot only because Rule 2 runs FIRST; deleting that precedence REDs them.
+            "The row becomes exempt from nothing.",
+            "The row never becomes exempt.",
+            "A row that becomes exempt from nothing is still a packing cause.",
+            "The `durations` row seems too specific to summarise at this altitude.",
+            "The REGISTRATION is the ONLY half exempt; that row, too, becomes a packing cause.",
+            "The REGISTRATION is the ONLY half exempt, and that row's weight, too, becomes the "
+            "bin's input.",
             "own edit."):
         assert _h_14544_row_exempted(not_a_row_exemption) is None, (
             f"the row-exemption predicate refuses TRUE prose ({not_a_row_exemption!r}) — that is "
@@ -11377,7 +11438,12 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             # `are`/`were` are unreachable for the singular `REGISTRATION` in true prose; they are
             # driven anyway so the shared set is graded rather than trusted.
             *(f"The REGISTRATION {copula} exempt." for copula in
-              ("is", "are", "was", "were", "stays", "remains", "stayed", "remained")),
+              ("is", "are", "was", "were", "stays", "remains", "stayed", "remained",
+               # ⛔ THE SUBSTITUTION COPULAS (#14623 round 31): `becomes` states the SAME exemption as
+               # `is`, so the scope pin refusing it was a FALSE BLOCK on true prose — the diagnostic
+               # asserting the paragraph named no scope at all. Each is driven here because the note
+               # above claims every copula in the shared set is graded positively.
+               "becomes", "became", "seems", "seemed", "appears", "appeared")),
             "Only the REGISTRATION was exempt.",
             "It was only the REGISTRATION that was exempt.",
             "The exempt half was ONLY the REGISTRATION.",
@@ -11409,7 +11475,14 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
                           "The half that is exempt is the row.",
                           "The row was the exempt half.",
                           "The exempt half was ONLY the row.",
-                          "The half that was exempt was the row."):
+                          "The half that was exempt was the row.",
+                          # …and the substitution copulas the round-31 widening admits, driven with
+                          # the ROW in the exempt half, so widening the verb run cannot smuggle the
+                          # half-swap past the pin on the way in.
+                          "The row became the exempt half.",
+                          "The exempt half became ONLY the row.",
+                          "The half that became exempt was the row.",
+                          "The row seems the exempt half."):
         assert _H_14544_SCOPE_RE.search(scope_inverse) is None, (
             f"the widened scope pin reads {scope_inverse!r}, so the half it exists to name is no "
             "longer graded — the widening admitted the SHAPE of the true claim, not its inverse")
