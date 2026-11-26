@@ -1705,7 +1705,7 @@ def test_EVERY_git_probe_carries_the_modules_own_timeout_bound():
     there — the figure belongs to THAT tree, not to this one): deleting
     `timeout=_GIT_PROBE_TIMEOUT_S` from `surface_files`'s `git ls-files` stayed GREEN;
     from `_tracked_destination_refusal`'s probe, GREEN again. Re-verified at this head by
-    mutation — every one of the four `subprocess.run` sites reds when its kwarg goes.
+    mutation — every one of the five `subprocess.run` sites reds when its kwarg goes.
     ⛔ NOT "a call site": the metadata probe's own arm records `passed_kwargs`, so
     deleting the kwarg THERE reds it (`the probe's bound must be the module's own`). The
     two sites this arm exists for are the other two. The artifact claimed the bound was
@@ -1722,6 +1722,11 @@ def test_EVERY_git_probe_carries_the_modules_own_timeout_bound():
     would otherwise shrink the population this arm walks and stay green; a NEW
     `subprocess.run` that is not a git probe (a future `git apply`, a formatter) reds,
     and the remedy is to classify it here rather than to widen the loop silently.
+
+    ↳ THE FIFTH SITE is `_boundary_is_unaskable`'s `git rev-parse --show-toplevel`
+    (#14741 review, cycle 2): it asks git WHICH repository it resolved, so it is a git
+    probe and it carries the same bound — a hung git there hangs every `--render` before
+    any other refusal can fire.
     """
     source = Path(census.__file__).read_text(encoding="utf-8")
     calls = [
@@ -1732,8 +1737,8 @@ def test_EVERY_git_probe_carries_the_modules_own_timeout_bound():
         and isinstance(node.func.value, ast.Name)
         and node.func.value.id == "subprocess"
     ]
-    assert len(calls) == 4, (
-        f"expected EXACTLY 4 `subprocess.run` probe sites in the census; got "
+    assert len(calls) == 5, (
+        f"expected EXACTLY 5 `subprocess.run` probe sites in the census; got "
         f"{len(calls)} at lines {[c.lineno for c in calls]} — a probe site was removed "
         "(its bound and its refusal went with it) or added (classify it here: this arm "
         "asserts every site is a git probe and carries the module's bound)")
@@ -2478,7 +2483,7 @@ def test_a_DANGLING_git_entry_on_a_BOUNDARY_is_asked_about_SOMEBODY_ELSE(
     class this module refuses rather than restores.
 
     This arm is the mutant's target: delete the `spec is None` branch in
-    `_destination_probes` (or `_git_entry_is_unresolvable`) and it reds; every in-ROOT
+    `_destination_probes` (or `_boundary_is_unaskable`) and it reds; every in-ROOT
     arm stays green, because finding a repository one level up is precisely what they
     need git to do.
     """
@@ -2547,8 +2552,98 @@ def test_a_DANGLING_git_entry_on_a_BOUNDARY_is_asked_about_SOMEBODY_ELSE(
         "answered as the repository ABOVE it, and that repository does not hold this "
         "path while the damaged one does")
     err = capsys.readouterr().err
-    assert "could not probe" in err and "cannot be resolved" in err, (
+    assert "could not probe" in err and "does not resolve" in err, (
         f"the refusal must name the unaskable boundary; stderr:\n{err}")
+    assert keeper.read_bytes() == before, (
+        "tracked content was overwritten through a boundary git answered from the "
+        "wrong repository")
+
+
+def test_a_BOUNDARY_git_DISOWNS_is_asked_about_SOMEBODY_ELSE(tmp_path, monkeypatch, capsys):
+    """…and the damage shapes `lexists` CANNOT see: `.git` present AND resolvable, git disowned.
+
+    ⛔ THE PREDICATE CLOSED ONE OF FOUR SHAPES (#14741 review, cycle 2, P1, measured).
+    `lexists(.git) and not exists(.git)` is a test of the NAME's resolvability. Three
+    other shapes leave a `.git` that is PRESENT and fully RESOLVABLE and still not a
+    repository git will use — `HEAD` removed, `objects/` removed, a symlink to an
+    existing non-gitdir — and in every one of them git WALKS UP and answers from the
+    ENCLOSING repository, so the boundary was probed, the probe permitted, and
+    `--render` overwrote content the damaged repository's index AND HEAD both hold at
+    **rc 0** with empty stderr. For the `objects/`-removed row those bytes are the LAST
+    copy, so that instance is damage git cannot restore.
+
+    So askability is decided by asking git which repository it resolved
+    (`rev-parse --show-toplevel` must name the boundary), not by enumerating shapes —
+    the same lesson rounds 5-11 kept re-learning one enumeration wider. This arm pins
+    the `HEAD`-removed row, which is the restorable one and the one the module's
+    `_plainly_outside_any_repository` docstring already names as a damage state.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)  # ROOT: tracks nothing here
+    sub = repo / "sub"
+    keeper = sub / "docs" / "K.md"
+    keeper.parent.mkdir(parents=True)
+    keeper.write_text("sub keep\n", encoding="utf-8")
+    config = ["-c", "user.email=a@b", "-c", "user.name=a"]
+    subprocess.run(["git", "-C", str(sub), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(sub), "add", "--", "docs/K.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(sub), *config, "commit", "-qm", "sub tracks docs/K.md"],
+        check=True,
+    )
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # THE DAMAGE: the index survives, `HEAD` does not. `.git` is untouched, so every
+    # name-based test — `exists`, `lexists`, `_looks_like_git_metadata` — still sees a
+    # perfectly ordinary repository.
+    (sub / ".git" / "HEAD").unlink()
+    # PREMISE 1 — the `.git` NAME is resolvable, so the arm cannot be graded by the
+    # dangling predicate the arm above pins.
+    assert (sub / ".git").exists() and (sub / ".git").is_dir(), (
+        "the premise: `.git` must be PRESENT and RESOLVABLE; otherwise this arm grades "
+        "the dangling shape instead")
+    # PREMISE 2 — git DISOWNS the damaged gitdir when it is NAMED.
+    named = subprocess.run(
+        ["git", "--git-dir", str(sub / ".git"), "ls-files"],
+        cwd=sub, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert named.returncode == 128, (
+        "the premise: git must DISOWN the damaged gitdir when it is named; got "
+        f"rc={named.returncode} stderr={named.stderr!r}")
+    # PREMISE 3 — AND SILENTLY WALKS UP when asked through cwd discovery, which is what
+    # makes the probe an answer about the ENCLOSING repository rather than a refusal.
+    discovered = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=sub, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert Path(discovered.stdout.strip()).resolve() == repo.resolve(), (
+        "the premise: cwd discovery must land on the ENCLOSING repository; got "
+        f"{discovered.stdout!r}")
+    # PREMISE 4 — the damaged repository's index still tracks it (that is the file the
+    # write would replace), and ROOT does not (or this arm would grade the ROOT probe).
+    indexed = subprocess.run(
+        ["git", "--git-dir", str(sub / ".git"), "--work-tree", str(sub), "ls-files"],
+        cwd=sub, capture_output=True, text=True, env=census._git_env(),
+    )
+    root_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "sub/docs/K.md"],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert root_answer.returncode == 1, (
+        "the premise: ROOT must NOT track it; got "
+        f"rc={root_answer.returncode}")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", "sub/docs/K.md"])
+    assert rc == 2, (
+        f"a boundary git disowns must not permit the write, got {rc} — git walked up "
+        "and answered from the repository above, which does not hold this path "
+        f"(damaged index says: {indexed.stdout!r})")
+    err = capsys.readouterr().err
+    assert "could not probe" in err and "does not resolve" in err, (
+        f"the refusal must name the unanswerable boundary; stderr:\n{err}")
     assert keeper.read_bytes() == before, (
         "tracked content was overwritten through a boundary git answered from the "
         "wrong repository")
@@ -4775,6 +4870,14 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # committed bytes at rc 0. Every in-ROOT arm stays green with the `spec is None`
         # branch deleted, which is why this one has to exist.
         "test_a_DANGLING_git_entry_on_a_BOUNDARY_is_asked_about_SOMEBODY_ELSE",
+        # ⛔ AND THE SAME HOLE WHERE `.git` IS RESOLVABLE AND STILL DISOWNED (#14741
+        # review, cycle 2, P1, measured): `lexists`/`exists` is a test of the NAME, and
+        # three of the four damage shapes (HEAD removed, objects/ removed, a symlink to
+        # an existing non-gitdir) pass it while git walks up and answers from the
+        # repository ABOVE — rc 0, tracked content replaced. Askability is therefore
+        # decided by `rev-parse --show-toplevel` naming the boundary, not by enumerating
+        # shapes; this arm is the `HEAD`-removed row.
+        "test_a_BOUNDARY_git_DISOWNS_is_asked_about_SOMEBODY_ELSE",
         "test_a_repository_BETWEEN_ROOT_and_the_destination_cannot_permit_what_it_tracks",
         "test_a_NESTED_repository_under_ROOT_cannot_permit_what_ROOT_tracks",
         # ⛔ AND THE DESTINATION IS A PATH, NOT A PATHSPEC (#14625 review, round 8, P3):
@@ -4865,8 +4968,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 55, (
-        f"expected EXACTLY 55 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
+    assert len(split_arms) == 56, (
+        f"expected EXACTLY 56 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
     missing = sorted(split_arms - defined)
@@ -4875,7 +4978,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 55` reds a name PRUNED from the literal and `missing` reds a    # name that no longer resolves; neither can red for an arm that was never named at
+    # `len(split_arms) == 56` reds a name PRUNED from the literal and `missing` reds a    # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
     # left the whole suite GREEN (100 passed, 15 skipped), so the sentence above — that
@@ -4931,8 +5034,13 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # the repository ABOVE it — so the probe returned the enclosing repository's permit
     # and the damaged repository's committed bytes were overwritten at rc 0 (#14741
     # review, P2, measured).
-    assert len(test_functions) == 114, (
-        f"expected EXACTLY 114 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
+    # ⛔ AND THE SHAPES `lexists` CANNOT SEE TAKE IT 114 -> 115 (`split_arms` 55 -> 56):
+    # a `.git` that is PRESENT and RESOLVABLE but disowned by git (HEAD removed,
+    # objects/ removed, a symlink to a non-gitdir) was probed, git walked up and answered
+    # as the ENCLOSING repository, and `--render` overwrote the damaged repository's
+    # committed bytes at rc 0 (#14741 review, cycle 2, P1, measured).
+    assert len(test_functions) == 115, (
+        f"expected EXACTLY 115 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
 

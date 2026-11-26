@@ -1205,27 +1205,61 @@ def _path_in_HEAD(probe_cwd: Path, probe_path: str) -> bool | None:
     return None
 
 
-def _git_entry_is_unresolvable(directory: Path) -> bool:
-    """True when ``directory`` holds a ``.git`` entry that is PRESENT and cannot be
-    RESOLVED — a symlink to an unmounted gitdir, the damage state `lexists` exists for.
+def _boundary_is_unaskable(boundary: Path) -> bool:
+    """True when `git -C <boundary>` cannot be shown to resolve THAT boundary's repository.
 
-    ⛔ IT IS NOT A PROVIDER THAT CAN BE ASKED, it is one that answers as the repository
-    ABOVE it (#14741 review, P2, measured). `git -C <dir>` SKIPS an entry it cannot
-    stat and keeps walking UP, so for a nested repository whose `.git` dangles the probe
-    answers about the ENCLOSING repository — whose index does not hold this path — and
-    the nested repository's own intact index (which DOES track it) is never consulted.
-    Measured: `--render sub/docs/K.md` exited **0** with empty stderr and replaced the 8
-    bytes `sub`'s index AND HEAD both hold, in a checkout one `git checkout -q` from
-    restore. A boundary that cannot be asked is a COULD-NOT-RUN, never a permit: the
-    same verdict `_plainly_outside_any_repository` already reaches when git says `not a
-    git repository` over a dangling `.git`, reached here for the case where git says
-    nothing at all because it found a repository one level up.
+    ⛔ THE TEST IS "WHICH REPOSITORY DID GIT RESOLVE", NOT "IS THE `.git` NAME
+    RESOLVABLE" (#14741 review, cycle 2, P1, measured). `git -C <dir>` WALKS UP when the
+    entry at `<dir>` is one it will not accept, so a boundary whose repository cannot be
+    asked answers about the ENCLOSING repository — a different repository with a
+    different index, and for this path a permit. There are at least FOUR ways to get
+    there and a `.git`-name predicate closes exactly ONE of them:
 
-    `exists()` follows the link, which is exactly why it answers False exactly where the
-    distinction matters — the `lexists`/`exists` pair is the whole test.
+      | shape | `.git` lexists | `.git` exists | git AT the boundary |
+      |---|---|---|---|
+      | dangling symlink (unmounted gitdir) | yes | **no** | walks up -> permit |
+      | `HEAD` removed (index intact) | yes | yes | walks up -> permit |
+      | `objects/` removed | yes | yes | walks up -> permit |
+      | symlink to an existing non-gitdir | yes | yes | walks up -> permit |
+
+    Only the first row is visible to `lexists`/`exists`; the other three are PRESENT and
+    fully RESOLVABLE and still disowned by git, so they were probed and the probe
+    answered about the repository ABOVE. Measured: `--render sub/docs/K.md` exited **0**
+    with empty stderr and replaced content `sub`'s index AND HEAD both hold — and for the
+    `objects/`-removed row the replaced bytes are the LAST copy (`cat-file -p` over the
+    damaged gitdir answers 128), which is damage git cannot restore.
+
+    Enumerating damage shapes is the mistake rounds 5-11 kept repeating one level out, so
+    this asks git the only question that closes the class: `rev-parse --show-toplevel`
+    must name THIS directory. A boundary that cannot be shown is a COULD-NOT-RUN, never a
+    permit — the verdict `_plainly_outside_any_repository` already reaches when git says
+    `not a git repository` over a damaged `.git`, reached here for the case where git
+    says nothing at all because it found a repository one level up.
+
+    ⛔ A BARE GITDIR IS EXEMPT ON PURPOSE: it has no `.git` pointer to resolve, its
+    metadata lives in place, and the GIT METADATA guard decides it. Over-blocking shapes
+    that are fine is the other failure mode this must not create, so every ordinary
+    boundary is verified against git rather than assumed: a normal checkout, a linked
+    worktree (whose `.git` is a gitfile), and a submodule all answer with their own path,
+    and `--render` keeps working in all three.
     """
-    git_entry = directory / ".git"
-    return os.path.lexists(git_entry) and not git_entry.exists()
+    if not os.path.lexists(boundary / ".git"):
+        return False
+    try:
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=boundary, capture_output=True, text=True,
+            encoding="utf-8", errors="surrogateescape",
+            env=_git_env(), timeout=_GIT_PROBE_TIMEOUT_S,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return True
+    if resolved.returncode != 0:
+        return True
+    toplevel = resolved.stdout.strip()
+    if not toplevel:
+        return True
+    return os.path.realpath(toplevel) != os.path.realpath(boundary)
 
 
 def _destination_probes(
@@ -1246,7 +1280,7 @@ def _destination_probes(
     existing ancestor.
 
     ⛔ AND A BOUNDARY THAT CANNOT BE ASKED IS A REFUSAL, NOT A SKIPPED PROVIDER (#14741
-    review, P2, measured). One whose `.git` is present and unresolvable answers as the
+    review, P2 + cycle 2 P1, measured). One git will not resolve to ITSELF answers as the
     repository ABOVE it, so it is recorded with `spec is None` and refused — a boundary
     skipped for being unaskable is the same shape as one that was never asked.
 
@@ -1299,15 +1333,14 @@ def _destination_probes(
         if not (os.path.lexists(boundary / ".git")
                 or _looks_like_git_metadata(boundary)):
             continue
-        # ⛔ A BOUNDARY WHOSE `.git` DANGLES IS ASKED ABOUT SOMEBODY ELSE (#14741 review,
-        # P2, measured). `lexists` correctly makes it a BOUNDARY — that half is right —
-        # but probing it is not asking it: git skips an entry it cannot stat and
-        # answers from the repository ABOVE, which is a DIFFERENT repository with a
-        # different index (and, for this path, a permit). So the boundary is recorded as
-        # UNANSWERABLE (`spec is None`) and the refusal fires on it. The bare-gitdir case
-        # is exempt on purpose: those boundaries carry their metadata in place, so
-        # `_looks_like_git_metadata` has already decided they can be asked.
-        if _git_entry_is_unresolvable(boundary) and not _looks_like_git_metadata(boundary):
+        # ⛔ A BOUNDARY GIT WILL NOT RESOLVE TO ITSELF IS ASKED ABOUT SOMEBODY ELSE
+        # (#14741 review, cycle 2, P1, measured). `lexists` correctly makes it a BOUNDARY
+        # — that half is right — but probing it is not asking it: git walks UP, finds the
+        # repository above, and answers from THAT index (and, for this path, a permit).
+        # So the boundary is recorded as UNANSWERABLE (`spec is None`) and the refusal
+        # fires on it. `_boundary_is_unaskable` states why that is decided by asking git
+        # which repository it resolved rather than by enumerating damage shapes.
+        if _boundary_is_unaskable(boundary):
             add(boundary, None, str(boundary))
             continue
         add(boundary, target.relative_to(boundary).as_posix(), str(target))
@@ -1349,10 +1382,14 @@ def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
             # ⛔ A BOUNDARY THAT CANNOT BE ASKED IS "COULD NOT RUN" (2), never a permit
             # (#14741 review, P2, measured). Naming the BOUNDARY, not the destination:
             # the destination is fine, the repository entry on its path is the damage.
+            # ⛔ A BOUNDARY THAT CANNOT BE ASKED IS "COULD NOT RUN" (2), never a permit
+            # (#14741 review, P2 + cycle 2 P1, measured). Naming the BOUNDARY, not the
+            # destination: the destination is fine, the repository entry on its path is
+            # the damage.
             print(
-                f"render: could not probe {label} for tracking: its `.git` entry is\n"
-                "present and cannot be resolved, so git answers as the repository\n"
-                "ABOVE it — and that repository does not hold this path.",
+                f"render: could not probe {label} for tracking: git does not resolve\n"
+                "that directory as a repository of its own, so it answers as the\n"
+                "repository ABOVE it — and that repository does not hold this path.",
                 file=sys.stderr,
             )
             return 2
