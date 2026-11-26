@@ -320,11 +320,14 @@ reports the current consent state.
 **Meeting transcripts:** the manual mining flow (transcript → meeting/decision/
 friction events + draft Points) is a local CLI/SDK path — see the
 meeting-transcripts section of [quickstart-selfhosted.md](quickstart-selfhosted.md).
-Over hosted HTTP the `tortoise_mine_knowledge_from_session` and
-`tortoise_mine_knowledge_from_directory` tools are stdio-only for
-security (#1090) — the flow `tortoise_mine_conversations` was retired into
-(#11609); run `tortoise serve` locally and connect your agent to it
-(stdio) to use them, or mine with the CLI against a local DB.
+Over hosted HTTP, `tortoise_mine_knowledge_from_directory` is stdio-only
+(security #1090) — run `tortoise serve` locally and connect your agent to it (stdio)
+for a folder of transcripts, or mine it with the CLI against a local DB.
+`tortoise_mine_knowledge_from_session` **is** served over hosted HTTP, except on its
+raw-transcript arm (`conversation=` as a transcript string with `source_id=`), which
+keeps the retired `tortoise_mine_conversations`' tenant-HTTP exclusion per-arm
+(#11609); its session arms (`conversation=` as a turn list, and `items=`) are the
+hosted door the consent section above names.
 
 ### The saved backlog: sessions captured without a provider key
 

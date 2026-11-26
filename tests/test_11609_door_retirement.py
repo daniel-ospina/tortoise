@@ -1447,14 +1447,33 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:         the ENTITY spelling of the same mention needed a judged unit that is not a block,
     #:         and is pinned by the bullet above (#14237 r15).
     #:
-    #: ⚠️ SCOPE: the documents whose every `tortoise_*` mention is a call, and ONE of
-    #: them today. The rule is doc-agnostic, but applying it repo-wide would red on docs
+    #: ⚠️ SCOPE: the documents whose every `tortoise_*` mention is a call — **THREE** of
+    #: them today: the provisioning how-to, and (widened by #14645 round 5) both
+    #: quickstarts. The rule is doc-agnostic, but applying it repo-wide would red on docs
     #: that carry retired call forms right now, which is a repair of its own — **#14291**
-    #: (filed from the round-5 review's P2, and re-measured at round 8: SEVEN lines, not six —
-    #: `tortoise_recall:`358 / `tortoise_update_point:`400,:670,:689 /
-    #: `tortoise_create_point:`665 / `tortoise_create_operator:`666 in
-    #: `docs/INGEST_CONTRACT.md`, and `tortoise_mine_conversations:`714 in
-    #: `docs/quickstart-selfhosted.md`), not this guard.
+    #: — not this guard.
+    #: ⛔ TWO COURSES FOR THAT ISSUE WERE CORRECTED HERE, both measured at this head rather
+    #: than carried over from the round-8 note (itself a correction of the round-5 one):
+    #:   · its `docs/quickstart-selfhosted.md` entry is **CLOSED**. That line was the
+    #:     `tortoise_mine_conversations(transcript=…, source_id=…)` call form; #14645 round 5
+    #:     re-pointed it at the two doors the name was retired into, and the doc is now IN
+    #:     this tuple, so the repair cannot regress. `retired_call_forms()` over that file is
+    #:     now empty — the guard's own function is the check, so the claim is re-runnable.
+    #:   · its `docs/INGEST_CONTRACT.md` half is **SEVEN lines**, still, but not the same
+    #:     seven: this PR RETIRES `tortoise_search`, which turns that doc's
+    #:     `tortoise_search(q=…)` instruction into a call form of a retired door, while the
+    #:     quickstart entry above leaves. So the issue's scope grew by one and shrank by one
+    #:     — it is not closed, and it is not unchanged either.
+    #: ⛔ THE LINE NUMBERS #14291 QUOTES HAVE ROTTED (`:358`/`:400`/`:665`/`:670`/`:689` were
+    #: correct when written and `docs/INGEST_CONTRACT.md` has moved under them since — the
+    #: rot class `docs/00_index.md` records against this repo's own address rows). So this
+    #: comment records the FILE and the COUNT, and the work list is RE-DERIVED rather than
+    #: transcribed:
+    #:
+    #:     python -c "import sys,pathlib;sys.path.insert(0,'.');\
+    #:       from tests.test_11609_door_retirement import TestEveryReaderNamesTheLiveListingDoor as G;\
+    #:       print(G.retired_call_forms(pathlib.Path('docs/INGEST_CONTRACT.md').read_text()))"
+    #:
     #: Naming the issue rather than saying "a follow-up" is deliberate: an unnamed
     #: follow-up is how a class gets declared closed while it is still open.
     REPLACEMENT_NAME = re.compile(r"tortoise_[a-z0-9_]+")
@@ -3897,3 +3916,127 @@ class TestEveryReaderNamesTheLiveListingDoor:
         assert "tortoise_graph_overview" in text, (
             f"{relpath} no longer names the live listing door at all — the repair for "
             "this guard is a RE-POINT, never a deletion")
+
+
+
+class TestAnAvailabilityClaimMatchesTheRegistry:
+    """A guarded doc may not deny a surface to a door the registry SERVES on it.
+
+    ⛔ THE DEFECT THIS CLOSES (#14645 round 6 — round 5's own repair, re-measured rather than
+    trusted). `tortoise_mine_conversations` was excluded from tenant HTTP **as a whole**
+    (#1090: its corpus mode walks the caller-supplied path), so both quickstarts said so and
+    were right. #11609 retired it into **two** doors that do NOT share that posture —
+    `tortoise_mine_knowledge_from_directory` is `http_policy=False`, while
+    `tortoise_mine_knowledge_from_session` is `http_policy=True` and refuses ONLY its
+    raw-transcript arm (`tortoise/mcp_server.py::tortoise_mine_knowledge_from_session`).
+    Round 5 carried the "stdio-only" sentence across to both successors, so the cloud
+    quickstart denied hosted HTTP to a door its own consent section, four screens earlier,
+    calls *"The hosted MCP tool"*. The retired-name guard above cannot see this: both new
+    names are LIVE, so R1/R2 have nothing to say.
+
+    ⚠️ WHAT THIS READS — and what it deliberately does NOT. It asks one question with a
+    mechanical oracle: in a SENTENCE carrying a denial phrase, is a LIVE tool named whose
+    registry `http_policy` is True? The phrase set is the closed tuple below and the policy
+    is `TOOL_REGISTRY`; no English is interpreted. Sentence scope (not the guard's block
+    scope) because the repaired prose names the directory door in the denying clause and the
+    session door's ARMS in another — a block unit would fuse them and red on the correct
+    text.
+
+    ⛔ DECLARED BOUND, and it is the shape the second edit actually shipped: a denial whose
+    object is ANAPHORIC — *"Hosted HTTP excludes **both** entirely"*, where the two doors
+    were named in the previous sentence — is NOT detected, because no tool name is in the
+    denying sentence. That sentence is repaired by hand in the same change and the repair is
+    recorded in the PR's round-6 note, not silently trusted; this test grades the shape it
+    CAN decide, and `test_the_pre_fix_sentence_is_the_violation` pins that it decides it.
+    The direction of the gap is fail-open, stated here rather than discovered by the next
+    reader.
+    """
+
+    #: Every phrasing that denies a hosted-HTTP surface. A closed tuple, like `RETIRED_USE_INSTEAD`.
+    DENIAL = re.compile(
+        r"stdio-only|(?:exclude[sd]?|not served|unavailable)[^.;]{0,80}\bentirely\b",
+        re.IGNORECASE,
+    )
+
+    #: The sentence ends THIS question uses. `;` is a boundary here and is deliberately NOT
+    #: one in the guard above: there the unit is a markdown block because the question was
+    #: whether a reader would ACT on an instruction; here the question is what a single
+    #: denial CLAUSE claims. The two units answer different questions, and neither is
+    #: described in terms of the other.
+    SENTENCE_END = re.compile(r"(?<=[.;!?])\s+")
+
+    @classmethod
+    def sentences(cls, text: str) -> list[str]:
+        return [s for s in cls.SENTENCE_END.split(text) if s.strip()]
+
+    @classmethod
+    def served_names_in(cls, sentence: str) -> list[str]:
+        """LIVE tool names in `sentence` whose registry policy serves them over hosted HTTP."""
+        served = {t.name for t in TOOL_REGISTRY if t.http_policy}
+        return [m.group(0).strip("_") for m in re.finditer(r"[A-Za-z0-9_]+", sentence)
+                if m.group(0).strip("_") in served]
+
+    @pytest.mark.parametrize(
+        "relpath", TestEveryReaderNamesTheLiveListingDoor.CALL_INSTRUCTION_DOCS)
+    def test_no_sentence_denies_a_surface_the_registry_serves(self, relpath):
+        """R3 on the real document — an availability claim graded against the registry."""
+        from pathlib import Path
+
+        text = (Path(__file__).resolve().parent.parent / relpath).read_text(encoding="utf-8")
+        violating = [
+            (name, sentence.strip())
+            for sentence in self.sentences(text)
+            if self.DENIAL.search(sentence)
+            for name in self.served_names_in(sentence)
+        ]
+        assert not violating, (
+            f"{relpath} tells the reader a door is not on hosted HTTP while `TOOL_REGISTRY` "
+            f"serves it there: {violating}. Re-derive the claim from the registry — a "
+            "retirement that FORKS one door into two does not fork its HTTP policy with it, "
+            "and one of `tortoise_mine_conversations`'s two successors IS on hosted HTTP")
+
+    def test_the_scan_read_a_real_claim(self):
+        """A scan that discovered no availability claim at all proves nothing (#14237 r5).
+
+        Asked of the GUARDED SET, not of each document: a doc that makes no availability
+        claim is correctly silent, and demanding one of every file would be a test that reds
+        on a true document. What must not happen is every file being silent.
+        """
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        claims = [
+            relpath
+            for relpath in TestEveryReaderNamesTheLiveListingDoor.CALL_INSTRUCTION_DOCS
+            if any(self.DENIAL.search(s)
+                   for s in self.sentences((root / relpath).read_text(encoding="utf-8")))
+        ]
+        assert claims, (
+            "no guarded document carries an availability claim this test can read, so the "
+            "row above measured nothing — either the prose moved out of `DENIAL`'s phrase "
+            "set (widen it in the same change) or the tuple no longer covers a doc that "
+            "discusses hosted-HTTP availability")
+
+    def test_the_pre_fix_sentence_is_the_violation(self):
+        """NON-VACUITY on the sentence that actually shipped, verbatim from round 5's head.
+
+        It reds here against the LIVE registry, so the row above fails on the pre-fix text
+        and is not merely passing on the repair. The second fixture is the repaired sentence
+        — a guard that reds on the fix is not a guard.
+        """
+        pre_fix = (
+            "Over hosted HTTP the `tortoise_mine_knowledge_from_session` and "
+            "`tortoise_mine_knowledge_from_directory` tools are stdio-only for "
+            "security (#1090).")
+        assert self.DENIAL.search(pre_fix), (
+            f"the fixture carries no denial phrase, so it grades nothing: {pre_fix}")
+        assert self.served_names_in(pre_fix) == ["tortoise_mine_knowledge_from_session"], (
+            "the pre-fix sentence must be read as denying hosted HTTP to the SERVED door — "
+            "the row above is vacuous if this is empty")
+
+        repaired = (
+            "Over hosted HTTP, `tortoise_mine_knowledge_from_directory` is stdio-only "
+            "(security #1090) — run `tortoise serve` locally (stdio) for a folder of "
+            "transcripts.")
+        assert not self.served_names_in(repaired), (
+            "the repaired sentence must not red: it names no served door in the denying clause")
