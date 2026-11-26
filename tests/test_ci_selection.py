@@ -9258,8 +9258,10 @@ _ROW_CLAIM_AFTER_FILE_RE = re.compile(
     #: `durations`"), and `_ROW_CLAIM_CARRY_RE` already accepts it. Reading only `row` here made
     #: a truth-preserving rewrite of one enumeration item unread, and the reach arm told the
     #: editor to undo it. ⛔ THE QUALIFIER IS NOT OPTIONAL: `entry` alone is the word the block
-    #: uses for the OPPOSITE claim ("A REGISTRATION is a `surfaces` entry on ANY `surfaces` key"),
-    #: so an optional `in `durations`` read `entry in `surfaces``, `entry in `durations_floors``
+    #: uses for the OPPOSITE claim (its own words: "A REGISTRATION is a surface entry on ANY
+    #: `surfaces` key" — quoted WITHOUT backticks around "surface entry", which an earlier
+    #: revision of this comment added and thereby quoted a sentence no version of the block
+    #: carries), so an optional `in `durations`` read `entry in `surfaces``, `entry in `durations_floors``
     #: and a bare `entry` as `durations` row claims — measured, each returned the path, and the
     #: reach arm then graded a TRUE registration statement as a false row claim and told the
     #: editor to delete it. The qualifier is part of the synonym, so it is part of the match.
@@ -11122,9 +11124,13 @@ def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
             "rewrite of the block reds this arm and the diagnostic blames the matcher — the "
             f"asymmetry the round-23 review measured: {noun_negative!r}")
     # ⛔ THE UNIT-SPELLED VALUE, the positive half's mirror of the noun-inserted absence above.
-    # The block states this weight WITH a unit in its own prose ("the flat `2.0 s`
-    # `DEFAULT_FAST_WEIGHT`") and the row's note does too, while the matcher's value group read a
-    # bare number — so a unit-preserving TRUE rewrite of the one clause emptied `positive`, and the
+    # ⛔ NOT justified by the block's prose: this PR's own restructure replaced the `flat `2.0 s``
+    # `DEFAULT_FAST_WEIGHT` spelling with ``row in `durations` — `core`-registered``, and no
+    # `durations` row note carries a number with a unit beside this weight (#14623 review round 6,
+    # P1 — the same false justification `b2bc3fd892266` corrected at the sibling site and left
+    # standing here). The unit is admitted because `2.0 s` is a TRUE rewrite — `durations` carries
+    # 2.0 for those rows — and this fixture pins it. The matcher's value group read a bare number,
+    # so a unit-preserving TRUE rewrite of the one clause emptied `positive`, and the
     # non-vacuity assertion above then reported that the block named NO file at all. False block on
     # true prose, same class and same regex as the `no … row` asymmetry (MEASURED: `2.0` -> `2.0 s`
     # red, `1 failed`).
@@ -11400,7 +11406,8 @@ def test_the_row_list_alone_reaches_every_item_it_names():
             f"the row-claim matcher does not read the block's own synonym ({spelling!r}), so a TRUE "
             f"rewrite of one list item reds the reach arm: {synonym!r}")
     # ⛔ AND THE QUALIFIER IS PART OF THE SYNONYM. `entry` alone is the block's word for the
-    # OPPOSITE claim ("A REGISTRATION is a `surfaces` entry on ANY `surfaces` key"), so an optional
+    # OPPOSITE claim (its own words: "A REGISTRATION is a surface entry on ANY `surfaces` key" —
+    # no backticks around "surface entry"), so an optional
     # `in `durations`` reads a true registration statement as a `durations` ROW claim — and the
     # REACH assertion above then calls the block false about a row the map does not carry, telling
     # the editor to delete a correct registration. MEASURED before this pin, each of these returned
