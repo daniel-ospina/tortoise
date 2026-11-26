@@ -1702,13 +1702,6 @@ _NOT_A_DOC = (r"(?!\s+" + _DOC_NOUN + r"\b)"
 _CONFIRM_PREDICATE = (
     r"\b(?:confirm|check|verif(?:y|ies|ied|ying)|ensur(?:e|es|ed|ing)"
     r"|see|saw|seen|look|list)(?:ing|ed|s|es|d)?\b"
-    # ⛔ A NEGATED OBJECT IS A SYMPTOM CONDITION, NOT A CONFIRMATION. "if you see
-    # NO tools in the list" describes the failure the restart fixes — the same
-    # class this table already declares GREEN as "if you cannot see the tools in
-    # the list" — and it was RED (measured) with `no` / `none` / `zero` /
-    # `nothing`, because negation by anything but `cannot` fell through the
-    # predicate. The lookahead sits on the PREDICATE, so every form inherits it.
-    r"(?!\s+(?:no|none|zero|nothing|not)\b)"
 )
 
 
@@ -1987,6 +1980,15 @@ _CONFIG_PREP_RE = re.compile(
 # The RUNNING-SESSION half of the same question: does the clause claim the tools
 # the CURRENT session can see? Used to stop an install-side anchor from excusing
 # a clause that also makes a session-presence claim.
+# …and the same claim introduced by a coordinating `and` AFTER the object. The
+# conjunction rule below scans only BETWEEN the config noun and the first `tools`,
+# so a conjunct that follows the object was invisible and the clause was exempted
+# — "… confirming the config lists the tools AND the tools are actually there" was
+# GREEN (measured) while the same content with the conjunct BEFORE the object is a
+# declared-RED row.
+_SESSION_AND_CONJUNCT_RE = re.compile(
+    r"\band\b[^\n]*?\b(?:actually\s+there|there|listed|present|visible"
+    r"|appearing|appears?|in\s+the\s+list)\b", re.IGNORECASE)
 _SESSION_PRESENCE_RE = re.compile(
     r"\b(?:actually\s+there|there|listed|present|visible|appearing|appears?"
     r"|show(?:s)?\s+up|in\s+the\s+list)\b", re.IGNORECASE)
@@ -2037,6 +2039,20 @@ _STATEMENT_BREAK_RE = re.compile(
     r"(?:[;—–]\s*|(?:(?<=\s)-(?!-)\s+|(?<=\s)--\s+|^-\s*)"
     r"|\.\s+(?=[A-Z\"'`(\[*_>])"
     r")")
+
+# ⛔ A NEGATED *OBSERVATION* IS A SYMPTOM CONDITION, A NEGATED *INSTRUCTION* IS NOT.
+# "if you see NO tools in the list" describes the failure the restart fixes (the
+# same class as the declared-GREEN "if you cannot see the tools in the list"), so
+# it must stay GREEN. But the same words under an instruction verb are still an
+# instruction: "… but first confirm no tools are missing", "… after confirming no
+# tools are missing", "… confirm no tools are missing beforehand" are all
+# pre-restart demands and must stay RED. A predicate-wide negation lookahead could
+# not tell those apart and DISABLED forms (b)/(c)/(d) on every one of them
+# (measured — a false PASS introduced by the fix for the false red). So the rule
+# is scoped to the OBSERVATION verb itself and applied as an explicit skip.
+_OBSERVATION_NEGATION_RE = re.compile(
+    r"\b(?:see|saw|seen|seeing|notice[sd]?|noticing)\b[^\n]*?"
+    r"\b(?:no|none|zero|nothing)\b", re.IGNORECASE)
 
 # A clause that opens with one of these continues the cue FORWARD ("restart,
 # then …"), so a subordinator later in it is not a deferral of the restart.
@@ -2119,7 +2135,9 @@ def _confirmation_scopes_the_config(clause: str) -> bool:
     tail = before[config.end():]
     and_match = re.search(r"\band\b", tail, re.IGNORECASE)
     if not and_match:
-        return True
+        # …but the object may be followed by a session-presence conjunct, which
+        # the `tail` scan above cannot see because it stops at `tools`.
+        return not _SESSION_AND_CONJUNCT_RE.search(after_object)
     # The `and` only breaks the exclusion when the second conjunct is NOT
     # itself file-side: "… the config file exists and the tools are enabled in
     # it" stays file-side (the trailing pronoun points back at the file), while
@@ -2182,11 +2200,18 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     confirm the tools are actually there. Restart your client …" was GREEN
     (measured) — a real pre-cue inversion, invisible to the anchor.
 
-    Graded forms are exactly the six enumerated in `_INVERSION_FORMS`, minus
-    (i) any whose confirmation scopes the config and (ii) every clause that opens
-    with a forward sequencer (see above) — post-cue, that skip covers all six
-    forms. Rephrasings outside that set are out of scope BY DESIGN; this function
-    grades what it claims and claims only what it grades.
+    Graded forms are exactly the SEVEN patterns in `_INVERSION_FORMS` — (a), (b),
+    (c), (d), (d′), (e) and the pre-cue-only (f) — minus (i) any whose confirmation
+    scopes the config, (ii) every clause that opens with a forward sequencer (see
+    above; post-cue, that skip covers all seven), and (iii) a negated OBSERVATION
+    (`_OBSERVATION_NEGATION_RE`), which is a symptom condition rather than a
+    confirmation. ⛔ The count was stated as "six" here and in two other comments
+    while the tuple held seven: `(d′)` (an adversative leading `already`) is
+    load-bearing and was missing from every enumeration, so a reader auditing the
+    graded surface under-counted it (measured — removing (d′) flips
+    "… but confirm the tools are already there" from RED to GREEN).
+    Rephrasings outside that set are out of scope BY DESIGN; this function grades
+    what it claims and claims only what it grades.
     """
     # ⛔ EVERY CUE PARAGRAPH, not just the first. `next(...)` graded only the
     # first paragraph containing the cue, so a troubleshooting/FAQ paragraph
@@ -2284,7 +2309,8 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     # actually there**, run …" stayed GREEN (measured).
     post_clauses = [c.strip().lstrip(_PRE_CUE_PREFIX).strip() for c in merged]
     for clause in pre_clauses:
-        if _confirmation_scopes_the_config(clause):
+        if (_confirmation_scopes_the_config(clause)
+                or _OBSERVATION_NEGATION_RE.search(clause)):
             continue
         # ⛔ A PRE-CUE IMPERATIVE THAT DEFERS ITS OWN CHECK PAST THE RESTART IS
         # FORWARD: "Check the tools after restarting. Restart your client, then
@@ -2308,8 +2334,9 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
         # tools are listed, run …)" was RED (measured) while its bare twin was
         # GREEN. (The em-dash twin is protected by the STATEMENT BREAK instead —
         # the dash ends the window, so it never reaches this clause.)
-        if (_FORWARD_SEQUENCER_RE.match(clause.lstrip('—–-:;…(\'" \t'))
-                or _confirmation_scopes_the_config(clause)):
+        if (_FORWARD_SEQUENCER_RE.match(clause)
+                or _confirmation_scopes_the_config(clause)
+                or _OBSERVATION_NEGATION_RE.search(clause)):
             continue
         for pattern in _INVERSION_FORMS:
             if pattern is _PRE_CUE_ONLY:
@@ -2422,9 +2449,10 @@ def test_3232_generic_restart_lines_are_exact():
     #   the post-cue scan cannot see).
     # - It is NOT an open-ended inversion detector. "… when the tools appear";
     #   "after making sure the tools …"; and any other rephrasing outside those
-    #   six are deliberately NOT graded — widening a prose denylist is how both
-    #   defects this pin fixes got in. The comment and the assert message claim
-    #   only the six, so neither outruns the measurement.
+    #   SEVEN (a, b, c, d, d′, e, and the pre-cue-only f) are deliberately NOT
+    #   graded — widening a prose denylist is how both defects this pin fixes got
+    #   in. The comment and the assert message claim only the seven, so neither
+    #   outruns the measurement.
     # - A confirmation scoped to the CONFIG stays GREEN: the file is readable
     #   without a restart, so "Restart your client after verifying the config
     #   lists the tools" is forward copy, not an inversion — UNLESS the clause
@@ -2637,6 +2665,23 @@ def test_3232_generic_restart_lines_are_exact():
     # RED because negation by anything but `cannot` fell through the predicate:
     ("Restart your client if you see no `tortoise_*` tools.", False),
     ("Restart your client if you see zero tools in the list.", False),
+    ("Restart your client after you have seen no tools in the list.", False),
+    # ── …but a NEGATED INSTRUCTION is still an instruction. These were GREEN
+    # while the negation rule was a PREDICATE-WIDE lookahead, which therefore
+    # disabled forms (b)/(c)/(d) on every one of them (measured) — the false PASS
+    # the scoped `_OBSERVATION_NEGATION_RE` skip exists to close:
+    ("Restart your client, but first confirm no tools are missing.", True),
+    ("Restart your client after confirming no tools are missing.", True),
+    ("Restart your client, confirm no tools are missing beforehand.", True),
+    # ── a session-presence conjunct AFTER the object. The conjunction rule scans
+    # only between the config noun and the first `tools`, so this shape was
+    # exempted while the same content with the conjunct BEFORE the object reds
+    # (measured) — `_SESSION_AND_CONJUNCT_RE` closes it:
+    ("Restart your client after confirming the config lists the tools and the "
+     "tools are actually there.", True),
+    # ── form (d′) is the seventh form and appeared in no enumeration; this row is
+    # what proves it is load-bearing (removing (d′) flips it RED → GREEN):
+    ("Restart your client, but confirm the tools are already there.", True),
     # ── form (f)'s `see` verb, which carried no discriminating row (every other
     # `See the tools …` row is doc-excluded and stayed GREEN either way):
     ("See the tools are actually there. Restart your client, then confirm the "
