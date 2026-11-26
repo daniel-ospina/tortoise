@@ -11,7 +11,8 @@
 // WHAT IT MUST NOT DO, because the old inline block did: render an incident
 // heading over an observation. The incident register's heading and lead are
 // emitted ONLY when that register has rows; the activity register has its own
-// muted heading and states that nothing was changed. An empty feed renders
+// muted heading and states that nothing was DISABLED (a `flag` row does write
+// `flagged_at`, so "changed" is not the verb — see `ACTIVITY_LEAD`). An empty feed renders
 // nothing at all (the panel is unmounted by the caller), so a customer with no
 // history does not get an empty "Security alerts" box implying something.
 //

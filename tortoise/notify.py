@@ -918,7 +918,12 @@ def _adopt_legacy_subject(store, incident_kind: str, subject: str,
 
 
 def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
-    """A state-change class: the INCIDENT owns the message (#14407).
+    """A human-work-item class: the INCIDENT owns the message (#14407).
+
+    ⛔ NOT "a state-change class": two of ``ABUSE_INCIDENT_KINDS``' three members
+    (``abuse_flag``, ``abuse_review_needed``) are re-derived rate MEASUREMENTS and
+    only ``abuse_suspended`` changes state (see the module docstring, and the
+    ``else`` arm of the ``what`` expression below).
 
     One decision point for both channels — the store's create-once object files
     the issue AND emits the single Telegram push for the lifecycle, so the human

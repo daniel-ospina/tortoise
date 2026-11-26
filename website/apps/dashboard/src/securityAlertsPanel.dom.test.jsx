@@ -15,8 +15,9 @@
 //   1. a notify-only `read_velocity` row NEVER renders under "Security alerts",
 //      and the incident lead sentence appears only when that register is
 //      non-empty — the defect itself, at the level a user sees it;
-//   2. the activity register states that nothing was changed, and the panel
-//      never prints the blanket imperative;
+//   2. the activity register states that nothing was DISABLED (not "changed" —
+//      a `flag` row writes `flagged_at`), and the panel never prints the blanket
+//      imperative;
 //   3. an aged row carries its age and collapses behind "Show older";
 //   4. an acknowledged row leaves the current list and is still reachable
 //      (tagged) — a dismissal that evaporates is not a dismissal;
@@ -115,7 +116,7 @@ test('#10156: a velocity row renders under Recent activity, never under Security
   assert.ok(text(container).includes(ACTIVITY_LEAD))
 })
 
-test('#10156: the activity register says nothing was changed, and the panel never prints the blanket imperative', () => {
+test('#10156: the activity register says nothing was disabled, and the panel never prints the blanket imperative', () => {
   const { container } = renderPanel({ alerts: [velocity] })
   // SCOPED (round-23 review finding): "nothing was changed, disabled or locked"
   // absolute is a whole-org-state claim, and the panel can render this lead right

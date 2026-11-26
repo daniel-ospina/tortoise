@@ -24,8 +24,13 @@
 //                        the account's state changed, a human acted, or an
 //                        authenticated credential event (a new-country sign-in)
 //                        occurred. Only this register carries incident framing.
-//   * REGISTER_ACTIVITY — a detector MEASURED a rate and changed nothing.
-//                        Muted, no verb, no instruction.
+//   * REGISTER_ACTIVITY — a detector MEASURED a rate and DISABLED nothing.
+//                        It may still MARK what it measured (`flagged_at`,
+//                        which `/v1/team` renders as status "flagged") — #14687
+//                        moved `flag`/`review_needed` here, and a `flag` row
+//                        DOES write that column, so "changed nothing" is the
+//                        one claim this register cannot make. Muted, no verb,
+//                        no instruction.
 //
 // An entry with no (or an unknown) `register` is treated as ACTIVITY. That
 // default is fail-quiet on purpose: incident framing is a claim that something

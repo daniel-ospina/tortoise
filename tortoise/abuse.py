@@ -167,7 +167,10 @@ ALERT_TYPES = (EVENT_FLAG, EVENT_REVIEW, EVENT_SUSPEND, EVENT_AUTH_IP,
 #                            a human acted, or an authenticated credential
 #                            event (a sign-in from a new country) occurred.
 #   * ``REGISTER_ACTIVITY`` — a detector OBSERVED a rate. It measured; it
-#                            changed nothing. Informational, muted, no verb.
+#                            disabled NOTHING (it may still have written
+#                            ``flagged_at``, which is a MARKER — the same
+#                            write-not-the-fact distinction this map applies
+#                            below). Informational, muted, no verb.
 #
 # A type missing from this map defaults to ACTIVITY (see ``_alert_dict``): an
 # unknown signal must never be presented as an incident, because incident

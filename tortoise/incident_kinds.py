@@ -240,9 +240,12 @@ KIND_ABUSE_ENFORCEMENT_FAULT = "ABUSE_ENFORCEMENT_FAULT"
 #: no incident, runbook or search could attribute (measured while filing: 0
 #: abuse-titled issues in either tracker, while the owner kept receiving the
 #: alerts). It is an incident kind now for the same reason its two siblings are:
-#: a flag IS a state change (#10156 puts ``EVENT_FLAG`` in the ALERT register),
-#: and the durable, assignable artifact is what makes the notification
-#: answerable. SCREAMING_CASE because it is added long after #4780 — the two
+#: a flag is a HUMAN WORK ITEM — the rate is re-derived on every evaluation and
+#: enforces nothing, and #14687 moved ``EVENT_FLAG`` to the ACTIVITY register on
+#: the CUSTOMER side precisely because it is not a state change (the earlier
+#: "#10156 puts ``EVENT_FLAG`` in the ALERT register" citation is no longer that
+#: map's answer) — and the durable, assignable artifact is what makes the
+#: notification answerable for the operator. SCREAMING_CASE because it is added long after #4780 — the two
 #: grandfathered lowercase spellings below are FROZEN keys and are not a
 #: precedent for a new one.
 KIND_ABUSE_FLAG_RAISED = "ABUSE_FLAG_RAISED"
