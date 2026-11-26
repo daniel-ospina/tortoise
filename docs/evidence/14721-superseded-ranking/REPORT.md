@@ -211,20 +211,28 @@ forward), and it now forwards `**kwargs`.
 
 ## 6. Proof the tests fail on the pre-fix code
 
-`tortoise/ranking.py` restored to `HEAD~1`, same suite, same graph lane:
+`tortoise/ranking.py` restored to `origin/main`, same suite, same graph lane:
 
 ```
 FAILED test_14721_superseded_never_outranks.py::test_the_superseded_claim_never_outranks_its_successor
 FAILED test_14721_superseded_never_outranks.py::test_a_history_read_keeps_the_replaced_claim
 FAILED test_14721_superseded_never_outranks.py::test_a_supersession_chain_resolves_to_the_newest_claim
+FAILED test_14721_superseded_never_outranks.py::test_a_four_link_chain_resolves_too
+FAILED test_14721_superseded_never_outranks.py::test_a_successor_beyond_the_page_does_not_drag_the_pair_out_of_it
 FAILED test_14721_superseded_never_outranks.py::test_the_order_is_deterministic_for_rows_that_are_not_in_violation
-4 failed, 1 passed
+6 failed, 2 passed
 ```
 
-The one that passes pre-fix is the deliberate **negative control**
-(`test_a_superseded_claim_whose_successor_is_absent_keeps_its_rank`): with no successor in the page
-there is nothing to outrank, so no reordering may happen — before or after. A test that failed there
-too would be evidence of a blanket penalty rather than the pairwise rule.
+The two that pass pre-fix are the deliberate **negative controls**, and both are supposed to:
+
+* `test_a_superseded_claim_whose_successor_is_absent_keeps_its_rank` — with no successor in the
+  result set there is nothing to outrank, so no reordering may happen before *or* after.
+* `test_two_unidentifiable_rows_are_never_reordered_by_each_other` — a pre-fix ranker imposes no
+  order at all, so it trivially cannot lose a row. The test exists to pin the *fix* from regressing
+  into the non-injective-id defect, not to demonstrate the fix.
+
+A suite where all eight failed pre-fix would be evidence of a blanket penalty rather than the
+pairwise rule.
 
 ## 7. Findings this lane did NOT fix (recorded, not widened)
 
