@@ -9385,8 +9385,11 @@ def _row_claims(header: str) -> list[str]:
     was live in this very block: "… and `#14671`'s
     `tests/test_13450_ep_position_axis_participation.py` — `core`-registered, carrying its own
     `durations` row …", where the claim word sat past a `core`-registered clause instead of
-    beside the path — six tokens and 51 characters away, measured on the OLD sentence quoted
-    right here, so that distance is fixed history rather than a figure restated from a run.
+    beside the path — six tokens away, measured on the OLD sentence quoted right here, so that
+    distance is fixed history rather than a figure restated from a run. ⛔ The token count is the
+    whole figure: a character span stood here and did not reproduce against the text it named — the
+    quoted sentence is wrapped, so its width depends on which form is measured — which is the
+    restated-figure class again, so no character span is stated.
     MEASURED: `_row_claims` omitted the file, and DELETING its `durations` row left all six of
     this PR's arms GREEN — the exact "a claim graded by nothing rots" class the block exists to
     warn about, reproduced in the matcher cut to catch it. The sentence was re-spelled to
