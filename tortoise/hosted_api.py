@@ -221,7 +221,7 @@ from tortoise.record_projection import NARRATIVE_RECORD_TYPE
 # hardcoded copy would drift in the one direction that matters — a renamed token
 # would route a NON-DURABLE journal into the durable branch and downgrade the
 # "stored NOWHERE" ERROR to a WARNING.
-from tortoise.record_writer import NON_DURABLE_JOURNAL_REFUSAL
+from tortoise.record_writer import NON_DURABLE_JOURNAL_REFUSAL, uncut_graph_remedy
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.retrieval_metering import (  # #4489: pure-ASGI retrieval-work flusher
     RetrievalMeteringMiddleware as _RetrievalMeteringMiddleware,
@@ -8463,6 +8463,28 @@ _UNCUT_CLEARS_NOTE = (
     "clear only on restart"
 )
 
+#: ⛔ WHAT A `halted` GRAPH IS ACTUALLY LOSING, published BESIDE
+#: `record.armed_but_halted` (#14610 review F2). The `ok` fold deliberately does
+#: NOT include the halted population — a halt is an OPERATOR's decision and a
+#: sanctioned red would be permanent — but that is a reason not to RED the
+#: deployment, never a reason to claim the graph is unharmed. It is not: a halted
+#: row refuses the allocator's arm (`ALLOCATION_SQL` is scoped `mode = 'active'`)
+#: and, with the writer flag off, refuses the enumerated replay too (the row, not
+#: the mode, is the fact), so its record accumulates NOTHING until an operator
+#: reopens it. Publishing the count WITHOUT that sentence leaves an operator
+#: reading a number whose cost is invisible — the asymmetric half of the same
+#: latch class `_UNCUT_CLEARS_NOTE` exists for.
+_HALTED_CLEARS_NOTE = (
+    "an OPERATOR's stop: a halted graph's record writes are REFUSED until "
+    "`record_allocator_cli.py reopen --org-id <org> --graph-id <graph>` -> "
+    "`seed --org-id <org> --graph-id <graph> --journal <path>` -> `arm "
+    "--org-id <org> --graph-id <graph> --acknowledge-cutover`. It is published "
+    "BESIDE `armed_but_halted` and deliberately NOT folded into `ok`: a halt is "
+    "an operator's decision, so a sanctioned red would be permanent — but the "
+    "record accumulates NOTHING for that graph until the reopen, so a deployment "
+    "carrying a halted graph is losing that graph's record rows silently"
+)
+
 
 def _record_health() -> dict:
     """#9548: is the Postgres record ARMED on THIS deployment? — for /health.
@@ -8646,6 +8668,9 @@ def _record_health() -> dict:
                 # rather than a measurement — the clear route does not depend on
                 # the snapshot that failed.
                 "armed_but_uncut_clears": _UNCUT_CLEARS_NOTE,
+                # #14610 review F2: a constant too, so the halted population's
+                # cost and cure are published on the failed-snapshot arm as well.
+                "armed_but_halted_clears": _HALTED_CLEARS_NOTE,
                 # Present-and-null for the same reason (#12943): a missing key
                 # must not read as "the cache is fine".
                 "cache_leg_failures": None,
@@ -8719,6 +8744,12 @@ def _record_health() -> dict:
         # documented `backfill` must be told that this process's entry stays red
         # until it observes the graph again or restarts.
         "armed_but_uncut_clears": _UNCUT_CLEARS_NOTE,
+        # ⛔ THE HALTED POPULATION IS NOT IN `ok`, BUT IT IS NOT HARMLESS EITHER
+        # (#14610 review F2). Publishing only the count let a deployment carry
+        # halted graphs — each LOSING its record rows — while the payload read as
+        # a ratio with no consequence and no verb. A constant, so it is published
+        # on every arm.
+        "armed_but_halted_clears": _HALTED_CLEARS_NOTE,
         # ⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW (#10185/#10620). ``None``
         # is "not evaluated" (the counter snapshot could not be read); ``False``
         # is "no armed write was refused inside the window"; ``True`` is "rows
@@ -31043,11 +31074,13 @@ def _provision_graph_record(org_id: str, graph_id: str) -> None:
     here can undo a graph; and a record outage must not 500 a user's graph
     creation when the record itself is optional and `write_live_record` is
     fail-soft by contract. What is NOT acceptable is silence, and that is what
-    `/health`'s `record.armed_but_uncut` + `record_allocator_cli.py backfill`
+    `/health`'s `record.armed_but_uncut` + :func:`record_writer.uncut_graph_remedy`
     are for. ⛔ The two are DIFFERENT repairs and the operator needs both halves:
-    the backfill heals the RECORD in its own process, while `/health`'s entry is
+    the arming verb heals the RECORD in its own process, while `/health`'s entry is
     process memory and clears on that graph's next armed write here or on a
     restart (published as `record.armed_but_uncut_clears`, #14610 review F3).
+    ⛔ AND IT IS NOT A BARE `backfill` (#14610 review F1): that only SEEDS the
+    row, and a `seeded` row allocates nothing — the remedy must name the ARM.
     (The atomic form the plan asked for — §A7.8 item 8's
     one-transaction RPC — is not buildable from here: the record's app role has
     no grant on `public.graphs`. Tracked against #14582.)
@@ -31059,10 +31092,14 @@ def _provision_graph_record(org_id: str, graph_id: str) -> None:
     except Exception:
         _logger.error(
             "graph %s (%s) was created but its record cursor could NOT be "
-            "provisioned (the record seam is unimportable) — every record this "
-            "graph writes is refused until it is seeded: run "
-            "`uv run python tools/record_allocator_cli.py backfill --org-id %s`",
-            graph_id, org_id, org_id, exc_info=True)
+            "provisioned (the record seam is unimportable, or the provision "
+            "itself failed) — every record this graph writes is refused until "
+            "its row is ARMED: %s",
+            # `uncut_graph_remedy` is bound at MODULE level, so the handler
+            # cannot hit the `UnboundLocalError` that a function-local import
+            # would raise here (the LOCAL `provision_graph_record` above is
+            # exactly the import that fails on the arm this handler exists for).
+            graph_id, org_id, uncut_graph_remedy(org_id), exc_info=True)
 
 
 async def _graph_quota_gate(org: dict) -> None:

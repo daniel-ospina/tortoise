@@ -2146,3 +2146,251 @@ def _conn():
     conn = psycopg2.connect(_app_dsn())
     conn.autocommit = False
     return conn
+
+
+# ── DB-free: the #14610 review's F1/F2/P2 findings, one pin each ───────────
+#
+# Every case below reds on the PRE-FIX tree. They exist because the suite pinned
+# the hook's wiring, the registry arithmetic and `/health`'s fold — and NOT the
+# sentence an operator is told to RUN. `backfill` alone is HALF a remedy, and a
+# half remedy is the latch class the whole fold exists to avoid: the operator
+# does the documented thing, the command exits 0, and the field stays red.
+
+def test_the_uncut_remedy_names_the_whole_arming_chain():
+    """⛔ F1 (#14610 review): `backfill` is HALF a remedy, and four sites named it.
+
+    `backfill` seeds; `ALLOCATION_SQL` is scoped `AND mode = 'active'`, so a
+    `seeded` row allocates nothing — the graph's writes stay refused
+    `cursor_not_active`, `/health` keeps folding `ok: false`, and on a deployment
+    whose `TORTOISE_RECORD_ALLOCATE` is not yet rolled the new row also REFUSES
+    the enumerated replay that graph was still landing records through
+    (`_refuse_an_enumerated_replay`: the ROW, not the mode, is the fact). So the
+    remedy must name the ARM, and every operator-facing site must publish that
+    one text rather than a second copy that can drift.
+    """
+    remedy = rw.uncut_graph_remedy("org-14610")
+    assert "backfill" in remedy, remedy
+    assert "--arm" in remedy, (
+        "the remedy must arm the graph: a bare `backfill` leaves the row "
+        f"`seeded`, which allocates nothing — got {remedy!r}")
+    assert "--acknowledge-cutover" in remedy, (
+        "arming is the per-graph cutover the CLI refuses without an "
+        f"acknowledgement — got {remedy!r}")
+    assert "org-14610" in remedy, "the org id must be interpolated, not left as <org>"
+
+    # The operator-facing homes, and how many times each must reach the ONE
+    # builder. `provision_graph_record` has two (the failed provision and the
+    # failed commit).
+    #
+    # ⛔ #14610 review F1 moved ONE site behind a helper, and the move IS the fix:
+    # the default-row HANDLER in `supabase_control` cannot name the builder
+    # directly, because the `from … import` that would bind it is the very import
+    # that fails on the arm the handler exists for (a function-local import makes
+    # the name LOCAL, so the unbound name raises `UnboundLocalError` while the
+    # message is being built). So that handler is pinned to its helper (the
+    # assertion after this loop) and the helper is pinned to the ONE builder.
+    sites = (
+        ("tortoise/record_writer.py", "_warn_uncut_graph", 1),
+        ("tortoise/record_writer.py", "provision_graph_record", 2),
+        ("tortoise/hosted_api.py", "_provision_graph_record", 1),
+        ("tortoise/supabase_control.py", "_arming_remedy_for_log", 1),
+    )
+    missing = []
+    for rel, function, want in sites:
+        node = _functions(rel).get(function)
+        assert node is not None, f"{rel}::{function} is gone — re-run the census"
+        got = _hook_calls(node, "uncut_graph_remedy")
+        if got < want:
+            missing.append(f"{rel}::{function} calls uncut_graph_remedy× "
+                           f"(want {want}, got {got})")
+    assert not missing, (
+        f"these operator-facing remedies do not name the arming chain: {missing}. "
+        "A log line naming only `backfill` sends an operator to a command that "
+        "seeds the row, cuts nothing over, and leaves `/health` red — the defect "
+        "the change fixed elsewhere, applied to the sentence that names the command")
+
+    # The second hop (#14610 review F1): the HANDLER must reach its helper, or the
+    # helper above is a site nothing calls.
+    handler = _functions("tortoise/supabase_control.py").get(
+        "_provision_default_graph_record")
+    assert handler is not None, (
+        "`supabase_control._provision_default_graph_record` is gone — re-run the "
+        "census")
+    assert _hook_calls(handler, "_arming_remedy_for_log") >= 1, (
+        "the default-row handler no longer names the arming remedy at all, so its "
+        "ERROR tells an operator the row is uncut and not how to cut it over")
+
+
+def test_the_arming_remedy_for_log_cannot_drift_from_the_one_home():
+    """⛔ F1's never-raise arm: the fallback literal must BE the builder's output.
+
+    `supabase_control` keeps the record seam lazy, so the handler cannot bind
+    `uncut_graph_remedy` from the import that just failed. Its fallback literal is
+    therefore a second copy — and a second copy that drifts is exactly the defect
+    F1 closed. This pins the two to each other byte for byte.
+
+    NON-VACUITY: a fallback still naming a bare `backfill` differs here by
+    `--arm --acknowledge-cutover`.
+    """
+    from tortoise import supabase_control
+
+    got = supabase_control._arming_remedy_for_log("org-14610")
+    assert got == rw.uncut_graph_remedy("org-14610"), (
+        "the arming log fallback has drifted from `record_writer."
+        f"uncut_graph_remedy`: {got!r} != {rw.uncut_graph_remedy('org-14610')!r}")
+
+
+def _modes():
+    """The allocator's own mode spellings, read rather than transcribed."""
+    from tortoise import record_allocator as ra
+    return ra.MODE_SEEDED, ra.MODE_HALTED, ra.MODE_ACTIVE
+
+
+def test_the_remedy_is_state_aware_because_one_command_cannot_reach_both():
+    """⛔ P2 (#14610 review): the published remedy could not reach `mode_seeded`.
+
+    The `armed_but_uncut` registry files a graph whose row EXISTS in mode
+    `seeded` under reason `mode_seeded`, and the message published for it named
+    the POPULATION verb — `backfill --arm --acknowledge-cutover`. That verb walks
+    `UNCUT_GRAPHS_SQL`, which keeps `c.graph_id IS NULL`, so a `seeded` graph is
+    excluded from its own remedy's population: MEASURED against a seeded row, it
+    printed `considered: 0, seeded: 0, refused: 0, armed: 0` and returned
+    `EXIT_OK` while the record leg stayed refused and `/health` stayed non-`ok`.
+    The verb that cures it is the single-graph `arm` (`ARM_SQL` is scoped
+    `AND mode = 'seeded'`), and a `halted` row needs `reopen` first because `arm`
+    refuses it BY DESIGN.
+
+    NON-VACUITY: pre-fix this function took no keyword arguments at all, so this
+    call raises `TypeError` — and even a caller that could pass them would get
+    the population verb back, which is the assertion below that fails.
+    """
+    seeded, halted, _active = _modes()
+
+    population = rw.uncut_graph_remedy("org-14610")
+    assert "backfill" in population and "--arm" in population, population
+
+    seeded_remedy = rw.uncut_graph_remedy(
+        "org-14610", graph_id="g_seeded", reason=f"mode_{seeded}")
+    assert "backfill" not in seeded_remedy, (
+        "a `mode_seeded` graph is OUTSIDE `backfill`'s population (`c.graph_id "
+        "IS NULL`), so publishing it is a false clean — the command exits 0 "
+        f"over 0 graphs — got {seeded_remedy!r}")
+    assert "arm" in seeded_remedy and "--graph-id g_seeded" in seeded_remedy, (
+        "the single-graph verb must name BOTH the graph and the arm — got "
+        f"{seeded_remedy!r}")
+    assert "org-14610" in seeded_remedy and "--acknowledge-cutover" in seeded_remedy, (
+        f"a remedy that is not runnable as printed is not a remedy — got {seeded_remedy!r}")
+
+    halted_remedy = rw.uncut_graph_remedy(
+        "org-14610", graph_id="g_halted", reason=f"mode_{halted}")
+    assert "reopen" in halted_remedy and halted_remedy.index("reopen") < (
+        halted_remedy.index("arm --org-id")), (
+        "`ARM_SQL` is scoped `mode = 'seeded'`, so naming `arm` for a HALTED row "
+        "sends an operator to a no-op; `reopen` must come first — got "
+        f"{halted_remedy!r}")
+
+    # A reason this function cannot place keeps the population verb, which is the
+    # correct one for the no-row population it names.
+    for other in ("no_cursor_row", "provision_failed", "malformed_dsn", None):
+        got = rw.uncut_graph_remedy("org-14610", graph_id="g_1", reason=other)
+        assert "backfill" in got, (other, got)
+
+
+def test_the_warning_publishes_the_verb_that_reaches_the_observed_state(caplog):
+    """The LOG SITE, not just the builder: `_warn_uncut_graph` knows the reason.
+
+    It is the one site that has both the reason and the graph at hand, so it is
+    the site that can publish a command an operator can paste. It passed NEITHER
+    before this fix (`uncut_graph_remedy()` was not called at all), so the line
+    for a `mode_seeded` graph named the wrong verb — which is the P2 in its
+    shipped form.
+
+    NON-VACUITY: pre-fix the emitted line carries `backfill` and no `--graph-id`.
+    """
+    import logging
+
+    seeded, _halted, _active = _modes()
+    rw.reset_uncut_graphs()
+    with caplog.at_level(logging.WARNING, logger=rw._logger.name):
+        rw._warn_uncut_graph("org-14610", "g_seeded", reason=f"mode_{seeded}")
+    line = " ".join(r.getMessage() for r in caplog.records)
+    assert "g_seeded" in line and "org-14610" in line, line
+    assert "backfill --org-id" not in line, (
+        "the warning for a `mode_seeded` graph still names the population verb, "
+        f"which cannot reach it — got {line!r}")
+    assert "arm --org-id org-14610 --graph-id g_seeded" in line, (
+        f"the warning must name the verb that reaches this graph — got {line!r}")
+
+
+def test_reset_uncut_graphs_also_resets_the_warning_throttle(caplog):
+    """P3 (#14610 review cycle 3): the reset seam left the throttle populated.
+
+    `reset_uncut_graphs` documented itself as zeroing "the registry" and cleared
+    three of the four maps this module keeps for it, so a process that re-armed
+    kept SUPPRESSING the per-graph warning for up to `UNCUT_GRAPH_WARN_SECONDS`
+    after the state it warned about was reset. `tests/conftest.py` papered over it
+    by clearing the map from the outside, which also meant the production seam
+    was untested; that direct clear is gone, so this test is the only thing
+    keeping the suite honest about it.
+
+    NON-VACUITY: pre-fix, the second `_warn_uncut_graph` call is throttled and
+    `caplog` holds ONE record, so the length assertion reds.
+    """
+    import logging
+
+    rw.reset_uncut_graphs()
+    with caplog.at_level(logging.WARNING, logger=rw._logger.name):
+        rw._warn_uncut_graph("org-14610", "g_throttle", reason="no_cursor_row")
+        rw.reset_uncut_graphs()
+        rw._warn_uncut_graph("org-14610", "g_throttle", reason="no_cursor_row")
+    lines = [r for r in caplog.records if "g_throttle" in r.getMessage()]
+    assert len(lines) == 2, (
+        "`reset_uncut_graphs()` must clear the per-graph warning throttle as well "
+        f"as the registry — got {len(lines)} warning(s)")
+
+
+def test_the_halted_population_publishes_its_cost_and_its_remedy(monkeypatch):
+    """⛔ F2 (#14610 review): a halted graph is NOT in `ok`, but it is NOT free.
+
+    The `ok` fold deliberately excludes the halted population — a halt is an
+    operator's decision, so a sanctioned red would be permanent. That is a reason
+    not to RED the deployment, never a reason to claim the graph is unharmed. It
+    is not: a halted row refuses the allocator's arm (`ALLOCATION_SQL` is scoped
+    ``mode = 'active'``) and, with the writer flag off, refuses the enumerated
+    replay too (the ROW, not the mode, is the fact), so its record accumulates
+    NOTHING until an operator reopens it. Publishing only the count left the cost
+    and the verb invisible — a number with no consequence reads as nothing.
+
+    NON-VACUITY: pre-fix the payload has no `armed_but_halted_clears` key at all,
+    so the first assertion reds with a `KeyError`.
+    """
+    from tortoise import record_projection
+
+    rw.reset_uncut_graphs()
+    try:
+        dsn = "postgresql://u:p@127.0.0.1:1/record"
+        rw.note_uncut_graph("org-14582", "graph-halted",
+                            reason=f"mode_{record_projection.MODE_HALTED}")
+        block = _health(monkeypatch, dsn=dsn)
+
+        note = block["armed_but_halted_clears"]
+        assert isinstance(note, str) and note, (
+            "`/health` publishes `armed_but_halted` and no sentence saying what "
+            "the deployment is losing or how to clear it")
+        for verb in ("reopen", "seed", "arm", "--acknowledge-cutover"):
+            assert verb in note, (
+                f"the halted remedy must name `{verb}` — the reopen -> seed -> "
+                f"arm chain is the only route back — got {note!r}")
+        assert "NOTHING" in note or "nothing" in note, (
+            "the note must state that the record accumulates NOTHING while "
+            f"halted, or the halt reads as free — got {note!r}")
+        # The `ok` fold still EXCLUDES the halted population: the note is the
+        # honest half, not a reason to red the deployment.
+        assert block["armed_but_halted"] == 1
+        assert block["ok"] is True, (
+            "a halt is an operator's decision — it must NOT fold into `ok`; the "
+            "note is what carries the cost")
+        # Published on the failed-snapshot arm too, because it is a constant.
+        assert _health(monkeypatch, dsn=None)["armed_but_halted_clears"] == note
+    finally:
+        rw.reset_uncut_graphs()

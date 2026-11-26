@@ -672,6 +672,16 @@ def _isolate_process_env():
 def _isolate_record_health_registry():
     """⛔ PROCESS-MEMORY HEALTH STATE MUST NOT CROSS TESTS (#14624 review F2).
 
+    ⛔ THIS *IS* #14610's `_no_ambient_uncut_graphs`, under a different name.
+    #14610 calls the same fixture `_no_ambient_uncut_graphs`; a grep for that
+    name in this tree returns nothing, which reads as "the isolation is missing"
+    when it is present and autouse. Do not add a second one: two autouse fixtures
+    resetting one registry is one reset too many to reason about, and the census
+    that compares the two branches by GREPPED NAME is what produced the false
+    absence. The reset itself now also clears the per-graph warning throttle,
+    because #14610 review cycle 3 fixed `reset_uncut_graphs` to clear it and this
+    fixture deliberately does not reach into the module's private maps.
+
     `tortoise.record_writer`'s two `/health` populations (`_UNCUT_GRAPHS`,
     `_UNCUT_HALTED`) and their overflow counters are MODULE GLOBALS fed from the
     WRITE PATH, so a live leg that writes a real point on a graph with no cursor
