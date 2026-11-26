@@ -93,7 +93,17 @@ async def _call(client, tool, args):
         # Without this arm a FAILED call is indistinguishable from an ANSWERED-EMPTY
         # one, so a re-run of this probe can publish a timeout as a silent door —
         # which is exactly how D4 was first published from calls that never ran
-        # (`run_readback.py`'s own note). One predicate, not a second spelling.
+        # (`run_readback.py`'s own note).
+        # ⛔ THIS IS A DELIBERATE MIRROR OF `run_readback.py`'s ARM, NOT A SHARED
+        # PREDICATE, and saying so is the point: `score_t6.call_failed` is the
+        # bundle's ONE predicate, but it decides over a CALL DICT, while the flag
+        # here lives on the MCP RESULT OBJECT (`res.isError`) that has not become a
+        # dict yet. This probe deliberately imports nothing from the bundle — it is
+        # run standalone from `/tmp` and must not depend on the checkout it reads
+        # (#14691 review, cycle 3, P2). The consequence is that the two spellings
+        # CAN drift, so the mirror is pinned by
+        # `tests/test_14691_structure_evidence.py::test_the_PEER_probe_keeps_the_MCP_error_arm`
+        # rather than left to a comment.
         if getattr(res, "isError", None) is True or getattr(res, "is_error",
                                                             None) is True:
             return {"tool": tool, "args": args, "ok": False,
