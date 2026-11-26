@@ -383,19 +383,35 @@ function firstMsOf(alert) {
  * Organization` (a message with no rule token, so EVERY flag rule shares it)
  * hid a suspension that happened a week later.
  *
- * ⛔ BOTH registers are bounded, and the bounds are DIFFERENT — mirroring
- * `_episode_acknowledged`, not approximating it:
+ * ⛔ BOTH registers are bounded, and the bounds are DIFFERENT — the same two
+ * rules `_episode_acknowledged` applies, mirrored as far as the facts this
+ * store persists allow (the narrowings are named below):
  *
  *   • INCIDENT (`alert` register) — the watermark test: an incident that
  *     HAPPENED after the dismissal is not covered. Each row is a new FACT, and
  *     folding it into the dismissed episode hides it.
  *
- *   • ACTIVITY (measurement) — the server's GAP test: a bout whose START is
- *     within `EPISODE_GAP_MS` of the dismissed window's END is the same ongoing
- *     measurement, so one dismissal covers it; a bout that starts LATER than
- *     that gap is a genuinely new bout and renders as CURRENT. There is no
- *     incident-style watermark here because a velocity row legitimately re-reports
- *     every five minutes with a newer `at`.
+ *   • ACTIVITY (measurement) — the server's GAP test, applied FORWARD ONLY: a
+ *     bout whose START is 0…`EPISODE_GAP_MS` after the dismissed window's END is
+ *     the same ongoing measurement, so one dismissal covers it; a bout that
+ *     starts LATER than that gap is a genuinely new bout and renders as CURRENT.
+ *     There is no incident-style watermark here because a velocity row
+ *     legitimately re-reports every five minutes with a newer `at`.
+ *
+ * ⚠️ THE TWO DELIBERATE NARROWINGS, stated so a reader does not assume an exact
+ * mirror. The server matches `overlap or (0 <= delta <= gap_s)` because it holds
+ * the acknowledged window's FIRST and LAST rows; this module persists only the
+ * END (`dismissedLast`), so the overlap arm cannot be evaluated and the lower
+ * bound of the gap arm is not applied — an episode whose START precedes the
+ * dismissed window's end is covered (`delta < 0 ⇒ covered`) rather than resolved
+ * by overlap. Both narrowings fire in exactly ONE situation: an episode that
+ * ENDED before the acknowledged window BEGAN (server: CURRENT, here: covered).
+ * Neither can ever hide a LATER bout, which is the direction `abuse.py`'s
+ * docstring rejects. A `dismissedFirst` map would close it; a third persisted
+ * map is not worth it to make an already-ended older episode of an identity the
+ * reader has just dismissed re-appear as CURRENT. Pinned by
+ * `notificationLedger.test.js` ("an episode that ENDED before the dismissed one
+ * began is still covered"), so a future change has to argue with this choice.
  *
  * ⚠️ THIS FUNCTION USED TO RETURN `true` UNCONDITIONALLY FOR ACTIVITY, on the
  * stated grounds that "that asymmetry is the server's". It is not: the server
@@ -585,9 +601,13 @@ function newestFirst(a, b) {
  *               presented as current, not so it becomes unreachable.
  *    snoozed  — hidden for now, listed (with a deadline) so they can be un-snoozed.
  *               A snooze with no way back is a delete.
- *    acked    — acknowledged SERVER-side (org-wide); not listed at all. This is
- *               the durable dismissal, and re-listing it would be the bug the
- *               owner reported.
+ *    acked    — acknowledged SERVER-side (org-wide). NEVER counted in
+ *               `unresolved` and never mixed into `current`/`older`: presenting
+ *               an acknowledged row as CURRENT is the bug the owner reported.
+ *               It IS listed — behind the panel's `ACKED_TOGGLE`, read-only —
+ *               because an org-wide, cross-device, IRREVERSIBLE decision needs a
+ *               reviewable record; the collapsed group is what keeps "listed"
+ *               from becoming "presented as current" (#14694 review finding).
  *    dismissed— locally dismissed ("for you"); listed behind its own toggle so
  *               the action is reversible.
  *    unresolved — the badge: `current.length + older.length`.

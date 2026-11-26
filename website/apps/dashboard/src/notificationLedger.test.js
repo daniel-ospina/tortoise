@@ -474,6 +474,57 @@ test('the ACTIVITY bound: a bout that STARTS beyond the server gap is a NEW bout
   )
 })
 
+test('an episode that ENDED before the dismissed one began is still covered', () => {
+  // THE DOCUMENTED NARROWING, pinned so it is a decision and not an accident.
+  // The server resolves this case with its OVERLAP arm (`overlap or
+  // (0 <= delta <= gap_s)`), and it answers CURRENT: the older bout shares no
+  // instant with the acknowledged window. This store persists only the window's
+  // END (`dismissedLast`), never its START, so overlap cannot be evaluated and
+  // the gap arm is applied one-sided (`delta <= gap`) — the older bout reads as
+  // covered. The `isDismissed` docstring names this exactly; the test exists so
+  // that a future change to either the store or the rule has to confront it.
+  //
+  // What it can NEVER do is hide a LATER bout: that is the direction
+  // `abuse.py`'s docstring rejects, and the sibling test above pins it.
+  const measured = alert({
+    type: 'read_velocity',
+    register: 'activity',
+    message: 'Read volume crossed the threshold.',
+  })
+  const key = entryKeyOf(measured)
+  const state = dismiss(emptyState(), key, NOW, measured)
+
+  // A bout that ENDED 9 days before the dismissed window BEGAN (dismissed
+  // window starts at NOW: `first_at` = `at` = NOW in the fixture above).
+  const endedEarlier = {
+    ...measured,
+    first_at: new Date(NOW.getTime() - 10 * DAY).toISOString(),
+    at: new Date(NOW.getTime() - 9 * DAY).toISOString(),
+    episode: 'read_velocity||ended-earlier',
+  }
+  assert.equal(
+    isDismissed(state, key, endedEarlier), true,
+    'an already-ended older bout of a just-dismissed identity stays covered',
+  )
+  assert.equal(
+    buildLedger({ alerts: [endedEarlier], state, now: NOW }).unresolved,
+    0,
+  )
+
+  // The same-shaped bout on the OTHER side of the window is a genuinely later
+  // bout, so the one-sided bound must not reach it — the asymmetry is the point.
+  const startedLater = {
+    ...measured,
+    first_at: new Date(NOW.getTime() + 9 * DAY).toISOString(),
+    at: new Date(NOW.getTime() + 10 * DAY).toISOString(),
+    episode: 'read_velocity||started-later',
+  }
+  assert.equal(
+    isDismissed(state, key, startedLater), false,
+    'a later bout is never covered by the older dismissal',
+  )
+})
+
 test('a dismissal written before `dismissedLast` existed still works', () => {
   // The field is new; a store already on a reader's disk has only the numeric
   // watermark. It must degrade to the previous (still-bounded) behaviour rather
