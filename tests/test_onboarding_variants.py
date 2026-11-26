@@ -1813,8 +1813,17 @@ _CONFIG_PREP_RE = re.compile(
 # as the same mark, so an en-dash or spaced-hyphen twin of a declared-GREEN row
 # went RED with a message claiming an inversion (measured):
 # "Restart your client – once the tools are listed, run …".
+# The dash/hyphen arms do NOT require a following space: "client—once",
+# "client —once", "client–once" and "client--once" are one-character edits of a
+# DECLARED-GREEN row and were all RED (measured), and the unspaced pre-cue twin
+# ("Delete the old entry—but first confirm the tools …") was a false PASS. A
+# single hyphen inside a word is still not a break ("well-known").
+# A double hyphen needs no arm of its own: after the `lstrip` the only place a
+# `--` separator can sit is the start of the window, which the `^` alternative
+# already covers (measured — `client--once` stays GREEN without a mid-word arm).
 _STATEMENT_BREAK_RE = re.compile(
-    r"(?:[;—–]\s+|(?:(?<=\s)|^)-(?=\s)|\.\s+(?=[A-Z\"'`(\[]))")
+    r"(?:[;—–]\s*|(?:(?<=\s)|^)-{1,2}\s*"
+    r"|\.\s+(?=[A-Z\"'`(\[]))")
 
 # A clause that opens with one of these continues the cue FORWARD ("restart,
 # then …"), so a subordinator later in it is not a deferral of the restart.
@@ -1964,6 +1973,14 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     merged: list[str] = []
     for clause in post_clauses:
         if merged and re.match(r"(?i)^and\b", clause.lstrip('—–-:;(\'" \t')):
+            merged[-1] = f"{merged[-1]}, {clause}"
+        elif (merged and re.fullmatch(r"(?i)\s*(?:then|and|next|afterwards?)",
+                                     merged[-1])):
+            # ⛔ A BARE SEQUENCER CLAUSE INTRODUCES THE NEXT ONE. A comma after
+            # the sequencer ("…, then, once the tools are listed run …",
+            # "…, and, …", "…, next, …", "…, afterwards, …") detached the clause
+            # it introduces, so the skip below could not see it and all four
+            # declared-GREEN shapes went RED (measured — one comma each).
             merged[-1] = f"{merged[-1]}, {clause}"
         else:
             merged.append(clause)
@@ -2257,7 +2274,28 @@ def test_3232_generic_restart_lines_are_exact():
      False),
     ("Restart your client after checking the config lists the tools.", False),
     # glyph and spelling variants of shapes already declared GREEN (each was RED
-    # on a one-character edit of a row above — measured):
+    # on a one-character edit of a row above — measured). A dash or hyphen does
+    # NOT need a following space, and a comma may sit right after a forward
+    # sequencer ("then, once the tools are listed, run …"):
+    ("Restart your client—once the tools are listed, run `tortoise mcp-status`.",
+     False),
+    ("Restart your client —once the tools are listed, run `tortoise "
+     "mcp-status`.", False),
+    ("Restart your client–once the tools are listed, run `tortoise mcp-status`.",
+     False),
+    ("Restart your client--once the tools are listed, run `tortoise "
+     "mcp-status`.", False),
+    ("Restart your client, then, once the tools are listed, run `tortoise "
+     "mcp-status`.", False),
+    ("Restart your client, and, once the tools are listed run `tortoise "
+     "mcp-status`.", False),
+    ("Restart your client, next, once the tools are listed run `tortoise "
+     "mcp-status`.", False),
+    ("Restart your client, afterwards, once the tools are listed run `tortoise "
+     "mcp-status`.", False),
+    # the unspaced pre-cue dash twin, which was a false PASS before the break fix:
+    ("Delete the old entry—but first confirm the tools are actually there. "
+     "Restart your client, then confirm the tools are actually there.", True),
     ("Restart your client – once the tools are listed, run `tortoise "
      "mcp-status`.", False),
     ("Restart your client - once the tools are listed, run `tortoise "
