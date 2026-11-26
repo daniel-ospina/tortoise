@@ -10791,8 +10791,8 @@ _H_14544_INVERTED_RE = re.compile(
 #:     the SUBJECT of an exemption predicate; and
 #:   * the row is the COMPLEMENT of an additive marker — `so is` / `as is` / `as well as` /
 #:     `likewise` / `along with` / an elliptical `…, and the row is too`.
-#: ⛔ SIX ROUNDS OF HISTORY, AND WHAT THEY TAUGHT — read this before widening ANY of it. Rounds 26
-#: to 31 each enumerated a class of words and each bought one gap by opening another:
+#: ⛔ SEVEN ROUNDS OF HISTORY, AND WHAT THEY TAUGHT — read this before widening ANY of it. Rounds 26
+#: to 32 each enumerated a class of words and each bought one gap by opening another:
 #:   26  enumerated conjunctions               -> `as is the durations row` (ONE inserted adjective)
 #:                                             escaped, and `row is too` FALSE-BLOCKED ordinary English
 #:   27  enumerated the copula+adverb run      -> the elliptical `…, and the row is too` went GREEN
@@ -10819,6 +10819,16 @@ _H_14544_INVERTED_RE = re.compile(
 #:                                             ("every English spelling … passes through a form of
 #:                                             be, remain or stay"), which was false in the one
 #:                                             place a later widener reads
+#:   32  admitted a PARENTHETICAL between     -> round 31 graded the verb as a token but anchored the
+#:       the noun and its predicate            slot IMMEDIATELY after the noun, so ONE inserted
+#:                                             punctuation mark bought the same gap ONE inserted word
+#:                                             bought at round 26: `The row, too, is exempt.`, `The
+#:                                             row, like the REGISTRATION, is exempt.`, `The row (as
+#:                                             well as the REGISTRATION) is exempt.` and `The row is,
+#:                                             in effect, exempt.` all returned `None` (measured at
+#:                                             round 31's head); and two ELLIPTICAL spellings the
+#:                                             marker list never had — `…; the row as well.` and
+#:                                             `… and so too the row.` — also returned `None`
 #: ⛔ RULE 1 — NEVER ENUMERATE AN OPEN LEXICAL CLASS — and the COPULA is one, which is the correction
 #: round 31 forced. An adverb list is open (no six items cover `equally` / `similarly` / `therefore`
 #: / `fully` / `just as`), and so is the verb slot: `become` / `seem` / `appear` / `turn` / `grow` /
@@ -10841,15 +10851,28 @@ _H_14544_INVERTED_RE = re.compile(
 #: lookahead admitting `,` conflates the appositive with the ellipsis, which round 28 did.
 #: ⛔ AND WHAT THIS DOES NOT COVER, stated rather than implied (the previous list named two residuals
 #: and was wrong on one of them, so this one names the shapes it cannot read):
-#:   * an exemption spelled with NO exemption word and NO additive marker (`the row keeps its
-#:     exemption`) — no regex reads a synonym it was not given;
+#:   * an exemption that never spells the substring `exempt` at all (`the row is spared the
+#:     ratchet` — measured `None` at round 32). ⛔ The wording that used to stand here named `the row
+#:     keeps its exemption` as unread and that was FALSE, measured: `exempt` carries no right
+#:     boundary, so it reads the `exempt` INSIDE `exemption` and `… keeps its exemption` is refused;
+#:   * an INCLUSIVE `too` at the end of a sentence (the fourth reading: `The ratchet reads the row's
+#:     weight too.` — TRUE prose that is NOT about exemption, measured REFUSED at round 32 whenever
+#:     the preceding sentence says `exempt`, because Rule 3 reads a clause-terminal `too` as the
+#:     ellipsis). A deliberate precedence choice, recorded rather than widened: nothing in the
+#:     pattern can tell the inclusive reading from the elliptical one;
+#:   * `…; the row as well.` — the same ellipsis spelled with `as well` — for the reason directly
+#:     above: widening the sentence-final marker to a second word widens the SAME false block;
 #:   * an additive marker whose exemption sits MORE than one sentence earlier;
 #:   * a NEGATION in a sentence that nonetheless affirms the row's exemption (`No one disputes that
 #:     the row is also exempt`) — Rule 2 is a precedence choice, not a parser;
 #:   * an ANAPHORIC weight that names no row at all (`as is the weight it carries`, `as is its
 #:     weight`) — the noun phrase is required to NAME one, in either order (round 30);
-#:   * a VERB PHRASE longer than one token between the noun and `exempt` (`the row would eventually
-#:     be exempt`, `the row is, in effect, exempt`) — Rule 1 grades that slot as ONE token (round 31).
+#:   * a VERB PHRASE longer than one token between the noun and `exempt` (`the row can be expected
+#:     to be exempt` — measured `None` at round 32) — Rule 1 grades that slot as ONE token, then a
+#:     run of up to three words (round 31), on either side of an optional parenthetical (round 32).
+#:     ⛔ The example this note used to give, `the row would eventually be exempt`, is READ (measured
+#:     at round 32: one verb token plus a two-word run), so it was a false residual — the same
+#:     species of false sentence in the note that round 31 fixed in the constant's own comment.
 _H_14544_COPULA = (
     r"(?:is|are|was|were|stays|remains|stayed|remained"
     # ⛔ THE SUBSTITUTION COPULAS (#14623 round 31). `become` / `seem` / `appear` state the SAME
@@ -10896,11 +10919,33 @@ _H_14544_ROW_NOUN_ANY = r"(?:" + _H_14544_ROW_WEIGHT_REVERSE + r"|" + _H_14544_R
 #: `neither of which` sentence stopped being read and the non-vacuity pin beside the arm REDed. A
 #: name collision between two unrelated guards is invisible at the definition site and only shows up
 #: as a guard that no longer fires.
+#: ⛔ RULE 1a — A PARENTHETICAL DOES NOT BREAK THE CLAIM (#14623 round 32). Round 31 graded the verb
+#: as a token — and kept the slot anchored IMMEDIATELY after the noun, so ONE inserted punctuation mark
+#: defeated the subject branch exactly as ONE inserted word defeated round 26. Measured at round 31's
+#: head, `_h_14544_row_exempted` returned `None` for every one of these, i.e. the paragraph shipped
+#: CLEAN: `The row, too, is exempt.` / `The \`durations\` row, too, is exempt.` / `The row's weight,
+#: too, is exempt.` / `The row, like the REGISTRATION, is exempt.` / `The row (as well as the
+#: REGISTRATION) is exempt.` / `The row is, in effect, exempt.`
+#: ⛔ A COMMA IS NOT A LEXICAL CLASS EITHER, which is why this is not a list of the adverbs that may
+#: sit there (`too`, `likewise`, `however`, …): ANY bracket group or comma-delimited clause of bounded
+#: width is admitted. Admitted on BOTH sides of the verb, because `the row is, in effect, exempt` puts
+#: the parenthetical AFTER it — the two slots are one rule, not two spellings of a list.
+_H_14544_INTERPOSED = r"(?:[(][^()]{1,60}[)]|,[^,.;:!?()]{1,60},)"
 _H_14544_ROW_EXEMPT_SUBJECT_RE = re.compile(
-    _H_14544_ROW_NOUN_ANY + r"\s+\w+\s+(?:\w+\s+){0,3}exempt", re.IGNORECASE)
+    _H_14544_ROW_NOUN_ANY
+    + r"(?:\s*" + _H_14544_INTERPOSED + r")?"
+    + r"\s+\w+\s*"
+    + r"(?:" + _H_14544_INTERPOSED + r"\s*)?"
+    + r"(?:\w+\s+){0,3}exempt", re.IGNORECASE)
 #: Rule 3: `too` is clause-terminal only when it ENDS the sentence — `[.!?]` or end of string.
 _H_14544_ROW_ADDITIVE_RE = re.compile(
     r"(?:so|as)\s+(?:too\s+)?" + _H_14544_COPULA + r"\s+" + _H_14544_ROW_NOUN_ANY
+    # ⛔ `so too the row` — the elliptical marker with the copula DROPPED (#14623 round 32). The
+    # `so|as` alternative above REQUIRES the copula, so `The REGISTRATION is exempt and so too the
+    # row.` returned `None` (measured at round 31's head). The copula is optional only AFTER `so
+    # too`, which is unambiguous; making it optional after a bare `so`/`as` would refuse TRUE prose
+    # like `As the row above states, …`.
+    + r"|so\s+too\s+(?:" + _H_14544_COPULA + r"\s+)?" + _H_14544_ROW_NOUN_ANY
     + r"|(?:as\s+well\s+as|likewise|along\s+with)\s+" + _H_14544_ROW_NOUN_ANY
     + r"|" + _H_14544_ROW_NOUN_ANY + r"\s*(?:" + _H_14544_COPULA + r")?\s*,?\s*too\s*(?:[.!?]|$)",
     re.IGNORECASE)
@@ -11273,7 +11318,24 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The REGISTRATION is exempt, along with the weight of the row",
             "The REGISTRATION is exempt, and so is the weight on the row",
             "The REGISTRATION is exempt; the weight of the row is exempt too",
-            "The REGISTRATION is exempt, and the weight of the row is too"):
+            "The REGISTRATION is exempt, and the weight of the row is too",
+            # ⛔ THE PARENTHETICAL SLOT (#14623 round 32): ONE inserted punctuation mark defeated
+            # round 31's token slot exactly as ONE inserted word defeated round 26. Every case here
+            # returned `None` at round 31's head (measured), so the paragraph shipped CLEAN. Both
+            # sides of the verb, both delimiters, and the reverse noun order — because the slot is
+            # one structural rule, and a fixture per delimiter is what stops one of them rotting.
+            "The row, too, is exempt.",
+            "The REGISTRATION is exempt; the `durations` row, too, is exempt.",
+            "The REGISTRATION is exempt; the row's weight, too, is exempt.",
+            "The REGISTRATION is exempt; the row, like the REGISTRATION, is exempt.",
+            "The REGISTRATION is exempt; the row (as well as the REGISTRATION) is exempt.",
+            "The REGISTRATION is exempt; the row is, in effect, exempt.",
+            "The row would eventually be exempt.",
+            # ⛔ AND THE TWO ELLIPTICAL SPELLINGS THE MARKER LIST NEVER HAD (#14623 round 32):
+            # `as well` as the terminal ellipsis, and `so too` with the copula DROPPED. Both were
+            # measured `None` at round 31's head.
+            "The REGISTRATION is exempt and so too the row.",
+            "The REGISTRATION is exempt and so too is the row."):
         assert _h_14544_row_exempted(row_exemption) is not None, (
             f"the row-exemption predicate no longer reads {row_exemption!r}, so a paragraph that "
             "exempts the `durations` row as well as the REGISTRATION passes every pin above — "
@@ -11333,6 +11395,14 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "A row that becomes exempt from nothing is still a packing cause.",
             "The `durations` row seems too specific to summarise at this altitude.",
             "The REGISTRATION is the ONLY half exempt; that row, too, becomes a packing cause.",
+            # ⛔ THE PARENTHETICAL SLOT MUST NOT REFUSE TRUE PROSE (#14623 round 32). These drive the
+            # two-sided `_H_14544_INTERPOSED` slot in BOTH directions: a comma- and a bracket-delimited
+            # parenthetical followed by a predicate that is NOT an exemption, and one followed by a
+            # NEGATED exemption (Rule 2 still outranks the structural match).
+            "The REGISTRATION is the ONLY half exempt; that row, too, is a packing cause.",
+            "The REGISTRATION is the ONLY half exempt; that row (as the paragraph above says) is a "
+            "packing cause.",
+            "The REGISTRATION is exempt; the row is, in effect, NOT exempt.",
             "The REGISTRATION is the ONLY half exempt, and that row's weight, too, becomes the "
             "bin's input.",
             "own edit."):
