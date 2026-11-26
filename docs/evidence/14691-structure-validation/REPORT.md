@@ -504,12 +504,15 @@ names its mutant in its own docstring:
 
 Three content defects were corrected rather than re-pinned:
 
-- **`not_in_corpus` was the wrong bucket, and it truncated.** In `t6-score.json` it was a 10-row list
-  of the **best-anchored paraphrases** (overlaps 0.636–1.0) — the opposite population — so a consumer
-  reading its length as "quotes the corpus never states" got the display cap, `10`, which is the
-  figure the PR description carried. It is now a **count**, the paraphrase rows live under
-  `paraphrase_examples`, and each capped list carries its OWN `*_examples_truncated` flag (one shared
-  boolean could not say which sample was complete).
+- **`not_in_corpus` was the wrong bucket, and it truncated — and then its NAME was the wrong claim.**
+  In `t6-score.json` it was a 10-row list of the **best-anchored paraphrases** (overlaps 0.636–1.0) —
+  the opposite population — so a consumer reading its length as "quotes the corpus never states" got
+  the display cap, `10`, which is the figure the PR description carried. The 5th cycle made it a
+  **count**; the 10th cycle found that the count's NAME still asserted the same thing (3 of its 12
+  rows the corpus does state), so it is now `below_sentence_band` — named for the scope it measures —
+  and `invented` carries the finding. The paraphrase rows live under `paraphrase_examples`, and each
+  capped list carries its OWN `*_examples_truncated` flag (one shared boolean could not say which
+  sample was complete).
 - **The quote band's unit of support was one SENTENCE, which graded faithful multi-fact summaries as
   inventions** (10th review, P2). `Three teams exist: Platform (engineering), Product (product
   management), and Customer (commercial).` scores 0.30 against a single sentence and 0.80 against its

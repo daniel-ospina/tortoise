@@ -1239,7 +1239,6 @@
       "paraphrase": 27,
       "invented": 9,
       "summary_in_one_turn": 3,
-      "not_in_corpus": 12,
       "below_sentence_band": 12,
       "paraphrase_examples": [
         {
@@ -1442,7 +1441,6 @@
     "summary_in_one_turn": 3,
     "invented": 9,
     "below_sentence_band": 12,
-    "not_in_corpus": 12,
     "bands": {
       "below_0_5": 11,
       "from_0_5_to_0_6": 1,
