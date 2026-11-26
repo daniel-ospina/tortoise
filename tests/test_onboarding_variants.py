@@ -1795,25 +1795,29 @@ _INVERSION_FORMS = (
     #     four-word list only re-opened the hole for `previously` / `recently` /
     #     `thoroughly` / `also already` (each measured GREEN with the closed
     #     list).
-    #     ⛔ BUT A RESTRICTIVE OR FREQUENCY ADVERB IS NOT A MANNER ADVERB, and it
-    #     DOES change the sense: "if you ONLY see the tools after a second
-    #     restart" describes the SYMPTOM, and this table already declares
+    #     ⛔ BUT A RESTRICTIVE OR FREQUENCY ADVERB IS NOT A MANNER ADVERB, and in
+    #     an `if` clause it changes the sense: "if you ONLY see the tools after a
+    #     second restart" describes the SYMPTOM, and this table already declares
     #     "Restart your client if you cannot see the tools in the list" GREEN — a
     #     tool-observation CONDITION is expressly not an inversion here. An
     #     unfiltered `\w+ly` reddened `only` / `barely` / `rarely` / `mostly` /
     #     `lately` copy that was GREEN at the previous head (each measured).
+    #     ⛔ AND THE EXCLUSION IS SCOPED TO `if` ALONE, because under
+    #     `after|once|when` the CONNECTIVE already fixes the order and no adverb
+    #     can undo it. A blanket exclusion made the whole form give up instead of
+    #     skipping one word, so "after you have only recently confirmed the tools
+    #     are actually there" went GREEN — a declared-RED shape lost to a
+    #     one-word insertion (measured, six shapes).
     #     ⛔ A HYPHENATED PREDICATE IS THE SAME PREDICATE: "double-checked" was
     #     GREEN while "checked" is a declared RED row (measured).
-    #     ⛔ AND A DOC CROSS-REFERENCE IS NOT A PRESENCE CHECK. Form (f) already
-    #     excludes it ("a DOC CROSS-REFERENCE … the noun must name the RUNNING
-    #     SESSION's tools"); form (a) had no such arm, so "after you have checked
-    #     the tools reference" was RED while the same clause BEFORE the cue is
-    #     declared GREEN. The lookahead below is form (f)'s rule, shared.
-    #     admits ANY `-ly` adverb (plus the bare four), and repeats, because the
-    #     connective is what carries the order: which adverb sits in it does not
-    #     change the verdict, so a closed four-word list only re-opened the hole
-    #     for `previously` / `recently` / `thoroughly` / `also already` (each
-    #     measured GREEN with the closed list).
+    #     ⛔ AND A DOC CROSS-REFERENCE IS NOT A PRESENCE CHECK, the rule form (f)
+    #     already carries ("the noun must name the RUNNING SESSION's tools").
+    #     SCOPE, stated because it is PARTIAL and measured: the lookahead
+    #     disqualifies a `tools` occurrence a documentation noun follows
+    #     IMMEDIATELY, and lazy matching lets a LATER `tools` in the same clause
+    #     re-anchor — so "after checking the tools reference for the full list of
+    #     tools" is still RED. That residual is shared with form (f)'s own
+    #     lookahead and is not claimed away here.
     #     ⛔ A COMMA-WRAPPED adverb is OUT OF SCOPE BY DESIGN, and that is stated
     #     rather than hidden: `… after you have, first, verified the tools …` is
     #     GREEN, because post-cue clauses are split on `,` BEFORE the forms are
@@ -1824,9 +1828,12 @@ _INVERSION_FORMS = (
     #     around a comma, which is a different (and much wider) rewrite than
     #     this pin claims.
     _inversion_form(
-        r"\b(?:after|once|when|if)\s+(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
+        r"\b(?:(?:after|once|when)\s+"
+        r"(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
+        r"(?:(?:\w+ly|first|already|just|also)\s+)*"
+        r"|if\s+(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
         r"(?:(?!(?:only|barely|rarely|mostly|lately|merely|simply|hardly)\b)"
-        r"(?:\w+ly|first|already|just|also)\s+)*"
+        r"(?:\w+ly|first|already|just|also)\s+)*)"
         r"(?:\w+-)?"
         + _CONFIRM_PREDICATE
         + r"[^\n]*?\btools\b(?!\s+(?:section|reference|table|guide|docs?|page)\b)"
@@ -2202,7 +2209,7 @@ def _restart_cue_order_violation(quick: str) -> str | None:
         else:
             merged.append(clause)
     # Post-cue clauses get the SAME decoration strip the pre-cue side gets
-    # (`:2036`). Without it form (c)'s `^` anchor never sees a bolded, quoted or
+    # (`_PRE_CUE_PREFIX`). Without it form (c)'s `^` anchor never sees a bolded, quoted or
     # parenthesised adversative, so "and then, **but first confirm the tools are
     # actually there**, run …" stayed GREEN (measured).
     post_clauses = [c.strip().lstrip(_PRE_CUE_PREFIX).strip() for c in merged]
@@ -2593,6 +2600,12 @@ def test_3232_generic_restart_lines_are_exact():
     ("Restart your client if you have rarely seen the tools appear at all.",
      False),
     ("Restart your client if you have barely seen the tools appear.", False),
+    # …and the exclusion is scoped to `if`: under `after|once|when` the connective
+    # already fixes the order, so a blanket exclusion lost these (both were RED):
+    ("Restart your client after you have only recently confirmed the tools are "
+     "actually there.", True),
+    ("Restart your client after you have merely confirmed the tools are "
+     "actually there.", True),
     # markdown decoration on the trailing marker is not a hedge (the same
     # doctrine as the bolded adversative row above), and all three were GREEN:
     ("Restart your client, confirm the tools are actually there **first**.",
