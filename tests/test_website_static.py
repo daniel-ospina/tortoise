@@ -5862,10 +5862,17 @@ def _ground_selector_matches(simple: str, element: GroundElement | None) -> bool
 #: The positional pseudo-classes that name one END of a box, spelled the ways
 #: CSS lets you spell it. Each alias is exactly true of the first/last child the
 #: markup declares, so accepting them grades BEHAVIOUR, not spelling (#14683
-#: independent review: `:nth-child(1)` was a fail-open).
+#: independent review: `:nth-child(1)` was a fail-open, and its `-of-type` and
+#: integer-syntax twins were the same fail-open one table row over).
+#:
+#: `(?:0*[nN]\s*\+\s*)?\+?0*1` accepts `1`, `+1`, `01`, `0n+1` and `0n + 1` —
+#: every spelling of the index 1 that a formatter or a human produces.
+_INDEX_ONE = r"(?:0*[nN]\s*\+\s*)?\+?0*1"
 _SIDE_PSEUDO_ALIASES = {
-    "first-child": ("first-child", r"nth-child\(1\)", "first-of-type"),
-    "last-child": ("last-child", r"nth-last-child\(1\)", "last-of-type"),
+    "first-child": ("first-child", rf"nth-child\(\s*{_INDEX_ONE}\s*\)",
+                    "first-of-type", rf"nth-of-type\(\s*{_INDEX_ONE}\s*\)"),
+    "last-child": ("last-child", rf"nth-last-child\(\s*{_INDEX_ONE}\s*\)",
+                   "last-of-type", rf"nth-last-of-type\(\s*{_INDEX_ONE}\s*\)"),
 }
 
 
@@ -6363,6 +6370,12 @@ def _short_viewport_centring_problems(html: str) -> list[str]:
     against the one committed page.
     """
     arms: dict[str, set[int]] = {}
+    #: Beats some hatch rule NAMES, whether or not it top-aligns. A `center` arm
+    #: is the neighbour row's finding, and reporting it here as "no
+    #: `max-height` rule sets its `justify-content`" claimed absence of a rule
+    #: that is right there (#14683 independent review, measured: replacing the
+    #: hatch's `flex-start` with `center` produced 7 absence messages).
+    named: set[str] = set()
     beat_ids = _beat_section_ids(html)
     for height, body in _max_height_media_blocks(html):
         for rule in re.finditer(r"([^{}]+)\{([^{}]*)\}", body):
@@ -6375,15 +6388,21 @@ def _short_viewport_centring_problems(html: str) -> list[str]:
             # Only an arm that actually TOP-ALIGNS needs centring under it; a
             # `center`/`safe center` here is the other row's finding, not this
             # one's.
-            if not values or not _justify_content_top_aligns(values[-1]):
-                continue
+            top_aligns = bool(values) and _justify_content_top_aligns(
+                values[-1])
             for beat in _beats_addressed(prelude, beat_ids):
-                arms.setdefault(beat, set()).add(height)
+                named.add(beat)
+                if top_aligns:
+                    arms.setdefault(beat, set()).add(height)
 
     candidates = _beat_ground_margin_candidates(html)
     problems: list[str] = []
     for beat in beat_ids:
         if beat not in arms:
+            if beat in named:
+                # The hatch reaches it, it just does not top-align it — the
+                # neighbour row owns that grading.
+                continue
             problems.append(
                 f"{beat}: no `@media (max-height: …)` rule sets its "
                 f"`justify-content`, so the hatch never reaches it")
@@ -7048,7 +7067,14 @@ class TestShortViewportCentringIsGradedPerBlock:
                 ("#beat-hero > :nth-child(1)", "margin-top: 0", "first"),
                 ("#beat-hero > :nth-last-child(1)", "margin-bottom: 0", "last"),
                 ("#beat-hero > .doc-grid:nth-child(1)", "margin-top: 0", "first"),
-                ("#beat-hero > div:first-of-type", "margin-top: 0", "first")):
+                ("#beat-hero > div:first-of-type", "margin-top: 0", "first"),
+                ("#beat-hero > div:nth-of-type(1)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-of-type(1)", "margin-top: 0", "first"),
+                ("#beat-hero > div:nth-last-of-type(1)", "margin-bottom: 0",
+                 "last"),
+                ("#beat-hero > :nth-child(+1)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-child(0n+1)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-child( 1 )", "margin-top: 0", "first")):
             page = self._page(hatch=(
                 self.CENTRED_HATCH + f"\n      {selector} {{ {declaration}; }}"))
             problems = _short_viewport_centring_problems(page)
@@ -7074,6 +7100,30 @@ class TestShortViewportCentringIsGradedPerBlock:
             assert _short_viewport_centring_problems(page) == [], (
                 f"`justify-content: {spelling}` IS the top-aligning arm, but "
                 "the hatch was reported as absent")
+
+    def test_a_non_top_aligning_hatch_is_not_called_absent(self):
+        """`center` in the hatch is the neighbour row's finding, not absence (P2).
+
+        The arm filter `continue`d before recording that a rule NAMED the beat,
+        so a hatch that sets `justify-content: center` produced seven
+        "no `max-height` rule sets its `justify-content`" messages over a block
+        that visibly does (#14683 independent review, measured). The absence
+        claim is reserved for a beat no hatch rule reaches at all.
+        """
+        page = self._page(
+            hatch=self.CENTRED_HATCH.replace(
+                "justify-content: flex-start", "justify-content: center"))
+        problems = _short_viewport_centring_problems(page)
+        assert not any("the hatch never reaches it" in p for p in problems), (
+            "a `center` hatch was reported as no hatch at all:", problems)
+
+        # The absence claim still fires when NOTHING in a hatch names the beat.
+        unreached = self._page(hatch=(
+            "      #beat-intro { justify-content: flex-start; }"),
+            markup=self.HERO_SECTION)
+        assert any("the hatch never reaches it" in p
+                   for p in _short_viewport_centring_problems(unreached)), (
+            "a beat no hatch rule names was not reported as unreached")
 
     def test_a_commented_out_beat_section_is_not_a_beat(self):
         """A comment is dead to the browser, so it is not a beat (#14683 F1).
