@@ -1799,7 +1799,7 @@
     {
       "id": "D5",
       "question": "does `graph_overview(section='topics', entity_id=\u2026)` resolve an entity that `get_entity` and `explore_connections` both resolve?",
-      "answer_over_mcp": "NO \u2014 it answers 'Entity \u2026 not found' for every node asked about, including nodes those two doors return",
+      "answer_over_mcp": "NO \u2014 it answers 'Entity \u2026 not found' for 7 of the 7 nodes asked about, including nodes those two doors return",
       "evidence": {
         "reported_not_found": {
           "Lumen Core": "1a2165c9fd5-bb074a074bd4",
@@ -1809,7 +1809,8 @@
           "Jonas Bauer": "1a2165cddc7-67897f705466",
           "Platform team": "1a2165cdd92-a48d8cae4dca",
           "event-bus": "1a2165d1bf1-f6c7fdcb1f99"
-        }
+        },
+        "nodes_asked": 7
       }
     }
   ],
