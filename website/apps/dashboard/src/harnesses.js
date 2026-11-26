@@ -434,14 +434,34 @@ mkdir -p ~/.pi/agent/extensions
 # capture, so both POST the same session_id — doubled work, and the loser can
 # 409. Disable the legacy entry before installing this one. NON-DESTRUCTIVE:
 # unlink a symlink (the agent-infra checkout is untouched), or move a real
-# directory to a dot-prefixed name Pi's loader SKIPS (it ignores dotfiles) —
-# never a recursive delete.
+# directory aside — and then RETIRE its entry point, because Pi's loader has
+# NO dotfile filter: a dot-prefixed directory's index.ts is still LOADED.
+# Never a recursive delete.
 if [ -L ~/.pi/agent/extensions/tortoise-capture ]; then
   rm ~/.pi/agent/extensions/tortoise-capture
 elif [ -d ~/.pi/agent/extensions/tortoise-capture ]; then
   mv ~/.pi/agent/extensions/tortoise-capture ~/.pi/agent/extensions/.tortoise-capture.disabled
 fi
 cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts ~/.pi/agent/extensions/tortoise-capture.ts
+# The rename retired NOTHING, and it comes after the copy on purpose: retiring
+# before it would leave a box with no producer if the copy failed. Refuse
+# rather than let mv overwrite a retired copy.
+if [ -e ~/.pi/agent/extensions/.tortoise-capture.disabled/index.ts ]; then
+  if [ -e ~/.pi/agent/extensions/.tortoise-capture.disabled/index.ts.disabled ]; then
+    echo "refusing: both .tortoise-capture.disabled/index.ts and its .disabled copy exist — move one aside" >&2
+    exit 1
+  fi
+  mv ~/.pi/agent/extensions/.tortoise-capture.disabled/index.ts ~/.pi/agent/extensions/.tortoise-capture.disabled/index.ts.disabled
+fi
+# #3512: the agent-infra farm also installs a SECOND producer (reflect-hook.ts);
+# retire it too — a .disabled suffix is a name the loader does not load.
+if [ -e ~/.pi/agent/extensions/reflect-hook.ts ]; then
+  if [ -e ~/.pi/agent/extensions/reflect-hook.ts.disabled ]; then
+    echo "refusing: both reflect-hook.ts and reflect-hook.ts.disabled exist — move one aside" >&2
+    exit 1
+  fi
+  mv ~/.pi/agent/extensions/reflect-hook.ts ~/.pi/agent/extensions/reflect-hook.ts.disabled
+fi
 # Backfill past Pi sessions with (the EXTENSION files automatically; this
 # import command is a separate, consent-gated path — it needs TORTOISE_CAPTURE=1):
 tortoise sessions import --harness pi --file <session.jsonl>`

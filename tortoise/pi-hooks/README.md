@@ -39,7 +39,34 @@ cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts \
    ~/.pi/agent/extensions/tortoise-capture.ts
 cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-volunteer.ts \
    ~/.pi/agent/extensions/tortoise-volunteer.ts
+# ⛔ THE RENAME RETIRED NOTHING, and it is deliberately after the copies: Pi's
+# loader has NO dotfile filter, so `.tortoise-capture.disabled/index.ts` is
+# still LOADED. Retire the entry point itself — and refuse rather than let `mv`
+# overwrite a retired copy. (Retiring before the copies would leave a box with
+# no producer at all if a copy failed.)
+if [ -e ~/.pi/agent/extensions/.tortoise-capture.disabled/index.ts ]; then
+  if [ -e ~/.pi/agent/extensions/.tortoise-capture.disabled/index.ts.disabled ]; then
+    echo "refusing: both .tortoise-capture.disabled/index.ts and its .disabled copy exist — move one aside" >&2
+    exit 1
+  fi
+  mv ~/.pi/agent/extensions/.tortoise-capture.disabled/index.ts \
+     ~/.pi/agent/extensions/.tortoise-capture.disabled/index.ts.disabled
+fi
+# #3512: the agent-infra farm also installs a SECOND producer, reflect-hook.ts;
+# retire it too (a `.disabled` suffix is a name the loader does not load).
+if [ -e ~/.pi/agent/extensions/reflect-hook.ts ]; then
+  if [ -e ~/.pi/agent/extensions/reflect-hook.ts.disabled ]; then
+    echo "refusing: both reflect-hook.ts and reflect-hook.ts.disabled exist — move one aside" >&2
+    exit 1
+  fi
+  mv ~/.pi/agent/extensions/reflect-hook.ts \
+     ~/.pi/agent/extensions/reflect-hook.ts.disabled
+fi
 ```
+
+This is the hand equivalent of what `tortoise install pi` does — and the
+installer is the one to prefer, because it VERIFIES the end state and fails
+rather than reporting success while two producers stay registered.
 
 Pi auto-discovers `~/.pi/agent/extensions/*.ts` on the next start. Installing
 the extensions *is* the opt-in — there is deliberately no `autoCapture`-style
@@ -242,6 +269,15 @@ producer. Those are dated measurements of a machine in its BOTH-producers state,
 and they remain accurate about it — but on a box where this seam is installed
 the producer is retired, so read them as the precondition this section removes.
 
+The two surfaces a human actually **copies into a shell** — the install snippet
+above and the dashboard's `PI_CAPTURE_INSTALL`
+(`website/apps/dashboard/src/harnesses.js`, pinned by `harnesses.test.js` and the
+wizard snapshots) — shipped the disproven dotfile rule as an instruction until
+#14342 review round 8: following them retired nothing. Both now perform the
+entry-point retirement and the second producer's, in the installer's order. If
+the routine changes, change all of them in one commit — a snippet that drifts
+from this section is the false claim, not a stale measurement.
+
 #### Residuals this guard does NOT close (filed as notes, not chased)
 
 - **The legacy DIRECTORY has no convergence arm.** The farm's manifest also
@@ -262,8 +298,13 @@ the producer is retired, so read them as the precondition this section removes.
   the window needs a concurrent writer on the same box.
 - **A symlink at a producer path pointing at a DIRECTORY** is loaded by Pi as a
   file attempt (which fails), yet retiring it renames the LINK to
-  `*.ts.disabled`, which Pi then resolves as a directory and loads. That shape
-  is refused by the post-retirement assertion rather than converged.
+  `*.ts.disabled`, which Pi then resolves as a directory and loads. Both arms
+  fail closed rather than reporting a retirement that did not retire: the
+  second producer is renamed aside and the install REFUSES (the renamed link is
+  checked, not just the path it came from), and a loaded link at
+  `PI_DISABLED_DIRNAME` is refused BEFORE any rename, so every re-run sees the
+  same shape instead of the second run finding the name vacated and going
+  green. Neither is converged — a human moves it aside.
 
 #### The backlog is a decision, not a delete
 

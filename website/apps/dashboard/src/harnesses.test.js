@@ -588,9 +588,21 @@ test('#3713: the Pi install disables a pre-existing tortoise-capture/ (no double
   // ...a symlink (the usual agent-infra bootstrap shape) is unlinked...
   assert.match(pi, /\[ -L ~\/\.pi\/agent\/extensions\/tortoise-capture \]/,
     'the symlink leg must be guarded by -L (unlink the link, never the target)')
-  // ...and a real directory is renamed to a name the loader SKIPS (dotfile).
+  // ...and a real directory is moved aside AND its entry point retired: the
+  // dot prefix alone retires NOTHING, because Pi's loader applies no dotfile
+  // filter (#14342). The old copy here said the loader SKIPS dotfiles — the
+  // disproven rule this guarded snippet used to teach.
   assert.match(pi, /\.tortoise-capture\.disabled/,
-    'a real directory must be renamed to a dot-prefixed name `collectAutoExtensionEntries` skips')
+    'a real directory must be moved aside to the dot-prefixed name')
+  assert.match(pi, /\.tortoise-capture\.disabled\/index\.ts\.disabled/,
+    'the entry point must be retired inside the dot directory — Pi loads a dot-prefixed directory by its index file')
+  // ...and the SECOND producer agent-infra's farm installs is retired too (#3512).
+  assert.match(pi, /reflect-hook\.ts\.disabled/,
+    'the snippet must retire reflect-hook.ts — the other capture producer')
+  // The snippet must refuse rather than overwrite a retired copy: `mv`
+  // overwrites on POSIX, which would destroy preserved bytes silently.
+  assert.match(pi, /refusing:/,
+    'a rename over an existing retired copy must be refused, never performed')
   // non-negotiable: never recursively delete user files from the install snippet.
   assert.doesNotMatch(pi, /rm\s+-/,
     'the collision guard must never `rm` with flags — a bare `rm` can only unlink the symlink')
