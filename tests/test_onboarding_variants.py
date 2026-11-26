@@ -2816,6 +2816,74 @@ def _is_completed_concession(clause: str) -> bool:
                 and _PRIOR_COMPLETION_RE.search(bare))
 
 
+# ⛔ AN `and <OPENER>` HALF IS A NEW CLAUSE WHEN ITS SUBORDINATE CONDITION IS
+# FOLLOWED BY A MAIN CLAUSE OF ITS OWN — and that is the ONLY shape this file
+# declines to fold into the cue's own conditional.
+#
+# The general question ("is this half a fresh statement, or the second conjunct of
+# the condition the cue sits in?") is CLAUSE-LEVEL vs PHRASE-LEVEL COORDINATION,
+# which is settled OUTSIDE regexes: the published conjunct-identification and
+# comma-splice work decides it from parse trees and POS features. THREE cuts of a
+# general `and <opener>` disambiguation were tried in this branch on that
+# impossible premise and each shipped a fresh seam — a false PASS on the
+# config-conjunction, a markdown hole, then a FALSE RED on `Restart your client
+# after any upgrade, and once the tools appear run …` (#14679 reviews at
+# `ed87479fbb05`, `6239dd051795`, `4f33aad5ff2f`; all measured).
+#
+# SO THE TEST IS DELIBERATELY NEITHER GENERAL NOR SYMMETRIC — it is MONOTONE.
+# Declining the merge can only move a verdict RED→GREEN for the ONE shape whose
+# main clause is visible, and every shape it does not recognise keeps the graded
+# verdict it has today. Nothing here can turn a graded inflection GREEN:
+#
+#   GREEN  Restart your client (you should see no errors in the log), and once
+#          the tools are listed run `tortoise mcp-status`.   (its OWN main clause)
+#   GREEN  Restart your client, confirm the tools are actually there first, and
+#          then run a query.                      (a forward sequencer, own clause)
+#   RED    Restart your client after confirming the config is right, and once the
+#          tools are actually there.  (a BARE condition — no main clause, so the
+#          half is the cue's second condition: folded in and graded)
+#   RED    Restart your client after confirming the config is right, and the tools
+#          are actually there.                       (same; form (a) across the seam)
+#
+# The residual is stated, not hidden: an imperative OUTSIDE the closed list below
+# keeps the graded verdict — that is the pre-fix behaviour, so it is a false PASS
+# that already existed, never a new one.
+_AND_FORWARD_SEQUENCER_RE = re.compile(
+    r"(?i)^and\s+(?:then|next|afterwards?)\b")
+_AND_SUBORDINATE_HALF_RE = re.compile(
+    r"(?i)^and\s+(?:once|when|whenever|after|if|unless|until|while|before)\b")
+# …and a CLOSED list of verbs a main clause opens with. A general verb test
+# would be POS tagging, which this file does not do.
+_AND_HALF_MAIN_CLAUSE_VERB_RE = re.compile(
+    r"\b(?:run|runs|start|starts|restart|restarts|relaunch|relaunches|reload|reloads"
+    r"|reopen|reopens|open|opens|close|closes|quit|quits|invoke|invokes"
+    r"|execute|executes|call|calls|use|uses|try|tries|test|tests|query|queries"
+    r"|inspect|inspects|navigate|navigates|click|clicks|type|types|save|saves"
+    r"|write|writes|check|checks|confirm|confirms|verify|verifies|ensure|ensures"
+    r"|see|sees|look|looks|add|adds|delete|deletes|remove|removes|install|installs"
+    r"|configure|configures|enable|enables|disable|disables|copy|copies|paste|pastes"
+    r"|send|sends|connect|connects|retry|retries|wait|waits|pick|picks|choose|chooses"
+    r"|browse|browses|review|reviews|update|updates|upgrade|upgrades|reinstall"
+    r"|reinstalls|refresh|refreshes|switch|switches)\b",
+    re.IGNORECASE)
+
+
+def _and_half_opens_its_own_clause(bare: str) -> bool:
+    """True when a decoration-free `and …` half carries a main clause of its own.
+
+    A BARE tools-presence condition (`and once the tools are actually there`) is
+    the cue's second conjunct and is folded in — that is what keeps the
+    config-conjunction rows graded. A condition whose predicate is followed by an
+    imperative (`and once the tools are listed RUN …`) is a separate clause, which
+    the cue's own sentence does not contain, so folding it in is what redded
+    ordinary forward copy (#14679 review at `4f33aad5ff2f`, measured).
+    """
+    if _AND_FORWARD_SEQUENCER_RE.match(bare):
+        return True
+    return bool(_AND_SUBORDINATE_HALF_RE.match(bare)
+                and _AND_HALF_MAIN_CLAUSE_VERB_RE.search(bare))
+
+
 def _paragraph_cue_order_violation(para: str) -> str | None:
     flat = " ".join(para.split())
     cue_at = _cue_start(flat)
@@ -2865,33 +2933,26 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     #     GREEN  Restart your client (you should see no errors in the log), and
     #            once the tools are listed run `tortoise mcp-status`.
     #     RED    the same sentence, after the splice landed in `remainder`
-    # ⛔ REVERTED: the `and <opener>` disambiguation was tried THREE TIMES in this
-    # branch (decline from the half's own opener; decline only when the half opens
-    # a forward clause; decline only when the predecessor is not a condition) and
-    # each cut shipped a fresh seam — a false PASS, then a markdown hole, then a
-    # FALSE RED on `Restart your client after any upgrade, and once the tools
-    # appear run …` because `_CONDITION_LEAD_RE` fired on a bare post-cue
-    # ADVERBIAL that governs nothing (all three measured by fresh reviewers at
-    # `ed87479fbb05` and `6239dd051795`). The mechanism is REMOVED rather than
-    # given a fourth arm: it is the one place in this function where "is this
-    # half a new statement or a second conjunct?" is a semantic judgement a regex
-    # cannot make, and the cost of guessing wrong here is a #3429 false red on
-    # ordinary copy. The residual it leaves is recorded on #14717:
-    #
-    #     GREEN (want RED)   Restart your client after confirming the config is
-    #                        right, and once the tools are actually there.
-    #
-    # — reachable only when the `and`-half carries its own forward opener AND the
-    # predecessor opened a condition, which is rare copy, and visible rather than
-    # silent because it is declared there.
+    # ⛔ THE DISAMBIGUATION IS NOT REVERSED — IT IS SCOPED TO THE ONE DECIDABLE
+    # SHAPE. `_and_half_opens_its_own_clause` declines the fold only when the half
+    # carries a main clause of its own, and its own comment states why that is the
+    # only safe cut and why it is monotone (it can only REMOVE a false red). Both
+    # findings from the review at `4f33aad5ff2f` are closed by it and by nothing
+    # else; the previous `GREEN (want RED)` residual it leaves is GONE, not
+    # re-declared — that sentence measures RED again (`… and once the tools are
+    # actually there.` is a bare condition, so it is folded in and graded).
     merged: list[str] = []
     for clause in post_clauses:
-        # An `and`-led clause continues the previous ONE (below); whether it is
-        # instead a fresh forward statement is the semantic seam documented above,
-        # and it is NOT guessed here.
+        # An `and`-led clause continues the previous ONE (below) UNLESS it carries
+        # its own main clause, in which case it is appended as its own clause so
+        # `_FORWARD_SEQUENCER_RE` can skip it and the predecessor keeps its
+        # clause-final anchor (`… actually there first, and then run …`).
+        bare = _DECORATION_RE.sub(" ", clause).lstrip(_PRE_CUE_PREFIX)
         if (merged
-                and re.match(r"(?i)^and\b",
-                             _DECORATION_RE.sub(" ", clause).lstrip(_PRE_CUE_PREFIX))):
+                and re.match(r"(?i)^and\b", bare)
+                and _and_half_opens_its_own_clause(bare)):
+            merged.append(clause)
+        elif (merged and re.match(r"(?i)^and\b", bare)):
             merged[-1] = f"{merged[-1]}, {clause}"
         elif (merged
                 # ⛔ SEARCH A DECORATION-FREE COPY. The tail anchor is `$`, so a
@@ -4538,27 +4599,35 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "then confirm the tools are actually there.", False),
     ("Once the client restarts, check the tools are present. Then restart your "
      "client, then confirm the tools are actually there.", False),
-    # ── CYCLE 40/41 DECLARED RESIDUALS: an `and once|and when` continuation folds
-    # into its predecessor, which DESTROYS the sequencer `_FORWARD_SEQUENCER_RE`
-    # anchors on — so this forward copy is graded RED with the "inverts its own
-    # restart cue" message (#3429's class). THREE cuts of a disambiguation were
-    # tried (decline from the half's own opener; decline only when the half opens
-    # a forward clause; decline only when the predecessor is not a condition) and
-    # all three shipped a fresh seam — a false PASS, a markdown hole, then a FALSE
-    # RED on `Restart your client after any upgrade, and once the tools appear …`
-    # because `_CONDITION_LEAD_RE` fired on a bare post-cue ADVERBIAL. The
-    # mechanism is REMOVED rather than given a fourth arm. PINNED AS RED so a
-    # reader sees the boundary and a future fix flips exactly these rows — the same
-    # convention as the `not just missing` residual above. Recorded on #14717.
+    # ── CYCLE 40/41: an `and once|and when|and then` continuation used to fold
+    # into its predecessor, which DESTROYED the sequencer `_FORWARD_SEQUENCER_RE`
+    # anchors on — so forward copy was graded RED with the "inverts its own restart
+    # cue" message (#3429's class). `_and_half_opens_its_own_clause` now declines
+    # the fold for the one decidable shape (the half carries a main clause of its
+    # own), so these three are GREEN again and are pinned as the FORWARD copy they
+    # are — not as a residual (#14679 review at `4f33aad5ff2f`, P1).
     ("Restart your client (you should see no errors in the log), and once the "
-     "tools are listed run `tortoise mcp-status`.", True),
+     "tools are listed run `tortoise mcp-status`.", False),
     ("Restart your client seeing no errors in the log, and when the tools "
-     "appear run `tortoise mcp-status --live`.", True),
+     "appear run `tortoise mcp-status --live`.", False),
+    # …and the SAME half reds again when the sentence is about the cue and not
+    # about a later command, because the half is then a BARE CONDITION with no
+    # main clause of its own: it is folded in and graded (§`_AND_HALF…`).
+    ("Restart your client, confirm the tools are actually there first, and then "
+     "run a query.", True),
     # ⛔ …while the CONFIG-CONJUNCTION the merge exists for still reds: its
     # `and`-half is not a forward clause of its own, so it is still folded in and
     # the config-scope rule still sees both halves.
     ("Restart your client after confirming the config is right, and the tools "
      "are actually there.", True),
+    # …and a half that DOES carry its own main clause stays GREEN even behind a
+    # condition predecessor — the exact shape whose third disambiguation cut shipped
+    # a FALSE RED (`Restart your client after any upgrade, and once the tools appear
+    # run …`, now covered below).
+    ("Restart your client after confirming the config is right, and once the "
+     "tools are listed run `tortoise mcp-status`.", False),
+    ("Restart your client after any upgrade, and once the tools appear run a "
+     "query.", False),
     # ── CYCLE 41 (#14679's review at `ed87479fbb05`): declining the merge from the
     # `and`-half's OWN opener shipped a FALSE PASS one inserted word from the row
     # above — whether that half is a fresh statement or the SECOND CONJUNCT of a
@@ -4571,7 +4640,16 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Restart your client after confirming the config is right, **and** the "
      "tools are actually there.", True),
     ("Restart your client seeing no errors in the log, **and** once the tools "
-     "appear run `tortoise mcp-status --live`.", True),
+     "appear run `tortoise mcp-status --live`.", False),
+    # ⛔ DECLARED RESIDUAL, and it is the one this mechanism actually produces
+    # (measured at this head, not asserted): `_AND_HALF_MAIN_CLAUSE_VERB_RE` is a
+    # CLOSED verb list, so an imperative outside it keeps the pre-fix verdict —
+    # folded in and graded, i.e. a false RED of #3429's class that ALREADY
+    # existed and is not made worse. Pinned as RED so the boundary is visible and
+    # a future fix flips exactly this row; closing it means adding the verb, not
+    # a new arm.
+    ("Restart your client after confirming the config is right, and once the "
+     "tools are listed grep the log.", True),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
