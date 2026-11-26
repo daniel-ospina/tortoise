@@ -1665,7 +1665,28 @@ QUICKSTART = REPO_ROOT / "docs" / "quickstart-cloud.md"
 # PARAGRAPH" (#14679 review at `b5b1ee005941`, measured). `your|the` is the whole
 # definite-article variation; a doc that drops the possessive is not a different
 # instruction, it is the same one spelled the way the docs already spell it.
-_RESTART_CUE_TEXT = r"restart\s+(?:your|the)\s+client"
+_RESTART_CUE_TEXT = r"restart(?:ing)?\s+(?:your|the|its)\s+(?:MCP\s+)?(?:client|app|IDE|editor|application)"
+# ⛔ THE CUE IS A MORPHOLOGY NOT ONE SPELLING, for the same reason `_PRE_CUE_VERB`
+# is (see it): pinning ONE wording reds the legitimate reword that #3429 is about.
+# Measured at `e337fcd3d5` (#14679 review), all three of these are FORWARD
+# rewordings of the shipped instruction that state the required order more
+# explicitly than `:135` does, and all three failed the "must keep its restart
+# cue" assert — a false red, the class that trains the next author to delete the
+# pin:
+#     Restart your MCP client, then confirm the tools are actually there.
+#     After restarting the client, confirm the tools are actually there.
+#     Restart the app, then confirm the tools are actually there.
+# So the admitted set is: the GERUND ("after restarting …"), the optional `its`
+# possessive the docs' own third spelling uses, the optional `MCP` modifier (the
+# very thing `:135`'s prose names: "the client's MCP/tool list"), and the nouns a
+# client is called in this repo's own copy. The NOUN SET is stated here as a
+# closed list on purpose: an unrecognised noun means the paragraph is not graded
+# at all, which is a false PASS as well as a false red, so widening it is a
+# measurement to take rather than a synonym to slip in.
+# ⛔ MEASURED BEFORE WIDENING: on the real `docs/quickstart-cloud.md` the widened
+# pattern matches the SAME two cue paragraphs as the old one (no new paragraph
+# becomes gradable and none of the two false-REDs), so the widening cannot turn
+# a currently-ungraded paragraph into a tools-appear failure.
 # ⛔ THE CUE IS FOUND CASE-INSENSITIVELY. Every form is IGNORECASE because "case
 # carries no meaning in this prose", but the cue itself was matched with `in`, so
 # a reword that keeps the required ORDER and merely lower-cases it mid-sentence
@@ -1850,7 +1871,18 @@ _CONFIRM_PREDICATE = (
     # measurement rather than a synonym slot.
     r"|mak(?:e|es|ing)\s+(?:sure|certain)|made\s+(?:sure|certain)"
     r"|be\s+(?:sure|certain)|validat(?:e|es|ed|ing)"
-    r"|see|saw|seen|look|list)(?:ing|ed|s|es|d)?\b"
+    # ⛔ `find|found` IS THE MISSING SYNONYM OF `look`/`see`, and it was a
+    # one-word hole in a CLOSED list — the same class this block has closed three
+    # times (#14679 review at `e337fcd3d5`, measured). `find` is not an exotic
+    # spelling here: it is the doc's own instruction verb two lines above
+    # (`docs/quickstart-cloud.md:80` says "restart the client and LOOK FOR the
+    # `tortoise_*` tools"), and both of these shipped GREEN end-to-end:
+    #     Restart your client once you find the `tortoise_*` tools in the list.
+    #     Restart your client after you have found the `tortoise_*` tools …
+    # while the `look` control is RED. Every other synonym gap in this block is
+    # either a member or a DECLARED residual (the copula below); `find` had no
+    # declaration at all, so a reader auditing the closure could not see it.
+    r"|see|saw|seen|look|list|find|found)(?:ing|ed|s|es|d)?\b"
 )
 
 # ⛔ THE OBJECT HAS TWO SPELLINGS IN THIS REPO'S OWN COPY, and only one was
@@ -3609,32 +3641,54 @@ def _confirmation_scopes_the_config(clause: str) -> bool:
 
 
 def _tools_appear_after_cue(quick: str) -> bool:
-    """The POSITIVE half of the pin: does the cue's sentence, or the one
-    immediately after it, name the tools?
+    """The POSITIVE half of the pin: does EVERY cue paragraph carry a tools
+    clause in its cue's sentence, or the one immediately after it?
 
-    ⛔ NOT A PARAGRAPH-WIDE SEARCH. A paragraph-wide search is satisfiable by an
-    UNRELATED later mention — this paragraph ends "if the tools are missing, run
-    `tortoise mcp-status`" — so any paragraph that says "restart" and mentions
-    the tools anywhere would pass. The window is the cue's sentence plus the
-    next one — `parts[:2]` of a split at REAL statement breaks — and no further: measured, "Restart your client. The config is
-    reloaded. The tools appear later." must NOT satisfy it.
+    ⛔ EVERY CUE PARAGRAPH, NOT THE FIRST ONE. This was `next(p for p in
+    quick.split("\\n\\n") if _RESTART_CUE_RE.search(p))` — the document's FIRST
+    cue paragraph — while `_restart_cue_order_violation` (the negative half, 40
+    lines below) already graded them all. On the real `docs/quickstart-cloud.md`
+    the first cue paragraph is the `--harness pi` blockquote at ~:74, NOT the
+    pinned `:135`, so the assertion graded the wrong paragraph and `:135` could
+    lose its tools clause entirely with all three doc-level asserts still green
+    (#14679 review at `e337fcd3d5`, measured — and the deleted pre-diff code,
+    which searched the literal `"Restart your client"`, correctly RED'd on the
+    same mutation, so this was a REGRESSION the widening of the cue introduced).
+
+    ⛔ NOT A PARAGRAPH-WIDE SEARCH. Stated per paragraph, as before: a
+    paragraph-wide search is satisfiable by an UNRELATED later mention — this
+    paragraph ends "if the tools are missing, run `tortoise mcp-status`" — so any
+    paragraph that says "restart" and mentions the tools anywhere would pass. The
+    window per cue is that cue's sentence plus the next one — `parts[:2]` of a
+    split at REAL statement breaks — and no further: measured, "Restart your
+    client. The config is reloaded. The tools appear later." must NOT satisfy it.
     """
-    para = next(p for p in quick.split("\n\n") if _RESTART_CUE_RE.search(p))
-    flat = " ".join(para.split())
-    after = flat[_cue_end(flat):]
-    # ⛔ DO NOT `lstrip` THE TERMINATOR. Stripping it turns "the cue's sentence or
-    # the next one" into "the next TWO", because the empty first part is then
-    # filled from further along — measured: "Restart your client. The config is
-    # reloaded. The tools appear later." wrongly satisfied the bound. Only the
-    # separating whitespace/comma that continues the cue is stripped.
-    parts = _STATEMENT_BREAK_RE.split(after.lstrip(" \t,…"), maxsplit=2)
-    # ⛔ CASE CARRIES NO MEANING IN THIS PROSE, and this was the ONE object search
-    # without the flag: "Restart your client, then confirm the Tools are there"
-    # satisfied the bound but "Restart your client. Tools then appear in the
-    # list." did not — a red with the "must keep a tools-appear clause" message
-    # over a paragraph that carries one (#14679 review cycle 30, measured).
-    return re.search(_TOOLS_OBJECT, " ".join(parts[:2]),
-                     re.IGNORECASE) is not None
+    cue_paras = [p for p in quick.split("\n\n") if _RESTART_CUE_RE.search(p)]
+    if not cue_paras:
+        return False
+    return all(_tools_appear_after_cue_in(p) for p in cue_paras)
+
+
+def _tools_appear_after_cue_in(para: str) -> bool:
+    """The same bound for ONE paragraph, applied to every cue it carries."""
+    for _, after in _cue_windows(para):
+        # ⛔ DO NOT `lstrip` THE TERMINATOR. Stripping it turns "the cue's sentence
+        # or the next one" into "the next TWO", because the empty first part is
+        # then filled from further along — measured: "Restart your client. The
+        # config is reloaded. The tools appear later." wrongly satisfied the
+        # bound. Only the separating whitespace/comma that continues the cue is
+        # stripped.
+        parts = _STATEMENT_BREAK_RE.split(after.lstrip(" \t,…"), maxsplit=2)
+        # ⛔ CASE CARRIES NO MEANING IN THIS PROSE, and this was the ONE object
+        # search without the flag: "Restart your client, then confirm the Tools
+        # are there" satisfied the bound but "Restart your client. Tools then
+        # appear in the list." did not — a red with the "must keep a tools-appear
+        # clause" message over a paragraph that carries one (#14679 review
+        # cycle 30, measured).
+        if re.search(_TOOLS_OBJECT, " ".join(parts[:2]),
+                     re.IGNORECASE) is None:
+            return False
+    return True
 
 
 def _restart_cue_order_violation(quick: str) -> str | None:
@@ -4176,10 +4230,69 @@ def _strip_asides(text: str) -> str:
     return _ASIDE_RE.sub(_repl, text)
 
 
+def _cue_windows(text: str) -> list[tuple[str, str]]:
+    """`(before, after)` for EVERY cue occurrence in `text`, in order.
+
+    ⛔ EVERY OCCURRENCE, NOT `_cue_start`/`_cue_end`. Both ends of this function
+    were single-match by construction, so a paragraph carrying a SECOND restart
+    cue was graded on its first one only and the second shipped with no signal
+    (#14679 review at `e337fcd3d5`, measured):
+
+        Restart your client, then confirm the tools are actually there.
+        Restart your client after confirming the tools are actually there.
+        -> violation None, i.e. the canonical (a) inversion appended to the
+           real `:135` paragraph passed both doc-level asserts.
+
+    The single-cue case is UNCHANGED BY CONSTRUCTION — `prev_end` starts at 0 and
+    the paragraph holds one match, so `before`/`after` are the same two slices
+    the old `flat[:cue_at]` / `flat[_cue_end(flat):]` produced. That is what makes
+    this additive: no existing row or the shipped doc can move, and the 746-row
+    table is the measurement that says so.
+
+    `before` for the second cue starts AFTER the previous cue's own STATEMENT,
+    not merely after the previous cue. That distinction is load-bearing and was
+    measured: taking `before` from the previous cue's end re-grades the previous
+    cue's FORWARD post-cue clause as if it were a pre-cue imperative, so two
+    FORWARD cues in one paragraph came back as a violation —
+    `then confirm the tools are actually there.` — a false red of the exact
+    #3429 class this pin is not allowed to become. Starting at the next statement
+    boundary makes the govern-window of cue k only the copy that actually sits
+    between them.
+
+    ⛔ DECLARED RESIDUAL: a second cue INSIDE the first cue's own sentence is not
+    graded (both windows advance past that statement). That is a narrower shape
+    than the one this fixes — the same paragraph, a separate sentence — and it is
+    declared here rather than left for a reader to discover, because the fix for
+    it (clause-level re-anchoring) is wider than this pin claims.
+    """
+    flat = " ".join(text.split())
+    windows: list[tuple[str, str]] = []
+    remaining = flat
+    while True:
+        match = _RESTART_CUE_RE.search(remaining)
+        if match is None:
+            break
+        before = remaining[:match.start()]
+        after = remaining[match.end():]
+        windows.append((before, after))
+        # The next cue's `before` begins at the statement AFTER this cue's own.
+        statements = _STATEMENT_BREAK_RE.split(after, maxsplit=1)
+        if len(statements) < 2 or not statements[1].strip():
+            break
+        remaining = statements[1]
+    return windows
+
+
 def _paragraph_cue_order_violation(para: str) -> str | None:
-    flat = " ".join(para.split())
-    cue_at = _cue_start(flat)
-    before, after = flat[:cue_at], flat[_cue_end(flat):]
+    """Grade EVERY cue in the paragraph; first violation wins."""
+    for before, after in _cue_windows(para):
+        violation = _cue_order_violation(before, after)
+        if violation is not None:
+            return violation
+    return None
+
+
+def _cue_order_violation(before: str, after: str) -> str | None:
     # ⛔ STATEMENT BREAKS FIRST, then clauses — the same reason the post-cue side
     # does it. A bare `[,.;]` cut inside `v1.2`/`e.g.` and ignored the em dash, so
     # a pre-cue form (f) inversion went GREEN ("Confirm the tools appear after the
@@ -7131,6 +7244,32 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "confirm the tools are actually there.", False),
     ("If you checked the tools before, restart your client, then confirm the "
      "tools are actually there.", False),
+    # ── the `find|found` synonym gap (#14679 review at `e337fcd3d5`) — the
+    #    doc's OWN instruction verb is `look for` (`docs/quickstart-cloud.md:80`
+    #    says "restart the client and look for the `tortoise_*` tools"), and
+    #    `find`/`found` sat outside a CLOSED predicate list, so the canonical (a)
+    #    inversion built on it shipped GREEN while the `look` control was RED.
+    #    Both spellings, plus the forward twin that must stay GREEN so the widening
+    #    cannot be "fixed" by grading every `find`.
+    ("Restart your client once you find the `tortoise_*` tools in the client's "
+     "MCP/tool list.", True),
+    ("Restart your client after you have found the `tortoise_*` tools in the "
+     "list.", True),
+    ("Restart your client, then find the `tortoise_*` tools in the client's "
+     "MCP/tool list.", False),
+    # ── the CUE's own morphology (#14679 review at `e337fcd3d5`): a forward
+    #    reword that keeps the required order must not be a false red, and
+    #    `_RESTART_CUE_TEXT` pinned one spelling of `restart your client`. Each
+    #    row is the forward/correct-order reading; the cue is what is under test
+    #    here, so every one of them must stay GREEN.
+    ("Restart your MCP client, then confirm the tools are actually there.", False),
+    ("After restarting the client, confirm the tools are actually there.", False),
+    ("Restart the app, then confirm the tools are actually there.", False),
+    ("Restart your client after confirming the tools are actually there.", True),
+    ("After restarting the app, confirm the tools are actually there.", False),
+    ("Confirm the tools are actually there before restarting the app.", True),
+    ("Before restarting your MCP client, confirm the tools are actually there.",
+     True),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
@@ -7252,6 +7391,46 @@ def test_3232_every_cue_paragraph_is_graded():
     assert _restart_cue_order_violation(f"{good}\n\n{bad}") is not None, (
         "a SECOND cue paragraph must be graded — this is the shape that was "
         "silent while only the first paragraph was read")
+    # ⛔ EVERY CUE IN A PARAGRAPH, not just the first (#14679 review at
+    # `e337fcd3d5`). `_cue_start`/`_cue_end` were single-match, so a SECOND cue
+    # in the SAME paragraph was invisible: appending the canonical (a) inversion
+    # to the real `:135` paragraph left both doc-level asserts green (measured).
+    assert _restart_cue_order_violation(f"{good} {good}") is None, (
+        "two FORWARD cues in one paragraph must stay GREEN — the first fix for "
+        "the multi-cue gap re-graded the previous cue's post-cue clause as a "
+        "pre-cue imperative and reported `then confirm the tools are actually "
+        "there.` as a violation, a false red of #3429's class (measured)")
+    assert _restart_cue_order_violation(f"{good} {bad}") is not None, (
+        "an inverted SECOND cue in the same paragraph must be graded")
+    assert _restart_cue_order_violation(f"{bad} {good}") is not None, (
+        "an inverted FIRST cue followed by a forward second must be graded")
+
+
+def test_3232_the_tools_bound_grades_every_cue_paragraph():
+    """⛔ THE POSITIVE HALF GRADES EVERY CUE PARAGRAPH, not the first one.
+
+    `_tools_appear_after_cue` was `next(p for p in quick.split("\\n\\n") if
+    _RESTART_CUE_RE.search(p))`, and on the real `docs/quickstart-cloud.md` the
+    FIRST cue paragraph is the `--harness pi` blockquote at ~:74, not the pinned
+    `:135`. So `:135` could lose its tools clause entirely and all three
+    doc-level asserts stayed green — a REGRESSION introduced when the cue was
+    widened (the pre-diff code searched the literal "Restart your client", which
+    only `:135` contains, and correctly redded the same mutation). Measured at
+    `e337fcd3d5` (#14679 review).
+
+    Pinned directly because the real doc happens to satisfy both paragraphs, so
+    the doc-level test cannot tell the two implementations apart: reverting to
+    `next(...)` leaves the whole suite GREEN.
+    """
+    with_tools = "Restart your client, then confirm the tools are actually there."
+    without = "Restart your client, then run `tortoise mcp-status --live`."
+    assert _tools_appear_after_cue(f"{with_tools}\n\n{with_tools}") is True
+    assert _tools_appear_after_cue(f"{without}\n\n{with_tools}") is False, (
+        "the FIRST cue paragraph has no tools clause — a later paragraph that "
+        "has one must not satisfy the bound for it")
+    assert _tools_appear_after_cue(f"{with_tools}\n\n{without}") is False, (
+        "a LATER cue paragraph with no tools clause must be graded — the shape "
+        "that silent while only the first paragraph was read")
 
 
 # The POSITIVE bound's window, pinned. Without these rows the window is unpinned:
