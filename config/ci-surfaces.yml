@@ -57,14 +57,14 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `a0cea31078` folded in — the verb packs
+# reader of the prose can see. On THIS tree — `origin/main` `ff10fb328891` folded in — the verb packs
 # the pool into two bins: nine shards at 827.8 s (a, b, e, f, g, h, i, j, k) and two at 827.7 s
 # (c, d), so `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST
 # shard's) — and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
 # (1680 / 827.8 = 2.0295) on every one of the eleven shards, so the two agree by construction
 # rather than by a hand re-read.
 # ⛔ THE POOL DELTA IS RE-COUNTED ON THE RESOLVED TREE, not carried: `fast_pool()` holds **1342**
-# files at this head against **1341** on `origin/main` `a0cea31078`, both counted by loading each
+# files at this head against **1341** on `origin/main` `ff10fb328891`, both counted by loading each
 # tree's OWN manifest (`git show origin/main:config/ci-surfaces.yml`) through `fast_pool()` — and
 # the set difference is exactly ONE entry: `tests/test_14582_creation_hook.py` (`core`, flat 2.0 s),
 # this PR's own (#14582) suite. `main` carries nothing this tree lacks, and every other row the
