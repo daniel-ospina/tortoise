@@ -387,20 +387,20 @@ FUNNEL_QUERY = (
 # place). Those 243 are exactly what the population lost: 150 above the pivot and
 # 93 below, which is why the citing-file count fell by one and nothing else moved.
 # So a reader who re-measures the old appendix gets 244/150/93 and a reader who
-# re-measures the tree gets 484/7/476: both are right, they count different trees,
+# re-measures the tree gets 485/7/477: both are right, they count different trees,
 # and neither licenses typing a figure here.
 # ⛔ THE FOUR DERIVED FIGURES IN THE PARAGRAPH ABOVE ARE DELIBERATELY NOT IN A
 # `_NOTES` ROW, and that is a LIMIT rather than an omission: they describe a tree
 # that no longer exists (the pre-split appendix), so `--check` — which recomputes
 # against the tree in front of it — has nothing to compare them with. They were
 # `242` / `92` / `483` / `475` until #14625's review re-measured them (P1): once
-# `main` landed `#14592`, the base tree read **727** distinct targets over **208**
+# `main` landed `#14592`, the base tree read **728** distinct targets over **208**
 # citing files, the appendix's 244 split 150 above / 93 below / 1 at the pivot, and
 # the only shared target was the pivot — so 244 − 1 = **243** cited nowhere else,
-# not 242, and the tree reads **484/7/476**, not 483/7/475. ⛔ AND THE RECOUNT IS A BASE
+# not 242, and the tree reads **485/7/477**, not 483/7/475. ⛔ AND THE RECOUNT IS A BASE
 # CHANGE, NOT AN ERROR — state it that way, because `242` was CORRECT where it was
 # written. At `939e37f664` (the base the first version used) that base's OWN pivot was
-# `28477`, not this base's `29604`: on ITS pivot the appendix's 244 split 150 above it /
+# `28477`, not this base's `29666`: on ITS pivot the appendix's 244 split 150 above it /
 # 93 below / 1 at it, so the pivot ITSELF was among the rows, and TWO of them were also
 # cited elsewhere — that pivot (`28477`) and line `19186` — so
 # 244 − 2 = **242**. `main`'s `#14592` then restamped the appendix (its own lines
@@ -410,7 +410,7 @@ FUNNEL_QUERY = (
 # counting a tree it was never measured on. (Measured with the appendix's own address
 # shape at each sha: `git grep -a -o -E '[[:alnum:]_.-]*hosted_api\.py:[0-9]+' <sha> --
 # docs/architecture/CYPHER-INVENTORY.md`. At `939e37f664` the rows `19186` and `28477`
-# are the two shared targets; at the shipping base only `29604` is.) ⛔ THE SPLIT IS
+# are the two shared targets; at the shipping base (`bbef0b88`) only `29666` is.) ⛔ THE SPLIT IS
 # RE-MEASURED AT EVERY REBASE, never carried: `#14625`'s rebase onto `c1c8df1a3817`
 # moved the appendix's own line numbers and left every one of the four figures
 # IDENTICAL (244 distinct, 150 above / 93 below / 1 at, only the pivot shared elsewhere),
