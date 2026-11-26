@@ -2050,17 +2050,43 @@ _INVERSION_FORMS = (
     #     "Restart your client after the tools are listed" was GREEN while
     #     "… once the tools are listed" is a declared RED row, and the `when` /
     #     `after` twins of the singular row this PR adds were GREEN too (#14679
-    #     review cycle 29, measured). The false-RED risk is the same as `once`'s
-    #     and is already carried by the two skips applied before every form: an
-    #     INSTALL-side state (`… after the tools are installed`) is file-side and
-    #     exempt via `_confirmation_scopes_the_config` — which is why the object
-    #     lookup there had to admit the singular too. A negated observation
-    #     (`… if you see no tools`) is exempt via `_negated_observation_only`.
+    #     review cycle 29, measured). The false-RED risk is NOT "the same as
+    #     `once`'s" — that claim stood here until cycle 35 falsified it, see the
+    #     relative-pronoun exclusion below. Two of the false REDs are carried by
+    #     the two skips applied before every form: an INSTALL-side state (`… after
+    #     the tools are installed`) is file-side and exempt via
+    #     `_confirmation_scopes_the_config` — which is why the object lookup there
+    #     had to admit the singular too — and a negated observation (`… if you see
+    #     no tools`) is exempt via `_negated_observation_only`. The THIRD was
+    #     carried by nothing at all, and is why the connective now excludes a
+    #     relative pronoun.
     #     `if` is deliberately NOT here: it is form (a)'s connective, and adding
     #     it would grade "… if you cannot see the tools", a remedy with the
     #     restart first (measured false RED on form (a)'s wider first cut).
     _inversion_form(
-        r"\b(?:once|when|after)\s+(?:[A-Za-z0-9_`*.-]+\s+){0,2}?"
+        # ⛔ A RELATIVE PRONOUN IS NOT A CONDITION — measured false RED (#14679
+        # review cycle 35). "Restart your client, AFTER WHICH the tools are
+        # available" puts the restart FIRST and then says what follows it:
+        # `which`/`that` is a RELATIVE pronoun standing for the restart event
+        # ("after which …" = "and after that, …"), not a modifier of `tools`, so
+        # the slot below must not be allowed to absorb it. Without this arm FIVE
+        # forward renderings were RED with a message asserting an inversion the
+        # copy does not contain, which is the exact false-red class #3429 says
+        # gets a pin deleted:
+        #   "…, after which the tools are available." /
+        #   "…, after which the tools are listed under MCP." /
+        #   "…, after that the tools are available." /
+        #   "…, after which YOUR tools are available." /
+        #   "…, after which the tool list is complete."
+        # It is excluded at the CONNECTIVE and not inside the slot, because the
+        # slot is lazy and would simply absorb one more word; allowing only a
+        # determiner there instead would drop the `once \`tortoise_*\` tools`-class
+        # modifiers the slot exists for. And it cannot hide an inversion: every
+        # graded form requires a tools PREDICATE inside the connective's own
+        # clause, and "after which restart your client" carries none — a
+        # relative clause can only attach to what the restart already did.
+        r"\b(?:once|when|after)(?!\s+(?:which|that)\b)\s+"
+        r"(?:[A-Za-z0-9_`*.-]+\s+){0,2}?"
         + _TOOLS_OBJECT + r"\s+"
         # ⛔ `is` is REACHABLE again, and required: it was dropped as "an arm no
         # row could depend on" because a plural `tools\s+` can never be followed
@@ -2778,11 +2804,20 @@ def test_3232_generic_restart_lines_are_exact():
     # OWN clause ("changing" is not one) — NOT because of the COMMA split.
     # ⛔ THAT SECOND HALF WAS TRUE WHEN WRITTEN AND IS NOW FALSE, measured: on the
     # then-55-row table (cycle 8) removing the comma split changed no row, but on
-    # the current table it loses FOUR declared-RED rows — all of them
-    # merged-introducer shapes added by cycles 18-21 (`… and then, but first
-    # confirm …` and its bold/paren twins, plus the config-conjunction row). They
-    # live in a LATER comma-delimited fragment, so the split is what puts them in
-    # front of the forms. The split is LOAD-BEARING; do not delete it.
+    # the current table it loses FIVE declared-RED rows (measured twice — dropping
+    # the split, and splitting on `;` instead; #14679 review cycle 35 found the
+    # count below one short and the cycle attribution stale):
+    #   1. `… and then, but first confirm the tools are actually there, run …`
+    #   2. `… after confirming the config is right, [but first confirm the tools
+    #      are actually there].` — the config-conjunction row
+    #   3. the same merged introducer BOLDED: `… and then, **but first confirm …**`
+    #   4. the same PARENTHESISED: `… and then, (but first confirm …)`
+    #   5. `… and then, although first confirm the tools are actually there, run …`
+    #      — the `although` twin cycle 29 added, which the old FOUR-row wording
+    #      predates (so "all added by cycles 18-21" was stale by one).
+    # All five are merged-introducer shapes; they live in a LATER comma-delimited
+    # fragment, so the split is what puts them in front of the forms. The split is
+    # LOAD-BEARING; do not delete it.
     #
     # What the graded set IS and IS NOT (#14679's reviews measured both):
     # - It is the SEVEN forms in `_INVERSION_FORMS`, each observed GREEN before
@@ -2837,8 +2872,19 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
                 "confirming the tools are actually there.")
     assert _restart_cue_order_violation(forward) is None, forward
     assert _restart_cue_order_violation(inverted) is not None, inverted
-    # …and the same doc with the cue lower-cased is graded, not skipped:
-    doc_lower = f"Lead-in.\n\n{inverted[0].lower() + inverted[1:]}\n"
+    # …and the same doc with the cue lower-cased is graded, not skipped.
+    # ⛔ THE TRANSFORMATION MUST LOWER THE CUE, not the first character of the
+    # paragraph. `inverted[0].lower() + inverted[1:]` only rewrote "O" → "o", so
+    # the cue in `doc_lower` was still `RESTART YOUR CLIENT` and this assertion
+    # reddened under exactly the same mutation as the one above it (dropping
+    # `re.IGNORECASE` from `_RESTART_CUE_RE`) — it pinned nothing the table did
+    # not already pin (measured, #14679 review cycle 35). This is the dead-arm
+    # class cycle 34 called out: "a comment asserting a measurement it cannot
+    # have is worse than the dead arm".
+    doc_lower = ("Lead-in.\n\n"
+                 + inverted.replace("RESTART YOUR CLIENT", "restart your client")
+                 + "\n")
+    assert "RESTART YOUR CLIENT" not in doc_lower
     assert _restart_cue_order_violation(doc_lower) is not None, doc_lower
 
 
@@ -2857,6 +2903,21 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Restart your client after confirming the config file lists the tools.", False),
     ("Restart your client once you have checked the tools are enabled in your "
      "client settings.", False),
+    # ── forward, RELATIVE PRONOUN: the restart is not conditioned on the tools —
+    #    the tools follow it ──────────────────────────────────────────────────
+    # ⛔ Every row here was RED before the connective's `(?!\s+(?:which|that)\b)`
+    # (measured, #14679 review cycle 35): `which`/`that` stands for the RESTART
+    # event, so "after which the tools are available" states the order the pin
+    # requires and was rejected as an inversion. Removing that exclusion reds all
+    # five; the already-GREEN `after which point …` row stays GREEN either way,
+    # which is why the arm is written at the connective rather than by widening a
+    # slot that no row constrains.
+    ("Restart your client, after which the tools are available.", False),
+    ("Restart your client, after which the tools are listed under MCP.", False),
+    ("Restart your client, after that the tools are available.", False),
+    ("Restart your client, after which your tools are available.", False),
+    ("Restart your client, after which the tool list is complete.", False),
+    ("Restart your client, after which point the tools are available.", False),
     # ── inversions: confirm FIRST, restart second ───────────────────────────
     ("Restart your client after confirming the tools are actually there.", True),
     ("Restart your client, but first confirm the tools are actually there.", True),
