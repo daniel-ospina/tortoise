@@ -10407,16 +10407,21 @@ _H_14544_ROW_ADJECTIVAL_RE = re.compile(
 #: arm above (measured GREEN, #14623 review round 8, F2). Graded by the same three parts: a
 #: negation word, a change verb, and the cut named in the clause.
 _H_14544_IMPERSONAL_NEGATION_RE = re.compile(
-    # ⛔ THE OBJECT IS READ here too (#14623 review round 15, P3): without it the arm refused the
-    # paragraph's own TRUE claims — "Nothing about that `eval` registration changed in `#14544`." and
-    # "Nothing about the bin changed in `#14544`." — which is the false-block class the ACTIVE arm
-    # was widened to avoid.
-    r"\bnothing\b[^,;.!?]{0,80}?(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)"
-    r"[^,;.!?]{0,60}?" + _H_14544_CHANGE_VERB
-    + r"[^,;.!?]{0,60}?(?:#14544|that\s+cut|the\s+cut)"
-    + r"|(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,60}?\bnothing\b"
-    r"[^,;.!?]{0,60}?" + _H_14544_CHANGE_VERB
-    + r"[^,;.!?]{0,60}?(?:#14544|that\s+cut|the\s+cut)",
+    # ⛔ THE WHOLE SENTENCE'S WORD ORDER IS GRADED, not one order: round 15 narrowed this to
+    # `<row-noun> … nothing … verb`, which made FOUR spellings the parent red ship GREEN —
+    # "Nothing changed in `#14544` about that row.", "Nothing moved in `#14544` for the `durations`
+    # row.", "Nothing altered the weight in `#14544`." and "Nothing touched that row in `#14544`."
+    # (measured by differential against the parent, #14623 review round 16, P2). The object is graded
+    # by EXCLUSION instead (`_H_14544_NONROW_OBJECT_RE` in the helper), so a negated change of a
+    # REGISTRATION or of a BIN — the paragraph's own TRUE claims — is still not this claim.
+    r"\bnothing\b[^,;.!?]{0,80}?" + _H_14544_CHANGE_VERB
+    + r"[^,;.!?]{0,80}?(?:#14544|that\s+cut|the\s+cut)",
+    re.IGNORECASE)
+#: The OBJECTS that make an impersonal negation the paragraph's OWN true claim rather than the
+#: retired one: the registration, the bin, the pool, a shard reading. Read to EXCLUDE, because
+#: listing the row's own nouns as a positive requirement is what shipped four shapes GREEN.
+_H_14544_NONROW_OBJECT_RE = re.compile(
+    r"\b(?:registration|registrations|bin|bins|pool|pools|shard|shards|letter|letters)\b",
     re.IGNORECASE)
 #: ⛔ THE DECLARED RESIDUAL, in the artifact rather than implied — filed as #14715 with six measured
 #: reproductions. This family reads clause structure off PUNCTUATION plus a subordinator list, which
@@ -10505,7 +10510,8 @@ def _h_14544_banned_claim(block: str) -> str | None:
             return sentence.strip()
         if _H_14544_ROW_ADJECTIVAL_RE.search(sentence):
             return sentence.strip()
-        if _H_14544_IMPERSONAL_NEGATION_RE.search(sentence):
+        if (_H_14544_IMPERSONAL_NEGATION_RE.search(sentence)
+                and _H_14544_NONROW_OBJECT_RE.search(sentence) is None):
             return sentence.strip()
         if _H_14544_QUANTIFIER_NEGATION_RE.search(sentence):
             return sentence.strip()
@@ -10761,11 +10767,14 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # this comment already claimed "both orders"). The two orders are separate alternatives
     # above, and each is asserted here rather than assumed.
     # ⛔ AND THE NOUN AND DISTANCE BOUNDS ARE FIXTURES, not prose promises, and they are stated as the
-    # constants actually implement them (#14623 review round 15, P3 — the previous line named a single
-    # span per arm and understated both): the ACTIVE arm allows 400 characters from the cut to the
-    # NEGATION and a further 80 from it to the change verb, so its cut-to-verb span is 482; the
-    # PASSIVE arm allows 20 from the row to the negation plus 40 to the verb (60), and needs the cut
-    # named in the sentence at all. The pronoun form is scoped by SUBJECT rather than by distance.
+    # constants actually implement them. ⛔ MEASURED (#14623 review round 16, P3 — round 15 stated the
+    # cut-to-verb span as 482, which is the SHORTEST negation's case only): the ACTIVE arm allows 400
+    # characters from the cut to the negation and 80 from the negation to the change verb, so its
+    # cut-to-verb span is 482 with `not` and 486 with `did not`/`doesn't` — the span is NOT a constant,
+    # only the two gaps are. The PASSIVE arm allows 20 from the row to the negation and 40 to the
+    # verb, so 60 with `was not` and 69 with `was never`; it also needs the cut named in the
+    # sentence at all. The pronoun form is scoped by SUBJECT rather than by distance. Stating the two
+    # gaps rather than one span is the point: a claimed span was wrong within one round.
     # Widening past those is NOT claimed — the residual is declared above, and a phrase guard that
     # claimed it would be false one noun later.
     for paraphrase in (
