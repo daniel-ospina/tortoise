@@ -1352,6 +1352,11 @@
           "point": "The segment being the planning unit supports treating it as the durable commercial frame."
         }
       ],
+      "bands": {
+        "below_0_5": 11,
+        "from_0_5_to_0_6": 1,
+        "at_or_above_0_6": 27
+      },
       "paraphrase_examples_truncated": true,
       "invented_examples_truncated": true
     },
@@ -1381,6 +1386,11 @@
     "paraphrase": 27,
     "invented": 12,
     "not_in_corpus": 12,
+    "bands": {
+      "below_0_5": 11,
+      "from_0_5_to_0_6": 1,
+      "at_or_above_0_6": 27
+    },
     "invented_examples": [
       {
         "doc": "doc-01",

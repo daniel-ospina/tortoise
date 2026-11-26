@@ -546,7 +546,10 @@ and **not** to the primary artifact, and the prose pins reached two headings out
 
 Two content fixes came with it: `managedBy` had `produces`'s two-way bug mirrored (an unreadable
 `dst_kind` graded the row `INVERTED`), now `UNCLASSIFIABLE` like its twin; and the PR body's A4 figure ("10 … overlap < 0.5") was corrected **in the body itself, before any
-clean attestation existed** — the artifacts say **12** at `< 0.6` (11 below 0.5). The A3 figure
+clean attestation existed** — the artifacts say **12** at `< 0.6`, of which **11 fall below 0.5** — a figure the scorer now
+persists as `claim_layer.bands` (`11 / 1 / 27` below-0.5, 0.5–0.6, at-or-above), so it is read
+rather than retyped. ⚠️ It was unbacked before that: no artifact carried a 0.5 threshold, and the
+only `11` the bundle held was `claim_layer.verbatim`, a disjoint bucket. The A3 figure
 ("5 `hasPart` parents") was corrected in a PR comment instead, because a record was already on the
 body and editing it would have wiped the proof: the artifacts say **2 parents / 5 children**.
 

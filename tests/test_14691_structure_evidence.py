@@ -1235,6 +1235,94 @@ def test_the_A1_caveat_cannot_claim_the_table_is_traceable():
         "the caveat has re-asserted blanket traceability of the table")
     assert "all traceable to text" not in caveat, (
         "the caveat has re-asserted 'all traceable to text'")
+def test_the_over_typed_table_matches_the_paragraph_that_describes_it():
+    """Reds if the A1 over-typed table is edited out from under its own caveat.
+
+    ⛔ THE PARAGRAPH CAN BE RE-FALSIFIED BY A TABLE EDIT (#14691, 10th review,
+    finding 1). The caveat says "two of its five rows are the bundle's own
+    untraceable names" — but nothing read the table, so measured GREEN (60
+    passed): deleting the `ownership accountability convention` row (making "five"
+    false), adding a sixth row, flipping the untraceable row's kind, or renaming
+    `control-room customers`. That is the exact mode that broke this paragraph in
+    cycles 8 and 9 (a claim beside the table disagreeing with the table), so the
+    table itself is now derived.
+
+    It also pins a band figure the scorer persists: REPORT's "(11 below 0.5)" had
+    no artifact behind it until `claim_layer.bands` existed.
+    """
+    a4 = _score()["A4_no_invention"]
+    untraceable = {u["name"]: u["kind"] for u in a4["untraceable_entities"]}
+    caveat = _report_paragraph(r"^\*\*\\\* The component type is a caveat")
+    assert caveat, "REPORT.md has no A1 caveat paragraph"
+
+    # (a) THE CAVEAT'S OWN TABLE, read as ROWS: from its header to the first
+    # blank line, split on `|`, name tokens from cell 0, kind from cell 1. A
+    # regex keyed on ONE cell shape found only 2 of the 5 rows — one name cell is
+    # ``**and**``-joined and two kinds carry no namespace colon — which made the
+    # size check below vacuous (measured).
+    lines = _report().splitlines()
+    header = next(i for i, line in enumerate(lines)
+                  if re.match(r"^\| node \| typed as \|", line))
+    table = []
+    for line in lines[header + 1:]:
+        if not line.strip():
+            break
+        if set(line.strip()) <= set("|- "):
+            continue
+        cells = [c.strip() for c in line.split("|")[1:-1]]
+        assert len(cells) >= 2, line
+        names = re.findall(r"`([^`]+)`", cells[0]) or [cells[0]]
+        table.append((names, cells[1].strip("`")))
+    assert table, "the over-typed table has no parseable rows"
+
+    # (b) its size must equal the number the paragraph uses
+    assert len(table) == 5, (
+        f"the over-typed table has {len(table)} rows, not the five the caveat "
+        f"claims: {[n for n, _ in table]}")
+    assert "two of its five rows" in caveat, (
+        "the caveat no longer says 'two of its five rows' — if the table size "
+        "changed, this sentence has to change with it")
+
+    # (c) the two untraceable names must be ROWS of it, with the artifact's kinds
+    by_name = {n: k for names, k in table for n in names}
+    for name, kind in untraceable.items():
+        assert name in by_name, (
+            f"the caveat says {name!r} is one of the table's rows, but the table "
+            f"has no such row: {sorted(by_name)}")
+        assert by_name[name] == kind, (name, by_name[name], kind)
+
+    # (d) the remaining rows ARE stated in the text (so the caveat's "other
+    # three" is true) and are not themselves untraceable
+    stated_rows = [(names, k) for names, k in table
+                   if not set(names) & set(untraceable)]
+    assert len(stated_rows) == 3, (stated_rows, list(untraceable))
+    corpus = " ".join(" ".join(n.lower().split())
+                      for d in _corpus()["documents"] for n in
+                      (t["content"] for t in d["turns"]))
+    for names, _kind in stated_rows:
+        for name in names:
+            assert " ".join(name.lower().split()) in corpus, (
+                f"the caveat calls {name!r} one of the rows stated in the text, "
+                "but its name is not in the corpus")
+
+    # (e) the band figure the report quotes, from the persisted histogram
+    bands = _score()["claim_layer"]["bands"]
+    assert (f"**{bands['below_0_5']} fall below 0.5**") in " ".join(_report().split()), (
+        f"the report's below-0.5 figure is not the artifact's ({bands['below_0_5']})")
+    # the histogram covers the NON-VERBATIM population (a verbatim quote never
+    # reaches `best_overlap`), so its total is `total - verbatim`, not `total`
+    quotes = _score()["A4_no_invention"]["quotes"]
+    assert sum(bands.values()) == quotes["total"] - quotes["verbatim"], (
+        bands, quotes["total"], quotes["verbatim"])
+    # the two real invariants of the histogram against the buckets
+    assert bands["below_0_5"] <= quotes["invented"], (
+        f"{bands['below_0_5']} quotes are below 0.5 but only "
+        f"{quotes['invented']} are below the 0.6 band", bands, quotes)
+    assert bands["at_or_above_0_6"] == quotes["paraphrase"], (
+        f"the at-or-above-0.6 band ({bands['at_or_above_0_6']}) is not the "
+        f"paraphrase bucket ({quotes['paraphrase']})", bands, quotes)
+
+
 def test_the_remaining_prose_figures_are_the_artifacts_figures():
     """Reds on the three figures that sat outside every pin (3rd review, P3).
 
