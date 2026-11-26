@@ -10207,7 +10207,13 @@ _H_14544_CHANGE_VERB = (
 #: reached 38 characters later and the paragraph's own true claim was refused. The subordinator
 #: list is what ends a clause when no punctuation does.
 _H_14544_SUBORDINATOR = (
-    r"(?:because|since|while|whereas|although|though|unless|so\b|which|who|whose|where)")
+    r"(?:because|since|while|whereas|although|though|unless|so\b|which|who|whose|where"
+    # ⛔ THE LIST IS THE COMMON SUBORDINATORS, not a sample (#14623 review round 9, P2): the first
+    # cut stopped at six joins and let `when`, `as`, `if`, `before`, `after`, `until` and `whenever`
+    # join a subordinate clause with no punctuation, so the object was read across it and the
+    # paragraph's own bin claim was refused — one measured red per missing word. `that` is
+    # deliberately NOT here: it is a determiner in the claim's own object (`touch that row`).
+    r"|when|whenever|as|if|before|after|until|whether)")
 _H_14544_NEGATED_ACTOR_CHANGE_RE = re.compile(
     r"(?:#14544|that\s+cut|the\s+cut)[\s\S]{0,400}?" + _H_14544_NEGATION
     + r"[\s\S]{0,80}?" + _H_14544_CHANGE_VERB
@@ -10272,6 +10278,15 @@ _H_14544_FOREIGN_BEFORE_RE = re.compile(
     r"^\s*(?:,?\s*(?:even|also|really)\s+)?\s*(?:at\s+any(?:\s+single)?\s+point\s+)?$",
     re.IGNORECASE)
 _H_14544_AGENT_IS_CUT_RE = re.compile(r"^\s*`?(?:#14544|that\s+cut|the\s+cut)\b", re.IGNORECASE)
+#: An AGENT NOUN PHRASE — a determiner plus a noun, a backticked name, an issue ref or a capitalised
+#: name — which is what `by <agent>` names. ⛔ WITHOUT THIS the excuse was granted to a `by` that is
+#: not an agent at all: `touched by design`, `by construction`, `by default`, `by the way` all read
+#: as FOREIGN and shipped the retired claim CLEAN (#14623 review round 9, P1). The stoplist is the
+#: idiom set, because `by the way` has the shape of an agent and is not one.
+_H_14544_AGENT_NP_RE = re.compile(
+    r"^\s*(?:`?#\d+|`?[A-Z][\w.-]*|(?:the|a|an|its|their|his|her|this|that)\s+"
+    r"(?!way\b|design\b|construction\b|default\b|hand\b|then\b|now\b|contrast\b|definition\b"
+    r"|time\b|far\b)\w)")
 
 
 def _h_14544_foreign_agent_at(sentence: str, pos: int) -> bool:
@@ -10285,10 +10300,19 @@ def _h_14544_foreign_agent_at(sentence: str, pos: int) -> bool:
         return False
     if _H_14544_FOREIGN_BEFORE_RE.match(tail[:first_by.start()]) is None:
         return False
-    return _H_14544_AGENT_IS_CUT_RE.match(tail[first_by.end():]) is None
+    agent = tail[first_by.end():]
+    if _H_14544_AGENT_NP_RE.match(agent) is None:
+        return False
+    return _H_14544_AGENT_IS_CUT_RE.match(agent) is None
 _H_14544_ROW_ADJECTIVAL_RE = re.compile(
     r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,80}?"
-    r"(?:untouched|unchanged|left\s+alone)"
+    # ⛔ THE ADJECTIVE ALTERNATION IS DERIVED FROM THE CHANGE VOCABULARY, not sampled (#14623
+    # review round 9, P1): reading only `untouched|unchanged|left alone` shipped the SAME claim as
+    # `unaltered`, `unmodified`, `unaffected`, `unedited`, `unshifted`, `unmoved` and `left
+    # unmodified` CLEAN — four measured misses. Every stem in `_H_14544_CHANGE_VERB` has an
+    # `un-` form, so the family is written as one.
+    r"(?:un(?:touched|changed|altered|affected|modified|edited|shifted|moved|rewritten|re-read)"
+    r"|left\s+(?:alone|untouched|unchanged|unaltered|unmodified|unaffected|unedited))"
     r"(?:[^,;.!?]{0,80}?(?:#14544|that\s+cut|the\s+cut)"
     r"|\s*,\s*(?:as|per|according\s+to|by)\b[^,;.!?]{0,60}?(?:#14544|that\s+cut|the\s+cut))"
     r"|#14544[^,;.!?]{0,40}?touch(?:ed|es|ing)?\s+neither\s+that\s+row",
@@ -10377,6 +10401,15 @@ _H_14544_CONCLUSION_RE = re.compile(
 #: the commit; the figure lives in `durations`, graded there by `_carry_row_claim_violations`. The
 #: pattern is a DECIMAL, so issue numbers and shas (`e66997b81e76`) are not read.
 _H_14544_WEIGHT_FIGURE_RE = re.compile(r"\b\d+\.\d+\b")
+#: ⛔ THE RESIDUAL, and it is DECLARED rather than implied — filed as #14715 with six measured
+#: reproductions. This family reads clause structure off PUNCTUATION plus the subordinator list, which
+#: is a partial parser of English prose, so three shapes still escape it: (R1) a comma-set-off adjunct
+#: or a coordinated object puts the row noun in what this code calls another clause; (R2) the
+#: ROW-first arm's two gaps are still `[\s\S]` and bridge clauses; (R3) a foreign agent in SUBJECT
+#: position is invisible because the excuse is read only from a post-verbal `by …`. ⛔ Every round that
+#: bounded one of those gaps produced the opposite error on a sibling arm (rounds 7, 8 and 9 each did,
+#: measured), so they are filed rather than circled: the guard closes the classes a fold actually
+#: reintroduces, and #14715 carries the six acceptance fixtures for the rest.
 
 
 def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
@@ -10605,6 +10638,14 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             # `, as|per|according to|by` alternative.
             "The `durations` row's weight is unchanged, as that cut's own note records.",
             "The `durations` row was left alone, according to `#14544`'s cut.",
+            # ⛔ THE `un-` FAMILY OF EVERY CHANGE VERB states this claim, and reading only
+            # `untouched|unchanged` shipped six of them CLEAN (#14623 review round 9, P1).
+            "The `durations` row is unaltered by `#14544`.",
+            "The row's weight was unaffected by `#14544`.",
+            "The `durations` row was left unmodified by `#14544`.",
+            # ⛔ `by <idiom>` IS NOT A FOREIGN AGENT: read as one, it excused the claim
+            # (#14623 review round 9, P1).
+            "The `durations` row was never touched by design, and `#14544`'s cut is separate.",
             # NOT honest prose, though it reads like it: it asserts the row's weight `was never
             # re-read` in the same sentence that names the cut which DID re-read it — the claim is
             # false, and refusing it is the guard working (the alternative, dropping the row-first
@@ -10652,6 +10693,11 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             # (#14623 review round 8, P2): the object was reached across `since`, so the clause
             # bound now ends at a subordinator too.
             "`#14544`'s cut does not move a bin since the bin is held by the `durations` row.",
+            # ⛔ AND EVERY OTHER COMMON SUBORDINATOR, not just `since` (#14623 review round 9, P2):
+            # one measured false red per word the list did not carry.
+            "`#14544`'s cut does not move a bin when the bin is held by the `durations` row.",
+            "`#14544`'s cut does not move a bin as the bin is held by the `durations` row.",
+            "`#14544`'s cut does not move a bin if the bin is held by the `durations` row.",
             "`#14544`'s removal of the file from the `core` surface cannot move a bin"):
         assert _h_14544_banned_claim(honest) is None, (
             f"the anaphor ban REDS honest prose ({honest!r}) — the passive arm is missing its BE "
