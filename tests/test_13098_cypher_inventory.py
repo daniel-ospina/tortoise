@@ -3066,6 +3066,59 @@ def test_a_directory_that_only_LOOKS_like_git_metadata_still_RENDERS(tmp_path, m
     assert out.exists() and out.stat().st_size > 0, "the render wrote nothing"
 
 
+def test_a_HEALTHY_worktree_RETARGETED_elsewhere_is_NOT_refused(tmp_path, monkeypatch):
+    """…and the askability test must not read a HEALTHY retargeted work tree as damage.
+
+    ⛔ `--show-toplevel` ANSWERS A PATH, AND "NOT THIS DIRECTORY" HAS TWO CAUSES (#14741
+    review, P3, measured). One is damage — git walked UP and answered as the repository
+    ABOVE, which is a strict ANCESTOR of this boundary and is why the refusal exists. The
+    other is a healthy repository whose work tree has been retargeted
+    (`git config core.worktree <elsewhere>`): git resolves this directory to ITSELF and
+    reports a work tree root that is neither this directory nor above it. Treating that
+    as unaskable refused `--render` on a shape `origin/main` permits (rc 0), i.e. an
+    over-block on a healthy repository — the failure mode the other arms here guard the
+    opposite side of.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    sub = repo / "sub"
+    (sub / "docs").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    subprocess.run(["git", "-C", str(sub), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(sub), "config", "core.worktree", str(elsewhere)],
+        check=True,
+    )
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # THE PREMISE THAT MAKES THIS THE RETARGETED SHAPE AND NOT THE DAMAGE SHAPE: git
+    # answers a toplevel that is NOT this boundary and NOT an ancestor of it.
+    resolved = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], cwd=sub,
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    assert resolved.returncode == 0, (
+        f"the premise: git must resolve the retargeted work tree; rc={resolved.returncode} "
+        f"stderr={resolved.stderr!r}")
+    toplevel = Path(resolved.stdout.strip()).resolve()
+    assert toplevel != sub.resolve(), "the premise: the work tree root must NOT be this dir"
+    assert not sub.resolve().is_relative_to(toplevel), (
+        "the premise: the answer must NOT be an ancestor of the boundary — an ancestor is "
+        "the DAMAGE signature, and this arm would then grade the wrong shape")
+    assert census._boundary_is_unaskable(sub) is False, (
+        "a healthy repository whose work tree is ELSEWHERE must be askable: git resolved "
+        "this directory to itself, so it is not 'the repository above'")
+    rc = census.main(["--render", "sub/docs/K.md"])
+    assert rc == 0, (
+        f"a retargeted work tree is not damage and must not block the render, got {rc} — "
+        "`origin/main` permits this shape")
+    assert (sub / "docs" / "K.md").exists(), "the render wrote nothing"
+
+
 def test_the_tracking_probe_still_PERMITS_both_honest_answers(tmp_path, monkeypatch):
     """…and the fail-closed arm above does not over-block either honest permit.
 
@@ -5405,6 +5458,11 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # trips the metadata heuristic must still render. Without this arm the fix's own
         # over-block (rc 2 where `origin/main` answered 0) is invisible.
         "test_a_directory_that_only_LOOKS_like_git_metadata_still_RENDERS",
+        # ⛔ AND THE OTHER OVER-BLOCK (#14741 review, P3, measured): a HEALTHY repository
+        # whose work tree is retargeted answers `--show-toplevel` with a directory that is
+        # not an ancestor — that is "a work tree elsewhere", not "the repository above",
+        # and refusing it turned a legitimate render into rc 2.
+        "test_a_HEALTHY_worktree_RETARGETED_elsewhere_is_NOT_refused",
     }
     # ⛔ AND THE SET'S OWN SIZE — the direction `missing` structurally cannot see.
     # `missing` reds for a NAME that no longer resolves; it stays GREEN for a member
@@ -5430,8 +5488,12 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # ⛔ AND ITS OVER-BLOCK FLOOR TAKES IT 60 -> 61: refusing a heuristic hit made a plain
     # `objects/`+`refs/` directory unaskable and turned a legitimate render into rc 2
     # (#14741 review, cycle 4, P2, measured against `origin/main`).
-    assert len(split_arms) == 61, (
-        f"expected EXACTLY 61 named split arms; got {len(split_arms)} — either a "
+    # ⛔ AND THE RETARGETED-WORK-TREE COUNTERWEIGHT TAKES IT 61 -> 62 (#14741 review, P3,
+    # measured): a healthy repository whose work tree is RETARGETED answers
+    # `--show-toplevel` with a directory that is not an ancestor, and treating that as
+    # "the repository above" refused a legitimate render.
+    assert len(split_arms) == 62, (
+        f"expected EXACTLY 62 named split arms; got {len(split_arms)} — either a "
         "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
@@ -5441,7 +5503,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 61` reds a name PRUNED from the literal and `missing` reds a
+    # `len(split_arms) == 62` reds a name PRUNED from the literal and `missing` reds a
     # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
@@ -5513,8 +5575,12 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # arm that pins ROOT as a boundary the unaskability test reaches — the one provider
     # the `stop = ROOT` walk exempted by construction (#14741 review, cycle 3, P2).
     # ⛔ AND THE OVER-BLOCK COUNTERWEIGHT TAKES IT 119 -> 120 (`split_arms` 60 -> 61).
-    assert len(test_functions) == 120, (
-        f"expected EXACTLY 120 test functions in this module; got "
+    # ⛔ AND THE RETARGETED-WORK-TREE COUNTERWEIGHT TAKES IT 120 -> 121 (`split_arms`
+    # 61 -> 62): `--show-toplevel` answering a NON-ancestor is a healthy work tree that
+    # is elsewhere, not "the repository above", and refusing it was an over-block on a
+    # healthy repository (#14741 review, P3, measured against `origin/main`).
+    assert len(test_functions) == 121, (
+        f"expected EXACTLY 121 test functions in this module; got "
         f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
