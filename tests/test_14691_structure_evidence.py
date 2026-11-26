@@ -693,7 +693,13 @@ def test_the_name_variance_retry_drops_a_KIND_WORD_not_the_FIRST_word():
     full-name arm misses (the pair is never co-stated); `lumen` and `dana` both
     occur in doc-01, and the truncation is what let the row through.
     Post-fix the retry drops ONE trailing kind word (`ingest-gateway component`)
-    and nothing else, so the same mutant reds A4.
+    and nothing else. ⛔ A CODE-side mutant on `_unweld` reds at the CONTRACT
+    assertions below (`_unweld("Lumen Core product")`), before this row reaches
+    A4 — so the old "the same mutant reds A4" claim named a row that never
+    fires (round 10, mutation attribution P1). The A4-level dependence on the
+    retry is pinned where it can actually be measured:
+    `test_the_name_variance_rows_are_RECORDED_and_LOAD_BEARING` removes the retry
+    and asserts the verdict flips.
     """
     module = _load_score_module()
     assert module.a4_invention()["passes"] is True, "baseline is not clean"
@@ -871,19 +877,58 @@ def test_a_finding_that_cannot_be_derived_is_RECORDED_as_WITHHELD():
 
 
 def test_the_name_variance_rows_are_RECORDED_and_LOAD_BEARING():
-    """Reds if the fallback's only committed user stops being recorded.
+    """Reds if the PRODUCER stops recording the retry's rows, or if the retry
+    stops carrying A4.
 
     ⛔ #14723 review, round 10, P2: "the fallback is load-bearing too (1 of the 46
     committed edges, `ingest-gateway component → event-bus`, passes only through
     it)". A load-bearing allowance that leaves no row behind is invisible in the
     artifact — so the rows that need it are emitted, and the one committed edge
     that does is asserted by name rather than by count alone.
+
+    ⛔ AND THE ROW MUST READ THE PRODUCER (round 10, mutation attribution P1).
+    This arm used to read `out/t6-score.json` only, which is a COMMITTED receipt:
+    deleting `name_variance.append(...)` from `a4_invention` left the artifact
+    untouched, so the recording could be removed from the scorer with this row
+    GREEN (MEASURED: `if stated: pass` in the producer → `1 passed`; the
+    "load-bearing" half was a corpus name-presence check that survives the
+    retry's removal too). It now derives from the LOADED scorer, and it removes
+    the retry to prove the allowance carries the verdict — so the producer mutant
+    reds at the first assertion, and an `_unweld`-to-identity mutant reds at
+    `passes is False`. The committed artifact is still checked, as the receipt it
+    is.
     """
-    rows = _score()["A4_no_invention"]["relation_name_variance"]
-    assert rows, "the committed receipt needs the retry but the artifact records none"
-    assert [(r["src"], r["dst"]) for r in rows] == [
-        ("ingest-gateway component", "event-bus")], rows
-    # ...and it is still a fact the corpus states: un-welding resolves BOTH ends
+    module = _load_score_module()
+    live = module.a4_invention()
+    assert [(r["src"], r["dst"]) for r in live["relation_name_variance"]] == [
+        ("ingest-gateway component", "event-bus")], (
+        "the PRODUCER records no row for the edge its retry rescued — a deleted "
+        "`name_variance.append(...)` leaves the committed artifact unchanged")
+    assert live["passes"] is True, "baseline A4 is not clean"
+    assert not [e for e in live["relations_not_co_stated"]
+                if e["src"] == "ingest-gateway component"], (
+        "the retry's own edge is reported as invented")
+    # ...and the RETRY is what carries it: without the un-weld, the same committed
+    # edge is an invented relation and A4's claim flips.
+    original_unweld = module._unweld
+    try:
+        module._unweld = lambda name: str(name or "")
+        without = module.a4_invention()
+    finally:
+        module._unweld = original_unweld
+    assert [(r["src"], r["dst"]) for r in without["relation_name_variance"]] == [], (
+        "the retry records rows it did not need")
+    assert [e for e in without["relations_not_co_stated"]
+            if e["src"] == "ingest-gateway component"], (
+        "the retry is not load-bearing — A4 grades this edge stated without it")
+    assert without["passes"] is False, (
+        "the retry is not load-bearing — A4's verdict does not move without it")
+    # ...the committed RECEIPT records the same row, and it is still a fact the
+    # corpus states: un-welding resolves BOTH ends
+    assert [(r["src"], r["dst"]) for r in
+            _score()["A4_no_invention"]["relation_name_variance"]] == [
+        ("ingest-gateway component", "event-bus")], (
+        "the committed receipt needs the retry but the artifact records none")
     corpus = json.loads((BUNDLE / "corpus" / "structure-corpus.json").read_text())
     text = " ".join(t["content"] for d in corpus["documents"] for t in d["turns"])
     flat = re.sub(r"[^a-z0-9 ]+", "", " ".join(text.lower().split()))
@@ -1196,6 +1241,13 @@ def test_D6_owners_and_row_count_are_DERIVED_not_typed():
     MEASURED on the pre-fix code: `evidence.owned_by_rows` does not exist (the
     row count was only ever prose), and dropping a person from the DECLARED people
     left `owners_asked` at all four — the witness filter never read the corpus.
+
+    ⛔ AND THE ROW-COUNT HALF USED TO PIN EXISTENCE, NOT DERIVATION (round 10,
+    mutation attribution P1). It compared the figure to a count derived from the
+    same `EDGES`, and the typed pre-fix figure was ALSO 6 — so
+    `owned_rows = [None] * 6` left this row GREEN (MEASURED; it redded only when
+    the field was ABSENT, via `KeyError`). The figure is now forced to move by
+    deleting a row from the population, which a literal cannot follow.
     """
     module = _load_score_module()
 
@@ -1207,6 +1259,19 @@ def test_D6_owners_and_row_count_are_DERIVED_not_typed():
     assert baseline["evidence"]["owned_by_rows"] == len(owned_rows), (
         "D6's ownedBy figure is not the write receipt's row count")
     assert f"holding {len(owned_rows)} ownedBy rows" in baseline["answer_over_mcp"]
+    # ...and the figure FOLLOWS the receipt: with one ownedBy row removed from
+    # the population, both the number and the sentence have to move.
+    original_edges = module.EDGES
+    try:
+        module.EDGES = [e for e in original_edges if e is not owned_rows[-1]]
+        reduced = d6(module)
+    finally:
+        module.EDGES = original_edges
+    assert reduced["evidence"]["owned_by_rows"] == len(owned_rows) - 1, (
+        "D6's ownedBy figure did not follow the receipt — it is a typed literal")
+    assert (f"holding {len(owned_rows) - 1} ownedBy rows"
+            in reduced["answer_over_mcp"]), (
+        "D6's ANSWER still quotes the old ownedBy count")
     assert baseline["evidence"]["owners_asked"] == sorted(
         set(module.DECL["people"])
         & set((module.READBACK.get("link_witness") or {}).keys()))
