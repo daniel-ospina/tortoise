@@ -1345,7 +1345,9 @@ def _registered_producers(ext_dir: Path) -> list[str]:
                     found.extend(f"{entry.name}/{name}" for name in resolved)
                     continue
             for index in ("index.ts", "index.js"):
-                if (entry / index).is_file():
+                # `exists`, not `is_file` — Pi uses `fs.existsSync`, and a
+                # DIRECTORY named `index.ts` is a producer it registers.
+                if (entry / index).exists():
                     found.append(f"{entry.name}/{index}")
         elif suffix_ok:
             found.append(entry.name)
@@ -2052,6 +2054,174 @@ def test_install_refuses_an_extensionless_main_that_node_resolves(home):
     assert not res.ok, (
         f"GREEN over two live producers: {res.actions} / "
         f"{_registered_producers(ext_dir)}")
+
+
+def test_install_refuses_when_the_index_entry_is_a_directory(home):
+    """ROUND-22 P1 — PI TESTS `fs.existsSync`, NOT `is_file`.
+
+    A DIRECTORY named `index.ts` (containing its own `index.js`) is a producer
+    Pi REGISTERS, and `is_file()` counted it as nothing: `ok=True` over two live
+    producers, measured on the first run, on a re-run, and on the legacy rename
+    path too. One word, and the forbidden direction.
+
+    Mutation: `.exists()` -> `.is_file()` at the index test — this row REDs, and
+    so does `test_oracle_counts_an_index_entry_that_is_a_directory`.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    for name in (capture_install.PI_SECOND_PRODUCER_NAME, "reflect-hook.js"):
+        target = home / "checkout" / f"t-{name}"
+        (target / "index.ts").mkdir(parents=True)
+        (target / "index.ts" / "index.js").write_text(
+            "export default function () {}\n")
+        (ext_dir / name).symlink_to(target, target_is_directory=True)
+
+        assert capture_install._pi_entry_is_loadable(ext_dir / name) is True, (
+            f"a directory named index.ts exists, and Pi registers it ({name})")
+
+    res = install_capture("pi", home=home)
+    assert not res.ok, (
+        f"GREEN over two live producers: {res.actions}")
+
+
+def test_oracle_counts_an_index_entry_that_is_a_directory(home):
+    """The oracle transcribes the same rule, so it had the same `.is_file()`
+    (#14342 round 22, finding 1) — which is why no row could see the class.
+
+    Mutation: `.exists()` -> `.is_file()` in the oracle — REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "t"
+    (target / "index.ts").mkdir(parents=True)
+    (target / "index.ts" / "index.js").write_text("// nested\n")
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).symlink_to(
+        target, target_is_directory=True)
+
+    got = _registered_producers(ext_dir)
+    assert got == [f"{capture_install.PI_SECOND_PRODUCER_NAME}/*"] or got, (
+        got)
+    assert got, (
+        "a directory named index.ts IS a producer Pi registers; the oracle "
+        "must not count nothing")
+
+
+def test_dry_run_does_not_claim_a_mechanism_on_an_unreadable_target(home):
+    """ROUND-22 P1 (a regression) — the preview asserted the mechanism AND the
+    count on the fail-closed branch, contradicting its own real run.
+
+    Measured: real -> "could not be VERIFIED … MAY still register";
+    dry (before the fix) -> "Pi still resolves it through resolveExtensionEntries
+    … so both producers would stay registered"; real Pi on that shape registers
+    NOTHING.
+
+    Mutation: drop the `_post_unreadable` branch — REDs, and so does
+    `test_dry_run_agrees_with_the_real_run_on_a_main_only_ts_link` if the
+    removal inverts a verdict.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "hook"
+    target.mkdir(parents=True)
+    (target / "hook.js").write_text("export default function () {}\n")
+    manifest = target / "package.json"
+    manifest.write_text('{"main": "hook.js"}')
+    (ext_dir / capture_install.PI_SECOND_PRODUCER_NAME).symlink_to(
+        target, target_is_directory=True)
+    os.chmod(manifest, 0o000)
+    try:
+        dry = install_capture("pi", home=home, dry_run=True)
+        real = install_capture("pi", home=home)
+    finally:
+        os.chmod(manifest, 0o644)
+
+    dry_err = dry.error or ""
+    assert not dry.ok, dry.actions
+    assert "COULD NOT be verified" in dry_err, dry_err
+    assert "resolveExtensionEntries" not in dry_err, dry_err
+    assert "both producers would stay registered" not in dry_err, dry_err
+    # The real run says the same thing, and neither claims a mechanism.
+    real_err = real.error or ""
+    assert not real.ok
+    assert "could not be VERIFIED" in real_err or \
+        "COULD NOT be verified" in real_err, real_err
+
+
+def test_install_refuses_when_the_legacy_index_entry_is_a_directory(home):
+    """ROUND-22 P1, on the plane where the index test is actually load-bearing.
+
+    A suffix-named symlink is caught earlier by the conservative rule, so the
+    `.is_file()`/`fs.existsSync` transcription only decides NON-suffixed shapes:
+    a REAL legacy directory whose `index.ts` is itself a directory containing
+    `index.js`. Measured with real Pi: `resolveExtensionEntries` tests
+    `fs.existsSync(indexTs)`, so that directory IS the entry point and Pi
+    registers it — while `.is_file()` counted nothing and the install went
+    GREEN after the rename over `['.tortoise-capture.disabled/index.ts',
+    'tortoise-capture.ts']`.
+
+    Mutation: `.exists()` -> `.is_file()` in the predicate's index test — REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    legacy = ext_dir / capture_install.LEGACY_PI_DIRNAME
+    (legacy / "index.ts").mkdir(parents=True)
+    (legacy / "index.ts" / "index.js").write_text(
+        "export default function () {}\n")
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, (
+        f"GREEN over two live producers: {res.actions} / "
+        f"{_registered_producers(ext_dir)}")
+
+
+def test_oracle_counts_a_legacy_index_entry_that_is_a_directory(home):
+    """Same rule, in the oracle — which transcribed the same `.is_file()` and
+    is why no row could see the class (#14342 round 22, findings 1 and 5).
+
+    Mutation: `.exists()` -> `.is_file()` in the oracle's index test — REDs.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    legacy = ext_dir / capture_install.LEGACY_PI_DIRNAME
+    (legacy / "index.ts").mkdir(parents=True)
+    (legacy / "index.ts" / "index.js").write_text("// nested\n")
+
+    got = _registered_producers(ext_dir)
+    assert got, (
+        "a real directory whose index.ts is a DIRECTORY is a producer Pi "
+        "registers (fs.existsSync); the oracle must not count nothing")
+
+
+def test_a_conservative_answer_is_reported_as_a_guess_not_a_measurement(home):
+    """The conservative rule answers True for ANY non-empty target, which is a
+    refusal-safe assumption and NOT a measurement — Pi ignores some of them
+    (#14342 round 22, finding 4).
+
+    Measured: `reflect-hook.js` → a directory containing only `notes.txt`; real
+    Pi registers nothing, while the receipt said "is registered at
+    reflect-hook.js". Safe verdict, false claim.
+
+    Mutation: drop the conservative branch from `_pi_loadability_is_guessed` —
+    REDs on the "could not be VERIFIED" wording.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "t"
+    target.mkdir(parents=True)
+    (target / "notes.txt").write_text("nothing Pi loads here\n")
+    (ext_dir / "reflect-hook.js").symlink_to(target, target_is_directory=True)
+
+    res = install_capture("pi", home=home)
+    error = res.error or ""
+    assert not res.ok, res.actions
+    assert "could not be VERIFIED" in error, (
+        f"the conservative answer was reported as a measurement: {error!r}")
+    assert "is registered" not in error, error
+    obstacle = capture_install.legacy_extension_obstacle("pi", ext_dir)
+    assert "could not be VERIFIED" in obstacle, obstacle
 
 
 def test_pi_install_refuses_a_js_second_producer_rather_than_report_green(home):

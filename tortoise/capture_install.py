@@ -1383,7 +1383,8 @@ def legacy_extension_obstacle(harness: str,
     # directory is still loaded, so the installer refuses before mutating and
     # refuses again on EVERY re-run. An unmirrored refusal is a hint that names
     # a command which refuses forever, which is what this predicate exists to
-    # prevent (`:1339-1341`).
+    # prevent (:func:`legacy_extension_obstacle`) — named, not numbered: a line
+    # range cannot be kept honest by hand (#14342 round 22, finding 6).
     if legacy_disabled.is_symlink() and _pi_entry_is_loadable(legacy_disabled):
         return (f"the disabled capture extension at {PI_DISABLED_DIRNAME} is a "
                 f"SYMLINK Pi still loads — move it out of the extensions "
@@ -2000,7 +2001,13 @@ def _pi_entry_is_loadable(path: Path) -> bool:
             # forever (#14342 review round 4, finding 1).
             if entries and any(os.path.exists(path / name) for name in entries):
                 return True
-            return (path / "index.ts").is_file() or (path / "index.js").is_file()
+            # ⛔ `exists`, NOT `is_file` — PI USES `fs.existsSync` (#14342 round
+            # 22, finding 1). A DIRECTORY named `index.ts` (containing its own
+            # `index.js`) is a producer Pi registers, and `is_file()` counted it
+            # as nothing: `ok=True` over two live producers, measured on the
+            # first run, a re-run, and the legacy rename path.
+            return (os.path.exists(path / "index.ts")
+                    or os.path.exists(path / "index.js"))
         return path.name.endswith(".ts") or path.name.endswith(".js")
     except OSError:
         return True
@@ -2117,18 +2124,22 @@ def _pi_retirement_unverifiable(path: Path) -> bool:
 
 
 def _pi_loadability_is_guessed(path: Path) -> bool:
-    """Did :func:`_pi_entry_is_loadable` answer from its UNREADABLE branch?
+    """Did :func:`_pi_entry_is_loadable` answer from a NON-MEASUREMENT branch?
 
-    That predicate fails CLOSED — "a path this reader cannot read may register
-    anything" — so a ``True`` from it is a MEASUREMENT only when the shape could
-    be READ. When it could not, a receipt that says "is still an extension Pi
-    loads" (and names a cause) states a registration AND a reason the code never
-    established (#14342 round 17, finding 1).
+    Two branches of that predicate are deliberate non-measurements:
 
-    The read FOLLOWS a symlink, because ``_pi_entry_is_loadable`` does: asking
-    about the link itself answers about a different object than the predicate
-    did, and a link to a directory with an unreadable ``package.json`` is
-    exactly the shape that was measured.
+    * the UNREADABLE manifest — "a path this reader cannot read may register
+      anything" (fail closed);
+    * the CONSERVATIVE suffix-named-symlink rule — ANY non-empty target answers
+      True, which is a refusal-safe assumption, not a reading of Pi's rule
+      (#14342 round 22, finding 4). Pi ignores some of those targets, so
+      reporting the answer as "is registered" states a fact nobody measured.
+
+    Both must word every receipt that consumes them as "could not be VERIFIED
+    — it may still register", and name no mechanism and no count. Say less,
+    never more than was measured.
+
+    The read FOLLOWS a symlink, because ``_pi_entry_is_loadable`` does.
     """
     try:
         if not path.exists():  # follows the link; False for a dangling one
@@ -2136,6 +2147,9 @@ def _pi_loadability_is_guessed(path: Path) -> bool:
         target = Path(os.path.realpath(path))
         if not target.is_dir():
             return False
+        if (path.is_symlink()
+                and path.name.endswith((".ts", ".js"))):
+            return True  # the conservative branch — always a guess
     except OSError:
         return False
     _entries, unreadable = _pi_manifest_entries(target)
@@ -2219,6 +2233,23 @@ def _seam_state_clause(*, dry_run: bool, wrote: bool) -> str:
     if wrote:
         return "The capture seam is in place (see the actions above)"
     return "The capture seam was ALREADY in place"
+
+
+#: The post-retirement ACTION line's clause.
+#:
+#: ⛔ WHY THIS ONE MAY SAY "STILL" WHILE THE ERROR BESIDE IT SOMETIMES SAYS
+#: "could not be VERIFIED" (#14342 round 22, finding 3, resolved here).
+#: This line is emitted only for an action that ALREADY LANDED: the entry point
+#: was found and renamed, so `_retire_pi_entry` READ the shape and acted on it.
+#: The guess branches of `_pi_loadability_is_guessed` are the UNREADABLE manifest
+#: and the CONSERVATIVE suffix-named-symlink rule — and in both of those
+#: `_retire_pi_entry` returns its own error instead of landing, so this clause is
+#: never reached with them. An earlier cut of this fix asked
+#: `_pi_loadability_is_guessed` about the pre-rename or post-rename path here;
+#: both are dead branches (the pre-rename path no longer EXISTS, and the
+#: post-rename one is a plain file), so the branch was removed rather than left
+#: as unreachable code that reads like a guarantee it does not provide.
+_STILL_LOADED = "it is STILL an extension Pi loads"
 
 
 def _assert_pi_entry_not_loadable(path: Path) -> str | None:
@@ -2445,14 +2476,30 @@ def _disable_pi_second_producer(
             # a path that does not exist under `--dry-run` answered False and
             # produced a refusal for a shape the real run completes GREEN.
             _post_entries, _post_unreadable = _pi_manifest_entries(active)
+            # `exists`, not `is_file` — Pi uses `fs.existsSync`, and a
+            # DIRECTORY named `index.ts` is a producer it registers (#14342
+            # round 22, finding 1).
             _post_loadable = bool(
                 _post_unreadable
                 or (_post_entries and any(os.path.exists(active / name)
                                           for name in _post_entries))
-                or (active / "index.ts").is_file()
-                or (active / "index.js").is_file())
+                or os.path.exists(active / "index.ts")
+                or os.path.exists(active / "index.js"))
             if not _post_loadable:
                 return True, [f"[dry-run] would retire {active} \u2192 {retired}"], None
+            # ⛔ A GUESS IS NOT A MEASUREMENT, ON THIS BRANCH TOO (#14342 round
+            # 22, finding 2). When the manifest cannot be READ, the real run
+            # says "could not be VERIFIED — it MAY still register"; asserting
+            # the mechanism AND the count here made the preview contradict both
+            # the real run and real Pi (which registers nothing on that shape).
+            if _post_unreadable:
+                return False, [], (
+                    f"{seam_state}, but the second capture producer could not "
+                    f"be disabled ({active}): renaming the link to {retired} "
+                    f"COULD NOT be verified — it may still register, so this "
+                    f"box may run both producers. Nothing was written (a dry "
+                    f"run); move {active} out of the extensions directory by "
+                    f"hand and re-run.")
             return False, [], (
                 f"{seam_state}, but the second capture producer could not be "
                 f"disabled ({active}): renaming the link to {retired} leaves a "
@@ -2501,10 +2548,10 @@ def _disable_pi_second_producer(
         # reports zero actions over a modified disk is the report that doctrine
         # exists to prevent (#14342 review, final round finding 3).
         landed = (f"retired the entry point inside {active} (index.ts/index.js "
-                  f"→ *.disabled) — but it is STILL an extension Pi loads"
+                  f"→ *.disabled) — but {_STILL_LOADED}"
                   if was_directory else
-                  f"retired {active} → {retired} — but it is STILL an "
-                  f"extension Pi loads")
+                  f"retired {active} → {retired} — but "
+                  f"{_STILL_LOADED}")
         return True, [landed], still
     if was_directory:
         detail = (f"retired the entry point inside {active} (index.ts/index.js "
