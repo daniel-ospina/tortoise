@@ -1689,9 +1689,17 @@ _RESTART_CUE_TEXT = r"restart(?:ing)?\s+(?:your|the|its)\s+(?:MCP\s+)?(?:client|
 #     After restarting the client, confirm the tools are actually there.
 #     Restart the app, then confirm the tools are actually there.
 # So the admitted set is: the GERUND ("after restarting …"), the optional `its`
-# possessive the docs' own third spelling uses, the optional `MCP` modifier (the
-# very thing `:135`'s prose names: "the client's MCP/tool list"), and the nouns a
-# client is called in this repo's own copy. The NOUN SET is stated here as a
+# possessive, the optional `MCP` modifier (the very thing `:135`'s prose names:
+# "the client's MCP/tool list"), and the nouns a client is called in this repo's
+# own copy.
+# ⛔ THE `its` ARM'S ORIGINAL JUSTIFICATION WAS FALSE AND IS CORRECTED HERE (#14679
+# review at `3e4dd16d`): an earlier revision of this comment claimed it was "the
+# docs' own third spelling", and `rg -i 'restart its client'` over the whole repo
+# returns NOTHING outside this file — the row that now pins it is the only reason
+# it is not unpinned rot. `its` is kept because it is the same definite-article
+# variation as `your|the` (a client can be referred to in the third person, e.g.
+# "restart its client" in prose about another product), and it is now reached by a
+# table row instead of by an assertion in a comment. The NOUN SET is stated here as a
 # closed list on purpose: an unrecognised noun means the paragraph is not graded
 # at all, which is a false PASS as well as a false red, so widening it is a
 # measurement to take rather than a synonym to slip in.
@@ -2004,6 +2012,7 @@ _PRE_CUE_VERB = (
     # exactly as they did for `always`.
     r"(?:(?:do|does)\s+)?(?:\w+-)?(?:confirm|check|verif(?:y|ies|ied|ying)|ensur(?:e|es|ed|ing)"
     r"|see|look|validat(?:e|es|ed|ing)"
+    r"|find|found"
     r"|mak(?:e|es|ed|ing)\s+(?:sure|certain)|made\s+(?:sure|certain)"
     r"|be\s+(?:sure|certain))\w*\b"
 )
@@ -2221,6 +2230,32 @@ _PRE_CUE_ONLY = _inversion_form(
     + r"[^\n]*?"
     + _TOOLS_OBJECT
     + r"\s+(?:in|on)\s+(?:the\s+|your\s+|our\s+)?client['\u2019]s\b"
+    # (f.4) A BARE OBJECT WHOSE CLAUSE ENDS AT THE CUE. Every arm above demands a
+    # predicate or a locative AFTER the object, so the shortest form of the
+    # inversion — the one a doc actually writes — was still GREEN end-to-end on
+    # the shipped pin (#14679 review at `3e4dd16d`, measured):
+    #
+    #     RED    Check the tools are there, then restart your client.   (control)
+    #     GREEN  Check the tools, then restart your client.            (false PASS)
+    #     GREEN  Check the tool list, then restart your client.        (false PASS)
+    #
+    # while the forward twin `Restart your client, then check the tools.` must
+    # stay GREEN — and does, because form (f) is PRE-CUE only.
+    # ⛔ `_NOT_A_DOC` IS WHAT KEEPS THIS FROM REFUSING CORRECT COPY, and it is why
+    # the arm can anchor on the clause END instead of enumerating doc nouns:
+    # `Check the tools overview for the full list, then restart your client.`
+    # stays GREEN (measured), because a documentation noun after the object is not
+    # a claim about the running session — the same discriminator (f.2) records as
+    # "the predicate is the MECHANISM, not a decoration". The `\s*$` is safe only
+    # because `_cue_governing_clause` has already dropped the pure-sequencer clause
+    # (`then`) from this string: the graded clause here is `Check the tools`, not
+    # `Check the tools, then` (verified by direct call).
+    + r"|\s*"
+    + _PRE_CUE_VERB
+    + r"[^\n]*?"
+    + _TOOLS_OBJECT
+    + _NOT_A_DOC
+    + r"\s*$"
     + r")"
 )
 
@@ -3033,9 +3068,31 @@ _STATEMENT_BREAK_RE = re.compile(
     # `**bold**` and `*emphasis*` inside their clause.
     r"|(?<=\s)>\s+"
     r"|(?<=\s)(?:\(\d{1,2}\)|\d{1,2}[.)])\s+"
-    r"|\.\s+(?=[A-Z\"'\u201c\u201d\u2018\u2019`(\[*_>])"
+    r"|\.\s+(?=[A-Za-z0-9\"'\u201c\u201d\u2018\u2019`(\[*_>])"
+    # ⛔ A SENTENCE START IS NOT ALWAYS CAPITALISED, AND THE LOWER-CASE CASE HAS
+    # COSTS IN BOTH DIRECTIONS (#14679 review at `3e4dd16d`, measured). The
+    # lookahead admitted only capitals (plus quote/markdown openers), so a
+    # lower-case or digit-initial sentence after a full stop did not break the
+    # statement, and the merged reading produced a false PASS in EACH half of the
+    # pin — while the comment above only declared the false-RED direction:
+    #
+    #   FALSE PASS (negative half): the merged statement hands `after restarting`
+    #     governance of the SECOND sentence, so `_defers_its_check_past_the_restart`
+    #     swallows the pre-restart check:
+    #       Check the logs after restarting. check the tools are actually there.
+    #       Restart your client, then confirm the tools are actually there.
+    #       -> None   (its capitalised twin is RED)
+    #   FALSE PASS (positive half): the two-sentence window then reaches a tools
+    #     mention two sentences later, which the bound exists to refuse:
+    #       Restart your client. the config is reloaded. the tools appear later.
+    #       -> True   (its capitalised twin is False, the pinned row)
+    #       Restart your client. 2 of the steps are done. The tools appear later.
+    #       -> True
+    # Adding `a-z` and `0-9` makes all three behave like their capitalised twins,
+    # which is the point: the glyph is the boundary, not the letter's case. A
+    # DOTTED TOKEN still splits (the window truncation the colon doctrine already
+    # accepts); that is unchanged by this edit.
     r")")
-
 # ⛔ A NEGATED *OBSERVATION* IS A SYMPTOM CONDITION, A NEGATED *INSTRUCTION* IS NOT.
 # "if you see NO tools in the list" describes the failure the restart fixes (the
 # same class as the declared-GREEN "if you cannot see the tools in the list"), so
@@ -5801,10 +5858,16 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "restarting.", True),
     ("Restart your client, confirm the tools are actually there before you "
      "restart.", True),
-    # a sentence that begins lower case is graded as though it continued — the
-    # cost of the lookahead that keeps `e.g. quit` inside one statement:
+    # ⛔ CORRECTED: a sentence that begins lower case USED to be graded as though
+    # it continued — the declared cost of a lookahead that kept `e.g. quit` inside
+    # one statement. That cost had a false-PASS twin on the same edit, so the
+    # lookahead now admits `a-z`/`0-9` too (#14679 review at `3e4dd16d`, measured)
+    # and this row flips with it. The flip is CORRECT, not a regression: once
+    # `otherwise` opens its own statement, this line is FORWARD — it asks the
+    # reader to confirm the tools AFTER the restart — which is the order the pin
+    # requires. Its pinned-RED verdict was an artifact of the merged statement.
     ("Restart your client. otherwise, after confirming the tools are actually "
-     "there, run `tortoise mcp-status`.", True),
+     "there, run `tortoise mcp-status`.", False),
     # the PRE-cue config exclusion: a file-side check before the cue is forward,
     # and nothing else in this table depends on that arm (measured):
     ("After verifying the config lists the tools, Restart your client and "
@@ -6980,9 +7043,13 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # inverting it shipped GREEN while the function's own docstring claimed it
     # grades "EVERY CUE PARAGRAPH" (#14679 review at `b5b1ee005941`, measured).
     ("Restart the client after confirming the tools are actually there.", True),
-    # …and the elliptical wording in the SAME register stays GREEN: declared
-    # below, next to its twin, rather than asserted RED here.
-    ("Look for the `tortoise_*` tools, then restart the client.", False),
+    # …and the elliptical wording in the SAME register is now GRADED — this was a
+    # DECLARED RESIDUAL and arm (f.4) closes it (#14679 review at `3e4dd16d`,
+    # measured): a bare object whose clause ENDS at the cue is the same inversion
+    # as `Check the tools are there`, and the `_NOT_A_DOC` lookahead keeps the
+    # reference shapes below GREEN. The flip is deliberate and is the one this
+    # declaration asked a future tightening to take.
+    ("Look for the `tortoise_*` tools, then restart the client.", True),
     ("Restart the client, then confirm the tools are actually there.", False),
     ("Verify the load the only way it can be verified \u2014 restart the client and "
      "look for the `tortoise_*` tools.", False),
@@ -6994,7 +7061,19 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # with a predicate the elliptical copy does not have), so it was deleted rather
     # than carried as an unpinned arm. Pinned here so the gap is visible and a
     # future tightening shows up as a deliberate flip.
-    ("Look for the tortoise_* tools, then restart your client.", False),
+    # ⛔ DECLARED RESIDUAL — NOW CLOSED BY ARM (f.4) (#14679 review at `3e4dd16d`).
+    # The elliptical `look for <object>` confirmation — an imperative whose object
+    # IS the thing being confirmed but which carries NO predicate word (`look for
+    # the tools, then restart`) — is graded by the clause-final arm (f.4), because
+    # that arm anchors on the OBJECT at the clause end rather than on a predicate
+    # word this copy does not have. The earlier note here said an arm had been
+    # written for it and "MEASURED to fire on no shape at all" and was deleted;
+    # that arm required a predicate (which the elliptical copy lacks), which is why
+    # it could not fire. (f.4)'s `_NOT_A_DOC` + `\s*$` needs no predicate, so both
+    # elliptical rows and their `check`/`see` twins now agree — which is the point
+    # of having one class graded once. The reference row below stays GREEN: `tools
+    # section` is a documentation noun, not the session's list.
+    ("Look for the tortoise_* tools, then restart your client.", True),
     ("Look for the tools section below for the full list. Restart your client, "
      "then confirm the tools are actually there.", False),
     # ── cycle 54 — the EMPHATIC `Do`, and the `going to` arm pinned ──
@@ -7472,11 +7551,35 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Restart your MCP client, then confirm the tools are actually there.", False),
     ("After restarting the client, confirm the tools are actually there.", False),
     ("Restart the app, then confirm the tools are actually there.", False),
-    ("Restart your client after confirming the tools are actually there.", True),
     ("After restarting the app, confirm the tools are actually there.", False),
     ("Confirm the tools are actually there before restarting the app.", True),
     ("Before restarting your MCP client, confirm the tools are actually there.",
      True),
+    # ── the `its` possessive and the `validate` member, each given its own row
+    #    (#14679 review at `3e4dd16d`, measured): both were members of a CLOSED
+    #    list that NO row or probe could reach, so deleting either changed nothing
+    #    (`841 passed` either way) — rot, not protection, by this file's own rule.
+    ("Restart its client after confirming the tools are actually there.", True),
+    ("Restart your client after validating the tools are actually there.", True),
+    # ── arm (f.4): a BARE pre-cue object whose clause ends at the cue
+    #    (#14679 review at `3e4dd16d`). Every other form (f) arm needs a predicate
+    #    or a locative after the object, so the shortest spelling of the inversion
+    #    was GREEN end-to-end on the shipped pin.
+    ("Check the tools, then restart your client.", True),
+    ("Check the tool list, then restart your client.", True),
+    ("Check the tools overview for the full list, then restart your client.",
+     False),
+    ("Restart your client, then check the tools.", False),
+    # ── the PRE-CUE imperative spelling of the same verb, which only got the
+    #    synonym in ONE of the two copies (#14679 review at `3e4dd16d`, measured):
+    #    `Find the tools, then restart` was GREEN while its `Look for` twin was RED.
+    ("Find the `tortoise_*` tools, then restart your client.", True),
+    ("Found the tools, then restart your client.", True),
+    ("Restart your client, then find the `tortoise_*` tools.", False),
+    # ── the statement break is the GLYPH, not the letter's case: the lower-case
+    #    twin of a declared-RED pre-cue inversion (#14679 review at `3e4dd16d`).
+    ("Check the logs after restarting. check the tools are actually there. "
+     "Restart your client, then confirm the tools are actually there.", True),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
@@ -7502,10 +7605,26 @@ def test_3232_pre_cue_verb_carries_every_morphology_the_other_copies_do():
     spellings = ("verify", "verifies", "verified", "verifying",
                  "ensure", "ensures", "ensured", "ensuring",
                  "validate", "validates", "validated", "validating",
+                 "find", "finds", "finding", "found",
                  "make sure", "made sure", "making certain")
     for spelling in spellings:
         assert _re.search(_PRE_CUE_VERB, spelling, _re.IGNORECASE), (
             f"_PRE_CUE_VERB cannot match {spelling!r}; the other copies can")
+    # ⛔ AND THE `_CONFIRM_PREDICATE` COPY IS PINNED THE SAME WAY (#14679 review at
+    # `3e4dd16d`, measured). It had NO row and NO test of its own: dropping
+    # `|validat(?:e|es|ed|ing)` from it left the whole suite green (`849 passed`),
+    # because the post-cue forms can reach `validate` through `_PRE_CUE_VERB` and a
+    # TABLE ROW therefore cannot tell the two copies apart. The copy that cannot be
+    # reached through a row is exactly the one that needs a direct pin — and the
+    # `find|found` addition to this copy alone proved it in the other direction:
+    # `Find the `tortoise_*` tools, then restart your client.` was GREEN until
+    # `_PRE_CUE_VERB` gained the same two spellings, because the copies had drifted
+    # on the word this change had just added. Two copies of one closed class that
+    # are not compared is how this file's most repeated defect happens.
+    for spelling in spellings:
+        assert _re.search(_CONFIRM_PREDICATE, spelling, _re.IGNORECASE), (
+            f"_CONFIRM_PREDICATE cannot match {spelling!r}; the copies have "
+            f"drifted, so one form grades a spelling the others cannot see")
 
 
 def test_3232_the_and_then_half_reds_for_the_first_anchor_not_by_accident():
@@ -7642,6 +7761,17 @@ def test_3232_the_tools_bound_grades_every_cue_paragraph():
     assert _tools_appear_after_cue(f"{with_tools}\n\n{without}") is False, (
         "a LATER cue paragraph with no tools clause must be graded — the shape "
         "that silent while only the first paragraph was read")
+    # ⛔ THE PER-CUE LOOP INSIDE ONE PARAGRAPH IS THE SAME DEFECT ONE LEVEL DOWN,
+    # and it was unpinned: trimming `_cue_windows(para)` to `[:1]` left the whole
+    # suite green (`841 passed`, measured, #14679 review at `3e4dd16d`).
+    assert _tools_appear_after_cue(
+        "Restart your client, then confirm the tools are actually there. "
+        "Wait. Restart your client. Nothing to see here.") is False, (
+        "the SECOND cue in a paragraph lost its tools clause and was accepted")
+    assert _tools_appear_after_cue(
+        "Restart your client, then confirm the tools are actually there. "
+        "Wait. Restart your client, then confirm the tools are actually "
+        "there.") is True
 
 
 # The POSITIVE bound's window, pinned. Without these rows the window is unpinned:
@@ -7661,6 +7791,13 @@ def test_3232_the_tools_bound_grades_every_cue_paragraph():
     ("Restart your client. The config is reloaded. The tools appear later.",
      False),
     ("Restart your client. Nothing to see here.", False),
+    # ── the statement break is the GLYPH, not the case of the next letter
+    #    (#14679 review at `3e4dd16d`, measured): a lower-case or digit-initial
+    #    sentence must bound the window exactly as its capitalised twin does.
+    ("Restart your client. the config is reloaded. the tools appear later.",
+     False),
+    ("Restart your client. 2 of the steps are done. The tools appear later.",
+     False),
 ])
 def test_3232_the_tools_appear_bound_is_sentence_bounded(line, appears):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
