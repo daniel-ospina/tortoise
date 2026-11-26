@@ -1299,10 +1299,11 @@ def test_each_door_finding_ANSWER_is_the_artifacts_answer_in_SUBSTANCE():
         answer = _flat(row.split("|")[3])
         artifact = _flat(finding["answer_over_mcp"])
         assert artifact, finding["id"]
-        # the artifact's sentence, compared on its first six words — prose may add
-        # to it, but the claim itself has to be present, not merely the sign
-        key = " ".join(artifact.split()[:6])
-        assert key in answer, (
+        # ⛔ THE WHOLE ANSWER, not its opening words (#14691 review, 7th cycle,
+        # finding 3). A six-word key stops BEFORE the claim: D6's key was
+        # "no it returns for all 4", so `… it returns for all 4 owners asked the
+        # rows each of them owns` — the door WORKING — kept the key and passed.
+        assert artifact in answer, (
             f"door finding {finding['id']}'s ANSWER in REPORT.md does not carry "
             f"the artifact's answer: report {answer[:140]!r} vs artifact "
             f"{artifact[:140]!r}")
@@ -1740,3 +1741,288 @@ def test_the_refusal_FIRES_on_the_run_path(monkeypatch, tmp_path):
         ingest.main()
     assert _StubSDK.captured > 0, (
         "a fresh graph never reached the ingest loop, so arm (1) is vacuous")
+
+
+def test_every_TABLE_ROW_in_the_report_is_derived_from_an_artifact():
+    """Reds if a per-row figure in the A1/A2/A5 tables drifts from its artifact.
+
+    ⛔ #14691 review, 7th cycle, findings 1, 2 and 5 (P1/P2/P2). The headline pins
+    reached the A1 and A3 HEADINGS, and the A2 table only in the three cells an
+    earlier cycle happened to name. Every other cell was free, measured green on
+    1de08152, one at a time:
+
+      * A2 `| **team → role** | **0** |` → `**7**` — the report could state that a
+        containment class it declares ABSENT (0 edges) EXISTS, contradicting §3's
+        own mechanism item and §5, with the suite green;
+      * A2 `person → team **4/4**` → `**9/4**`, `person → role **4/4**` →
+        `**9/4**`, the ownedBy `**4/4** (6 rows)` → `**9/4**` / `(11 rows)`,
+        `customer → product 2/2` → `9/2`, `dependsOn **7/7** | **7/7**` →
+        `**7/7** | **14/7**`;
+      * A1 `| component | 7 | 7 | 7* |` → `9 | 9 | 9*`, `| team | 3 | 3 | 3 |` →
+        `6 | 6 | 6 |`;
+      * A5's `best rank` cells (`2` → `5`).
+
+    Each row is rebuilt from `out/t6-score.json`, so the table cannot say anything
+    the artifact does not.
+    """
+    score = _score()
+    a1 = score["A1_type_coverage"]
+    a2 = score["A2_edges"]["totals"]
+    report = _report()
+
+    # ── A1: one row per declared role, from `per_type`
+    for role, block in a1["per_type"].items():
+        # the table HEADER also starts `| role |`; the data row's cells are ints
+        row = _report_line(rf"^\| {role} \| \d+ \| \d+ \| \d+")
+        assert row, f"REPORT.md has no A1 row for {role!r}"
+        cells = [c.strip().rstrip("*") for c in row.split("|")[1:-1]]
+        assert cells[1:4] == [str(block["declared"]), str(block["present"]),
+                              str(block["right_kind"])], (role, cells)
+
+    # ── A2: every class row, from `totals` + the receipt's own row counts
+    receipt = _receipt()
+    rows_by_predicate = {}
+    for doc in receipt["documents"]:
+        for edge in (((doc.get("result") or {}).get("relation_write") or {})
+                     .get("edges") or []):
+            rows_by_predicate[edge["predicate"]] = \
+                rows_by_predicate.get(edge["predicate"], 0) + 1
+    owned_rows = rows_by_predicate.get("ownedBy", 0)
+    produced_rows = rows_by_predicate.get("produces", 0)
+    ownership_pairs = sum(1 for o in score["A2_edges"]["ownership"] if o["present"])
+
+    def a2row(pattern, *expected, cells_at=()):
+        row = _report_line(pattern)
+        assert row, f"REPORT.md has no A2 row matching {pattern!r}"
+        for fragment in expected:
+            assert fragment in row, (pattern, fragment, row)
+        cells = [c.strip() for c in row.split("|")[1:-1]]
+        for index, want in cells_at:
+            assert cells[index] == want, (pattern, index, want, cells)
+
+    a2row(r"^\| product → feature \(`hasPart`\)", f"**{a2['containment_present']}**")
+    a2row(r"^\| person → team \(`related`\)", f"**{a2['membership_present']}**")
+    a2row(r"^\| person → role \(`related`\)", f"**{a2['role_links_present']}**")
+    a2row(r"^\| \*\*team → role\*\* \|", f"**{a2['team_to_role_edges']}**")
+    a2row(r"^\| thing → owner \(`ownedBy`\)",
+          f"**{ownership_pairs}/4** ({owned_rows} rows)",
+          f"**{a2['ownership_oriented_correct']}/{owned_rows}")
+    a2row(r"^\| dependent → dependency \(`dependsOn`\)",
+          cells_at=((1, f"**{a2['dependency_present_and_correct']}**"),
+                    (2, f"**{a2['dependency_present_and_correct']}**")))
+    a2row(r"^\| team → component \(`produces`\)",
+          f"{produced_rows}/{produced_rows}", f"**0/{produced_rows}")
+    a2row(r"^\| customer → product \|", "2/2")
+
+    # ── A5: each row's rank cell holds exactly the ranks the artifact recorded
+    probes = score["A5_retrieval"]["probes"]
+    # the A5 table's own shape: question | expected | text verdict | ranks | walk
+    table = [line for line in report.splitlines()
+             if re.match(r"^\| [^|]+ \| [^|]+ \| ✅[^|]* \| [\d, ]+ \| [❌✅] \|$", line)]
+    assert len(table) == len(probes), (len(table), len(probes))
+    for probe, row in zip(probes, table, strict=True):
+        # the report collapses equal ranks ("2" for three features that each
+        # ranked 2), so the comparable form is the SET of distinct ranks
+        ranks = sorted(set(probe["first_rank_in_search"].values()))
+        cells = [c.strip() for c in row.split("|")]
+        shown = sorted({int(n) for n in re.findall(r"\d+", cells[-3])})
+        assert shown == ranks, (
+            f"A5 row for {probe['element']!r} states ranks {shown} while the "
+            f"artifact recorded {ranks}: {row}")
+
+
+def test_the_after_ingest_block_cost_table_and_remaining_figures_are_derived():
+    """Reds if §2's after-ingest block, the cost/token tables, or the §3/§7/§8
+    figures drift from their artifacts.
+
+    ⛔ #14691 review, 7th cycle, finding 5 (P2). Measured green on 1de08152, one
+    at a time: the after-ingest `taxonomy` (`"Point": 86` → 93), `structure.total`
+    (81 → 88), `pointkinds` count (51 → 58), `5 agentSession sources` → `9`;
+    §2's `| doc-02 | 14.6 |` → `21.6`; the total row's `**19**` calls → 26 and
+    `50` points → 57; `**0 of 28 declared structure elements untraceable**` → 7;
+    `8 of 46 are not co-stated` → 15; `50 \`quote\` spans` → 57; `Examples of the
+    invented 12` → 19; §7's `**13**` → 20; §8's `809,812 bytes · 791 KB` → and
+    `32 element walks` → 39; and `out/ingest-receipt.json`'s
+    `documents[1].ack_seconds` (14.58) → 99.9 — the ack column's own source.
+
+    Each figure is read out of the artifact, never retyped.
+    """
+    score = _score()
+    receipt = _receipt()
+    after = receipt["graph_overview_after"]
+    a4 = score["A4_no_invention"]
+    claim = score["claim_layer"]
+    tokens = score["extraction_tokens"]
+    readback = _readback()
+    report = _report()
+
+    # ── §2: the after-ingest overview block
+    tax = ", ".join(f'"{k}": {v}' for k, v in after["taxonomy"].items())
+    assert f'"taxonomy":  {{{tax}}}' in report, (tax, "§2 taxonomy")
+    assert (f'"structure": {{"operators": {after["structure"]["operators"]}, '
+            f'"total": {after["structure"]["total"]}}}') in report, "§2 structure"
+    kinds = ", ".join(f'{{"kind": "{p["kind"]}", "count": {p["count"]}}}'
+                      for p in after["pointkinds"])
+    assert f'"pointkinds": [{kinds}]' in report, ("§2 pointkinds", kinds)
+    sources = len(after["sources"])
+    assert f"{sources} agentSession sources" in report, "§2 sources"
+
+    # ── §2: the per-document cost/ack rows, and the totals row
+    docs = {d["doc_id"]: d for d in receipt["documents"]}
+    for doc_id, by_doc in tokens["by_doc"].items():
+        row = _report_line(rf"^\| {doc_id} \|")
+        assert row, f"REPORT.md has no §2 row for {doc_id}"
+        cells = [c.strip() for c in row.split("|")[1:-1]]
+        assert cells[1] == f"{docs[doc_id]['ack_seconds']:.1f}", (doc_id, cells)
+        assert cells[2] == str(by_doc["calls"]), (doc_id, cells)
+        assert cells[3] == f"{by_doc['prompt_tokens']:,}", (doc_id, cells)
+        assert cells[4] == f"{by_doc['completion_tokens']:,}", (doc_id, cells)
+    total = _report_line(r"^\| \*\*total\*\* \|")
+    assert total, "REPORT.md has no §2 totals row"
+    cells = [c.strip() for c in total.split("|")[1:-1]]
+    assert cells[2] == f"**{tokens['calls']}**", cells
+    assert cells[3] == f"**{tokens['prompt_tokens']:,}**", cells
+    assert cells[4] == f"**{tokens['completion_tokens']:,}**", cells
+    assert cells[5] == f"{score['claim_layer']['quotes_total']}", cells
+    assert cells[6] == f"**{score['edge_count']}**", cells
+
+    # ── §3: the A4 counts and the claim-layer call-outs
+    assert (f"**{a4['untraceable_counts']['declared_structure']} of "
+            f"{score['A1_type_coverage']['declared']} declared structure elements "
+            "untraceable**") in report, "§3/A4 declared untraceable"
+    strict = a4["relations_not_co_stated_at_SENTENCE_scope"]
+    if not isinstance(strict, int):
+        strict = len(strict)
+    assert f"**{len(a4['relations_not_co_stated'])} of {score['edge_count']} " \
+           "relations are" in report, "§3/A4 un-stated relations"
+    assert f"{strict} of {score['edge_count']} are not" in report, "§3/A4 strict"
+    assert f"{claim['quotes_total']} `quote` spans" in report, "§3 quote spans"
+    assert f"Examples of the invented {claim['invented']}" in report, \
+        "§3 examples header"
+    assert (f"**{score['A2_edges']['totals']['asymmetric_pairs_inverted']}** — is "
+            "the number this report's A2 line derives") in report, "§7 pairs"
+
+    # ── §8: the readback row's own size and walk count
+    path = BUNDLE / "out" / "readback.json"
+    size = path.stat().st_size
+    assert f"{size:,} bytes · {round(size / 1024)} KB" in report, "§8 readback size"
+    assert f"{len(readback['elements'])} element walks" in report, "§8 walk count"
+
+
+def test_the_readback_artifact_backs_the_findings_it_is_cited_for():
+    """Reds if `out/readback.json`'s payload contradicts the findings citing it.
+
+    ⛔ #14691 review, 7th cycle, findings 6 and 7 (P3). `_door_findings()` takes
+    `READBACK["door_findings"]` verbatim, so the evidence a finding is cited for
+    can be emptied while the finding stands. Measured green on 1de08152:
+    `unresolved_elements` → `[]` (while D2 and REPORT keep saying "2 of 32"), a
+    retrieval walk's `reply` → `{"entity": {}}`, `structure_check.reply` →
+    `{"result": [{"severity": "error", …}]}` (while §6.4 says it returned `[]`),
+    `tool_surface.count` 39 → 99, `"ok": true` → `false`, and the receipt's
+    `installed_packs` losing a namespace REPORT names.
+
+    These are the fields the report's prose is a claim ABOUT, so they are pinned
+    to it — never inferred from it.
+    """
+    readback = _readback()
+    receipt = _receipt()
+    report = _report()
+
+    # D2's "NO for 2 of 32" is the readback's own unresolved list and walk count
+    unresolved = readback["unresolved_elements"]
+    elements = readback["elements"]
+    # a walk that was asked must carry a reply, and the unresolved entries must
+    # be a subset of the elements read
+    assert all("reply" in (e.get("walk") or {}) for e in elements), (
+        "an element walk carries no reply at all")
+    unresolved_ids = {u.split(":", 1)[-1] for u in unresolved}
+    names = {e.get("name") for e in elements}
+    assert unresolved_ids <= {str(n) for n in names}, (sorted(unresolved_ids)[:5])
+    d2 = next(f for f in _score()["door_findings"] if f["id"] == "D2")
+    assert f"{len(unresolved)} of {len(elements)}" in d2["answer_over_mcp"], (
+        d2["answer_over_mcp"], len(unresolved), len(elements))
+
+    # §6.4's claim: the structural validator answered nothing
+    assert _rows(readback["structure_check"]["reply"]) == [], (
+        "check_structure returned rows, so REPORT §6.4's claim is false")
+    # the readback's own health and surface
+    assert readback["ok"] is True, (
+        "the readback reports NOT ok — a layer read errored")
+    assert readback["tool_surface"]["count"] == len(
+        json.loads((BUNDLE / "out" / "tool-surface.json").read_text())), (
+        readback["tool_surface"], "the surface count disagrees with the receipt")
+    # every pack REPORT names is one the receipt recorded
+    names_in_report = [p["namespace"] for p in receipt["installed_packs"]]
+    assert len(names_in_report) == len(set(names_in_report)), names_in_report
+    sentence = " ".join(report.split())
+    for namespace in names_in_report:
+        assert f"`{namespace}`" in sentence, (
+            f"REPORT does not name the installed pack {namespace!r} that the "
+            "receipt recorded")
+
+
+def test_the_tool_surface_artifact_carries_a_SCHEMA_for_every_tool():
+    """Reds if the surface artifact keeps its tools but loses their schemas.
+
+    ⛔ #14691 review, 7th cycle, finding 8 (P3). REPORT §8 says the artifact is
+    "the live MCP surface (39 tools) **with each tool's own `inputSchema`**", and
+    the suite pinned only its LENGTH. Measured green on 1de08152: replacing every
+    entry's description/params with `{"description": "fake", "required": [],
+    "params": []}`.
+    """
+    surface = json.loads((BUNDLE / "out" / "tool-surface.json").read_text())
+    assert surface, "the surface artifact is empty"
+    for name, entry in surface.items():
+        assert isinstance(entry, dict) and entry, (name, entry)
+        text = json.dumps(entry)
+        assert len(text) > 40, (
+            f"{name}'s entry carries no schema at all: {text}")
+        assert "fake" not in text.lower(), (name, text[:120])
+    # the surface is the same SET the readback recorded, not just the same size
+    names = set(surface)
+    assert names == set(_readback()["tool_surface"]["names"]), (
+        "the surface receipt and the readback disagree about WHICH tools exist")
+
+
+def test_the_independent_measurements_FINDING_payload_is_pinned_row_by_row():
+    """Reds if the corroboration's rows are rewritten in place.
+
+    ⛔ #14691 review, 7th cycle, finding 4 (P2). The `(b)` pins fixed the
+    corroboration's headline fields; its PAYLOAD stayed free. Measured green on
+    1de08152: swapping src/dst (and src_kind/dst_kind) on 2 of the 4
+    `A2.ownedBy` rows — so the peer read corroborates "half correct" instead of
+    "0/6 inverted", the exact claim it is cited for — `witness_neighbourhood_doors`
+    given `explore_rows: 99`, and every `A5.*.search_ok` set to false.
+    """
+    indep = json.loads((BUNDLE / "out" / "t6-independent-verification.json").read_text())
+    declared = _corpus()["_declared_structure"]
+
+    # (1) each ownedBy row must record the INVERSION this artifact corroborates:
+    #     the OWNER as source and the OWNED THING as target, with the kinds the
+    #     live read reported. Reversing any row would make the peer read
+    #     corroborate "correct" instead of "0/6 inverted" — the claim it is cited
+    #     for — so the row set is pinned whole.
+    expected = {(_norm_key(owner), _norm_key(thing) if thing != "ingest-gateway"
+                 else "ingest-gateway component")
+                for thing, owner in declared["ownership"]}
+    rows = indep["A2"]["ownedBy"]
+    assert len(rows) == len(expected), rows
+    seen = set()
+    for row in rows:
+        src, dst = _norm_key(row["src"]), _norm_key(row["dst"])
+        assert (src, dst) in expected, (
+            f"an independent ownedBy row reads {src!r} → {dst!r}, which is not "
+            f"the owner → owned-thing inversion the artifact corroborates: "
+            f"{sorted(expected)}")
+        assert row["src_kind"] == "subject" and row["dst_kind"] == "object", row
+        seen.add((src, dst))
+    assert seen == expected, sorted(expected - seen)
+
+    # (2) the neighbourhood witness: its counts must be its own lists' lengths
+    for node, block in indep["witness_neighbourhood_doors"].items():
+        assert block["explore_rows"] == len(block["explore"]), (node, block)
+        assert "not found" in json.dumps(block["list_topics"]).lower(), (node, block)
+
+    # (3) every retrieval probe the corroboration ran answered
+    for element, block in indep["A5"].items():
+        assert block["search_ok"] is True, (element, block)

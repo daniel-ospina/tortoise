@@ -319,9 +319,9 @@ Every one of these was measured through MCP; none was worked around.
 
 | id | question | answer over MCP | evidence |
 |---|---|---|---|
-| **D1** | is this structural edge oriented `src → dst`? | **No — the edge and its type are visible; its direction is not** by the time a caller reads it. | `explore_connections` UNIONs `(n)-[r]->(m)` with `(n)<-[r]-(m)` and keeps `type(r)` only (`tortoise/navigation.py:172-179`). The one read that reports direction, `entity_reads.entity_relations`, is behind `GET /v1/entities/{id}/relations` and has **no MCP/SDK door** (`tortoise/entity_reads.py:533-559`). |
-| **D4** | does `expand_relationships` report the STRUCTURAL edges of an entity, the way it reports the epistemic ones? | **No — it returns `[]` for a node that has edges, so a structurally-connected entity reads as ISOLATED.** | Lumen Core: 1 row (its `IMPL` to `control-room customers`), 19 real neighbours. Amara Osei / Platform team / event-bus: **0 rows** each, while `explore_connections` sees 6 / 10 / 10. The read covers `IMPL\|NAND\|hasPart` only (`entity_reads.py:551-559`) — and `hasPart` only where it is an operator/point edge. |
-| **D3** | does the full-scan door accept the **bare** kind the packs declare? | **No — a bare kind returns an EMPTY list with no error, while the namespaced spelling returns rows.** | `search_knowledge(kind="product", entity_type="object")` → `[]`; `kind="product-strategy:product"` → 2 rows. Same for `team`/`core:team`. A caller who reads `objectKinds: [product]` in a manifest and asks for it is told *"there is nothing"* — an answer, not a refusal (AX: a surface must not answer where it cannot know). |
+| **D1** | is this structural edge oriented `src → dst`? | **NO — the edge and its type are visible, its direction is not.** | `explore_connections` UNIONs `(n)-[r]->(m)` with `(n)<-[r]-(m)` and keeps `type(r)` only (`tortoise/navigation.py:172-179`). The one read that reports direction, `entity_reads.entity_relations`, is behind `GET /v1/entities/{id}/relations` and has **no MCP/SDK door** (`tortoise/entity_reads.py:533-559`). |
+| **D4** | does `expand_relationships` report the STRUCTURAL edges of an entity, the way it reports the epistemic ones? | **NO — it returns `[]` for a node that has edges, so a structurally-connected entity reads as isolated.** | Lumen Core: 1 row (its `IMPL` to `control-room customers`), 19 real neighbours. Amara Osei / Platform team / event-bus: **0 rows** each, while `explore_connections` sees 6 / 10 / 10. The read covers `IMPL\|NAND\|hasPart` only (`entity_reads.py:551-559`) — and `hasPart` only where it is an operator/point edge. |
+| **D3** | does the full-scan door accept the **bare** kind the packs declare? | **NO — a bare kind returns an EMPTY list with no error while the namespaced spelling returns rows.** | `search_knowledge(kind="product", entity_type="object")` → `[]`; `kind="product-strategy:product"` → 2 rows. Same for `team`/`core:team`. A caller who reads `objectKinds: [product]` in a manifest and asks for it is told *"there is nothing"* — an answer, not a refusal (AX: a surface must not answer where it cannot know). |
 | **D5** | does `graph_overview(section='topics', entity_id=…)` resolve an entity that `get_entity` and `explore_connections` both resolve? | **NO — it answers 'Entity … not found' for every node asked about, including nodes those two doors return.** | Lumen Core, Amara Osei, Platform team, event-bus — all four resolve through `get_entity` and walk through `explore_connections`. |
 | **D6** | does the product's OWNERSHIP door — `tortoise_get_entity(id, type='governance')` — return what each person owns? | **NO — it returns `[]` for all 4 owners asked, on a graph holding 6 `ownedBy` rows.** | `tortoise_get_entity(id, type="governance")` → `_get_owned_entities` reads `MATCH (s:Subject)<-[:ownedBy]-(e)` (`sdk.py:62739-62758`), the declared orientation; the written rows point the other way, so nothing points *into* a Subject. |
 | **D2** | can a declared structure element be resolved by NAME through the MCP doors? | **NO for 2 of 32** **walked** names — ⚠️ the walk population is 32, **not** the 28 declared elements §1 names: `run_readback.ALL_ELEMENTS` is the 28 declared names plus every `ownedThing` in `_declared_structure.ownership`, and the 32 rows carry `Lumen Core` and `ingest-gateway` a second time each. Of those 32, 2 do not resolve — `explore_connections(query=…)` resolves names to **Points**, and `ingest-gateway`'s stored name is `ingest-gateway component` (from the sentence *"owns the ingest-gateway component"*). | `out/readback.json` → `unresolved_elements` (2 rows), `elements` (32 walks), `elements[].walk_root_kind` (empty on 5/5 retrieval walks); re-derived by `score_t6._door_findings`, so the artifact cannot state a count its own rows deny. |
@@ -545,6 +545,28 @@ body and editing it would have wiped the proof: the artifacts say **2 parents / 
 committed 791 KB artifact, so the fix is on the CONSUMER side — `score_t6.is_error_reply` /
 `call_failed` / `measured_empty`, plus the test-side `_measured()` — where a failed call is no longer
 readable as an answered-empty one.
+
+### 8.3 What the 7th review cycle added (every table row and every figure)
+
+The 9 findings of the 6th cycle were verified closed, and the cycle then found eight more of the same
+shape: the headline pins reached the A1/A3 *headings* and three A2 cells, while the rest of every
+table and most of §2/§3/§7/§8's numbers were free. All eight were measured green on `1de08152`; each
+now reds:
+
+| mutant (all measured green at `1de08152`) | arm that now reds on it |
+|---|---|
+| A2 `\| **team → role** \| **0** \|` → `**7**` (stating a class the report declares ABSENT), the `4/4` cells → `9/4`, `(6 rows)` → `(11 rows)`, `dependsOn`'s correct cell → `14/7`, `customer → product 2/2` → `9/2` | `test_every_TABLE_ROW_in_the_report_is_derived_from_an_artifact` |
+| A1 `\| component \| 7 \| 7 \| 7* \|` → `9 \| 9 \| 9*`, `\| team \| 3 …` → `6 …`, an A5 rank `2` → `5` | same |
+| §2's after-ingest `taxonomy` / `structure.total` / `pointkinds` / `5 agentSession sources`; every per-doc ack/calls/token cell and the totals row; `0 of 28 …`, `8 of 46 …`, `50 \`quote\` spans`, `Examples of the invented 12`, §7's `13`, §8's bytes/KB and `32 element walks`; the receipt's own `ack_seconds` | `test_the_after_ingest_block_cost_table_and_remaining_figures_are_derived` |
+| `out/readback.json`'s `unresolved_elements` emptied (D2 keeps saying "2 of 32"), `structure_check` given an error row (§6.4 says it returned `[]`), `tool_surface.count` 39 → 99, `"ok"` → `false` | `test_the_readback_artifact_backs_the_findings_it_is_cited_for` |
+| every `out/tool-surface.json` entry's schema replaced with `{"description": "fake", …}` | `test_the_tool_surface_artifact_carries_a_SCHEMA_for_every_tool` |
+| an independent `A2.ownedBy` row reversed (so the peer read corroborates "half correct" instead of "0/6 inverted"), `explore_rows: 99`, every `A5.*.search_ok` → false | `test_the_independent_measurements_FINDING_payload_is_pinned_row_by_row` |
+| D6's answer reworded to say the door WORKS while keeping its leading "No" | `test_each_door_finding_ANSWER_is_the_artifacts_answer_in_SUBSTANCE` (now full containment, not a six-word key) |
+
+The door-finding ANSWER cells now carry the artifact's `answer_over_mcp` verbatim, so the table cannot
+assert a reversal and the arms are exact rather than approximate.
+
+---
 
 ---
 
