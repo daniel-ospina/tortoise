@@ -1981,9 +1981,21 @@ _PRE_CUE_ONLY = _inversion_form(
     # adverb-free twin is a declared-RED row: the same one-inserted-word defect,
     # one position further out (#14679 review round 7). `then`/`next` are in the
     # slot because they escape it identically (measured).
-    r"(?:(?:(?:" + _ADVERBS + r")|then|next)\s*,?\s+)*)?(?:need\s+to"
-    r"|have\s+to|want\s+to|be\s+able\s+to|be\s+going\s+to|going\s+to|must|should|can"
-    r"|could|will|shall|may|might|ought\s+to|would)\s+"
+    r"(?:(?:(?:" + _ADVERBS + r")|then|next)\s*,?\s+)*)?"
+    # ⛔ THE SEMI-MODAL'S OWN `to` IS A POSITION TOO. The adverb runs sit around and
+    # at the boundary of the chain, so `You will NEED FIRST TO confirm …` was still
+    # GREEN over a declared-RED twin — the same one-inserted-word defect, one
+    # position further in (#14679 review round 8). A semi-modal therefore carries
+    # its own run before `to`.
+    r"(?:(?:need|have|want)\s+(?:(?:" + _ADVERBS + r")\s*,?\s+)*to"
+    r"|be\s+able\s+to|be\s+going\s+to|going\s+to|must|should|can"
+    # ⛔ `had better` IS THE SAME MODAL, AND THE FILE SAYS SO TWICE. This form
+    # omitted it while `_NEGATED_CUE_LEAD_RE` admits `\b(?:had|'d|\u2019d)\s+better\s+not`
+    # and its comment declares "`ought` AND `had better` ARE THE SAME LEAD" —
+    # two copies of one class disagreeing, which is this file's most repeated
+    # defect: `You had better confirm the tools are actually there. Restart …`
+    # was GREEN while its own negation is a pinned RED row (#14679 review round 8).
+    r"|had\s+better|better|could|will|shall|may|might|ought\s+to|would)\s+"
     r"|be\s+sure\s+to\s+|make\s+sure\s+to\s+)?"
     # ⛔ THE ADVERB SLOT SITS ON **EITHER SIDE** OF THE MODAL — form (a) already
     # solved this (`(?:_ADVERBS)\s+)*` both sides) and (f) was the outlier, so
@@ -2834,8 +2846,11 @@ _STATEMENT_BREAK_RE = re.compile(
     #     GREEN  Restart your client, **after confirming the tools …**
     #     GREEN  > Restart your client,\n> after confirming the tools …
     #
-    # Measured: narrowing to `^-+\s*` and dropping `^>\s*` keeps all 566 rows and
-    # every `test_3232_*` / `test_5153_*` green while fixing both probes. The
+    # Measured: narrowing to `^-+\s*` and dropping `^>\s*` keeps the WHOLE table
+    # and every `test_3232_*` / `test_5153_*` green while fixing both probes. (The
+    # integer that used to sit here rotted the moment a row was added — the same
+    # defect the split-loss paragraph was rewritten for; a count names its sha or
+    # does not appear.) The
     # `>`-and-ordinal arms below do the pre-cue work here, and `_PRE_CUE_PREFIX`
     # does the `*`/`+` half — ⛔ NOT the whitespace-bounded arm, which carried
     # `*`/`+` until cycle 50 and never matched a row or a probe (measured: 0 of 616
@@ -5615,7 +5630,9 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # CLOSED verb list, so an imperative outside it keeps the pre-fix verdict —
     # folded in and graded, i.e. a false RED of #3429's class that ALREADY
     # existed and is not made worse. Pinned as RED so the boundary is visible and
-    # a future fix flips exactly this row; closing it means adding the verb, not
+    # a future fix flips exactly this row AND reds the declared-GREEN
+    # `Before you start - restart your client …` row (2 rows measured at this head);
+    # closing it means adding the verb, not
     # a new arm.
     ("Restart your client after confirming the config is right, and once the "
      "tools are listed grep the log.", True),
@@ -5786,6 +5803,26 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("You shouldn't restart your client unless the tools are missing from the "
      "list.", False),
     ("Don't restart your client until you can see the tools in the list.", True),
+    # (15) round-8: `had better` is the modal the file already names twice, and the
+    #      semi-modal's own `to` is a position the adverb runs must reach.
+    #      DECLARED, not fixed: a MULTI-WORD adverb phrase (`first of all`,
+    #      `once again`) and `be to` (`You are to confirm …`) stay GREEN — the run
+    #      is single-token by construction and `be to` is a member enumeration,
+    #      not a class.
+    ("You had better confirm the tools are actually there. Restart your client, "
+     "then run a query.", True),
+    ("You'd better confirm the tools are actually there. Restart your client, "
+     "then run a query.", True),
+    ("You will need first to confirm the tools are actually there. Restart your "
+     "client, then run a query.", True),
+    ("You need first to confirm the tools are actually there. Restart your "
+     "client, then run a query.", True),
+    ("Restart your client, then you had better confirm the tools are actually "
+     "there.", False),
+    ("You will need to first of all confirm the tools are actually there. "
+     "Restart your client.", False),
+    ("You are to confirm the tools are actually there. Restart your client, "
+     "then run a query.", False),
     # (8) a LEADING CONJUNCTION introduces a sentence exactly as `Now`/`Then` do.
     ("And confirm the tools are actually there. Restart your client, then run "
      "a query.", True),
