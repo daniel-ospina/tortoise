@@ -1253,6 +1253,39 @@ def test_a_mapping_valued_property_cannot_drop_the_update_arm_either():
     )
 
 
+def test_a_mapping_valued_property_CLEARS_on_the_EntityMutated_patch_too():
+    """#11783 — the SECOND `_patch_statement` feed, pinned (review round 2, F3).
+
+    `EntityMutated` state ops end in the same `UPDATE … SET col = %s` the
+    `PointRevised` arm does, and the graph's own fold for that door writes
+    `MATCH … SET n += $s` — measured 2026-11-26: the Mapping degrades to null and
+    the property is REMOVED. So this feed passes `patch=True` for the same
+    reason, and it was unpinned: reverting only that argument left every mapping
+    test green (measured), because they all drive the `NodePatch` feed.
+    """
+    statements = record_projection.mutations_for(
+        {"type": "EntityMutated", "id": "pt-11783-ent",
+         "label": "Point", "op": "revise",
+         "state": {"quote": {"odd": "shape"},
+                   "search_keys": {"odd": "shape"},
+                   "content": "revised"}},
+        org_id="org-t", graph_id="graph-t")
+
+    patches = [s for s in statements if "UPDATE public.point" in s.sql]
+    assert len(patches) == 1, (
+        f"an EntityMutated patch was not planned: {[s.sql[:40] for s in statements]}"
+    )
+    sql = patches[0].sql
+    bound = dict(zip(patches[0].param_columns, patches[0].params, strict=True))
+    for column in ("quote", "search_keys"):
+        assert f"{column} = %s" in sql, (
+            f"the EntityMutated patch must SET {column} to NULL (the graph's fold "
+            f"removes the property) — this feed lost `patch=True`: {sql}"
+        )
+        assert bound[column] is None, f"{column} must bind NULL: {bound[column]!r}"
+    assert "content = %s" in sql, f"the rest of the patch must land: {sql}"
+
+
 class _FakeConn:
     """Enough of a connection for the door to open, fail and dispose of one."""
 
@@ -1377,6 +1410,50 @@ def test_a_store_refusal_after_the_plan_was_built_stays_write_failed(monkeypatch
         "a store/config refusal must NOT be counted as a plan-build refusal: its "
         "remedy is the DSN, the role or the migration, never the producer"
     )
+
+
+class _UnserializableConn(_FakeConn):
+    """A connection that opens; the PLAN fails before it is used (#11783 F2)."""
+
+    def cursor(self):  # pragma: no cover - never reached
+        raise AssertionError("no statement may run for a plan-build failure")
+
+
+def test_a_plan_build_failure_that_is_not_a_projection_error_is_also_plan_refused(
+        monkeypatch):
+    """#11783 review round 2 (F2) — the PHASE is total over classes, or it is not.
+
+    The plan builders call `json.dumps(tail)` inside the plan build, so a payload
+    carrying an un-serializable value raises `TypeError` before any statement —
+    and replaying the same record re-raises it. Narrowing the marker to
+    `RecordProjectionError` left that one counted `write_failed`, i.e. the log
+    told an operator "a replay heals the record" about a record no replay can
+    heal (measured pre-fix).
+    """
+    from tortoise import monitoring, record_writer
+
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://fake")
+    monkeypatch.setattr(record_writer, "_default_connect",
+                        lambda dsn: _UnserializableConn())
+    record_writer._close_live_breaker()
+    before = dict(monitoring.record_write_failure_counts())
+
+    write = record_writer.write_live_record(
+        {"type": "PointAdded",
+         "point": {"eventId": "pt-11783-json", "id": "pt-11783-json",
+                   "content": "a claim", "point_kind": "statement",
+                   "custom": object()}},
+        seq=11, tenant=("org-t", "graph-t"))
+
+    after = dict(monitoring.record_write_failure_counts())
+    assert write is not None
+    assert write.refusal == "plan_refused", (
+        "a plan-build failure that is not a RecordProjectionError must still be "
+        f"`plan_refused` — the phase is the fact, not the class: {write.refusal!r}"
+    )
+    assert after.get("plan_refused", 0) == before.get("plan_refused", 0) + 1
+    assert after.get("write_failed", 0) == before.get("write_failed", 0)
 
 
 def test_a_string_passes_through_unchanged():

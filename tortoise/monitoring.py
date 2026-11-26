@@ -745,7 +745,10 @@ AUDIT_FALLBACK_DROP_COUNT = Counter(
 #                             that EXECUTED and failed stays ``write_failed``, as
 #                             does a refusal raised after the plan was built (the
 #                             tenant-GUC read-back, a role bypassing RLS, the
-#                             cutover guard, a schema not on disk). Split out
+#                             cutover guard) — EXCEPT a record schema that is not
+#                             on disk, which raises INSIDE the plan build and so
+#                             lands here too: that one is a REDEPLOY, not a
+#                             producer change. Split out
 #                             because the two used to share ``write_failed`` and
 #                             182 plan-build refusals therefore read exactly like
 #                             a transport outage while every database probe was
@@ -2783,10 +2786,13 @@ def record_record_write_failure(reason: str) -> None:
       STATEMENT that executed and failed (a CHECK constraint, a driver error, a
       dropped connection) stays on ``write_failed``, and so does every refusal
       raised AFTER the plan was built (the tenant-GUC read-back, a role that
-      bypasses RLS, the cutover guard's failed ``SELECT``, a schema that is not
-      on disk) — which is why the classification is the phase, not the exception
-      class. Split out of ``write_failed`` because 182 plan-build refusals read
-      exactly like a transport outage while every database probe was healthy;
+      bypasses RLS, the cutover guard's failed ``SELECT``) — which is why the
+      classification is the phase, not the exception class. ⚠️ One cause IS a
+      deployment fact and lands here anyway: a record schema that is not on disk
+      raises inside the plan build, so a ``plan_refused`` reading must consider a
+      redeploy, not only the producer. Split out of ``write_failed`` because 182
+      plan-build refusals read exactly like a transport outage while every
+      database probe was healthy;
     * ``journal_collision`` — the record WAS reached and refused to file this
       record under a journal position it cannot index (#9318): a different
       record TYPE, a different CAPTURE TIME, an identity the surviving row

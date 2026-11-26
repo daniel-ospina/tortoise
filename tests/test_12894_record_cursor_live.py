@@ -1190,6 +1190,15 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
     Driven deterministically: `replay_plan` is made to raise, which reaches the
     generic arm without inventing a schema state; the flag is then mirrored OFF
     so the enumerated arm's original sentence is pinned too.
+
+    ⚠️ THE STAND-IN MUST BE AN EXECUTION FAILURE, not any raise (#11783): the
+    live door now counts a failure raised INSIDE the plan build as
+    `plan_refused` (no statement ran; a replay re-refuses), so a bare
+    `RuntimeError` here no longer reaches this arm at all — it is stamped at the
+    phase boundary and counted there. `RecordStatementError` is the class the
+    generic arm exists for (a statement executed and failed) and is explicitly
+    excluded from that stamp, so it still lands here and the sentence pinned
+    below keeps being the one an operator reads on it.
     """
     org, graph = tenant
     _append_positions(schema, org, graph, [1, 2])
@@ -1201,7 +1210,9 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
                        _app_role_dsn(os.environ["TEST_RECORD_DB_URI"]))
 
     def _explode(*a, **k):
-        raise RuntimeError("the statement exploded")
+        # A RecordStatementError, NOT a bare RuntimeError: see this test's
+        # docstring — the generic arm's population is execution failures.
+        raise rp.RecordStatementError("the statement exploded")
 
     monkeypatch.setattr(rp, "replay_plan", _explode)
     for flag, armed in (("1", True), ("0", False)):
