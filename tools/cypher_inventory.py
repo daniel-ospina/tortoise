@@ -1205,7 +1205,32 @@ def _path_in_HEAD(probe_cwd: Path, probe_path: str) -> bool | None:
     return None
 
 
-def _destination_probes(target: Path, rel: str | None) -> tuple[tuple[Path, str, str], ...]:
+def _git_entry_is_unresolvable(directory: Path) -> bool:
+    """True when ``directory`` holds a ``.git`` entry that is PRESENT and cannot be
+    RESOLVED — a symlink to an unmounted gitdir, the damage state `lexists` exists for.
+
+    ⛔ IT IS NOT A PROVIDER THAT CAN BE ASKED, it is one that answers as the repository
+    ABOVE it (#14741 review, P2, measured). `git -C <dir>` SKIPS an entry it cannot
+    stat and keeps walking UP, so for a nested repository whose `.git` dangles the probe
+    answers about the ENCLOSING repository — whose index does not hold this path — and
+    the nested repository's own intact index (which DOES track it) is never consulted.
+    Measured: `--render sub/docs/K.md` exited **0** with empty stderr and replaced the 8
+    bytes `sub`'s index AND HEAD both hold, in a checkout one `git checkout -q` from
+    restore. A boundary that cannot be asked is a COULD-NOT-RUN, never a permit: the
+    same verdict `_plainly_outside_any_repository` already reaches when git says `not a
+    git repository` over a dangling `.git`, reached here for the case where git says
+    nothing at all because it found a repository one level up.
+
+    `exists()` follows the link, which is exactly why it answers False exactly where the
+    distinction matters — the `lexists`/`exists` pair is the whole test.
+    """
+    git_entry = directory / ".git"
+    return os.path.lexists(git_entry) and not git_entry.exists()
+
+
+def _destination_probes(
+    target: Path, rel: str | None
+) -> tuple[tuple[Path, str | None, str], ...]:
     """Every repository that could hold the destination, ROOT first.
 
     ⛔ NOT THE TWO ENDPOINTS (#14625 review, round 10, P3, measured). Rounds 7 and 8
@@ -1220,6 +1245,11 @@ def _destination_probes(target: Path, rel: str | None) -> tuple[tuple[Path, str,
     worktree's own gitdir, a submodule's gitlink), and finally the destination's nearest
     existing ancestor.
 
+    ⛔ AND A BOUNDARY THAT CANNOT BE ASKED IS A REFUSAL, NOT A SKIPPED PROVIDER (#14741
+    review, P2, measured). One whose `.git` is present and unresolvable answers as the
+    repository ABOVE it, so it is recorded with `spec is None` and refused — a boundary
+    skipped for being unaskable is the same shape as one that was never asked.
+
     ⛔ AND THE WALK RUNS FOR BOTH BRANCHES, NOT ONLY INSIDE `ROOT` (#14625 review, round
     11, P2). For a destination outside ROOT the walk continues past where ROOT would be
     and stops at the filesystem root, because the outermost repository is then NOT ROOT —
@@ -1227,10 +1257,10 @@ def _destination_probes(target: Path, rel: str | None) -> tuple[tuple[Path, str,
 
     Order matters only for the message: the OUTERMOST refusal is the most legible.
     """
-    probes: list[tuple[Path, str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    probes: list[tuple[Path, str | None, str]] = []
+    seen: set[tuple[str, str | None]] = set()
 
-    def add(cwd: Path, spec: str, label: str) -> None:
+    def add(cwd: Path, spec: str | None, label: str) -> None:
         key = (str(cwd), spec)
         if key in seen:
             return
@@ -1266,21 +1296,41 @@ def _destination_probes(target: Path, rel: str | None) -> tuple[tuple[Path, str,
         chain.append(cursor)
         cursor = cursor.parent
     for boundary in reversed(chain):
-        if os.path.lexists(boundary / ".git") or _looks_like_git_metadata(boundary):
-            add(boundary, target.relative_to(boundary).as_posix(), str(target))
+        if not (os.path.lexists(boundary / ".git")
+                or _looks_like_git_metadata(boundary)):
+            continue
+        # ⛔ A BOUNDARY WHOSE `.git` DANGLES IS ASKED ABOUT SOMEBODY ELSE (#14741 review,
+        # P2, measured). `lexists` correctly makes it a BOUNDARY — that half is right —
+        # but probing it is not asking it: git skips an entry it cannot stat and
+        # answers from the repository ABOVE, which is a DIFFERENT repository with a
+        # different index (and, for this path, a permit). So the boundary is recorded as
+        # UNANSWERABLE (`spec is None`) and the refusal fires on it. The bare-gitdir case
+        # is exempt on purpose: those boundaries carry their metadata in place, so
+        # `_looks_like_git_metadata` has already decided they can be asked.
+        if _git_entry_is_unresolvable(boundary) and not _looks_like_git_metadata(boundary):
+            add(boundary, None, str(boundary))
+            continue
+        add(boundary, target.relative_to(boundary).as_posix(), str(target))
     probe_dir = target.parent
     while not probe_dir.is_dir() and probe_dir != probe_dir.parent:
         probe_dir = probe_dir.parent
     # ⛔ THE WHOLE REMAINDER FROM THE NEAREST EXISTING ANCESTOR, never `target.name`
-    # — for BOTH branches. The round-10 refactor of this function reintroduced the
-    # round-5 fail-OPEN by spelling the `rel is None` branch as the basename: with
-    # `peer/sub/` removed, the probe asked about `x.md` in `peer/` while the index still
-    # named `sub/deep/x.md`, answered "untracked" and `--render` landed a generated
-    # document on a TRACKED path at rc 0 (caught by
+    # — for BOTH branches. The invariant is about the PATH, and `git ls-files` matches an
+    # index entry whose work-tree file is absent, so the remainder is the only spelling
+    # that names the entry an index would hold.
+    # ⛔ AND IT IS STATED AS INTENT, NOT AS A PIN, BECAUSE NOTHING ISOLATES IT (#14741
+    # review, P2, measured). Reverting this line to `target.name` reddens NOTHING: in
+    # every shape where the basename would answer differently (a removed parent between
+    # the destination and the repository that tracks it), a BOUNDARY provider above
+    # refuses first, and when no boundary is a repository the nearest existing ancestor
+    # resolves to the repository that holds the path anyway. So the earlier claim in
+    # this comment — that a "round-10 refactor reintroduced round 5's fail-open" and that
     # `test_a_TRACKED_destination_elsewhere_is_refused_in_ITS_OWN_repository`'s third
-    # half — the arm that exists for exactly this). `target.relative_to(probe_dir)` is
-    # the path, which is what the invariant is about, and `git ls-files` matches an index
-    # entry whose work-tree file is absent.
+    # half caught it — was FALSE in both halves, and was measured false: `origin/main`
+    # (`tools/cypher_inventory.py`, the `if not _root_probe_done:` block) already spelled
+    # the whole remainder, and that arm stays GREEN under the basename mutant. A comment
+    # asserting coverage the tree does not have is what a later lane reads instead of the
+    # arm. The boundary walk is what actually refuses these shapes.
     add(probe_dir, target.relative_to(probe_dir).as_posix(), str(target))
     return tuple(probes)
 
@@ -1295,6 +1345,17 @@ def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
     following whichever single provider they had been shown.
     """
     for cwd, spec, label in _destination_probes(target, rel):
+        if spec is None:
+            # ⛔ A BOUNDARY THAT CANNOT BE ASKED IS "COULD NOT RUN" (2), never a permit
+            # (#14741 review, P2, measured). Naming the BOUNDARY, not the destination:
+            # the destination is fine, the repository entry on its path is the damage.
+            print(
+                f"render: could not probe {label} for tracking: its `.git` entry is\n"
+                "present and cannot be resolved, so git answers as the repository\n"
+                "ABOVE it — and that repository does not hold this path.",
+                file=sys.stderr,
+            )
+            return 2
         verdict = _probe_one_repository(target, cwd, spec, label)
         if verdict is not None:
             return verdict
@@ -1621,8 +1682,10 @@ def main(argv: list[str] | None = None) -> int:
         # P2). It used to answer only when the target sat INSIDE `ROOT` (`rel` is not
         # None), so `--render` into ANOTHER checkout's tracked file never asked anybody
         # and overwrote it at rc 0 (measured: 27 -> 145,745 bytes). The index that
-        # matters is the one the DESTINATION belongs to, so the probe runs from the
-        # destination's own directory with its basename.
+        # matters is the one the DESTINATION belongs to, so the probe asks every
+        # repository BOUNDARY on its path — never one named provider, and never the
+        # destination's BASENAME, which is the round-5 fail-open `_destination_probes`
+        # spells out in full.
         refusal = _tracked_destination_refusal(target, rel)
         if refusal is not None:
             return refusal
