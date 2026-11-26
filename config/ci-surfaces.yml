@@ -66,55 +66,33 @@ version: 1
 # (`tests/test_14592_read_parity.py`, `core` and `api` — ONE `fast_pool()` entry, two surfaces, the
 # same flat 2.0 s) plus #14342's two intake suites (`tests/test_14342_capture_intake_door.py`, `core`
 # and `api`; `tests/test_capture_intake.py`, `core` — ONE `fast_pool()` entry each, the same flat
-# 2.0 s) — the verb packs the pool into ONE bin: eleven shards at 827.6 s (a, b, c, d, e, f, g, h, i,
-# j, k), so `ceil(827.6/60 x 2)` = 28 m governs — and the same emission prints `watchdog_minutes: 28`
-# with `watchdog_headroom: 2.03` (1680 / 827.6 = 2.0300), so the two agree by construction rather than
-# by a hand re-read.
-# ⛔ THAT PAIR IS THIS TREE'S ALONE, and the move is measurable: `fast_pool()` holds 1341 entries here
-# against 1339 on `origin/main` `c1c8df1a3817f`, both re-derived by loading each tree's OWN manifest
+# 2.0 s) — at THIS head the verb does NOT pack the pool into one bin, and the emission below says
+# so rather than rounding it into one: seven shards at 828.0 s (a, f, g, h, i, j, k) and four shards
+# at 827.9 s (b, c, d, e), so `ceil(828.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is
+# the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
+# `watchdog_headroom: 2.03` (1680 / 828.0 = 2.0290), so the two agree by construction rather than by
+# a hand re-read.
+# ⛔ THAT PAIR IS THIS TREE'S ALONE, and the move is measurable: `fast_pool()` holds 1343 entries here
+# against 1341 on `origin/main` `ff10fb328891`, both re-derived by loading each tree's OWN manifest
 # through `fast_pool()` — not carried from either parent's paragraph — and the set difference is
-# exactly TWO entries: #14342's intake suites above (`test_14342_capture_intake_door.py`,
-# `test_capture_intake.py`). `main` carries nothing this tree lacks, MEASURED AFTER this branch merged
-# `origin/main` `c1c8df1a3817f` — before that merge it carried `test_13450_ep_position_axis_participation.py`
-# (landed on main after this branch's base), and this sentence said so rather than claiming otherwise.
+# exactly TWO entries, both #14342's: `test_14342_capture_intake_door.py` and `test_capture_intake.py`.
+# `main` carries nothing this tree lacks, MEASURED AFTER this branch merged `origin/main`
+# `ff10fb328891` (an earlier cut of this sentence named a base this branch has since folded past).
 # ⛔ Every other row named above is `main`'s at this head, NOT this PR's; counting one as this PR's
-# would contradict the 1341 − 1339 = 2 the two readings give. The name lists are what the guard
+# would contradict the 1343 − 1341 = 2 the two readings give. The name lists are what the guard
 # COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), and
 # `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
 # derivation, so they are a graded claim about THIS head — a fold re-derives them with the verb, it
 # never carries them.
-# ⛔ THIS BLOCK ARRIVED SPLICED AGAIN AT THE `origin/main` `4b2fba3e8a` MERGE, and the repair is
+# ⛔ THIS BLOCK ARRIVED SPLICED AGAIN AT THE `origin/main` `ff10fb328891` MERGE, and the repair is
 # recorded rather than hidden: `config/ci-surfaces.yml` carries a `merge=union` driver, so the fold
-# applied BOTH parents' derivations — one naming `origin/main` `29bb16b5b6` with this branch's own
-# `tests/test_14592_read_parity.py`, one spelling the same base with `#14607`'s two rows called this
-# branch's own. The copies DISAGREED on the figures (826.7/826.6 against 826.9/826.8) and neither
-# describes this head. Neither side is picked: the sentence above is a fresh re-derivation with
-# `--emit-push-matrix` on this merged tree, and both parents' copies are deleted rather than
-# re-pointed.
-# INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
-# fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `bbef0b8840` folded in, plus THIS
-# change's own row (`tests/test_own_site_fragment_targets.py`, `core` AND `onboarding`, at the flat
-# 2.0 s `DEFAULT_FAST_WEIGHT`) — the verb packs eleven shards at 827.6 s (a, b, c, d, e, f, g, h,
-# i, j, k), so `ceil(827.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the
-# SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
-# (1680 / 827.6 = 2.0300), so the two agree by construction rather than by a hand re-read.
-# ⛔ THAT PAIR IS THIS TREE'S ALONE, and the move is measurable: `fast_pool()` holds 1341 entries
-# here against 1340 on `origin/main` `bbef0b8840`, each read by loading that tree's OWN manifest
-# through the verb, and the set difference is exactly ONE entry —
-# `tests/test_own_site_fragment_targets.py`, this change's own suite. `main` carries nothing this
-# tree lacks. ⛔ Every other row this tree carries is `main`'s at this head, NOT this change's
-# (`#14700`'s `tests/test_14700_capture_in_flight_typed_refusal.py`, `#14621`'s
-# `tests/test_14592_read_parity.py`, `#14548`'s residue RATCHET `tests/test_sdk_privatise_sweep.py`
-# — the one `core` row here whose weight is NOT the flat 2.0 s — `#14607`'s
-# `tests/test_mcp_selfcheck.py` and `tests/test_recall_neighborhood.py`): each landed before this
-# fold, and reading one as this change's delta would attribute a partition move to a row that did
-# not cause it. The name lists above are what the guard COMPARES against the live emission
-# (`test_the_fast_shards_header_block_states_the_measured_emission`), and
-# `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
-# derivation, so they are a graded claim about THIS head — re-derived with the verb on every fold,
-# never carried.
+# applied BOTH parents' derivations — this branch's, naming `origin/main` `4b2fba3e8a` and the
+# eleven-at-827.6 s bin, and `main`'s, naming `bbef0b8840` with `tests/test_own_site_fragment_targets.py`
+# called this branch's own. The fragments spliced mid-sentence (one copy began at `INTO, never carried
+# from …`), and the two DISAGREED on the figures, so neither described the merged tree. Neither side
+# is picked: the paragraph above is a fresh re-derivation with `--emit-push-matrix` on this merged
+# tree, and both parents' copies are deleted rather than re-pointed.
 # ⛔ THIS BLOCK ARRIVES SPLICED, REPEATEDLY, and that is mechanical rather than mysterious:
 # `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
 # derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. Measured on
