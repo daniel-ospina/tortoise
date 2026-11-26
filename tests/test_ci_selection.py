@@ -9355,7 +9355,14 @@ _ROW_CLAIM_CARRY_RE = re.compile(
     #: and the fixture below pins it, so the arm grades the CLAIM rather than the spelling. Requiring
     #: the bare number made a unit-preserving TRUE rewrite empty `positive`, and the arm then
     #: reported the block as naming no file at all — a false block, reproduced on `2.0` -> `2.0 s`.
-    r"(?:(?:an?\s+)?explicit\s+`?(?P<value>\d+(?:\.\d+)?)(?:\s*s)?`?\s+`?durations`?\s+"
+    #: ⛔ `explicit` IS OPTIONAL FOR THE SAME REASON, and it was the SAME defect one word over
+    #: (#14623 review round 24, P3): the positive branch required the literal word `explicit`, so
+    #: `carry a `2.0` `durations` row` — a TRUE rewrite that states the identical claim — emptied
+    #: `positive` and the arm reported the block as naming NO file, the inverse of its own text.
+    #: The graded PROPERTY is "names a file as carrying a `durations` row of THIS value"; the
+    #: adjective, like the unit, is prose. The polarity mutation (a row whose value moved) still reds
+    #: — that is the fixture's job, not this alternation's.
+    r"(?:(?:an?\s+)?(?:explicit\s+)?`?(?P<value>\d+(?:\.\d+)?)(?:\s*s)?`?\s+`?durations`?\s+"
     r"(?:rows?|entr(?:y|ies))"
     r"|no\s+(?:`?durations`?\s+)?(?:rows?|entr(?:y|ies)))",
     re.IGNORECASE,
@@ -10263,7 +10270,7 @@ _H_14544_EXEMPTION_OPEN_RE = re.compile(r"The one cause this paragraph does NOT 
 #: whole block; the POSITIVE ones stay paragraph-bounded, where a lost claim reds instead of passing.
 #: ⛔ ONE RULE IS PARAGRAPH-BOUNDED ON PURPOSE, and the exception is named rather than implied: the
 #: WEIGHT rule reads the corrected paragraph, not the block, because the block legitimately quotes
-#: figures that are not a row's weight ("10.0 s` row", the shard minutes, the headroom ratio) and
+#: figures that are not a row's weight (the shard minutes, the headroom ratio) and
 #: widening it refuses that true prose (measured, #14623 review round 13, F1). Consequence, stated:
 #: an inserted `⛔` inside the paragraph moves a restated figure out of the graded region — a
 #: text-controlled bound for THIS rule alone, carried as a residual on #14715 rather than closed by
@@ -10658,13 +10665,20 @@ _H_14544_ROW_PROVENANCE_RE = re.compile(
 #: polarity pinned. Measured at `d1f14298`: inverting it to “Both halves stay exempt” (the commit's
 #: own subject reversed) left this arm GREEN, because nothing graded the sentence that scopes the
 #: exemption. Without this, the paragraph can grant the exemption to the row it exists to implicate.
-#: ⛔ THREE SPELLINGS, not one: a single-spelling POSITIVE pin is a lock that reds a TRUE rewording
-#: with a diagnostic asserting the opposite of what the paragraph says (#14623 review round 14, P3) —
-#: "The REGISTRATION alone is the only half exempt.", "Only the REGISTRATION half is exempt." and
-#: "The exempt half is the REGISTRATION, not the row." all RED before this. The polarity mutation
-#: (swap the half) still reds — see the fixture in the arm.
+#: ⛔ THE PROPERTY IS GRADED, NOT A SPELLING SET — and the difference is the whole point of this
+#: note. A single-spelling POSITIVE pin is a lock that reds a TRUE rewording with a diagnostic
+#: asserting the opposite of what the paragraph says (#14623 review round 14, P3). Naming an
+#: explicitly enumerated LIST of spellings reproduces that defect one step later (#14623 review
+#: round 24, P3: `The REGISTRATION alone is exempt` states the identical scope claim and matched
+#: none of the three, so the pin had been widened from one spelling to three and no further). What
+#: is admitted is therefore the SHAPE of the claim — the paragraph says the exempt half IS the
+#: REGISTRATION, in either word order, with or without the `ONLY` emphasis, and with `half` /
+#: `alone` / no qualifier between. The polarity mutation (swap the half, or "Both halves stay
+#: exempt") still reds: it names no REGISTRATION-only scope at all, which is what this arm exists
+#: to catch — see the fixture in the arm.
 _H_14544_SCOPE_RE = re.compile(
     r"REGISTRATION(?:\s+alone)?\s+is\s+(?:the\s+)?ONLY\s+half"
+    r"|REGISTRATION(?:\s+half|\s+alone)?\s+is\s+exempt"
     r"|only\s+the\s+REGISTRATION(?:\s+half)?\s+is\s+exempt"
     r"|the\s+exempt\s+half\s+is\s+the\s+REGISTRATION", re.IGNORECASE)
 #: The CONCLUSION half: the paragraph's own payoff sentence — a packing change attributed to that row

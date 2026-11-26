@@ -175,16 +175,16 @@ version: 1
 # `--emit-push-matrix` on this merged tree. Each earlier fold's figures live on the commit that
 # measured them (`git log`), which is where a spliced copy belongs.
 # ⛔ THE FOLD THIS HEAD CARRIES (`ff10fb328891`) SPLICED THIS BLOCK ON NEITHER SIDE — it left the
-# derivation reading once — and spliced `durations` instead: under the same `merge=union` driver two
-# rows arrived twice, `test_14560_operator_vectors.py` and `test_13098_cypher_inventory.py`, with no
-# conflict marker raised. ⛔ It is the SILENT form of the same defect, and the scope of "silent"
-# is exact rather than rhetorical: plain `yaml.safe_load` keeps the LAST copy and discards the first
-# without a word. This repo's own `parse_manifest_text` REFUSES instead — measured on the spliced
-# tree, it raised `DuplicateManifestKeyError` naming both lines — which is why the two readers are
-# both cited: the red is the arm, and the silence is what the arm exists for. Resolved by PROVENANCE
-# rather than by a side — this branch owns the `#14560` row's rewrite (`main` never touched it),
-# `main` owns the `#13098` row's (`#14625` rewrote it; this branch inherited the pre-cut note) — so
-# neither side was picked wholesale.
+# derivation reading once — and spliced `durations` instead: under the same `merge=union` driver
+# `test_14560_operator_vectors.py` and `test_13098_cypher_inventory.py` each arrived as a DUPLICATE
+# `durations` key, with no conflict marker raised. ⛔ It is the SILENT form of the same defect, and
+# the scope of "silent" is exact rather than rhetorical: plain `yaml.safe_load` keeps the LAST copy
+# and discards the first without a word. This repo's own `parse_manifest_text` REFUSES instead —
+# measured on the spliced tree, it raised `DuplicateManifestKeyError` naming both lines — which is
+# why both readers are cited: the red is the arm, and the silence is what the arm exists for.
+# Resolved by PROVENANCE rather than by a side — this branch owns the `#14560` row's rewrite (`main`
+# never touched it), `main` owns the `#13098` row's (`#14625` rewrote it; this branch inherited the
+# pre-cut note) — so neither side was picked wholesale.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: dropping that REGISTRATION cannot move a
 # bin, because the file's pool entry comes from the `eval` registration ALONE (as the sentence above
