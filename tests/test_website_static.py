@@ -5859,6 +5859,29 @@ def _ground_selector_matches(simple: str, element: GroundElement | None) -> bool
     return True
 
 
+#: The positional pseudo-classes that name one END of a box, spelled the ways
+#: CSS lets you spell it. Each alias is exactly true of the first/last child the
+#: markup declares, so accepting them grades BEHAVIOUR, not spelling (#14683
+#: independent review: `:nth-child(1)` was a fail-open).
+_SIDE_PSEUDO_ALIASES = {
+    "first-child": ("first-child", r"nth-child\(1\)", "first-of-type"),
+    "last-child": ("last-child", r"nth-last-child\(1\)", "last-of-type"),
+}
+
+
+#: The `justify-content` values that TOP-ALIGN a column flex container. `start`
+#: is the same alignment as `flex-start` (the beats are `display: flex;
+#: flex-direction: column`), and a trailing `!important` sets priority, never
+#: the value — grading the raw text false-RED both with a message claiming the
+#: hatch sets no alignment at all (#14683 independent review, measured).
+_TOP_ALIGNING_JUSTIFY = frozenset({"flex-start", "start"})
+
+
+def _justify_content_top_aligns(value: str) -> bool:
+    """Is this `justify-content` value the top-aligning arm?"""
+    return value.split("!")[0].strip().lower() in _TOP_ALIGNING_JUSTIFY
+
+
 def _beats_whose_ground(
         selector: str, side: str,
         grounds: dict[str, dict[str, GroundElement | None]]) -> list[str]:
@@ -5924,8 +5947,22 @@ def _beats_whose_ground(
     for beat, sides in grounds.items():
         for subject in (f"#{beat}", ".beat"):
             subject_re = rf"(?<![-\w]){re.escape(subject)}(?![-\w])>"
+            # ⛔ THE END IS NAMED BY ANY OF ITS ALIASES, not one spelling
+            # (#14683 independent review, measured at `18741101`). Requiring the
+            # literal `:{side}` left the two canonical respellings of the same
+            # end uncollected — `:nth-child(1)` for the first child,
+            # `:nth-last-child(1)` for the last, and the `-of-type` forms —
+            # while the browser applied them:
+            #
+            #     `#beat-hero > :nth-child(1) { margin-top: 0 }`  ->  guard `[]`
+            #
+            # over the hero, which that rule top-aligns (identical specificity,
+            # later in source). Each alias is exactly true of the first/last
+            # child this reader already reads from the markup, and the OTHER
+            # end's aliases stay out of this side.
+            aliases = "|".join(_SIDE_PSEUDO_ALIASES[side])
             match = re.search(
-                rf"{subject_re}([^\s>]*):{side}(?![\w-])", compact)
+                rf"{subject_re}([^\s>]*?):(?:{aliases})(?![\w-])", compact)
             if match and _ground_selector_matches(match.group(1),
                                                   sides.get(side)):
                 out.append(beat)
@@ -6338,7 +6375,7 @@ def _short_viewport_centring_problems(html: str) -> list[str]:
             # Only an arm that actually TOP-ALIGNS needs centring under it; a
             # `center`/`safe center` here is the other row's finding, not this
             # one's.
-            if not values or values[-1] != "flex-start":
+            if not values or not _justify_content_top_aligns(values[-1]):
                 continue
             for beat in _beats_addressed(prelude, beat_ids):
                 arms.setdefault(beat, set()).add(height)
@@ -6996,6 +7033,47 @@ class TestShortViewportCentringIsGradedPerBlock:
             "a reset on the ground itself was reported CLEAN — the descendant "
             "fix above must not cost the catch it exists for")
         assert any("beat-hero > :first-child" in p for p in problems), problems
+
+    def test_the_other_spellings_of_an_end_are_collected(self):
+        """`:nth-child(1)` names the same end as `:first-child` (P1).
+
+        The primary arm required the literal `:first-child`/`:last-child`, so
+        the canonical respellings of the SAME end were never collected while
+        the browser applied them. Measured at `18741101`:
+        `#beat-hero > :nth-child(1) { margin-top: 0 }` returned `[]` over the
+        hero it top-aligns (identical specificity to the shipped `auto`, later
+        in source).
+        """
+        for selector, declaration, side in (
+                ("#beat-hero > :nth-child(1)", "margin-top: 0", "first"),
+                ("#beat-hero > :nth-last-child(1)", "margin-bottom: 0", "last"),
+                ("#beat-hero > .doc-grid:nth-child(1)", "margin-top: 0", "first"),
+                ("#beat-hero > div:first-of-type", "margin-top: 0", "first")):
+            page = self._page(hatch=(
+                self.CENTRED_HATCH + f"\n      {selector} {{ {declaration}; }}"))
+            problems = _short_viewport_centring_problems(page)
+            assert any(f"beat-hero > :{side}-child" in p
+                       and "resolves to `0`" in p for p in problems), (
+                f"a reset on `{selector}` was reported CLEAN — that selector "
+                f"addresses the same ground element the shipped `auto` does:",
+                problems)
+
+    def test_start_and_important_are_the_same_top_alignment(self):
+        """`start` ≡ `flex-start`, and `!important` sets priority only (P2).
+
+        The hatch's arm was detected by comparing the raw declaration text, so
+        `justify-content: start` (identical on a column flex container) and
+        `justify-content: flex-start !important` both fell out of `arms`, and
+        every beat was reported as "no `max-height` rule sets its
+        `justify-content`" — a false RED claiming absence of a present rule
+        (#14683 independent review, measured at `18741101`).
+        """
+        for spelling in ("start", "flex-start !important"):
+            page = self._page(hatch=self.CENTRED_HATCH.replace(
+                "justify-content: flex-start", f"justify-content: {spelling}"))
+            assert _short_viewport_centring_problems(page) == [], (
+                f"`justify-content: {spelling}` IS the top-aligning arm, but "
+                "the hatch was reported as absent")
 
     def test_a_commented_out_beat_section_is_not_a_beat(self):
         """A comment is dead to the browser, so it is not a beat (#14683 F1).
