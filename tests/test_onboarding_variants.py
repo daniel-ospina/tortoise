@@ -1869,14 +1869,22 @@ def _inversion_form(pattern: str) -> re.Pattern[str]:
 # its removal measurements are re-taken over the whole table at this head.
 _ADVERBS = (r"(?:\w+ly|very|so|too|quite|rather|first|already|just|also"
             r"|now|still)")
-
 # ⛔ THE PRE-CUE VERB LIST, ONE DEFINITION — form (f) spelled it twice and a
 # THIRD copy sits inside the shared `_CONFIRM_PREDICATE`, which is how the same
 # hole opened four times (#14679 review rounds 3-6). Every arm of form (f) reads
 # this constant; if a member is added, every arm gains it.
 _PRE_CUE_VERB = (
-    r"(?:\w+-)?(?:confirm|check|verify|see|look|ensure"
-    r"|make\s+(?:sure|certain)|be\s+(?:sure|certain)|validate)\w*\b"
+    # ⛔ MORPHOLOGY, NOT A TRAILING `\w*`. This copy spelled `verify\w*` and
+    # `ensure\w*`, which — as this very file documents 180 lines up — "cannot
+    # match 'verified' (y→i)" and "cannot match 'ensuring'". Measured side by
+    # side, it drifted on SIX spellings the other three copies all carry
+    # (`verifies|verified|ensuring|validating|made sure|making certain`), so the
+    # comment's claim of ONE DEFINITION was false of the code (#14679 review
+    # cycle 48). The morphology is now written out.
+    r"(?:\w+-)?(?:confirm|check|verif(?:y|ies|ied|ying)|ensur(?:e|es|ed|ing)"
+    r"|see|look|validat(?:e|es|ed|ing)"
+    r"|mak(?:e|es|ed|ing)\s+(?:sure|certain)|made\s+(?:sure|certain)"
+    r"|be\s+(?:sure|certain))\w*\b"
 )
 # (f) The same inversion stated one sentence EARLIER — a PRE-CUE imperative the
 #     reader must carry out before restarting:
@@ -2664,9 +2672,26 @@ _CONFIG_PREP_RE = re.compile(
 # — "… confirming the config lists the tools AND the tools are actually there" was
 # GREEN (measured) while the same content with the conjunct BEFORE the object is a
 # declared-RED row.
+# ⛔ ONE DEFINITION OF THE PRESENCE ADVERB RUN — this list was spelled TWICE,
+# once per presence pattern, and both copies were blind to every adverb but
+# `actually`. So a conjunct that DOES claim the running session's tools was
+# classified as config/install-side and exempted, and the pin PASSED:
+#
+#     RED    … and the tools are actually there     (control)
+#     RED    … and the tools are all present        (control — `present` is bare)
+#     GREEN  … and the tools are all there          (measured)
+#     GREEN  … and the tools are really there       (measured)
+#
+# `_ABSENCE_ADVERB_RUN` exists one form over for exactly this reason ("an
+# adverbial run is skipped, then the arm grades the polarity of the state");
+# `_INSTALL_SIDE_RE` already carries `(?:all|both)\s+`. Interpolated into BOTH
+# patterns so the two cannot drift again (#14679 review cycle 48).
+_PRESENCE_ADVERB = (r"(?:actually|all|both|really|definitely|plainly|truly"
+                    r"|clearly|visibly|indeed|still|already|now|already)")
+
 _SESSION_AND_CONJUNCT_RE = re.compile(
-    r"\band\b[^\n]*?\b(?:actually\s+there"
-    r"|(?:are|is|were|was)\s+(?:actually\s+)?there"
+    r"\band\b[^\n]*?\b(?:" + _PRESENCE_ADVERB + r"\s+there"
+    r"|(?:are|is|were|was)\s+(?:" + _PRESENCE_ADVERB + r"\s+)?there"
     r"|listed|present|visible|appearing|appears?|show(?:s)?\s+up"
     r"|load(?:ed|s)|running|live|in\s+the\s+list)\b", re.IGNORECASE)
 _SESSION_PRESENCE_RE = re.compile(
@@ -2674,7 +2699,8 @@ _SESSION_PRESENCE_RE = re.compile(
     # "there are no duplicate entries", so an entirely FILE-SIDE conjunct was
     # graded as an inversion (measured) — the config exclusion exists to keep
     # exactly that copy GREEN.
-    r"\b(?:actually\s+there|(?:are|is|were|was)\s+(?:actually\s+)?there"
+    r"\b(?:" + _PRESENCE_ADVERB + r"\s+there"
+    r"|(?:are|is|were|was)\s+(?:" + _PRESENCE_ADVERB + r"\s+)?there"
     r"|listed|present|visible|appearing|appears?"
     r"|show(?:s)?\s+up|load(?:ed|s)|running|live|in\s+the\s+list)\b",
     re.IGNORECASE)
@@ -2902,6 +2928,28 @@ _SEQUENCER_FRAGMENT_RE = re.compile(
     r"|first|firstly|now|once|finally|lastly|subsequently|still|too"
     r"|probably|likely|maybe|perhaps|want|wants|better|best|had|ought"
     r"|always|simply|prefer|very|really|actually|definitely|surely"
+    # ⛔ CONTRACTIONS, PRONOUNS, COPULAS AND THE `able|ready|done` ADJECTIVES.
+    # The class claims to be "sequencers, restrictives, courtesy, modal subjects,
+    # PRONOUNS and subordinators" — and `it`, `that`, `there`, `is`, `are` are
+    # exactly those, while `be` was present and `is`/`are` were not. One
+    # contraction defeated the walk-back and the confirmation behind it was
+    # discarded, so the pin PASSED on plainly inverted copy:
+    #
+    #     RED    … then you must restart your client …
+    #     GREEN  … then you'll need to restart your client …          (measured)
+    #     GREEN  … then you are ready to restart …                    (measured)
+    #     GREEN  … and once that's done, restart …                    (measured)
+    #     GREEN  … then it is best to restart …                       (measured)
+    #     GREEN  … then you will be able to restart …                 (measured)
+    #
+    # `_PRE_CUE_ONLY` already knows `you(?:'ll|'d|'re|'ve)`, so the two lists of
+    # the same class disagreed. This is register, not exotica: `docs/*.md` uses
+    # `it's` 12×, `you're` 8×, `that's` 6×, and `docs/quickstart-cloud.md:433`
+    # itself uses `you'll`.
+    r"|you'll|you'd|you're|you've|we'll|they're|it's|that's|that'll|there's"
+    r"|it|that|this|there|they|is|are|was|were|am"
+    r"|able|ready|done|possible|necessary|important|wise|safe"
+    r"|quite|rather|already"
     r"|before|after|until|unless|prior|when)\b\s*,?\s*)+$", re.IGNORECASE)
 
 # ⛔ A CUE GOVERNED BY A TEMPORAL SUBORDINATE INVERTS WHAT FOLLOWS IT. In
@@ -5751,6 +5799,29 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     #     shows up as a deliberate row flip.
     ("Delete the old entry and confirm the tools are actually there. Restart "
      "your client, then run a query.", False),
+    # ⛔ CYCLE 48 — the fragment class was still a whitelist that missed the
+    # classes it CLAIMS (pronouns, copulas) and every contraction. One word
+    # defeated the walk-back and the pin PASSED on plainly inverted copy. The
+    # `then you must` twin was already RED.
+    ("Confirm the tools are actually there, then you'll need to restart your "
+     "client, then confirm the tools are actually there.", True),
+    ("Confirm the tools are actually there, then you are ready to restart your "
+     "client, then confirm the tools are actually there.", True),
+    ("Confirm the tools are actually there, and once that's done, restart your "
+     "client, then confirm the tools are actually there.", True),
+    ("Confirm the tools are actually there, then it is best to restart your "
+     "client, then confirm the tools are actually there.", True),
+    ("Confirm the tools are actually there, then you will be able to restart "
+     "your client, then confirm the tools are actually there.", True),
+    #⛔ CYCLE 48 — the presence-adverb run was spelled TWICE and both copies knew
+    # only `actually`, so a conjunct that DOES claim the running session's tools
+    # was treated as config/install-side and exempted. `all present` was already
+    # RED because `present` is a bare token; `all there` was GREEN.
+    ("Restart your client after confirming the config lists the tools and the "
+     "tools are all there, then confirm the tools are actually there.", True),
+    ("Restart your client after confirming the tools are installed and the "
+     "tools are really there, then confirm the tools are actually there.",
+     True),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
@@ -5762,6 +5833,24 @@ def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
         assert violation is None, (
             f"pinned GREEN and was graded ({violation!r}) — forward copy, or a "
             f"DECLARED residual, per this row's own comment: {line!r}")
+
+
+def test_3232_pre_cue_verb_carries_every_morphology_the_other_copies_do():
+    """⛔ THE `_PRE_CUE_VERB` COPY DRIFTED ON SIX SPELLINGS, and the comment above
+    it claimed "ONE DEFINITION". This is a direct pin because the drift has no
+    grammatical path through the grader (form (f) is `^`-anchored, so the verb
+    must be clause-initial, and `Verified`/`Ensuring` are not imperatives) — the
+    honest evidence for a copy that cannot be reached is that the copy itself
+    carries the spellings its three siblings do (#14679 review cycle 48).
+    """
+    import re as _re
+    spellings = ("verify", "verifies", "verified", "verifying",
+                 "ensure", "ensures", "ensured", "ensuring",
+                 "validate", "validates", "validated", "validating",
+                 "make sure", "made sure", "making certain")
+    for spelling in spellings:
+        assert _re.search(_PRE_CUE_VERB, spelling, _re.IGNORECASE), (
+            f"_PRE_CUE_VERB cannot match {spelling!r}; the other copies can")
 
 
 def test_3232_the_and_then_half_reds_for_the_first_anchor_not_by_accident():
