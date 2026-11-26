@@ -435,10 +435,16 @@ def a2_edges() -> dict:
     # `(s:Subject)<-[:ownedBy]-(e)`, the declared orientation.
     owners = {_norm(o) for _t, o in DECL["ownership"]}
     ownership_door = {}
+    ownership_door_unasked = []
     for name, w in (READBACK.get("link_witness") or {}).items():
         if _norm(name) in owners:
-            ownership_door[name] = rows((w.get("governance_owned_by") or {})
-                                        .get("reply"))
+            probe = (w.get("governance_owned_by") or {})
+            if probe.get("reply") is None:
+                # Same distinction as D6 above: an owner never asked is recorded
+                # as NOT ASKED, never as a `0`-row answer.
+                ownership_door_unasked.append(name)
+                continue
+            ownership_door[name] = rows(probe.get("reply"))
 
     contained = sum(1 for c in containment if c["present"])
     mem = sum(1 for m in membership if m["present"])
@@ -484,6 +490,9 @@ def a2_edges() -> dict:
             "owners_asked": sorted(ownership_door),
             "rows_returned": {k: len(v) for k, v in ownership_door.items()},
             "total_rows": sum(len(v) for v in ownership_door.values()),
+            # an owner the witness never asked is reported as such, never folded
+            # into `total_rows: 0` (a `0` is a measurement; absence is not)
+            "owners_not_asked": sorted(ownership_door_unasked),
         },
         "totals": {
             "containment_present": f"{contained}/{len(containment)}",
@@ -813,8 +822,19 @@ def _door_findings() -> list[dict]:
                                    "isolated",
                 "evidence": silent,
             })
+    # ⛔ A MISSING PROBE IS NOT A MEASURED `[]` (#14691 review, 3rd cycle). The
+    # condition used to be `.get("reply") in ([], None)`, and `.get` returns
+    # `None` for a row where the probe is ABSENT — so a witness that never asked
+    # the door was counted as one that asked and got an empty answer, and D6 (the
+    # bundle's headline mechanism finding) could be asserted from rows that were
+    # never measured. Driven: deleting `governance_owned_by` from every witness
+    # row still emitted D6 with all four owners listed. The committed artifact is
+    # honest today (all seven witness rows carry a real `reply: []`), so this was
+    # a fail-open in the PRODUCER, not a false number — and it is the same shape
+    # as the findings that came before it: a claim satisfiable without the
+    # measurement. `== []` requires the key AND the empty answer.
     owned = {n: w for n, w in witness.items()
-             if (w.get("governance_owned_by") or {}).get("reply") in ([], None)}
+             if (w.get("governance_owned_by") or {}).get("reply") == []}
     asked_owners = [n for n in owned
                     if n in {"Amara Osei", "Dana Whitlock", "Tomas Ferreira",
                              "Jonas Bauer"}]

@@ -388,8 +388,9 @@ committed its own probe and write-up into this bundle:
 | `VERIFICATION-independent.md` | its write-up (**not** this report — the primary record) |
 | `out/t6-quote-audit.json` | its quote-fidelity audit |
 
-It reaches the same numbers from a different read: the same 5 `hasPart`, 7 `dependsOn` and 6
-`ownedBy` rows; the same `dev:code` typing for all seven components; the same duplicate
+It reaches the same numbers from a different read: the same 5 `hasPart` and 7 `dependsOn` **pairs**,
+and the same **4** `ownedBy` pairs (the receipt's 6 write rows reduce to those 4 — `ownedBy 0/6` is
+the RECEIPT's row count, `4` is the pair count both reads land on); the same `dev:code` typing for all seven components; the same duplicate
 `mid-market utilities` / `mid-market utilities segment` nodes; the same `expand_relationships`
 silence on structural edges; `tortoise_list_topics` answering `Entity … not found` for nodes two
 other doors resolve; and the same quote audit (**11 verbatim / 27 paraphrase / 12 not in the
