@@ -97,6 +97,42 @@ def rows(reply, keys=("result", "results", "relationships", "nodes", "items",
     return []
 
 
+def is_error_reply(reply) -> bool:
+    """True when a reply is an ERROR envelope rather than an ANSWER.
+
+    ⛔ A door that FAILED and a door that answered EMPTY are two different
+    measurements, and `rows()` maps both to `[]` (#14691 review, 5th cycle, N1).
+    Left alone, that collapses a transport failure into "the door says there is
+    nothing" — and for D4 that means an `{"error": …}` witness reply CREATES the
+    finding "expand_relationships returns [] for a connected node", which is a
+    claim about the product the measurement never made. Every reader that decides
+    emptiness or ownership from a reply must ask this first.
+    """
+    while isinstance(reply, str):
+        try:
+            reply = json.loads(reply)
+        except (ValueError, TypeError):
+            return False
+    if isinstance(reply, dict):
+        return bool(reply.get("error")) or reply.get("ok") is False
+    return False
+
+
+def call_failed(call) -> bool:
+    """True when a witness CALL — or the `reply` it carries — is an error.
+
+    ⛔ THE ENVELOPE IS THE CALL, NOT THE `reply` INSIDE IT (#14691 review, 5th
+    cycle, N1, second pass). The first cut of this guard asked `is_error_reply`
+    about `call.get("reply")` ALONE, so a failed call spelled
+    `{"ok": false, "error": …}` — which has no `reply` key at all — read as
+    `None`, `rows(None)` as `[]`, and manufactured D4 anyway (measured: the arm
+    asserting it cannot still redded). Both shapes are errors.
+    """
+    if not isinstance(call, dict):
+        return False
+    return is_error_reply(call) or is_error_reply(call.get("reply"))
+
+
 # ── the entity map: id → {name, kind} ─────────────────────────────────────
 def entity_map() -> dict[str, dict]:
     out: dict[str, dict] = {}
@@ -416,9 +452,18 @@ def a2_edges() -> dict:
                 # at the other end. Checked on KIND, not on a name, because the
                 # producer is what the kind identifies.
                 agent_kinds = _ROLE_KINDS["team"] | _ROLE_KINDS["person"]
-                row["src_kind_is_an_agent"] = e["src_kind"] in agent_kinds
+                src_kind = e.get("src_kind") or ""
+                row["src_kind_is_an_agent"] = src_kind in agent_kinds
+                # ⛔ A ROW THIS SCORER CANNOT CLASSIFY IS NOT A `correct` ROW
+                # (#14691 review, 5th cycle, N6). An absent or unreadable
+                # `src_kind` used to fall through the `else` and be graded
+                # `correct`, so ONE unreadable row moved
+                # `asymmetric_rows_correct` 7 -> 8 — the tally A2's verdict is
+                # read from. It now gets its own bucket and counts in neither
+                # arm; `asymmetric_rows_unclassifiable` states the size of it.
                 row["orientation"] = ("INVERTED" if row["src_kind_is_an_agent"]
-                                      else "correct")
+                                      else ("correct" if src_kind
+                                            else "UNCLASSIFIABLE"))
             elif pred == "managedBy":
                 # §3.6 types `managedBy` as `Entity → Subject`: the RESPONSIBLE
                 # PARTY is the dst. Checked on KIND (a Subject end), because the
@@ -459,7 +504,7 @@ def a2_edges() -> dict:
     # wrote (hasPart is symmetric, `related` has no direction), how many assert
     # what the corpus says? Rows and distinct pairs are different units — 6
     # `ownedBy` rows are 4 distinct pairs — so both are stated.
-    asymmetric_correct = asymmetric_inverted = 0
+    asymmetric_correct = asymmetric_inverted = asymmetric_unclassified = 0
     inverted_pairs: set[tuple[str, str, str]] = set()
     for group in (ownership, dependency):
         for item in group:
@@ -479,6 +524,8 @@ def a2_edges() -> dict:
             inverted_pairs.add((row["edge"]["predicate"],
                                 _norm(row["edge"]["src"]),
                                 _norm(row["edge"]["dst"])))
+        elif row.get("orientation") == "UNCLASSIFIABLE":
+            asymmetric_unclassified += 1
     asymmetric = (asymmetric_correct, asymmetric_inverted)
     return {
         "containment": containment, "membership": membership,
@@ -508,6 +555,7 @@ def a2_edges() -> dict:
             "dependency_present_and_correct": f"{dep_ok}/{len(dependency)}",
             "asymmetric_rows_correct": asymmetric[0],
             "asymmetric_rows_inverted": asymmetric[1],
+            "asymmetric_rows_unclassifiable": asymmetric_unclassified,
             "asymmetric_pairs_inverted": len(inverted_pairs),
         },
         # PRESENCE is part of the assertion, not just the orientation: a graph
@@ -601,8 +649,23 @@ def a4_invention() -> dict:
             best = max(best, hit / len(words))
         return round(best, 3)
 
+    #: The paraphrase band: above it the content words survive and only the
+    #: wording changed; below it the corpus does not state the thing at all.
+    BAND = 0.6
+    #: Example lists are capped for artifact size. A cap is a DISPLAY concern and
+    #: never a count, so each list records when its cap bit.
+    CAP = 10
     quotes = {"total": 0, "verbatim": 0, "paraphrase": 0, "invented": 0,
-              "not_in_corpus": [], "invented_examples": []}
+              # ⛔ `not_in_corpus` IS A COUNT, NOT A LIST (#14691 review, 5th
+              # cycle, N5). It used to be a 10-row list of the BEST-ANCHORED
+              # PARAPHRASES — the opposite bucket — so a consumer reading its
+              # LENGTH as "quotes the corpus never states" got 10, the cap, where
+              # the real figure is `invented`. The paraphrase rows it held are
+              # preserved under `paraphrase_examples`; the name now carries the
+              # number it promises.
+              "not_in_corpus": 0,
+              "paraphrase_examples": [], "invented_examples": [],
+              "examples_truncated": False}
     for doc in RECEIPT.get("documents") or []:
         for point in (doc.get("result") or {}).get("points") or []:
             props = point.get("props") or {}
@@ -617,14 +680,19 @@ def a4_invention() -> dict:
             entry = {"doc": doc.get("doc_id"), "quote": quote[:200],
                      "best_sentence_overlap": ov,
                      "point": str(point.get("text") or point.get("content"))[:140]}
-            if ov >= 0.6:
+            if ov >= BAND:
                 quotes["paraphrase"] += 1
-                if len(quotes["not_in_corpus"]) < 10:
-                    quotes["not_in_corpus"].append(entry)
+                if len(quotes["paraphrase_examples"]) < CAP:
+                    quotes["paraphrase_examples"].append(entry)
+                else:
+                    quotes["examples_truncated"] = True
             else:
                 quotes["invented"] += 1
-                if len(quotes["invented_examples"]) < 10:
+                quotes["not_in_corpus"] += 1
+                if len(quotes["invented_examples"]) < CAP:
                     quotes["invented_examples"].append(entry)
+                else:
+                    quotes["examples_truncated"] = True
 
     # (c) the product's own compliance warnings
     warn = {"total": 0, "no_source_turn": 0, "token_overlap_band": 0,
@@ -805,11 +873,19 @@ def _door_findings() -> list[dict]:
     found = list(READBACK.get("door_findings") or [])
     witness = READBACK.get("link_witness") or {}
     if not any(f.get("id") == "D4" and witness for f in found):
+        # ⛔ AN ERROR IS NOT SILENCE (#14691 review, 5th cycle, N1). An
+        # `{"error": …}` reply satisfied `not rows(...)` and MANUFACTURED D4 —
+        # "it returns [] for a node that has edges" — from a call that never
+        # answered. Measured: replacing all seven witness `expand_relationships`
+        # replies with error envelopes left the suite green and the finding in
+        # place. `call_failed` tests the CALL as well as its `reply`, because a
+        # failure that carries no `reply` key at all is the same measurement gap.
         silent = {name: {"expand_rows": 0,
                          "explore_neighbours": w.get("explore_neighbour_count")}
                   for name, w in witness.items()
                   if not rows((w.get("expand_relationships") or {})
                               .get("reply"))
+                  and not call_failed(w.get("expand_relationships"))
                   and (w.get("explore_neighbour_count") or 0) > 0}
         if silent:
             found.append({
@@ -836,6 +912,10 @@ def _door_findings() -> list[dict]:
     for n, w in witness.items():
         probe = w.get("governance_owned_by")
         if not isinstance(probe, dict) or "reply" not in probe:
+            continue
+        if call_failed(probe):
+            # same distinction as D4: a failed call is NOT a measured empty, so
+            # it can neither witness the finding nor be counted as an answer.
             continue
         if rows(probe["reply"]) == []:
             owned[n] = w
@@ -890,6 +970,7 @@ def _claim_layer() -> dict:
     q = a4_invention()["quotes"]
     return {"quotes_total": q["total"], "verbatim": q["verbatim"],
             "paraphrase": q["paraphrase"], "invented": q["invented"],
+            "not_in_corpus": q["not_in_corpus"],
             "invented_examples": q["invented_examples"][:6],
             "passes": q["invented"] == 0}
 

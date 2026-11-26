@@ -422,7 +422,7 @@ measurement. It is also the process fact worth carrying back: the pre-dispatch c
 | `run_readback.py` | step 2 — MCP-read only: kind scans, per-element edge walks, link witness, 5 structure probes, `check_structure`; writes `out/readback.json` | — |
 | `score_t6.py` | step 3 — derives every number in §3 from the two receipts; writes `out/t6-score.json` | — |
 | `out/ingest-receipt.json` | per-document full result envelope: `relation_write.edges`, `warnings[]`, `stats.llm` tokens | `run_ingest.py` |
-| `out/readback.json` | verbatim MCP replies (784 KB): scans, 32 element walks, endpoint reads, link witness, probes | `run_readback.py` |
+| `out/readback.json` | verbatim MCP replies (809,812 bytes · 791 KB): scans, 32 element walks, endpoint reads, link witness, probes | `run_readback.py` |
 | `out/t6-score.json` | the five assertions with their numbers, evidence rows and verdicts | `score_t6.py` |
 | `out/tool-surface.json` | the live MCP surface (39 tools) with each tool's own `inputSchema` | `run_readback.py` |
 | `verify_independent.py` | a second lane's independent MCP probe (depth-2 subgraph reads) | **not this bundle's producer** — §7 |
@@ -444,9 +444,51 @@ ruleset and `.mergify.yml` require `python-ci-gate`, `docs`, `pricing-artifact`,
 baseline for new code, so the rename was taken rather than left as debt. **The rename is inert** — mechanically verified by renaming
 it back and diffing against `d4fc8fe`: zero differences — so the artifact's numbers stand and only
 the binding is stale. It is stated here rather than silently regenerated, because regenerating a
-784 KB receipt would rewrite every number downstream of it to fix a comment-sized defect.
+791 KB receipt would rewrite every number downstream of it to fix a comment-sized defect.
 `tests/test_14691_structure_evidence.py` pins the binding against that stated exception, so a future
 drift reds instead of going unnoticed (which is what let this one through the first review).
+
+### 8.1 What the falsifier suite actually pins (5th review cycle)
+
+The 5th review cycle found one class, seven times over: the suite pinned what the *test* believed and
+never the edges between the committed artifacts, the prose that quotes them, and the inputs they are
+derived from. Measured mutants that stayed **green** before this cycle — each now reds, and each arm
+names its mutant in its own docstring:
+
+| mutant (all measured green before) | arm that now reds on it |
+|---|---|
+| `out/t6-independent-verification.json`'s `A2` replaced with a hand-written note, `declared` emptied | `test_the_orphan_second_measurement_agrees_with_the_primary` |
+| `out/t6-quote-audit.json` `verbatim 11→50`, `not_in_corpus 12→0` | `test_the_quote_audit_artifact_is_re_derived_from_the_receipt` |
+| `REPORT.md` §7 `(11 / 27 / 12)` → `(50 / 0 / 0)` | `test_the_quote_breakdown_in_the_report_is_the_claim_layer` |
+| a door finding's **answer** flipped `No → YES` | `test_each_door_finding_answer_states_the_artifacts_polarity` |
+| A1/A3 heading **counts** rewritten (`28/28` → `35/35`, `5/2/5` → `99/1/42`) | `test_report_headline_counts_are_the_artifacts_counts` |
+| `directions_source: UNAVAILABLE`, `directions: {}` | `test_the_directions_table_is_the_ruling_table` |
+| `empty_before` carrying `total_entities: 500` / `node_count: 900` / a real `pointkinds` list | `test_the_isolation_refusal_is_enforced_on_the_whole_overview` |
+| an `{"error": …}` witness reply read as an answered-empty one (it manufactured D4) | `test_an_ERROR_reply_is_not_an_EMPTY_answer` |
+| an unreadable `src_kind` graded `correct`, moving `asymmetric_rows_correct` 7 → 8 | `test_an_UNREADABLE_kind_is_not_graded_correct` |
+
+Three content defects were corrected rather than re-pinned:
+
+* **`not_in_corpus` was the wrong bucket, and it truncated.** In `t6-score.json` it was a 10-row list
+  of the **best-anchored paraphrases** (overlaps 0.636–1.0) — the opposite population — so a consumer
+  reading its length as "quotes the corpus never states" got the display cap, `10`, which is the
+  figure the PR description carried. It is now a **count** (`12`, equal to `invented`), the paraphrase
+  rows live under `paraphrase_examples`, and both capped lists carry `examples_truncated`.
+* **An unclassifiable `produces` row was graded `correct`** because the check was
+  `"INVERTED" if src_kind_is_an_agent else "correct"`. It is now its own
+  `UNCLASSIFIABLE` bucket, counted in `asymmetric_rows_unclassifiable` and in neither arm.
+* **The fresh-graph refusal read two fields.** It is now a pure `occupancy()` walk over the whole
+  `graph_overview()` reply, excluding only what describes the connection or the installed vocabulary
+  (`namespaces`, `status.connected`, and `stale.limit` — a page size, which the first cut of the walk
+  wrongly counted and which would have refused every real run).
+
+⚠️ **One residual, stated rather than silently closed:** `run_readback.py`'s own `report["ok"]` still
+only inspects three `layers` calls, so it does not see a failed `bare_kind_probes` or
+`expand_relationships` call either. That file's bytes are the provenance binding of a committed 791 KB
+artifact — it cannot be edited without regenerating a receipt this box cannot reproduce (no graph, no
+LLM key) — so the fix was taken on the **consumer** side, where the scorer now refuses to read an
+error envelope as an answer for D4/D6, and the falsifier above pins it. The D3 finding itself is
+carried in `readback.json` as measured.
 
 ---
 
