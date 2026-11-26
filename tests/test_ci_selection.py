@@ -10953,24 +10953,39 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # commit graded two different subjects. The mask is asserted below rather than trusted.
     # …and the LIVE block must stay clean of all of them, or the ban is a false red rather than a
     # grade: the shapes above are the claim, this is the prose the repository actually ships.
-    live_anaphor = _h_14544_banned_claim(_unquoted_block(_emission_block_header(
-        cs.MANIFEST.read_text(encoding="utf-8"))))
+    # ⛔ ONE EXPRESSION, used by the live assertion AND by the plant below, so the two cannot
+    # diverge and a revert of the mask REDS rather than quietly re-arming the false red.
+    def _read_live_block(manifest_text: str) -> str | None:
+        return _h_14544_banned_claim(_unquoted_block(_emission_block_header(manifest_text)))
+
+    raw_manifest = cs.MANIFEST.read_text(encoding="utf-8")
+    live_anaphor = _read_live_block(raw_manifest)
     assert live_anaphor is None, (
         "the block now contains a retired-claim reading, so the ban above reds the live prose "
         f"rather than a fold's: {live_anaphor!r}")
-    # …and the MASK is what keeps that read honest, so it is graded in both directions: the retired
-    # claim is READ unmasked (or this fixture is decoration) and NOT read when it sits inside a
-    # quoted record. Without the second half, narrowing the subject back to the raw header would
-    # leave every assertion above green while the false red came back.
+    # …and the MASK is what keeps that read honest, so it is graded in both directions ON THE LIVE
+    # SUBJECT rather than on a literal: a quoted record of the retired claim is PLANTED in a copy
+    # of this tree's own manifest — the shape the block's doctrine permits, since a quotation
+    # records a dead claim without re-stating it — and the same read must stay green over it while
+    # the same text UNMASKED must red.
+    # ⛔ THE PLANT GOES INSIDE THE BLOCK, not at the end of the file: `_emission_block_header` is
+    # everything BEFORE the `fast_shards:` key, so a record appended to the file lands outside the
+    # subject and grades nothing.
     quoted_retired = (
         '⛔ Quoted for the record: "`#14544` touched neither of which." · and it does not now.')
-    assert _h_14544_banned_claim(quoted_retired) is not None, (
-        "the anaphor ban no longer reads the retired claim even UNMASKED, so the quoted-record "
-        "assertion below grades nothing — re-point the ban at the claim before trusting the mask")
-    assert _h_14544_banned_claim(_unquoted_block(quoted_retired)) is None, (
-        "a QUOTED record of the retired claim is being read as a live claim — the quoted-span "
-        "mask has regressed, and the repair this message would push is to delete the block's "
-        "record of why the sentence is gone")
+    block_key = re.search(r"^fast_shards:", raw_manifest, re.MULTILINE)
+    assert block_key is not None, (
+        "the manifest carries no `fast_shards:` key, so the quoted-record plant below cannot be "
+        "placed inside the block this arm reads")
+    planted = (raw_manifest[:block_key.start()] + "# " + quoted_retired + "\n"
+               + raw_manifest[block_key.start():])
+    assert _h_14544_banned_claim(_emission_block_header(planted)) is not None, (
+        "the anaphor ban does not read the retired claim planted as a record, so the masked "
+        "assertion below would be decoration — re-point the ban at the claim first")
+    assert _read_live_block(planted) is None, (
+        "a QUOTED record of the retired claim is being read as a live claim: the quoted-span "
+        "mask has regressed (or this read stopped masking), and the repair this message would "
+        "push is to delete the block's record of why the sentence is gone")
 
 
 def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
