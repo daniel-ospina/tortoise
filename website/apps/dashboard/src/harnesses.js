@@ -419,29 +419,30 @@ export const CLAUDE_CAPTURE_NOTE = `${captureInstallNote({
 // POST with a 409 while the organization has agent sessions switched off
 // (Memory sources > Agent sessions). The extension fires an install-probe on
 // load (harness + timestamp only, no content) and files the session when it
-// ends. It has no agent-infra dependency and needs no local tortoise CLI.
+// ends. It has no agent-infra dependency; the INSTALL step uses the local
+// `tortoise` CLI, and the record names that command rather than scripting a
+// second copy of the installer's shape analysis (#14342 round 9).
 export const PI_CAPTURE_INSTALL = `${captureInstallNote({
   heading: 'Session capture for Pi (#1727 T1, #3575) — install the in-repo capture extension',
   optIn: false,
 })}
 # The extension probes on load (harness + timestamp only, no content) and files
-# each session on exit. Install from your Tortoise checkout
-# (github.com/daniel-ospina/tortoise):
-mkdir -p ~/.pi/agent/extensions
-# #3713 collision guard: Pi's loader treats a top-level tortoise-capture.ts
-# AND a tortoise-capture/index.ts as TWO extensions (no basename dedupe).
-# A pre-existing agent-infra tortoise-capture/ registers its own agent_end
-# capture, so both POST the same session_id — doubled work, and the loser can
-# 409. Disable the legacy entry before installing this one. NON-DESTRUCTIVE:
-# unlink a symlink (the agent-infra checkout is untouched), or move a real
-# directory to a dot-prefixed name Pi's loader SKIPS (it ignores dotfiles) —
-# never a recursive delete.
-if [ -L ~/.pi/agent/extensions/tortoise-capture ]; then
-  rm ~/.pi/agent/extensions/tortoise-capture
-elif [ -d ~/.pi/agent/extensions/tortoise-capture ]; then
-  mv ~/.pi/agent/extensions/tortoise-capture ~/.pi/agent/extensions/.tortoise-capture.disabled
-fi
-cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts ~/.pi/agent/extensions/tortoise-capture.ts
+# each session on exit. Install it with your Tortoise checkout's CLI:
+# The installer copies tortoise/pi-hooks/tortoise-capture.ts and
+# tortoise/pi-hooks/tortoise-volunteer.ts into ~/.pi/agent/extensions/,
+# then retires the producers that would double-capture.
+# The SUPPORTED install — the product's own seam installer, which VERIFIES the
+# end state and refuses (naming what it found) rather than reporting success
+# while two producers stay registered. It copies the extensions, THEN retires
+# the legacy entry point, THEN the second producer's — that order is the safety
+# property, so no failure can leave the box with no producer at all.
+# ⛔ A hand-copied duplicate of it shipped here until #14342 round 9, and it was
+# REMOVED rather than patched: it renamed a reflect-hook.ts DIRECTORY to a name
+# Pi still loads, edited THROUGH a symlinked .tortoise-capture.disabled into a
+# foreign checkout, and unlinked the legacy producer symlink BEFORE the copies.
+# The installer is the surface with the tests; a shell copy of its shape
+# analysis is a second implementation that drifts silently.
+tortoise install pi
 # Backfill past Pi sessions with (the EXTENSION files automatically; this
 # import command is a separate, consent-gated path — it needs TORTOISE_CAPTURE=1):
 tortoise sessions import --harness pi --file <session.jsonl>`
