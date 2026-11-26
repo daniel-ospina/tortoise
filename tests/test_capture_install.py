@@ -1091,6 +1091,109 @@ def test_pi_install_dry_run_names_the_second_producer_without_touching_it(home):
                and "reflect-hook" in a for a in res.actions), res.actions
 
 
+def test_pi_install_dry_run_names_the_legacy_retirement_on_the_fresh_directory_shape(
+        home):
+    """On the FRESH legacy-directory shape the real run renames the directory
+    aside **and then** retires the entry point inside it — two actions, and the
+    second is the one that actually stops the producer. The dry run read the
+    disabled name from DISK, where it does not exist yet, so it reported the
+    rename only and omitted the step that matters (#14342 review round 8,
+    finding 3).
+
+    Mutation: read `legacy_disabled` under `--dry-run` (the retirement line
+    disappears from the plan while the real run still performs it)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    legacy = ext_dir / capture_install.LEGACY_PI_DIRNAME
+    legacy.mkdir(parents=True)
+    (legacy / "index.ts").write_text("// legacy producer\n")
+
+    dry = install_capture("pi", home=home, dry_run=True)
+
+    assert dry.ok, dry.error
+    # Nothing was touched...
+    assert (legacy / "index.ts").read_text() == "// legacy producer\n"
+    assert not (ext_dir / capture_install.PI_DISABLED_DIRNAME).exists()
+    # ...but BOTH steps the real run performs are named.
+    assert any("[dry-run] would rename" in a for a in dry.actions), dry.actions
+    assert any("[dry-run] would retire" in a
+               and "entry point inside" in a for a in dry.actions), dry.actions
+
+    real = install_capture("pi", home=home)
+    assert real.ok, real.error
+    assert any("renamed" in a for a in real.actions), real.actions
+    assert any("retired the legacy extension's entry point inside" in a
+               for a in real.actions), real.actions
+
+
+def test_retire_pi_entry_refuses_to_overwrite_a_preserved_symlink_copy(home):
+    """The symlink branch renames the LINK, and `Path.rename` OVERWRITES on
+    POSIX — so a retired copy already sitting at the produced name is destroyed
+    silently, unlike the directory branch and the second producer's collision
+    arm, which both refuse. Silent byte loss inside an install that can still
+    report success (#14342 review round 8, finding 1, second facet).
+
+    Mutation: drop the `lexists(produced)` guard — the preserved bytes are
+    replaced by the link."""
+    ext_dir = home / "extensions"
+    ext_dir.mkdir()
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    (target / "index.ts").write_text("// legacy producer\n")
+    link = ext_dir / "tortoise-capture"
+    link.symlink_to(target, target_is_directory=True)
+    kept = ext_dir / "tortoise-capture.disabled"
+    kept.write_text("// DO NOT LOSE ME\n")
+
+    error = capture_install._retire_pi_entry(link)
+
+    assert error and "already exists" in error, error
+    assert kept.read_text() == "// DO NOT LOSE ME\n", (
+        "the preserved copy was overwritten by the rename")
+    assert link.is_symlink(), "the refused retirement still mutated the link"
+
+
+def test_pi_install_refuses_a_loaded_legacy_entry_point_behind_a_symlink(home):
+    """A SYMLINK at ``.tortoise-capture.disabled`` pointing at a directory with
+    ``index.ts`` is a legacy producer Pi STILL loads.
+
+    `_retire_pi_entry` renamed the LINK to ``….disabled.disabled``, which
+    `discoverExtensionsInDir` still resolves through
+    `resolveExtensionEntries` (a symlinked subdirectory is a subdirectory),
+    while the post-retirement assertion read the path the rename started FROM —
+    gone, so "not loadable" — and the install reported "retired the legacy
+    extension's entry point" over two live producers: the exact false PASS this
+    PR exists to remove (#14342 round 8, finding 1).
+
+    The refusal is also STICKY: it refuses before mutating anything, so the
+    natural response to a failed install (re-run) reads the same shape and
+    refuses again instead of going green over two producers.
+
+    Mutation: assert on the vacated path (or drop the shape check) — run 1
+    reports ok; rename-then-assert-a-produced-path — run 2 reports ok."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "tortoise-capture"
+    target.mkdir(parents=True)
+    body = "// legacy producer, checked out elsewhere\n"
+    (target / "index.ts").write_text(body)
+    disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    disabled.symlink_to(target, target_is_directory=True)
+
+    first = install_capture("pi", home=home)
+
+    assert not first.ok, first.actions
+    assert "SYMLINK" in (first.error or ""), first.error
+    # Non-destructive: the link and the checkout it points at are untouched.
+    assert disabled.is_symlink()
+    assert (target / "index.ts").read_text() == body
+
+    second = install_capture("pi", home=home)
+
+    assert not second.ok, second.actions
+    assert "SYMLINK" in (second.error or ""), second.error
+    assert disabled.is_symlink()
+
+
 #: The names Pi's loader would REGISTER from ``~/.pi/agent/extensions``.
 #: ``dist/core/extensions/loader.js``: a direct entry loads iff its name ENDS
 #: WITH ``.ts`` / ``.js`` (``isExtensionFile``); **every** subdirectory is
@@ -1432,6 +1535,43 @@ def test_pi_install_refuses_when_the_retired_second_producer_still_loads(home):
     assert (ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
             ).is_symlink()
     assert (real / "index.ts").read_text() == body
+    # #10241's doctrine, applied to a failure AFTER the mutation: the rename
+    # DID land, so the receipt names it. A failure reporting zero actions over
+    # a modified disk is what that doctrine exists to prevent (#14342 review,
+    # final round finding 3).
+    assert any("retired" in action for action in res.actions), res.actions
+
+
+def test_pi_install_refuses_a_still_loadable_retired_second_producer_every_run(home):
+    """The retired name is GUARD STATE, not a by-product of the run that wrote
+    it: a refusal that fires only once is not a guard.
+
+    Run 1 renames a SYMLINK-to-directory producer and correctly refuses (the
+    renamed link still loads). Run 2 — the natural response to a failed
+    install — used to find ``reflect-hook.ts`` absent, answer "nothing to do",
+    and report a GREEN install with two producers live: the same false PASS,
+    one re-run later (#14342 review, final round finding 1).
+
+    Mutation: check ``retired`` only right after a same-run rename — run 2
+    returns ok.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    target = home / "checkout" / "reflect-hook"
+    target.mkdir(parents=True)
+    body = "// the other producer, checked out elsewhere\n"
+    (target / "index.ts").write_text(body)
+    retired = ext_dir / capture_install.PI_SECOND_PRODUCER_DISABLED_NAME
+    retired.symlink_to(target, target_is_directory=True)
+
+    for attempt in (1, 2):
+        res = install_capture("pi", home=home)
+
+        assert not res.ok, f"run {attempt} reported a green install: {res.actions}"
+        assert "still" in (res.error or "").lower(), res.error
+        # Non-destructive: nothing is touched, so the refusal repeats.
+        assert retired.is_symlink()
+        assert (target / "index.ts").read_text() == body
 
 
 def test_pi_legacy_obstacle_names_the_second_producers_collision(home):

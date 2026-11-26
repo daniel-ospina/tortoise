@@ -1953,7 +1953,16 @@ def _retire_pi_entry(path: Path) -> str | None:
         # would rename files inside someone else's checkout (an agent-infra
         # working tree) while the installer's scope is `~/.pi/agent/extensions`.
         if path.is_symlink():
-            path.rename(path.with_name(f"{path.name}.disabled"))
+            produced = path.with_name(f"{path.name}.disabled")
+            if os.path.lexists(produced):
+                # `Path.rename` OVERWRITES on POSIX: renaming the link over an
+                # existing retired copy destroys it silently, inside an install
+                # that may still report success. The directory branch below and
+                # the second producer's collision arm both refuse this; the
+                # symlink branch must not be the one that deletes.
+                return (f"{produced} already exists — retiring {path} would "
+                        f"overwrite preserved bytes")
+            path.rename(produced)
             return None
         if path.is_dir():
             entries, unreadable = _pi_manifest_entries(path)
@@ -2023,6 +2032,22 @@ def _disable_pi_second_producer(
     """
     active = ext_dir / PI_SECOND_PRODUCER_NAME
     retired = active.with_name(f"{PI_SECOND_PRODUCER_NAME}.disabled")
+    # ⛔ THE RETIRED NAME IS GUARD STATE, NOT A BY-PRODUCT OF THIS RUN. A
+    # refusal that fires only in the run that performed the rename is not a
+    # guard: run 1 renamed a SYMLINK TO A DIRECTORY and refused (a suffixed
+    # symlink is still resolved through its index file), and run 2 — the
+    # natural response to a failed install — found `active` absent, answered
+    # "nothing to do", and reported a GREEN install with two producers live.
+    # So `retired` is re-read on EVERY run, exactly as the legacy arm re-reads
+    # its own disabled name (#14342 review, final round finding 1).
+    if _pi_entry_is_loadable(retired):
+        return False, [], (
+            f"cannot disable the second capture producer: {retired} is still "
+            "an extension Pi loads — a symlink to a directory is resolved "
+            "through `resolveExtensionEntries` under any suffixed name — so "
+            "both producers stay registered and every session is captured "
+            "twice. Nothing was touched. Move it out of the extensions "
+            "directory by hand and re-run.")
     if not os.path.lexists(active):
         return False, [], None
     if not _pi_entry_is_loadable(active):
@@ -2097,7 +2122,16 @@ def _disable_pi_second_producer(
     if still is None and os.path.lexists(retired):
         still = _assert_pi_entry_not_loadable(retired)
     if still:
-        return False, [], still
+        # #10241's doctrine, applied to a failure AFTER the mutation: the
+        # rename DID land, so the receipt says what landed. A failure that
+        # reports zero actions over a modified disk is the report that doctrine
+        # exists to prevent (#14342 review, final round finding 3).
+        landed = (f"retired the entry point inside {active} (index.ts/index.js "
+                  f"→ *.disabled) — but it is STILL an extension Pi loads"
+                  if was_directory else
+                  f"retired {active} → {retired} — but it is STILL an "
+                  f"extension Pi loads")
+        return True, [landed], still
     if was_directory:
         detail = (f"retired the entry point inside {active} (index.ts/index.js "
                   f"→ *.disabled; the directory stays in place — a suffixed "
@@ -2343,9 +2377,43 @@ def _install_pi(
                        f"(symlink target untouched)")
         changed = True
 
-    legacy_retirable = _pi_entry_is_loadable(legacy_disabled) if (
-        os.path.lexists(legacy_disabled)) else False
+    if dry_run and legacy.is_dir() and not legacy.is_symlink():
+        # The rename above is only PLANNED under `--dry-run`, so the disabled
+        # name does not exist yet and reading it reported nothing to retire —
+        # a dry run that omitted the very step the real run performs, which is
+        # the one that actually stops the producer (#14342 review round 8,
+        # finding 3). Read the SOURCE the real run would rename FROM.
+        legacy_retirable = _pi_entry_is_loadable(legacy)
+    else:
+        legacy_retirable = _pi_entry_is_loadable(legacy_disabled) if (
+            os.path.lexists(legacy_disabled)) else False
     if legacy_retirable:
+        if legacy_disabled.is_symlink():
+            # ⛔ A LINK TO A DIRECTORY IS NOT RETIRED BY RENAMING IT, and the
+            # assertion used to read the path the rename started FROM — gone
+            # after the rename, so "not loadable" — and the install reported
+            # "retired the legacy extension's entry point" while Pi kept
+            # loading the renamed link (`.disabled.disabled` is still resolved
+            # through `resolveExtensionEntries`). Refuse BEFORE any mutation:
+            # nothing is touched, so every re-run reads the same shape and
+            # refuses again instead of going green (#14342 round 8 finding 1).
+            # Refused, not converged: unlinking would destroy a link the
+            # installer did not create, and the sibling arm above already
+            # documents the one link it does unlink.
+            return InstallResult(harness, changed=changed,
+                                 actions=tuple(actions),
+                                 changed_artifacts=_written(), error=(
+                                     f"the legacy capture extension "
+                                     f"{legacy_disabled} is a SYMLINK to a "
+                                     f"directory, and Pi resolves a symlinked "
+                                     f"subdirectory through its index file "
+                                     f"under ANY suffixed name — renaming it "
+                                     f"retires nothing, so both producers "
+                                     f"would stay registered. Nothing was "
+                                     f"touched. Move {legacy_disabled} out of "
+                                     f"the extensions directory by hand (the "
+                                     f"checkout it points at is untouched) "
+                                     f"and re-run."))
         if dry_run:
             actions.append(
                 f"[dry-run] would retire the entry point inside "
@@ -2353,17 +2421,28 @@ def _install_pi(
             changed = True
         else:
             legacy_error = _retire_pi_entry(legacy_disabled)
-            if legacy_error is None:
+            retired_landed = legacy_error is None
+            if retired_landed:
                 legacy_error = _assert_pi_entry_not_loadable(legacy_disabled)
             if legacy_error:
+                # #10241: a rename that LANDED is reported even when the
+                # assertion then fails — the disk changed, so a receipt with
+                # no action lines would hide it (#14342 review, final round
+                # finding 3).
+                if retired_landed:
+                    actions.append(
+                        f"retired the legacy extension's entry point inside "
+                        f"{legacy_disabled} (files preserved) — but Pi STILL "
+                        f"loads it")
+                    changed = True
                 return InstallResult(harness, changed=changed,
                                      actions=tuple(actions),
                                      changed_artifacts=_written(), error=(
-                                         f"the legacy capture extension was "
-                                         f"renamed aside but is STILL an "
-                                         f"extension Pi loads ({legacy_error}), "
-                                         f"so both producers stay registered. "
-                                         f"Move {legacy_disabled} out of the "
+                                         f"the legacy capture extension at "
+                                         f"{legacy_disabled} could not be "
+                                         f"retired ({legacy_error}), so both "
+                                         f"producers stay registered. Move "
+                                         f"{legacy_disabled} out of the "
                                          f"extensions directory by hand and "
                                          f"re-run."))
             actions.append(
