@@ -1226,14 +1226,31 @@ test('#14694: an UNREAD feed is never "you have no notifications"', () => {
     'and never asserts a state nothing has measured')
 })
 
-test('#14694: the unread arm is distinct from every other empty-state sentence', () => {
-  // Four empty states, four sentences — a caller that wires the wrong flag must
-  // be distinguishable from one that wired the right one.
+test('#14694: the unread arm outranks nothing — a failed or cut read still wins', () => {
+  // The precedence, which is the part a wrong flag would actually break. Plain
+  // absence assertions here would be unfalsifiable: `ALERTS_UNAVAILABLE` and
+  // `SCAN_SATURATED_EMPTY` are gated on `unavailable`/`scanSaturated` (both false
+  // in the unread render below), and `LEDGER_ALL_CLEAR` needs `alerts.length > 0`
+  // — so "the unread render does not show them" is true no matter what
+  // `feedLoaded` does. The discriminating claim is that each of the OTHER states
+  // still renders its OWN sentence while unloaded, i.e. `feedLoaded` is not a
+  // fourth gate that swallows them.
   const unread = renderBell({ alerts: [], feedLoaded: false })
   fireEvent.click(bell(unread.container))
-  assert.ok(!unread.container.textContent.includes(ALERTS_UNAVAILABLE))
-  assert.ok(!unread.container.textContent.includes(SCAN_SATURATED_EMPTY))
-  assert.ok(!unread.container.textContent.includes(LEDGER_ALL_CLEAR))
+  assert.ok(unread.container.textContent.includes(LEDGER_PENDING))
+  assert.ok(!unread.container.textContent.includes('You have no notifications.'))
+
+  const failed = renderBell({ alerts: [], feedLoaded: false, unavailable: true })
+  fireEvent.click(bell(failed.container))
+  assert.ok(failed.container.textContent.includes(ALERTS_UNAVAILABLE),
+    'a failed read is still the failed-read sentence — not "still checking"')
+  assert.ok(!failed.container.textContent.includes(LEDGER_PENDING))
+
+  const cut = renderBell({ alerts: [], feedLoaded: false, scanSaturated: true })
+  fireEvent.click(bell(cut.container))
+  assert.ok(cut.container.textContent.includes(SCAN_SATURATED_EMPTY),
+    'and a cut scan is still the cut-scan sentence')
+  assert.ok(!cut.container.textContent.includes(LEDGER_PENDING))
 })
 
 test('#14694: a settled feed still reports the all-clear once every row is put away', () => {

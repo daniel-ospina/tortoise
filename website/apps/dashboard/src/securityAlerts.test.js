@@ -376,15 +376,66 @@ const switchTeamPath = (main = readFileSync(join(here, 'main.jsx'), 'utf8')) => 
   return main.slice(start, end + close.length)
 }
 
+test('#14694: main.jsx WIRES the fourth feed fact — the component cannot close this alone', () => {
+  // The rendered half of #14694 lives in `notificationPanel.dom.test.jsx`, and
+  // every one of those tests passes `feedLoaded` ITSELF — so they exercise the
+  // component and cannot see the MOUNT. Measured on the pre-fix wiring, all three
+  // of these mutations were GREEN across the whole 1163-test primary suite:
+  //   * `feedLoaded={true}` — the reported defect returns verbatim (the panel
+  //     claims "You have no notifications." over an unread feed);
+  //   * the `feedLoaded={alertsLoaded}` line deleted — the default `false` takes
+  //     over and the panel says "Checking…" forever;
+  //   * both `setAlertsLoaded(false)` resets removed — the `switchTeam` window
+  //     reopens.
+  // A prop with no gate on its production wiring is a fix that cannot regress
+  // detectably, which is the false-PASS class #14686's own cycles exist to close.
+  const main = readFileSync(join(here, 'main.jsx'), 'utf8')
+  const bellAt = main.indexOf('<NotificationBell')
+  assert.ok(bellAt !== -1, 'main.jsx must mount the bell')
+  // Bounded by the element's own close so the assertion cannot be satisfied by a
+  // lookalike somewhere else in a 12k-line file.
+  const mountEnd = main.indexOf('/>', bellAt)
+  const mount = main.slice(bellAt, mountEnd)
+  assert.match(mount, /feedLoaded=\{alertsLoaded\}/,
+    'the mount must pass the REAL settled fact — `true` reinstates the defect, and '
+    + 'omitting it leaves the default `false` on forever')
+  // Every SETTLE arm sets it: a failed read is a settled one (`unavailable` says
+  // which kind), so all three arms — 2xx, non-2xx, throw — must set it, and a
+  // fourth would mean an arm was added without deciding this question.
+  const loadAt = main.indexOf('async function loadAlerts')
+  assert.ok(loadAt !== -1, 'loadAlerts must exist')
+  const loadBody = main.slice(loadAt, main.indexOf('\n  }', loadAt))
+  const settled = loadBody.match(/setAlertsLoaded\(true\)/g) || []
+  assert.equal(settled.length, 3,
+    'all three settle arms (success, non-2xx, catch) must mark the feed settled; '
+    + 'the `orgIdRef` staleness-guard returns must NOT — a discarded read is not '
+    + 'evidence about the next Organization')
+})
+
 test('#14686: a team switch drops the previous Organization\'s alerts', () => {
   const body = switchTeamPath()
-  // All THREE feed facts reset: rows, the cut-scan flag and the failed-read flag
-  // each render a different claim on the closed bell, so leaving any of them set
-  // reports the previous Organization's state.
+  // All FOUR feed facts reset: rows, the cut-scan flag, the failed-read flag and
+  // `alertsLoaded` — each renders a different claim on the bell, so leaving any of
+  // them set reports the previous Organization's state. `alertsLoaded` is the
+  // FOURTH (#14694): `switchTeam` clears the feed and only then reads it, and
+  // without the reset the panel prints "You have no notifications." over the feed
+  // it has not read yet. This pin said THREE until #14694 added the fourth, and a
+  // stale count is how the pin stops meaning what it claims.
   assert.match(body, /setAlerts\(\[\]\)/,
     'the previous Organization\'s rows must not survive a switch')
   assert.match(body, /setAlertsSaturated\(false\)/, 'nor its cut-scan flag')
   assert.match(body, /setAlertsUnavailable\(false\)/, 'nor its failed-read flag')
+  assert.match(body, /setAlertsLoaded\(false\)/,
+    'nor its "feed has been read" fact — the read below has not happened yet')
+  // A COUNT, not a presence check. The slice covers BOTH reset sites (the switch
+  // at `setAlerts([])` and the revert path at 10-space indent), so an "at least
+  // one" match is satisfied by whichever one survives — measured: removing the
+  // switch's reset left this pin GREEN, because the revert's still matched it.
+  // Two is the whole set, so dropping either reds here.
+  assert.equal((body.match(/setAlertsLoaded\(false\)/g) || []).length, 2,
+    'BOTH reset sites (the switch and its revert) must clear the settled fact — '
+    + 'a `[]` feed they just cleared must not be accompanied by "you have no '
+    + 'notifications" while the read is still in flight')
   assert.match(body, /loadAlerts\(orgId\)/,
     'and the NEW Organization must be read — an empty bell is not a correct one')
   // The WRITE state of the dropped feed goes with it: `ackError` is otherwise

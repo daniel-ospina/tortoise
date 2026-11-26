@@ -324,13 +324,16 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
  *    fact, and the only one a caller can omit and still be honest, because it
  *    defaults to `false`: the panel then says it is still checking instead of
  *    printing `LEDGER_EMPTY` ("You have no notifications."), which is a claim
- *    about the Organization's state that an unread feed cannot support. The two
- *    callers that must pass `true` are the real ones — `main.jsx` tracks it on
- *    the read it already owns; every test that asserts an empty/all-clear line
- *    passes a SETTLED feed explicitly, so the conflation cannot come back "for
- *    free" through a harness default. Defaulting to `true` here would make the
- *    false all-clear the silent path again, which is the defect this prop exists
- *    to close;
+ *    about the Organization's state that an unread feed cannot support. There is
+ *    exactly ONE production caller (`main.jsx`, which tracks `alertsLoaded` on the
+ *    read it already owns) and it must pass `true` once that read settles;
+ *    defaulting to `true` HERE would make the false all-clear the silent path
+ *    again, which is the defect this prop exists to close. In the tests,
+ *    `notificationPanel.dom.test.jsx`'s harness DOES default it to `true` so the
+ *    ~50 pre-existing empty/all-clear cases keep testing the settled panel — which
+ *    is precisely why the production wiring is pinned separately in
+ *    `securityAlerts.test.js` ("main.jsx WIRES the fourth feed fact"): a harness
+ *    default cannot see the mount, so the wiring needs a pin that can.
  *  * `userId` / `orgId` — the identity the local ledger is keyed by;
  *  * `canAcknowledge` + `onAcknowledge` — the owner/admin org-wide dismissal;
  *  * `ackPending` (episode) / `ackError` ({episode, orgId, label, message}) —
