@@ -130,9 +130,9 @@ version: 1
 # applied BOTH parents' derivations — one naming `origin/main` `29bb16b5b6` with this branch's own
 # `tests/test_14592_read_parity.py`, one spelling the same base with `#14607`'s two rows called this
 # branch's own. The copies DISAGREED on the figures (826.7/826.6 against 826.9/826.8) and neither
-# describes this head. Neither side is picked: the sentence above is a third reading taken with
+# describes this head. Neither side is picked: the sentence above is a fresh reading taken with
 # `--emit-push-matrix` on the tree this fold produced, and both parents' copies are deleted rather than
-# re-pointed. ⛔ AND IT ARRIVED SPLICED A FOURTH TIME AT THE `origin/main` `c1c8df1a` FOLD, so the
+# re-pointed. ⛔ AND IT ARRIVED SPLICED AGAIN AT THE `origin/main` `c1c8df1a` FOLD, so the
 # same repair is applied again and recorded here: `merge=union` applied BOTH parents' hunks with no
 # marker, the second copy opening mid-sentence at "INTO, never carried from the branch…", and it
 # carried TWO things this deletion does not silently drop — a `#13450` row attributed to a lane
