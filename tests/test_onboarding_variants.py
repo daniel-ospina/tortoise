@@ -1768,10 +1768,15 @@ _INVERSION_FORMS = (
     #     One inserted ADVERB between the auxiliary and the predicate defeated
     #     the whole form — "… after you have first verified the tools …" was
     #     GREEN (measured) while its bare twin is a declared RED row, the same
-    #     one-inserted-word class `c30589f4df458` closed one form over.
+    #     one-inserted-word class `c30589f4df458` closed one form over. The slot
+    #     admits ANY `-ly` adverb (plus the bare four), and repeats, because the
+    #     connective is what carries the order: which adverb sits in it does not
+    #     change the verdict, so a closed four-word list only re-opened the hole
+    #     for `previously` / `recently` / `thoroughly` / `also already` (each
+    #     measured GREEN with the closed list).
     _inversion_form(
         r"\b(?:after|once|when|if)\s+(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
-        r"(?:(?:first|already|just|also)\s*,?\s+)?"
+        r"(?:(?:\w+ly|first|already|just|also)\s*,?\s+)*"
         + _CONFIRM_PREDICATE
         + r"[^\n]*?\btools\b"
     ),
@@ -1789,16 +1794,29 @@ _INVERSION_FORMS = (
         + r"[^\n]*?\btools\b"
     ),
     # (d) a marker trailing the object, unambiguous about the order:
-    #     "… confirm the tools are actually there beforehand". `first` and
-    #     `already` are the SAME order claim one word over and were GREEN
-    #     (measured) — "… confirm the tools are actually there first" is a
-    #     one-word substitution of a declared RED row. Form (c) excludes only a
-    #     BARE LEADING `first` (whose forward reading "Restart your client first
-    #     and confirm …" is a real alternative); it says nothing about the
-    #     trailing position, where the order is not ambiguous.
+    #     "… confirm the tools are actually there beforehand". `first` is the
+    #     same order claim in the trailing position and was GREEN (measured) —
+    #     "… confirm the tools are actually there first" is a one-word
+    #     substitution of a declared RED row.
+    #     ⛔ `first` MUST BE CLAUSE-FINAL, because it is also an idiom: "verify
+    #     the tools are present FIRST THING" is forward copy (verify as your
+    #     first action after the restart) and an unanchored `\bfirst\b` reddened
+    #     it (measured). `already` is NOT a marker here at all for the same
+    #     reason in stronger form: it asserts a STATE, not an order — "confirm
+    #     the tools are already there" says nothing about when they were
+    #     confirmed, and reding it turned a declared-GREEN row RED under a
+    #     one-word change (measured; its adversative twin below still reds).
     _inversion_form(
         _CONFIRM_PREDICATE + r"[^\n]*?\btools\b[^\n]*?"
-        r"\b(?:beforehand|before restarting|before you restart|first|already)\b"
+        r"(?:\b(?:beforehand|before restarting|before you restart)\b"
+        r"|\bfirst\b(?=[\s.,;:!?)]*$))"
+    ),
+    # (d′) `already` DOES carry an order claim — but only where an adversative,
+    #     not the adverb, is what asserts it ("… but confirm the tools are
+    #     already there" = confirm first). Measured GREEN before this form.
+    _inversion_form(
+        r"^(?:but|however|though|yet)\b[^\n]*?" + _CONFIRM_PREDICATE
+        + r"[^\n]*?\btools\b[^\n]*?\balready\b"
     ),
     # (e) the restart conditioned on the tools ALREADY being present:
     #     "Restart your client only once the tools are actually there",
@@ -2089,7 +2107,7 @@ def _restart_cue_order_violation(quick: str) -> str | None:
         else:
             merged.append(clause)
     # Post-cue clauses get the SAME decoration strip the pre-cue side gets
-    # (`:2025`). Without it form (c)'s `^` anchor never sees a bolded, quoted or
+    # (`:2036`). Without it form (c)'s `^` anchor never sees a bolded, quoted or
     # parenthesised adversative, so "and then, **but first confirm the tools are
     # actually there**, run …" stayed GREEN (measured).
     post_clauses = [c.strip().lstrip(_PRE_CUE_PREFIX).strip() for c in merged]
@@ -2392,12 +2410,36 @@ def test_3232_generic_restart_lines_are_exact():
     ("Restart your client after you have already verified the tools are actually "
      "there.", True),
     ("Restart your client after you first confirm the tools are there.", True),
-    # the pre-restart marker one word over (form (d)): `first` / `already`
-    # trailing the object are the same order claim as `beforehand`.
+    # the pre-restart marker one word over (form (d)): `first` trailing the
+    # object is the same order claim as `beforehand` — but only CLAUSE-FINAL,
+    # and `already` only under an adversative, because `already` asserts a STATE
+    # ("confirm the tools are already there" = after the restart) and reding it
+    # turned a declared-GREEN row RED under a one-word change. Each shape below
+    # was measured; the GREEN ones are the false blocks that fix exists to avoid.
     ("Restart your client, confirm the tools are actually there first.", True),
     ("Restart your client, but confirm the tools are actually there first.",
      True),
     ("Restart your client, but confirm the tools are already there.", True),
+    ("Restart your client, confirm the tools are already there.", False),
+    ("Restart your client, check the tools are already listed.", False),
+    ("Restart your client to confirm the tools are already in the list.",
+     False),
+    ("Restart your client, give it a moment, and check that the tools are "
+     "already enabled.", False),
+    ("Restart your client, and once it is back, confirm the tools are already "
+     "in the list.", False),
+    ("Restart your client, verify the tools are present first thing.", False),
+    # …and the adverb slot in form (a) is an OPEN class, because the connective
+    # is what carries the order — a closed four-word list only re-opened the
+    # hole one adverb over (each of these measured GREEN with the closed list):
+    ("Restart your client after you have previously verified the tools are "
+     "actually there.", True),
+    ("Restart your client after you have recently confirmed the tools are "
+     "actually there.", True),
+    ("Restart your client after you have thoroughly verified the tools are "
+     "actually there.", True),
+    ("Restart your client after you have also already verified the tools are "
+     "actually there.", True),
     # a determiner/modifier other than a bare `the` in form (e):
     ("Restart your client once all the tools appear.", True),
     ("Restart your client once your tools appear.", True),
