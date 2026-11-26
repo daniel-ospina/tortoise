@@ -1357,7 +1357,7 @@ def test_a_metadata_probe_that_never_answers_is_bounded_and_REFUSED(
     outside = tmp_path / "outside"
     outside.mkdir()
     target = outside / "doc.md"
-    seen: dict = {}
+    probe: dict = {}
     real_run = subprocess.run
 
     def _hangs(argv, *args, **kwargs):
@@ -1366,18 +1366,25 @@ def test_a_metadata_probe_that_never_answers_is_bounded_and_REFUSED(
         # which answers first and has no timeout arm of its own. Delegating everything
         # but `rev-parse` keeps this arm about the one bound it pins.
         if list(argv[:2]) == ["git", "rev-parse"]:
-            seen.update(kwargs)
+            # ⛔ NOT `probe.update(kwargs)`. `python3 tools/sdk_privatise.py --check` is a
+            # RATCHET over untyped `.update(`/`.query(`/`.delete(` receivers and this
+            # arm's landing RAISED it (measured at this head: 11912 -> 11913 overall,
+            # `seen.update` 103 -> 104, `python-ci` step `run: python3
+            # tools/sdk_privatise.py --check` rc 0 -> 1). A test helper is not worth a
+            # ratchet exception, so the kwargs are stored under one key.
+            probe["passed_kwargs"] = kwargs
             raise subprocess.TimeoutExpired(
                 cmd=argv, timeout=kwargs.get("timeout"))
         return real_run(argv, *args, **kwargs)
 
     monkeypatch.setattr(census.subprocess, "run", _hangs)
     rc = census.main(["--render", str(target)])
-    assert "timeout" in seen, (
+    passed = probe.get("passed_kwargs")
+    assert passed is not None, (
         "the metadata probe passed no `timeout=` — the refusal below claims a timeout "
         "REFUSES, so an unbounded probe lets a hung git hang `--render`")
-    assert seen["timeout"] == census._GIT_PROBE_TIMEOUT_S, (
-        f"the probe's bound must be the module's own; got {seen['timeout']}")
+    assert passed.get("timeout") == census._GIT_PROBE_TIMEOUT_S, (
+        f"the probe's bound must be the module's own; got {passed.get('timeout')}")
     assert rc == 2, (
         f"a timed-out probe must exit 2 (could not run), got {rc} — `TimeoutExpired` "
         "is not an `OSError`, so without its own arm it raises out of `main()`")
