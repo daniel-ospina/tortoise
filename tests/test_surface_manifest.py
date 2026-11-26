@@ -139,14 +139,23 @@ def test_the_guard_fails_closed_when_the_baseline_is_missing(tmp_path):
 
 
 def test_the_guard_reds_when_a_tool_is_added(tmp_path):
-    """The whole point: a registry entry the owner never approved is a failure."""
+    """The whole point: a registry entry the owner never approved is a failure.
+
+    ⛔ The representative is read from the FROZEN manifest and must be a row the
+    DECLARATION still advertises. This case stripped `tortoise_search` until
+    #11609 lane P11 retired that door: stripping a RETIRED name from the manifest
+    removes nothing the registry still advertises, so the guard correctly stayed
+    green and the test read it as a broken gate. Deriving the name from the manifest
+    keeps the case measuring the property, not one door's continued existence.
+    """
     doc = _manifest()
-    doc["rows"] = [r for r in doc["rows"] if r["name"] != "tortoise_search"]
+    representative = doc["rows"][0]["name"]
+    doc["rows"] = [r for r in doc["rows"] if r["name"] != representative]
     stripped = tmp_path / "stripped.yml"
     stripped.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
     result = _run("tools/surface-guard.py", "--manifest", str(stripped))
     assert result.returncode == 1, "an added tool did not red the gate"
-    assert "tortoise_search" in result.stdout
+    assert representative in result.stdout
 
 
 def test_the_guard_reds_when_a_public_method_is_added(tmp_path):
@@ -760,10 +769,24 @@ def test_every_row_declares_whether_it_decides_or_merely_observes() -> None:
     for row in rows:
         expected = "decided" if row["recommendation"] in ("merge", "kill", "fix-declaration") else "observed"
         assert row.get("basis") == expected, f"{row['name']}: {row['recommendation']} must be {expected}"
-    decided = [r for r in rows if r["basis"] == "decided"]
-    observed = [r for r in rows if r["basis"] == "observed"]
-    assert len(decided) + len(observed) == len(rows)
-    assert decided, "at least one recommendation must derive from a decision already made"
+    # ⛔ NO POPULATION FLOOR HERE — and no replacement assertion either (#14645 review,
+    # agent-infra#3442 rule 3). The floor used to be `assert decided`, counting the rows
+    # stamped `decided`; #11609 lane P11 retired the last one (`tortoise_suggest_entry_points`,
+    # `fix-declaration`, retired FORWARD into `search_knowledge(mode="entry_points")`), so at
+    # this head that population is EMPTY: `[] == []`. A floor that lands on an empty population
+    # is a false green (#13599 / #13678) and it also reddened on correct work.
+    #
+    # A second formulation was tried in its place — "`decided` must be exactly the rows whose
+    # recommendation demands a decision" — and it is ENTAILED by the loop above, so it was just
+    # as vacuous: the loop asserts `basis == ("decided" if recommendation in verdicts else
+    # "observed")` for EVERY row, which makes the two lists the same set by construction. It
+    # could not fail on a mutation that the loop did not already catch. Deleted rather than
+    # commented (a comment explaining why an assertion cannot fail is not a fix).
+    #
+    # THE LOOP ABOVE *IS* the guard, and it is discriminating: flip one live row to
+    # `recommendation: merge` while leaving its `basis: observed`, or stamp a `keep` row
+    # `basis: decided`, and the row reddens. That is the failure this pin exists for — usage
+    # presented as a verdict — and it is the only property here that can fail.
 
 
 def _write(doc: dict, tmp_path) -> str:
@@ -821,14 +844,22 @@ def test_the_guard_reds_when_a_tools_SDK_binding_moves(tmp_path):
     """P2 found by review: CONTRIBUTING promised this; the guard did not do it.
 
     `sdk_method` could be silently re-pointed on any tool while the required check stayed green.
+
+    ⛔ The representative is the first row that ACTUALLY DECLARES a binding, read from the
+    frozen manifest. It used to be hard-coded to `tortoise_search`, which declares
+    `sdk_method` — and #11609 lane P11 retired that door, so the case found no row and
+    raised. A hand-picked name is a pin on one door's existence, not on the property; a
+    row that names no binding cannot have its binding moved, so selecting on the binding
+    is also the correct eligibility test.
     """
     doc = _manifest()
+    representative = next(
+        r["name"] for r in doc["rows"]
+        if not str(r["name"]).startswith("sdk:") and r.get("sdk_method"))
     for row in doc["rows"]:
-        if row["name"] == "tortoise_search":
+        if row["name"] == representative:
             row["sdk_method"] = "definitely_not_the_real_binding"
             break
-    else:
-        raise AssertionError("tortoise_search missing from the baseline")
     result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
     assert result.returncode == 1, "a moved SDK binding did not red the gate"
     assert "binding" in result.stdout
@@ -1278,12 +1309,19 @@ def test_the_check_reds_when_a_served_default_changes_behind_an_unchanged_code_o
     from tortoise import mcp_server
 
     components = mcp_server.mcp._local_provider._components
-    key = next(k for k in components if k.startswith("tool:tortoise_search@"))
+    # ⛔ #11609 lane P11 retired `tortoise_search`, the door this case used to pin. The
+    # property is about the DERIVATION — a served default changing behind a byte-identical
+    # code object — so the representative only has to be a live tool whose handler carries
+    # a NUMERIC positional default; pinning it to one door's continued existence made the
+    # case a surface pin in disguise. `tortoise_graph_overview`'s `days` (index 2) is that
+    # default, and its retirement is not on any lane's path.
+    key = next(k for k in components if k.startswith("tool:tortoise_graph_overview@"))
     original = components[key]
     fn = original.fn
-    assert fn.__defaults__[3] == 10, "this test is pinned to tortoise_search's `limit` default"
+    assert fn.__defaults__[2] == 30, (
+        "this test is pinned to tortoise_graph_overview's `days` default")
 
-    tampered = _shadow_of(fn, __defaults__=(*fn.__defaults__[:3], 999, *fn.__defaults__[4:]))
+    tampered = _shadow_of(fn, __defaults__=(*fn.__defaults__[:2], 999, *fn.__defaults__[3:]))
     assert sm._code_digest(tampered.__code__) == sm._code_digest(fn.__code__), (
         "the code object must be identical, or this is not the #4192 case"
     )
@@ -1295,7 +1333,7 @@ def test_the_check_reds_when_a_served_default_changes_behind_an_unchanged_code_o
     finally:
         components[key] = original
     assert rc == 1, "a changed served default did not red the derivation check (#4192)"
-    assert "served_attributes" in out and "tortoise_search" in out, out
+    assert "served_attributes" in out and "tortoise_graph_overview" in out, out
 
 
 def test_the_check_reds_on_an_unclassified_new_column(checker, tmp_path):
@@ -1831,15 +1869,19 @@ def test_the_guard_reds_on_a_same_name_replacement_of_an_approved_tool():
 
     guard = _load_guard()
     components = mcp_server.mcp._local_provider._components
-    key = next(k for k in components if k.startswith("tool:tortoise_search@"))
+    # ⛔ #11609 lane P11 retired `tortoise_search`, the door this case used to shadow.
+    # The representative only has to be a LIVE approved tool — the property is that a
+    # COUNT-PRESERVING same-name substitution reds — so it follows the container the door
+    # retired into rather than pinning one door's continued existence.
+    key = next(k for k in components if k.startswith("tool:tortoise_search_knowledge@"))
     original = components[key]
     original_count = len([k for k in components if k.startswith("tool:")])
 
-    async def tortoise_search() -> str:
+    async def tortoise_search_knowledge() -> str:
         """shadow implementation of an approved tool"""
         return "shadow"
 
-    mcp_server.mcp.add_tool(tortoise_search)
+    mcp_server.mcp.add_tool(tortoise_search_knowledge)
     try:
         assert len([k for k in components if k.startswith("tool:")]) == original_count, (
             "this test is meaningless unless the count is preserved"
@@ -2377,13 +2419,14 @@ def test_the_guard_reds_on_a_tampered_default_behind_an_approved_tool():
 
     guard = _load_guard()
     components = mcp_server.mcp._local_provider._components
-    key = next(k for k in components if k.startswith("tool:tortoise_search@"))
+    key = next(k for k in components if k.startswith("tool:tortoise_graph_overview@"))
     original = components[key]
     fn = original.fn
-    assert fn.__defaults__[3] == 10, "this test is pinned to tortoise_search's `limit` default"
+    assert fn.__defaults__[2] == 30, (
+        "this test is pinned to tortoise_graph_overview's `days` default")
 
     tampers = {
-        # `limit` is the 4th positional default of `tortoise_search`.
+        # `limit` is the 4th positional default of `tortoise_graph_overview`.
         "default": {"__defaults__": (*fn.__defaults__[:3], 999, *fn.__defaults__[4:])},
         "annotation": {"__annotations__": {**fn.__annotations__, "query": "int"}},
     }
@@ -2408,7 +2451,7 @@ def test_the_guard_reds_when_the_served_component_has_no_code_object():
 
     guard = _load_guard()
     components = mcp_server.mcp._local_provider._components
-    key = next(k for k in components if k.startswith("tool:tortoise_search@"))
+    key = next(k for k in components if k.startswith("tool:tortoise_graph_overview@"))
     original = components[key]
 
     def shadow() -> str:
@@ -2416,13 +2459,13 @@ def test_the_guard_reds_when_the_served_component_has_no_code_object():
         return "shadow"
 
     partial = functools.partial(shadow)
-    partial.__name__ = "tortoise_search"
+    partial.__name__ = "tortoise_graph_overview"
     mcp_server.mcp.add_tool(partial)
     try:
         assert guard.main([]) == 1, "a no-__code__ substitution did not red the gate"
     finally:
         for k in [k for k in components
-                  if k.startswith("tool:tortoise_search@") and k != key]:
+                  if k.startswith("tool:tortoise_graph_overview@") and k != key]:
             components.pop(k, None)
         components[key] = original
         assert guard.main([]) == 0, "the served-implementation check did not recover"
@@ -2522,7 +2565,7 @@ def test_the_guard_reds_when_an_approved_tool_stops_being_served():
 
     guard = _load_guard()
     components = mcp_server.mcp._local_provider._components
-    key = next(k for k in components if k.startswith("tool:tortoise_search@"))
+    key = next(k for k in components if k.startswith("tool:tortoise_graph_overview@"))
     saved = components.pop(key)
     try:
         assert guard.main([]) == 1, "a declared-but-unserved tool did not red the gate"
@@ -2544,16 +2587,38 @@ def test_a_null_served_from_is_treated_as_malformed_not_as_nothing_to_check():
 
     doc = _manifest()
     mutated = copy.deepcopy(doc)
+    # ⛔ Read the representative from the FROZEN manifest: `tortoise_search` was the
+    # hard-coded one until #11609 lane P11 retired it, at which point the mutation became
+    # a no-op and the guard correctly stayed green while this case read it as broken.
+    representative = next(r["name"] for r in mutated["rows"]
+                         if not str(r["name"]).startswith("sdk:") and r.get("served"))
     for row in mutated["rows"]:
-        if row.get("name") == "tortoise_search":
+        if row.get("name") == representative:
             row["served_from"] = None
     tmp = pathlib.Path(tempfile.mkdtemp()) / "m.yml"
     tmp.write_text(yaml.safe_dump(mutated, sort_keys=False, width=110))
 
     async def tortoise_search_shadow() -> str:
-        """shadow"""
+        """shadow implementation, added under the representative's own name"""
         return "shadow"
 
+    # ⛔ SNAPSHOT the real component, and restore it — do not just pop the prefix.
+    # `add_tool` under an EXISTING name REPLACES that component (the semantics
+    # `test_the_guard_reds_on_a_same_name_replacement_of_an_approved_tool` asserts 700
+    # lines up), so popping every `tool:{representative}@*` key in `finally` deletes the
+    # REAL tool as well: `mcp.get_tool(representative)` then raises for the rest of the
+    # process, and a later in-process read of the served surface (this file's guard
+    # cases, a `_registered_schema(...)` pin) reds on state this test leaked — or passes
+    # for the wrong reason. `representative` is a LIVE tool (the first `served` manifest
+    # row), which is what makes the collision real; the pre-#11609 name,
+    # `tortoise_search_shadow`, could not collide.
+    components = mcp_server.mcp._local_provider._components
+    prefix = f"tool:{representative}@"
+    original = {k: v for k, v in components.items() if k.startswith(prefix)}
+    assert original, (
+        f"{representative} has no registered component — the manifest row this case "
+        "derives its representative from is not the served surface")
+    tortoise_search_shadow.__name__ = representative
     mcp_server.mcp.add_tool(tortoise_search_shadow)
     try:
         # Subprocess, because that is how CI runs it — argparse in-process is a different path.
@@ -2568,9 +2633,22 @@ def test_a_null_served_from_is_treated_as_malformed_not_as_nothing_to_check():
             "the guard redded for some other reason than the missing fingerprint"
         )
     finally:
-        components = mcp_server.mcp._local_provider._components
-        for k in [k for k in components if k.startswith("tool:tortoise_search_shadow@")]:
+        # Drop the shadow's keys (a same-name add can mint a different version suffix)
+        # AND put the captured originals back under their own keys. Recovering by
+        # popping alone is what left the tool unserved.
+        for k in [k for k in components if k.startswith(prefix)]:
             components.pop(k)
+        # A plain loop, not `components.update(...)`: the privatisation ratchet
+        # (`tools/sdk_privatise.py --check`) counts untyped `.update(` receivers and
+        # reds when that count RISES, so this restore must not add one.
+        for k, v in original.items():
+            components[k] = v
+
+    restored = [v for k, v in components.items() if k.startswith(prefix)]
+    assert restored and all(v.fn is not tortoise_search_shadow for v in restored), (
+        f"this case left {representative} UNSERVED (or left the shadow in place) for the "
+        "rest of the session: the same-name shadow must be removed and the real "
+        "component restored")
 
 
 def test_a_null_served_attributes_is_treated_as_malformed_not_as_nothing_to_check():
@@ -2584,8 +2662,10 @@ def test_a_null_served_attributes_is_treated_as_malformed_not_as_nothing_to_chec
 
     doc = _manifest()
     mutated = copy.deepcopy(doc)
+    representative = next(r["name"] for r in mutated["rows"]
+                         if not str(r["name"]).startswith("sdk:") and r.get("served"))
     for row in mutated["rows"]:
-        if row.get("name") == "tortoise_search":
+        if row.get("name") == representative:
             row["served_attributes"] = None
     tmp = pathlib.Path(tempfile.mkdtemp()) / "m.yml"
     tmp.write_text(yaml.safe_dump(mutated, sort_keys=False, width=110))
@@ -5585,7 +5665,11 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # and FIVE doors retired forward into them and into `graph_overview`
     # (`create_edge`, `create_operator`, `events_poll`, `delete`, `list_graphs`, −5) — so
     # 40 + 4 − 5 = 39, with no SDK movement (all four SDK methods already had a `def`).
-    assert live["mcp"] == manifest["counts"]["tools"] == 39
+    # #11609 LANE P11 (the nine envelope doors): 39 -> 30, again with a single term —
+    # NINE doors retire forward once the read/query containers carry the list envelope at
+    # the handler (`_row_section_envelope`), and no container row arrives because all four
+    # destinations were already advertised. 39 - 9 = 30, with no SDK movement.
+    assert live["mcp"] == manifest["counts"]["tools"] == 30
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same

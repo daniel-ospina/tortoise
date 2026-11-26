@@ -49,24 +49,32 @@ those are what this file measures:
 
 ⛔ AND THE HALF THAT IS A RECORDED DECISION, NOT A CHOICE THIS FILE MAKES
 -----------------------------------------------------------------------
-Seventeen live names are absent from the approved 27-target and are STILL LIVE
-after this wave, each for a reason already recorded elsewhere.
+Seventeen live names were absent from the approved 27-target after lane P7; **THREE are
+STILL LIVE at this head**, each for a reason already recorded elsewhere.
 `TestProtectedDoorsStayLive` asserts the reasons hold in the code — if one stops
 holding, that door becomes retirable and this test should be updated IN THE BATCH
 THAT UNBLOCKS IT, not silently:
 
-  · six READ doors + `check_structure` + `calibrate_summary` declare `-> list[dict]`,
-    the array envelope that carries the #8482 `_safe` failure repair
-    (`tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`, #10914);
-  · `search` carries a `rest_spec` (`GET /v1/search`) AND a list envelope — but lane P4
+  · ⛔ THE ENVELOPE CATEGORY IS GONE, and that is the largest departure this file records:
+    NINE doors — the six READ doors (`search_sessions`, `suggest_entry_points`,
+    `list_batches`, `list_namespaces`, `diary_read`, `expand_relationships`) plus
+    `search`, `check_structure` and `calibrate_summary` — were held because each declared
+    `-> list[dict]`, the array envelope that carries the #8482 `_safe` failure repair
+    (#10914). #11609 lane P11 made that reason false and retired all nine FORWARD in the
+    same batch. The property they were held to protect did not leave with them: it is
+    asserted AT THE CONTAINER, on the wire, by
+    `tests/test_11609_read_containers.py::TestTheContainersCarryTheEnvelope`;
+  · `search` ALSO carried a `rest_spec` (`GET /v1/search`) — but lane P4
     MEASURED the coupling FALSE, for `search` as much as for the pairs (no product module
     derives a route from a registry row; the route is a hand-written decorator in
     `hosted_api.py`, and `docs/architecture/11609-STRUCTURAL-BLOCKERS.md` §1.5 records the
     COUPLING as "aspirational, not real" — the CELL is a recorded fact about a route that
-    exists independently). ⛔ So what ACTUALLY holds `search` is the
-    `list[dict]` envelope, not the route — do not restore "retiring the entry deletes a REST
-    route" as a live reason. `issue_insight` and `session_context` carried a `rest_spec` too
-    and left in lane P6, the batch that acted on that measurement;
+    exists independently). ⛔ So nothing ever held `search` but the `list[dict]` envelope —
+    do not restore "retiring the entry deletes a REST route" as a live reason. It retired
+    in lane P11, and its `rest_spec` cell is still asserted from
+    `RETIRED_TOOL_REGISTRY` (`test_the_retired_search_door_still_records_its_rest_spec`).
+    `issue_insight` and `session_context` carried a `rest_spec` too and left in lane P6,
+    the batch that acted on that same measurement;
   · `query` is the PAGED destination two ALREADY-retired pointers name
     (`paginated_query`, `query_points_by_tag`), so retiring it is a re-pointing decision,
     not a door removal;
@@ -79,17 +87,19 @@ THAT UNBLOCKS IT, not silently:
     leave the held list only in the batch that makes its stated reason untrue, with a
     test behind it, not silently and not in two steps.
 
-  9 (envelope: the six READ doors, `check_structure`, `calibrate_summary`, and `search` — whose
-  `rest_spec` cell is a RECORD, not a retention reason, and whose own annotation is
-  `-> list[dict]`) + 0 (rest_spec as a retention reason: measured FALSE, §1.5) + 1 (paged
-  destination) + 0 (no arm) + 2 (destination not an MCP door — `org_create`, `ingest`) = 12,
-  and
+  0 (envelope: the category is EMPTY — the nine doors it held retired forward in lane P11,
+  and the property moved to `TestTheContainersCarryTheEnvelope`) + 0 (rest_spec as a
+  retention reason: measured FALSE, §1.5) + 1 (paged destination) + 0 (no arm) + 2
+  (destination not an MCP door — `org_create`, `ingest`) = 3, and
   `TestProtectedDoorsStayLive` reads EVERY protected name back from the code — a name that
   lands in this list without an assertion behind it is the shape the #13052 review caught.
 
 ⛔ THE COUNT WAS 25 UNTIL #11609 LANE P1, 23 UNTIL LANE P2, 21 UNTIL LANE P6, 19 AFTER THAT
-LANE'S `rest_spec` PAIR, 17 AFTER ITS DELETE PAIR, AND **12 AT THIS HEAD** — #11609 lane P7
-retired FIVE more forward in the batch that REGISTERED their destinations: `tortoise_delete`
+LANE'S `rest_spec` PAIR, 17 AFTER ITS DELETE PAIR, 12 UNTIL LANE P11, AND **3 AT THIS
+HEAD** — lane P11 retired the NINE envelope doors forward IN THE BATCH THAT MADE THEIR
+REASON FALSE (`_row_section_envelope` at the four container boundaries), which is the
+contract this file states. #11609 lane P7 retired FIVE more forward in the batch that
+REGISTERED their destinations: `tortoise_delete`
 (→ `tortoise_delete_knowledge`), `tortoise_create_edge` / `tortoise_create_operator`
 (→ `tortoise_link_entities`), `tortoise_events_poll` (→ `tortoise_poll_events`), and
 `tortoise_list_graphs` (→ `tortoise_graph_overview(section="graphs")`, whose handler had
@@ -112,11 +122,13 @@ the batch that gave that kept entry the target's own spelling** (`tortoise_delet
 and retired `tortoise_delete` onto it, so the ruling's shape and the target's name are now
 the same thing. The
 arithmetic moved with each wave: 4 (no arm) became 2 became 0, and the population 25 became
-23 became 21 became 19 became 17 became 12 — a count left at 19 would have been a table claiming two
+23 became 21 became 19 became 17 became 12 became 3 — a count left at 19 would have been a
+table claiming two
 names that are no longer live, which is the rot the population check exists to red. ⛔ THIS
 PROSE SAID 19/`NINE` WHILE THE ASSERTIONS BELOW READ 17/`SEVEN` after #13626 merged — the
 assertions were right and the prose was pre-DELETE-pair, which is the shape a lane
-"restores" to a red (#13626 review ISSUE 4).
+"restores" to a red (#13626 review ISSUE 4). The same rot reappeared at lane P11 (prose 12,
+assertions 3) and is why every count above is now stated with the wave that moved it.
 
 NO ARCHIVE ROW IS EXPECTED HERE. `archive/mcp-tools/` holds doors with NO destination
 (owner ruling 2026-11-12, `archive/README.md`); a forwarded name is STILL SERVED, so the
@@ -205,6 +217,38 @@ RETIRED_THIS_WAVE_BY_CONTAINER: dict[str, int] = {
     "delete": 2,
 }
 
+#: The nine doors **lane P11** (this batch) retires forward — the envelope category the
+#: module docstring calls NINE. Kept as its own tuple rather than more rows in
+#: `RETIRED_THIS_WAVE` because the two tables answer different questions and the 13-door
+#: count/histogram pins read the P1/P6 arithmetic (`3 + 6 + 4`); adding nine rows there
+#: would have re-based prose that records those waves, not this one.
+#:
+#: ⛔ WHY IT EXISTS (#14645 review P3, the addendum's sixth mutation row): those nine
+#: pointers were graded by NOTHING. Every pointer assertion in this file derives its
+#: population from `RETIRED_THIS_WAVE`, so a pointer naming an argument its container does
+#: not take was invisible for exactly the batch that added nine of them — the reviewer's
+#: mutation (drop one of the nine from the population) left the file green, i.e. the
+#: coverage was not merely partial, it could not red. `POINTER_GRADED` below is what the
+#: parametrizations read, and `test_lane_p11_names_the_nine_doors_the_prose_does` pins the
+#: nine so dropping one moves a count instead of silently un-grading it.
+RETIRED_IN_P11: tuple[str, ...] = (
+    "tortoise_search",
+    "tortoise_search_sessions",
+    "tortoise_suggest_entry_points",
+    "tortoise_list_batches",
+    "tortoise_list_namespaces",
+    "tortoise_diary_read",
+    "tortoise_expand_relationships",
+    "tortoise_check_structure",
+    "tortoise_calibrate_summary",
+)
+
+#: Every retired door whose POINTER is graded against a live signature: the P1/P6 wave's
+#: thirteen plus lane P11's nine. The union is derived, so a door added to either table is
+#: graded without a second edit to a hand-kept list.
+POINTER_GRADED: tuple[str, ...] = tuple(
+    sorted(set(RETIRED_THIS_WAVE) | set(RETIRED_IN_P11)))
+
 
 def _require_non_empty(what: str, kinds: tuple[str, ...]) -> tuple[str, ...]:
     """A derivation that produced NOTHING reds here rather than passing vacuously.
@@ -288,37 +332,38 @@ _CREATE_ENTITY_TYPES: tuple[str, ...] = _require_non_empty(
 
 #: Doors this wave deliberately does NOT retire, each with the artefact that says why.
 PROTECTED = {
-    # `-> list[dict]` + reaches a container: the #8482 envelope exception.
-    "tortoise_search_sessions": "list envelope (#8482)",
-    "tortoise_suggest_entry_points": "list envelope (#8482)",
-    "tortoise_list_batches": "list envelope (#8482)",
-    "tortoise_list_namespaces": "list envelope (#8482)",
-    "tortoise_diary_read": "list envelope (#8482)",
-    "tortoise_expand_relationships": "list envelope (#8482)",
-    "tortoise_check_structure": "list envelope (#8482, #10914)",
-    "tortoise_calibrate_summary": "list envelope (#8482, #12951)",
-    # `rest_spec`: the CELL is still recorded, but the coupling it used to stand for —
-    # "retiring the registry entry deletes the REST route with it" — is MEASURED FALSE for
-    # every door that ever claimed it, `search` included (§1.5 of
-    # `docs/architecture/11609-STRUCTURAL-BLOCKERS.md`): no product module derives a route
-    # from a registry row, and the routes are hand-written decorators that reach the SDK
-    # directly, so the row going deletes nothing on the wire. ⛔ So `search` is held by its
-    # `list[dict]` ENVELOPE, not by the route; its `rest_spec` cell is a recorded fact about
-    # a route that exists independently, never a retention reason. `issue_insight` /
-    # `tortoise_session_context` sat here on the false reason and left in #11609 lane P6.
-    "tortoise_search": "list envelope (#8482); its rest_spec cell (GET /v1/search) is a RECORD, not a reason",
     # The paged destination of two already-retired pointers.
     "tortoise_query": "paged destination of paginated_query/query_points_by_tag",
-    # No arm on the recorded container.
-    # ⛔ `tortoise_create_point` / `tortoise_diary_write` USED to sit here (held by two
-    # ABSENCES at `create_entity`: "has no point arm" / "has no diary arm") and left in
-    # #11609 lane P1; `tortoise_compute_confidence` / `tortoise_recall` used to sit here
-    # (held by "`check_confidence` does not recompute" / "has no recall arm") and left in
-    # #11609 lane P2. Each pair retire FORWARD in `RETIRED_USE_INSTEAD` in the batch that
-    # grew the arms. Do not restore them without first removing those arms.
+
+    # ⛔ THE ENVELOPE CATEGORY IS NOW EMPTY (#11609 lane P11), and that is a MEASURED
+    # result, not a table that lost rows. Nine doors used to sit here holding
+    # `list envelope (#8482)` — `search`, `search_sessions`, `suggest_entry_points`,
+    # `list_batches`, `list_namespaces`, `diary_read`, `expand_relationships`,
+    # `check_structure`, `calibrate_summary`. The reason had two halves and BOTH are now
+    # false:
+    #   · the FAILURE half was already false before this lane: #11153 flips `isError`
+    #     for any tool whose `_safe` payload is a refusal, whatever its annotation, so
+    #     the array envelope is not what carries the failure channel;
+    #   · the SUCCESS half was real — a `-> Any` container's list arm shipped a bare text
+    #     block with NO `structuredContent` where the door shipped `{"result": [...]}`
+    #     (#10085) — and the batch that makes it false applies
+    #     `_row_section_envelope` at four container boundaries, which wraps a LIST and
+    #     leaves a MAPPING untouched. All nine now retire FORWARD.
+    # ⛔ So the envelope is no longer a RETAINING reason for any live door, and this
+    # table does not keep a row for it. What replaced the retention is an assertion that
+    # cannot rot: `tests/test_11609_read_containers.py::TestTheContainersCarryTheEnvelope`
+    # drives each container's list arm and requires `{"result": [...]}` — the invariant
+    # the nine doors were held to protect, now pinned AT THE CONTAINER instead of inferred
+    # from the doors' continued existence.
+    #
+    # The two ABSENCE pairs that used to sit here left in #11609 lanes P1 (`create_point` /
+    # `diary_write`, when `create_entity` grew `type="point"` / `type="diary"`) and P2
+    # (`compute_confidence` / `recall`, when `check_confidence` grew `recompute=True` /
+    # `recall=True`). Each pair retired FORWARD in the batch that grew the arms. Do not
+    # restore them without first removing those arms.
 }
 
-#: The other TWO of the registry block's 12: live, off the 27-target, and held for a
+#: The other TWO of the registry block's 3: live, off the 27-target, and held for a
 #: reason with no PROPERTY to assert — their recorded destination is not a live MCP door,
 #: so there is no container to answer through and nothing that can be measured beyond
 #: "still live, still not retired" (which `TestProtectedDoorsStayLive` pins for every name
@@ -326,7 +371,7 @@ PROTECTED = {
 #: because `PROTECTED`'s contract is a retaining artefact this file READS BACK from the
 #: code; a name here has none, and pretending otherwise would make the table's own
 #: docstring false. What the split buys:
-#: `len(PROTECTED) + len(NO_CONTAINER_YET) == 12` turns the registry's prose enumeration
+#: `len(PROTECTED) + len(NO_CONTAINER_YET) == 3` turns the registry's prose enumeration
 #: into a checked POPULATION, so a live door dropped from either table reds here instead of
 #: surviving as a comment.
 NO_CONTAINER_YET = {
@@ -497,7 +542,38 @@ class TestThePointerIsCallableAtTheContainer:
         "tortoise_create_point": "pointKind",
     }
 
-    @pytest.mark.parametrize("name", sorted(RETIRED_THIS_WAVE))
+    def test_lane_p11_names_the_nine_doors_the_prose_does(self):
+        """The NINE is a count, not a sentence — and every one of them is GRADED.
+
+        ⛔ THE DEFECT THIS CLOSES (#14645 review P3, the addendum's sixth row). The
+        envelope category's retirement was recorded in the module docstring as nine
+        named doors, and each of their pointers was checked by hand against the
+        container signatures — but the pointer assertions derive their population from
+        `RETIRED_THIS_WAVE`, which holds the P1/P6 thirteen and none of the nine. So
+        deleting a name from the graded set left every row green: the coverage could not
+        red, which is the inert-enforcer shape, not a partial-coverage shape.
+
+        Non-vacuity: dropping one name from `RETIRED_IN_P11` fails the count below, and
+        removing it from `POINTER_GRADED` (the derivation) fails the subset assertion —
+        measured by reverting either edit.
+        """
+        assert len(RETIRED_IN_P11) == 9, (
+            f"lane P11's table holds {len(RETIRED_IN_P11)} doors, not the NINE the "
+            "module docstring enumerates (search, search_sessions, suggest_entry_points, "
+            "list_batches, list_namespaces, diary_read, expand_relationships, "
+            "check_structure, calibrate_summary) — a door added or dropped moves this "
+            "count in the same change, not silently")
+        ungraded = sorted(set(RETIRED_IN_P11) - set(POINTER_GRADED))
+        assert not ungraded, (
+            "these lane-P11 doors are not in POINTER_GRADED, so no assertion reads "
+            f"their pointer at all: {ungraded}")
+        not_retired = sorted(name for name in RETIRED_IN_P11
+                             if name not in RETIRED_USE_INSTEAD)
+        assert not not_retired, (
+            "these lane-P11 names carry no RETIRED_USE_INSTEAD row, so the nine-door "
+            f"claim is not the tree's: {not_retired}")
+
+    @pytest.mark.parametrize("name", POINTER_GRADED)
     def test_every_named_argument_is_one_the_container_accepts(self, name):
         """BIND the pointer's own call against the live tool's signature."""
         pointer = RETIRED_USE_INSTEAD[name]
@@ -527,6 +603,36 @@ class TestThePointerIsCallableAtTheContainer:
             f"{name}'s {kind} must be INSIDE props — `tortoise_create_entity(type, name, "
             f"props=None)` has no {kind} parameter: {pointer!r}")
 
+    def test_a_renamed_argument_keeps_the_door_default(self):
+        """A RENAMED argument can lose its VALUE silently, which no keyword check sees.
+
+        `tortoise_diary_read(agent_name, last_n: int = 10)` becomes
+        `tortoise_list_knowledge(kind="diary", agent=..., limit=...)`, whose `limit`
+        default is 20 and which the SDK forwards as `_diary_read(last_n=limit)`. A
+        migrating caller who omits the argument gets TWICE the rows the door gave it —
+        the "silently widens the read" class the P11 block names, riding the default.
+
+        The pointer therefore names the VALUE (`limit=10`), and this case DERIVES that
+        value from the retired door's own signature rather than restating it: move the
+        door's default and the pointer must move with it; drop the value and the read
+        widens again. It also asserts the container's own default really is different, so
+        the pin is about a live divergence and not about a coincidence.
+        """
+        name, retired_kwarg, container_kwarg = "tortoise_diary_read", "last_n", "limit"
+        pointer = RETIRED_USE_INSTEAD[name]
+        door_default = inspect.signature(getattr(ms, name)).parameters[retired_kwarg].default
+        container_default = inspect.signature(
+            ms.tortoise_list_knowledge).parameters[container_kwarg].default
+        assert door_default != container_default, (
+            f"{name}'s {retired_kwarg}={door_default} now equals the container's "
+            f"{container_kwarg}={container_default} — the widening this pin's value "
+            "compensates for is gone, so delete this case with the fact it recorded")
+        assert f"{container_kwarg}={door_default}" in pointer, (
+            f"{name} is pointed at {pointer!r} without {container_kwarg}={door_default}: "
+            f"the door defaulted {retired_kwarg}={door_default} and the container defaults "
+            f"{container_kwarg}={container_default}, so a migrating caller who omits it "
+            "doubles its read with no error")
+
 
 class TestEveryPointerResolvesInOneHop:
     def test_every_retired_name_points_at_a_live_tool(self):
@@ -554,13 +660,16 @@ class TestEveryPointerResolvesInOneHop:
         `len(TOOL_REGISTRY) == 42` pin ever existed, so 42 is not a surface this chain may
         claim as advertised.
         """
-        assert len(TOOL_REGISTRY) == 39, (
-            f"live surface is {len(TOOL_REGISTRY)}, not 39 — every wave removes doors "
+        assert len(TOOL_REGISTRY) == 30, (
+            f"live surface is {len(TOOL_REGISTRY)}, not 30 — every wave removes doors "
             "into arms on a container that already existed, and #11609 lane P7 registered "
             "the FOUR approved target names that had no entry, so the chain is "
             "44 − 4 (P6's two pairs) = 40, then 40 + 4 (P7's registrations) − 5 "
             "(P7's forward retirements: create_edge, create_operator, events_poll, "
-            "delete, list_graphs) = 39")
+            "delete, list_graphs) = 39, then 39 − 9 (P11's envelope doors: search, "
+            "search_sessions, suggest_entry_points, list_batches, list_namespaces, "
+            "diary_read, expand_relationships, check_structure, calibrate_summary, "
+            "each retiring once its container carried the list envelope) = 30")
 
 
 class TestTheDestinationPerformsTheAbsorbedOperation:
@@ -861,22 +970,33 @@ class TestProtectedDoorsStayLive:
     """A recorded decision, asserted against the code that makes it true.
 
     ⛔ WHAT IS PINNED, AND WHAT IS ONLY ENUMERATED. The registry's `#11609 lane E` block
-    named 25 live doors off the 27-target and four PAIRS have left it since — the chain
-    `25 -> 23 -> 21 -> 19 -> 17` the block itself states. TWO (`create_point`, `diary_write`)
+    named 25 live doors off the 27-target and SIX batches have taken names off it since — the
+    chain `25 -> 23 -> 21 -> 19 -> 17 -> 12 -> 3` the block itself states. TWO
+    (`create_point`, `diary_write`)
     were retired by #11609 lane P1 in the change that gave `create_entity` their arms, TWO
     (`compute_confidence`, `recall`) by lane P2 (#13550) in the change that gave
-    `check_confidence` its `recompute=True` / `recall=True` arms, and TWO more
-    (`issue_insight`, `session_context`) plus the LAST TWO (`delete_point`, `delete_entity`)
+    `check_confidence` its `recompute=True` / `recall=True` arms, TWO more
+    (`issue_insight`, `session_context`) plus the TWO after them (`delete_point`,
+    `delete_entity`)
     by lane P6 — the first pair on lane P4's measurement that the `rest_spec` reason was
-    false, the second on the #9660 ruling that keeps `tortoise_delete` and widens it — so
-    25 − 2 − 2 − 2 − 2 = 17, and the population is 17 and TEN
-    of them carry a retaining PROPERTY, and EVERY ONE is read back from the code below —
+    false, the second on the #9660 ruling that keeps `tortoise_delete` and widens it — FIVE
+    by lane P7 in the change that registered their destinations, NINE (the whole envelope
+    category) by lane P11 in the change that applied `_row_section_envelope` at the
+    container boundaries — so
+    25 − 2 − 2 − 2 − 2 − 5 − 9 = 3, and the population is 3 and ONE
+    of them carries a retaining PROPERTY, and EVERY ONE is read back from the code below —
     none is a name that only appears in the `PROTECTED` dict,
     which is the weaker treatment this class reserves for `NO_CONTAINER_YET` (#13052
     review F3):
 
-      · 9 envelope doors — the `-> list[dict]` annotation, from `inspect.signature` (this is
-        also `search`'s real reason: its `rest_spec` cell is a record, never a gate — §1.5);
+      · 0 envelope doors — the category is EMPTY at this head, and it is empty because lane
+        P11 made its reason false rather than because a row was dropped: the nine doors that
+        held `-> list[dict]` (the #8482 array envelope, which is also `search`'s real reason
+        — its `rest_spec` cell is a record, never a gate — §1.5) retired FORWARD, and the
+        property they carried is now asserted AT THE CONTAINER by
+        `tests/test_11609_read_containers.py::TestTheContainersCarryTheEnvelope`. A door-side
+        parametrization over that emptied set was DELETED rather than left collecting zero
+        cases, which is the #13052 false-green shape;
       · 0 `rest_spec` doors — the category is EMPTY on this tree, because the coupling is
         measured FALSE for every door that ever claimed it;
       · 1 paged destination (`tortoise_query`) — the two retired pointers that name it,
@@ -898,13 +1018,13 @@ class TestProtectedDoorsStayLive:
     The other TWO (`NO_CONTAINER_YET`) have no live container at all, so the only thing
     to measure is "still live, still not retired" — pinned below for them too. The two
     tables together are what make the enumeration checkable as a POPULATION; neither
-    alone is 12 of 12.
+    alone is 3 of 3.
     """
 
     def test_the_two_tables_cover_the_enumerated_population_and_do_not_overlap(self):
         live = _live()
-        assert len(PROTECTED) == 10, (
-            f"PROTECTED holds {len(PROTECTED)}: the registry block names 10 doors with a "
+        assert len(PROTECTED) == 1, (
+            f"PROTECTED holds {len(PROTECTED)}: the registry block names 1 door with a "
             "retaining property — if a door gained or lost one, move it in the batch that "
             "changed the code, not to wherever a green run lands")
         assert len(NO_CONTAINER_YET) == 2, (
@@ -915,8 +1035,8 @@ class TestProtectedDoorsStayLive:
         both = set(PROTECTED) & set(NO_CONTAINER_YET)
         assert not both, f"a door is in both tables, which is a contradiction: {both}"
         population = set(PROTECTED) | set(NO_CONTAINER_YET)
-        assert len(population) == 12, (
-            f"the two tables cover {len(population)} names, not the 12 live names off the "
+        assert len(population) == 3, (
+            f"the two tables cover {len(population)} names, not the 3 live names off the "
             "27-target that the registry block enumerates — a live door dropped from both "
             "is a door with NO recorded reason to stay live")
         missing = sorted(n for n in population if n not in live)
@@ -934,39 +1054,40 @@ class TestProtectedDoorsStayLive:
             "unblocks it updates this table in the same change")
         assert name not in RETIRED_USE_INSTEAD, name
 
-    @pytest.mark.parametrize("name", [
-        "tortoise_search_sessions", "tortoise_suggest_entry_points",
-        "tortoise_list_batches", "tortoise_list_namespaces", "tortoise_diary_read",
-        "tortoise_expand_relationships", "tortoise_check_structure",
-        "tortoise_calibrate_summary", "tortoise_search",
-    ])
-    def test_the_list_envelope_is_still_what_keeps_it_live(self, name):
-        annotation = inspect.signature(
-            getattr(ms, name), eval_str=True).return_annotation
-        assert annotation == list[dict], (
-            f"{name} declares {annotation!r}: the array schema is the #8482 repair, so a "
-            "non-list envelope means the reason it stayed live is gone — update the "
-            "protected table in the batch that gives its container an envelope")
+    # ⛔ THE `list envelope` CATEGORY IS EMPTY AS OF #11609 LANE P11, so there is no
+    # door left to parametrize here. That is deliberate and it is NOT a lost assertion:
+    # the property the nine doors carried — "a caller of the container receives
+    # `{\"result\": [...]}` for a list arm" — is asserted AT THE CONTAINER, in
+    # `tests/test_11609_read_containers.py::TestTheContainersCarryTheEnvelope`. Keeping a
+    # door-side parametrization over an empty set would be a green that proves nothing
+    # (an empty `pytest.mark.parametrize` collects zero cases), which is exactly the
+    # false-green shape #13052 review F3 named.
+    #
+    # The `rest_spec` cell of `tortoise_search` is likewise no longer readable from
+    # `_live()` — the door retired forward — so its RECORD assertion moved with it to
+    # `test_the_retired_search_door_still_records_its_rest_spec`, which reads
+    # `RETIRED_TOOL_REGISTRY` (the declaration is kept on purpose, the same reason every
+    # other forward retirement keeps one).
+    def test_the_retired_search_door_still_records_its_rest_spec(self):
+        """The affected CELL persists; the ROUTE is not what retained the door (§1.5).
 
-    @pytest.mark.parametrize("name", [
-        "tortoise_search",
-    ])
-    def test_the_rest_spec_cell_is_still_recorded_though_the_route_holds_nothing(self, name):
-        """The CELL persists; the ROUTE is not what retains the door (§1.5).
-
-        The assertion is unchanged — `search` still carries `rest_spec` — but the name and
-        the message must not teach the measured-false mechanism. ⛔ The coupling is FALSE
-        (the route is a hand-written decorator; no product module derives one from a row),
-        so removing this cell is NOT a retirement gate: what keeps `search` live is its
-        `list[dict]` envelope, pinned by `test_the_list_envelope_is_still_what_keeps_it_live`
-        (this file, which now covers `search`) and by
-        `tests/test_11609_structural_blockers.py::test_the_search_door_is_held_by_the_envelope_not_the_route`.
+        `tortoise_search` retired FORWARD in lane P11 once its container carried the
+        envelope. The `rest_spec` cell is a RECORD about a route that exists
+        independently: §1.5 measured that no product module derives a route from a
+        registry row (`FastAPIRouterAdapter.register_all` is never called by product
+        code) and that `GET /v1/search` is a hand-written decorator reaching the SDK, so
+        retiring the row deletes nothing on the wire. ⛔ Reading it from the RETIRED
+        registry rather than the live one is the point: a cell that vanished with the
+        retirement would still tell a reader "this row owned that route".
         """
-        entry = _live()[name]
-        assert getattr(entry, "rest_spec", None) is not None, (
-            f"{name} no longer carries a `rest_spec` cell. That is a RECORD change, not a "
-            "retirement gate — the route does not hold the door; its `list[dict]` envelope "
-            "does (see §1.5). Re-derive why the cell moved before retiring anything")
+        retired = {t.name: t for t in RETIRED_TOOL_REGISTRY}
+        assert "tortoise_search" in retired, (
+            "`tortoise_search` is no longer in either registry — a retirement must keep "
+            "its DECLARATION so the #3883 shim can still answer and name the successor")
+        assert getattr(retired["tortoise_search"], "rest_spec", None) is not None, (
+            "`tortoise_search` no longer carries a `rest_spec` cell. That is a RECORD "
+            "change, not a retirement gate — the route does not hold the door (§1.5). "
+            "Re-derive why the cell moved before retiring anything")
 
     # ⛔ THE `no arm` CATEGORY IS EMPTY, AND BOTH HALVES OF ITS DEPARTURE ARE ASSERTED
     # FROM THE CODE ABOVE, not from this table's silence:
@@ -1085,6 +1206,8 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: Documents whose every `tortoise_*` mention is an instruction to CALL it.
     CALL_INSTRUCTION_DOCS: ClassVar[tuple[str, ...]] = (
         "docs/how-to/provision-a-graph-per-end-user.md",
+        "docs/quickstart-cloud.md",
+        "docs/quickstart-selfhosted.md",
     )
 
     #: ⛔ WHAT THIS GUARD READS: MARKDOWN STRUCTURE, NOT ENGLISH (#14237, rounds 2-5).
@@ -1324,14 +1447,33 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:         the ENTITY spelling of the same mention needed a judged unit that is not a block,
     #:         and is pinned by the bullet above (#14237 r15).
     #:
-    #: ⚠️ SCOPE: the documents whose every `tortoise_*` mention is a call, and ONE of
-    #: them today. The rule is doc-agnostic, but applying it repo-wide would red on docs
+    #: ⚠️ SCOPE: the documents whose every `tortoise_*` mention is a call — **THREE** of
+    #: them today: the provisioning how-to, and (widened by #14645 round 5) both
+    #: quickstarts. The rule is doc-agnostic, but applying it repo-wide would red on docs
     #: that carry retired call forms right now, which is a repair of its own — **#14291**
-    #: (filed from the round-5 review's P2, and re-measured at round 8: SEVEN lines, not six —
-    #: `tortoise_recall:`358 / `tortoise_update_point:`400,:670,:689 /
-    #: `tortoise_create_point:`665 / `tortoise_create_operator:`666 in
-    #: `docs/INGEST_CONTRACT.md`, and `tortoise_mine_conversations:`714 in
-    #: `docs/quickstart-selfhosted.md`), not this guard.
+    #: — not this guard.
+    #: ⛔ TWO COURSES FOR THAT ISSUE WERE CORRECTED HERE, both measured at this head rather
+    #: than carried over from the round-8 note (itself a correction of the round-5 one):
+    #:   · its `docs/quickstart-selfhosted.md` entry is **CLOSED**. That line was the
+    #:     `tortoise_mine_conversations(transcript=…, source_id=…)` call form; #14645 round 5
+    #:     re-pointed it at the two doors the name was retired into, and the doc is now IN
+    #:     this tuple, so the repair cannot regress. `retired_call_forms()` over that file is
+    #:     now empty — the guard's own function is the check, so the claim is re-runnable.
+    #:   · its `docs/INGEST_CONTRACT.md` half is **SEVEN lines**, still, but not the same
+    #:     seven: this PR RETIRES `tortoise_search`, which turns that doc's
+    #:     `tortoise_search(q=…)` instruction into a call form of a retired door, while the
+    #:     quickstart entry above leaves. So the issue's scope grew by one and shrank by one
+    #:     — it is not closed, and it is not unchanged either.
+    #: ⛔ THE LINE NUMBERS #14291 QUOTES HAVE ROTTED (`:358`/`:400`/`:665`/`:670`/`:689` were
+    #: correct when written and `docs/INGEST_CONTRACT.md` has moved under them since — the
+    #: rot class `docs/00_index.md` records against this repo's own address rows). So this
+    #: comment records the FILE and the COUNT, and the work list is RE-DERIVED rather than
+    #: transcribed:
+    #:
+    #:     python -c "import sys,pathlib;sys.path.insert(0,'.');\
+    #:       from tests.test_11609_door_retirement import TestEveryReaderNamesTheLiveListingDoor as G;\
+    #:       print(G.retired_call_forms(pathlib.Path('docs/INGEST_CONTRACT.md').read_text()))"
+    #:
     #: Naming the issue rather than saying "a follow-up" is deliberate: an unnamed
     #: follow-up is how a class gets declared closed while it is still open.
     REPLACEMENT_NAME = re.compile(r"tortoise_[a-z0-9_]+")
@@ -3774,3 +3916,127 @@ class TestEveryReaderNamesTheLiveListingDoor:
         assert "tortoise_graph_overview" in text, (
             f"{relpath} no longer names the live listing door at all — the repair for "
             "this guard is a RE-POINT, never a deletion")
+
+
+
+class TestAnAvailabilityClaimMatchesTheRegistry:
+    """A guarded doc may not deny a surface to a door the registry SERVES on it.
+
+    ⛔ THE DEFECT THIS CLOSES (#14645 round 6 — round 5's own repair, re-measured rather than
+    trusted). `tortoise_mine_conversations` was excluded from tenant HTTP **as a whole**
+    (#1090: its corpus mode walks the caller-supplied path), so both quickstarts said so and
+    were right. #11609 retired it into **two** doors that do NOT share that posture —
+    `tortoise_mine_knowledge_from_directory` is `http_policy=False`, while
+    `tortoise_mine_knowledge_from_session` is `http_policy=True` and refuses ONLY its
+    raw-transcript arm (`tortoise/mcp_server.py::tortoise_mine_knowledge_from_session`).
+    Round 5 carried the "stdio-only" sentence across to both successors, so the cloud
+    quickstart denied hosted HTTP to a door its own consent section, four screens earlier,
+    calls *"The hosted MCP tool"*. The retired-name guard above cannot see this: both new
+    names are LIVE, so R1/R2 have nothing to say.
+
+    ⚠️ WHAT THIS READS — and what it deliberately does NOT. It asks one question with a
+    mechanical oracle: in a SENTENCE carrying a denial phrase, is a LIVE tool named whose
+    registry `http_policy` is True? The phrase set is the closed tuple below and the policy
+    is `TOOL_REGISTRY`; no English is interpreted. Sentence scope (not the guard's block
+    scope) because the repaired prose names the directory door in the denying clause and the
+    session door's ARMS in another — a block unit would fuse them and red on the correct
+    text.
+
+    ⛔ DECLARED BOUND, and it is the shape the second edit actually shipped: a denial whose
+    object is ANAPHORIC — *"Hosted HTTP excludes **both** entirely"*, where the two doors
+    were named in the previous sentence — is NOT detected, because no tool name is in the
+    denying sentence. That sentence is repaired by hand in the same change and the repair is
+    recorded in the PR's round-6 note, not silently trusted; this test grades the shape it
+    CAN decide, and `test_the_pre_fix_sentence_is_the_violation` pins that it decides it.
+    The direction of the gap is fail-open, stated here rather than discovered by the next
+    reader.
+    """
+
+    #: Every phrasing that denies a hosted-HTTP surface. A closed tuple, like `RETIRED_USE_INSTEAD`.
+    DENIAL = re.compile(
+        r"stdio-only|(?:exclude[sd]?|not served|unavailable)[^.;]{0,80}\bentirely\b",
+        re.IGNORECASE,
+    )
+
+    #: The sentence ends THIS question uses. `;` is a boundary here and is deliberately NOT
+    #: one in the guard above: there the unit is a markdown block because the question was
+    #: whether a reader would ACT on an instruction; here the question is what a single
+    #: denial CLAUSE claims. The two units answer different questions, and neither is
+    #: described in terms of the other.
+    SENTENCE_END = re.compile(r"(?<=[.;!?])\s+")
+
+    @classmethod
+    def sentences(cls, text: str) -> list[str]:
+        return [s for s in cls.SENTENCE_END.split(text) if s.strip()]
+
+    @classmethod
+    def served_names_in(cls, sentence: str) -> list[str]:
+        """LIVE tool names in `sentence` whose registry policy serves them over hosted HTTP."""
+        served = {t.name for t in TOOL_REGISTRY if t.http_policy}
+        return [m.group(0).strip("_") for m in re.finditer(r"[A-Za-z0-9_]+", sentence)
+                if m.group(0).strip("_") in served]
+
+    @pytest.mark.parametrize(
+        "relpath", TestEveryReaderNamesTheLiveListingDoor.CALL_INSTRUCTION_DOCS)
+    def test_no_sentence_denies_a_surface_the_registry_serves(self, relpath):
+        """R3 on the real document — an availability claim graded against the registry."""
+        from pathlib import Path
+
+        text = (Path(__file__).resolve().parent.parent / relpath).read_text(encoding="utf-8")
+        violating = [
+            (name, sentence.strip())
+            for sentence in self.sentences(text)
+            if self.DENIAL.search(sentence)
+            for name in self.served_names_in(sentence)
+        ]
+        assert not violating, (
+            f"{relpath} tells the reader a door is not on hosted HTTP while `TOOL_REGISTRY` "
+            f"serves it there: {violating}. Re-derive the claim from the registry — a "
+            "retirement that FORKS one door into two does not fork its HTTP policy with it, "
+            "and one of `tortoise_mine_conversations`'s two successors IS on hosted HTTP")
+
+    def test_the_scan_read_a_real_claim(self):
+        """A scan that discovered no availability claim at all proves nothing (#14237 r5).
+
+        Asked of the GUARDED SET, not of each document: a doc that makes no availability
+        claim is correctly silent, and demanding one of every file would be a test that reds
+        on a true document. What must not happen is every file being silent.
+        """
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        claims = [
+            relpath
+            for relpath in TestEveryReaderNamesTheLiveListingDoor.CALL_INSTRUCTION_DOCS
+            if any(self.DENIAL.search(s)
+                   for s in self.sentences((root / relpath).read_text(encoding="utf-8")))
+        ]
+        assert claims, (
+            "no guarded document carries an availability claim this test can read, so the "
+            "row above measured nothing — either the prose moved out of `DENIAL`'s phrase "
+            "set (widen it in the same change) or the tuple no longer covers a doc that "
+            "discusses hosted-HTTP availability")
+
+    def test_the_pre_fix_sentence_is_the_violation(self):
+        """NON-VACUITY on the sentence that actually shipped, verbatim from round 5's head.
+
+        It reds here against the LIVE registry, so the row above fails on the pre-fix text
+        and is not merely passing on the repair. The second fixture is the repaired sentence
+        — a guard that reds on the fix is not a guard.
+        """
+        pre_fix = (
+            "Over hosted HTTP the `tortoise_mine_knowledge_from_session` and "
+            "`tortoise_mine_knowledge_from_directory` tools are stdio-only for "
+            "security (#1090).")
+        assert self.DENIAL.search(pre_fix), (
+            f"the fixture carries no denial phrase, so it grades nothing: {pre_fix}")
+        assert self.served_names_in(pre_fix) == ["tortoise_mine_knowledge_from_session"], (
+            "the pre-fix sentence must be read as denying hosted HTTP to the SERVED door — "
+            "the row above is vacuous if this is empty")
+
+        repaired = (
+            "Over hosted HTTP, `tortoise_mine_knowledge_from_directory` is stdio-only "
+            "(security #1090) — run `tortoise serve` locally (stdio) for a folder of "
+            "transcripts.")
+        assert not self.served_names_in(repaired), (
+            "the repaired sentence must not red: it names no served door in the denying clause")
