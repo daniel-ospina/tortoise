@@ -57,7 +57,7 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `f37a250d9b22b` folded in, carrying
+# reader of the prose can see. On THIS tree — `origin/main` `c3b21056d08a` folded in, carrying
 # `#14597`'s expansion fusion over the residue RATCHET
 # (`tests/test_expansion_fusion_14344.py`, `core`, carrying a `durations` row),
 # `#14415`'s `tests/test_14219_batch_ingest.py` row and `tests/test_14219_batches_api.py` row,
@@ -66,7 +66,8 @@ version: 1
 # `tests/test_14559_reaper_schedule.py` row, `#14574`'s drift-reporter registration
 # (`tests/test_fly_secret_declaration_report.py`), `#14592`'s
 # `tests/test_14592_operating_model_evidence.py` row and `tests/test_14592_read_parity.py` row
-# (`core` and `api` — ONE `fast_pool()` entry, two surfaces), `#14607`'s registrations
+# (`core` on BOTH, plus `eval` on the first and `api` on the second — and the first is also a
+# `tier1` member — but ONE `fast_pool()` entry, because the pool is a SET), `#14607`'s registrations
 # (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), and `#14671`'s
 # `tests/test_13450_ep_position_axis_participation.py` row in `durations` — `core`-registered —
 # the verb packs the pool into two est_seconds readings: seven shards at 827.2 s
