@@ -515,10 +515,13 @@ test('#14686: an in-flight alerts read cannot land on the wrong Organization', (
   // destructured alias all write the previous Organization's rows above the guard and
   // stayed green (measured) — a defensive copy there is a routine reflex, and the
   // row's own message claims a property the literal count does not enforce. The call
-  // form is spelling-agnostic; `setAlertsSaturated(`/`setAlertsUnavailable(` do not
-  // match `setAlerts\s*\(` because a letter follows, so a looser count is not
-  // false-positive-prone (whole-body `setAlerts(` occurrences at this head: 1).
-  assert.equal((body.match(/setAlerts\s*\(/g) || []).length, 1,
+  // form is spelling-agnostic — and so is the IDENTIFIER count used here, which also
+  // catches the callee being aliased or optional-called (`const write = setAlerts`,
+  // `setAlerts?.(x)`, `setAlerts.call(null, x)` — all measured green under the literal
+  // and under the call form). `\b` keeps `setAlertsSaturated`/`setAlertsUnavailable`
+  // out (the word boundary fails before `S`/`U`), and nothing in `loadAlerts`
+  // references the setter without calling it, so the count at this head is 1.
+  assert.equal((body.match(/\bsetAlerts\b/g) || []).length, 1,
     'the success write must appear exactly once — a write above the guard defeats it')
 })
 
