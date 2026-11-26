@@ -3881,48 +3881,60 @@ def _record_column_value(table: str, column: str, value: Any) -> Any:
 
     Two rules, both about ONE datum having ONE representation: a list form of any
     ``_POINT_FLATTEN_COLUMNS`` key is space-joined exactly as the graph's
-    ``flatten_search_keys_prop`` joins it, and a MAPPING form of the same key is
-    refused rather than serialized into a text column.
+    ``flatten_search_keys_prop`` joins it, and a MAPPING form of the same key
+    contributes NO column (``_OMIT``) — never a JSON serialization of it, and,
+    since #11783, never a refusal that takes the whole record write with it.
     """
     if table == "point" and column in _POINT_FLATTEN_COLUMNS and isinstance(
             value, Mapping):
-        # ⚠️ A DELIBERATE DIVERGENCE from the graph, and it is stated rather than
-        # hidden: `flatten_search_keys_prop` has no Mapping arm (it flattens only
-        # list/tuple), so the fold leaves a dict-valued flattened key in the PAYLOAD
-        # as-is while this boundary REFUSES the record — and the live write doors
-        # then degrade that value to null rather than storing it (`#7369`), so what
-        # diverges is the RECORD's fate, not the node's. The reasons are asymmetric
-        # on purpose — `_jsonb_or_scalar` would `json.dumps` the dict into the
-        # now-`text` column, which is the SECOND representation #10620 exists to
-        # remove, and this module's standing rule is that a disagreement stays
-        # visible rather than being coerced.
+        # ⛔ A MAPPING CONTRIBUTES NO COLUMN — and it never refuses the record
+        # (#11783). `_OMIT` is EXACT PARITY with the graph: the flattener has no
+        # Mapping arm (it flattens ``list``/``tuple`` only), so the value reaches
+        # the writers unchanged and `_is_persistable_prop_value` refuses it there
+        # (`_persist_extra_props` `continue`s on a non-persistable value), which
+        # means `SET n += $props` never carries the key — the node stores nothing
+        # on a create and KEEPS ITS PREVIOUS VALUE on an update. `_OMIT` is that
+        # same outcome by its own definition (`_Omit` above: writes NOTHING, not
+        # NULL, so an earlier row's column survives a later record exactly as the
+        # node's property does).
         #
-        # ⚠️ The Mapping form IS REACHABLE, and this comment said otherwise until
-        # the #11706 re-record review measured it: `update_point` carries its props
-        # into the journal VERBATIM and `flatten_search_keys_prop` flattens
-        # ``list``/``tuple`` only, so ``update_point(pid, quote={"a": 1})`` arrives
-        # here (as does a producer-supplied payload). ⛔ `create_point` does NOT
-        # reach this arm — its snapshot is built through
-        # `_journal_snapshot_from_create_map`, which runs every value through
-        # `_stored_prop_value` and OMITS a Mapping, so the create's record write
-        # SUCCEEDS without the key. What the GRAPH does with that value is NOT
-        # "keep it" —
-        # the writers filter a value the engine cannot persist before dispatch
-        # (`_is_persistable_prop_value` refuses a Mapping, `_persist_extra_props`
-        # skips it, and the `#7369` "degraded … to null" warning fires on the live
-        # doors), so the node carries no value. This boundary refuses the WHOLE
-        # record write instead (`write_failed`, warned, journaled — and a replay
-        # of the same snapshot meets the same refusal, so it heals only once this
-        # arm changes). Whether that bigger divergence is worth it, or the arm
-        # should instead OMIT the column (exact parity with a write that stores
-        # nothing), is a design decision tracked in #11783 — not taken here.
-        raise RecordProjectionError(
-            f"point.{column} arrived as a MAPPING — the graph's form is the flat "
-            "space-joined string (projection/entities.py::"
-            "flatten_search_keys_prop flattens list/tuple only and leaves a dict "
-            "as-is, which this boundary will not copy into a text column as JSON). "
-            "Refusing rather than serializing a second representation."
+        # ⛔ THE RAISE THIS REPLACED DROPPED THE WHOLE RECORD WRITE, and that is
+        # measured, not hypothetical (2026-11-26, hosted `tortoise-y4mjjq`):
+        # `/health` reported `record.degraded_reasons.write_failed` climbing
+        # 0 → 34 → 46 → 182 in ~24 h while `record_writes_applied` reached 3190 and
+        # the database was healthy (2.5–3.6 ms). One property's VALUE SHAPE was
+        # taking its whole row — and every other property in it — out of the
+        # record, while the graph committed the same write. A value shape must not
+        # drop a write: store what can be stored, DECLARE what could not
+        # (docs/ax/ax-principles.md, #10183), and let the rest of the row land.
+        #
+        # THE DECLARATION is the WARNING below — the column and the value's TYPE,
+        # never the value itself (a `quote` is the user's own text). It is emitted
+        # per occurrence on purpose: the graph's own `#7369` "degraded … to null"
+        # warning fires once per value, so both stores say the same thing about the
+        # same key instead of one of them being silent.
+        #
+        # ⚠️ The Mapping form IS REACHABLE, and an earlier version of this comment
+        # said otherwise until the #11706 re-record review measured it:
+        # `update_point` carries its props into the journal VERBATIM,
+        # `EventAPI.add_point` splats its `**fields` into the record, and
+        # `flatten_search_keys_prop` flattens ``list``/``tuple`` only — so
+        # ``update_point(pid, quote={"a": 1})`` arrives here, as does a
+        # producer-supplied payload. ⛔ `create_point` does NOT reach this arm: its
+        # snapshot is built through `_journal_snapshot_from_create_map`, which runs
+        # every value through `_stored_prop_value` and OMITS a Mapping, so a
+        # create's record write already succeeded without the key.
+        _LOGGER.warning(
+            "record column omitted (point.%s): the value arrived as a %s, and the "
+            "graph stores NO property for it either (`_is_persistable_prop_value` "
+            "refuses a Mapping, so `SET n += $props` never carries the key). The "
+            "column is therefore left as it was — never serialized into a text "
+            "column as a second representation (#10620) and never a reason to "
+            "drop the rest of the row (#11783). Fix the PRODUCER if this value "
+            "is meant to persist.",
+            column, type(value).__name__,
         )
+        return _OMIT
     if table == "point" and column in _POINT_FLATTEN_COLUMNS and isinstance(
             value, (list, tuple)):
         flat = " ".join(str(item).strip() for item in value if str(item).strip())

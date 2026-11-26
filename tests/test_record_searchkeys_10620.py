@@ -1124,14 +1124,107 @@ def test_content_columns_are_real_record_columns():
             f"{required!r} carries the user's own text and must be withheld")
 
 
-def test_a_mapping_valued_search_keys_is_refused_not_serialized():
-    """A dict is neither the graph's form nor a list — never JSON into `text`."""
-    with pytest.raises(record_projection.RecordProjectionError) as caught:
-        record_projection._record_column_value(
-            "point", "search_keys", {"k": "v"})
-    assert "second representation" in str(caught.value)
-    # The divergence is STATED: the graph leaves a dict as-is, the record refuses.
-    assert "leaves a dict as-is" in str(caught.value)
+def test_a_mapping_valued_search_keys_is_omitted_not_serialized(caplog):
+    """#11783 — a dict contributes NO column, and never refuses the record.
+
+    The old arm raised `RecordProjectionError` here, and that refusal took the
+    WHOLE record write with it: measured live (2026-11-26, hosted app) as
+    `record.degraded_reasons.write_failed` climbing 0 → 182 while the database
+    was healthy and `record_writes_applied` reached 3190. `_OMIT` is exact
+    parity with the graph, which filters a Mapping before `SET n += $props`
+    (`_is_persistable_prop_value` refuses it), so the node stores no such
+    property while the rest of the record lands.
+
+    The declaration is asserted too: the WARNING names the COLUMN and the
+    value's TYPE, and never the value (a `quote` is the user's own text).
+    """
+    with caplog.at_level(logging.WARNING,
+                         logger=record_projection.__name__):
+        for column in ("search_keys", "quote"):
+            resolved = record_projection._record_column_value(
+                "point", column, {"k": "v"})
+            assert resolved is record_projection._OMIT, (
+                f"a Mapping-valued {column} must contribute NO column (the graph "
+                "stores no property for it either) — any OTHER value here is the "
+                "second representation #10620 exists to remove"
+            )
+
+    messages = [r.getMessage() for r in caplog.records
+                if r.levelno == logging.WARNING]
+    assert any("point.quote" in m and "dict" in m for m in messages), (
+        f"the omission of point.quote must DECLARE itself (column + shape): {messages}"
+    )
+    assert any("point.search_keys" in m for m in messages), messages
+    assert not any("'k'" in m or '"k"' in m for m in messages), (
+        "the declaration must name the SHAPE, never the value: a quote is the "
+        f"user's own text and this line goes to the deployment's log: {messages}"
+    )
+
+
+def test_a_mapping_valued_property_cannot_drop_the_rest_of_the_row():
+    """#11783, the seam the issue names: `_split_properties`, CREATE direction.
+
+    Pre-fix this raised `RecordProjectionError` out of `mutations_for` — so the
+    point row, its identity row and the journal position all vanished while the
+    graph committed the same write. The row must land, with the offending
+    column ABSENT (the upsert builds its `INSERT` and `DO UPDATE` lists from the
+    same `col_values`, so an omitted key touches neither) and every other
+    column present.
+    """
+    for key in ("quote", "search_keys"):
+        record = {"type": "PointAdded",
+                  "point": {"eventId": "pt-11783", "id": "pt-11783",
+                            "content": "a claim",
+                            "point_kind": "statement", key: {"odd": "shape"}}}
+        statements = record_projection.mutations_for(
+            record, org_id="org-t", graph_id="graph-t")
+
+        point = [s for s in statements if "INSERT INTO public.point" in s.sql]
+        assert len(point) == 1, (
+            f"a Mapping-valued {key} dropped the point row (#11783): "
+            f"{len(statements)} statement(s) planned"
+        )
+        columns = point[0].sql.split("(", 1)[1].split(")", 1)[0]
+        assert key not in [c.strip() for c in columns.split(",")], (
+            f"{key} reached the record as a column: {columns}"
+        )
+        for landed in ("content", "point_kind", "node_key"):
+            assert landed in columns, (
+                f"{key}: the rest of the row must still land, and {landed!r} is "
+                f"missing from {columns}"
+            )
+
+
+def test_a_mapping_valued_property_cannot_drop_the_update_arm_either():
+    """#11783, UPDATE direction — where omission must match the NODE's fate.
+
+    The graph filters the Mapping before `SET n += $props`, so an update leaves
+    the node's EXISTING property untouched (it is not cleared). `_OMIT` writes
+    nothing rather than NULL for exactly that reason (see `_Omit`), and the
+    upsert/patch builders take their `SET` list from `col_values` — so the
+    column is absent from the `SET`, which is the record's version of "kept".
+    A NULL there would CLEAR it instead, which would be the divergence.
+    """
+    record = {"type": "PointRevised", "id": "pt-11783",
+              "new_content": "revised",
+              "quote": {"odd": "shape"},
+              "search_keys": {"odd": "shape"}}
+    statements = record_projection.mutations_for(
+        record, org_id="org-t", graph_id="graph-t")
+
+    patches = [s for s in statements if "UPDATE public.point" in s.sql]
+    assert len(patches) == 1, (
+        f"a Mapping-valued property dropped the point UPDATE (#11783): "
+        f"{len(statements)} statement(s) planned"
+    )
+    for clause in ("quote =", "search_keys ="):
+        assert clause not in patches[0].sql, (
+            f"the update SETs {clause!r}: a Mapping the graph does not store "
+            f"must leave the column untouched, never clear it: {patches[0].sql}"
+        )
+    assert "content = %s" in patches[0].sql, (
+        f"the rest of the update must still land: {patches[0].sql}"
+    )
 
 
 def test_a_string_passes_through_unchanged():
@@ -1279,6 +1372,101 @@ def test_a_list_valued_snapshot_lands_flattened_not_as_json():
         conn.close()
 
 
+def _column_row(conn, tenant: tuple[str, str], key: str, column: str):
+    org, graph = tenant
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {column}, content FROM public.point "
+            "WHERE org_id=%s AND graph_id=%s AND node_key=%s",
+            (org, graph, key))
+        return cur.fetchone()
+
+
+@pytest.mark.parametrize("key", ["search_keys", "quote"])
+def test_a_mapping_valued_property_LANDS_the_row_on_Postgres(key):
+    """#11783, the production drop, reproduced and closed on a real Postgres.
+
+    Pre-fix this replay raised `RecordProjectionError` and the row was ABSENT —
+    which is what `/health` reported as `write_failed` climbing to 182 while the
+    graph committed the same writes. The assertion is on the ROW (present, with
+    its content) and on the COLUMN (absent → NULL), never on the absence of an
+    exception: a projection that reports success while dropping the row is the
+    failure being fixed, and so is one that stores the dict as JSON.
+    """
+    conn = _record_schema_conn()
+    tenant = _tenant()
+    row_key = f"pt-{uuid.uuid4().hex[:10]}"
+    _seed(conn, tenant, [row_key])
+    org, graph = tenant
+    try:
+        replay_conn = _app_role_conn()
+        try:
+            record_projection.replay(
+                [{"type": "PointAdded",
+                  "point": {"eventId": row_key, "id": row_key,
+                            "content": "a claim", "point_kind": "statement",
+                            key: {"odd": "shape"}}}],
+                replay_conn, org_id=org, graph_id=graph, position=False)
+            replay_conn.commit()
+        finally:
+            replay_conn.close()
+
+        row = _column_row(conn, tenant, row_key, key)
+        assert row is not None, (
+            f"a Mapping-valued {key} dropped the whole point row from the record "
+            "(#11783) — this is the 182-write production drop"
+        )
+        assert row[0] is None, (
+            f"the record stored a Mapping as a second representation in {key}: "
+            f"{row[0]!r} — the graph stores NO property for that value"
+        )
+        assert row[1] == "a claim", (
+            f"the rest of the row must still land: {row!r}"
+        )
+    finally:
+        conn.close()
+
+
+def test_a_mapping_valued_update_keeps_the_stored_value_like_the_node_does():
+    """#11783, the UPDATE arm on Postgres — omission, not a clear.
+
+    The graph filters the Mapping before `SET n += $props`, so the node KEEPS
+    its existing value; the record must do the same (the upsert's `SET` list is
+    built from the same `col_values`, so an omitted column is not touched).
+    Writing NULL here — `SET quote = NULL` — would clear the record's value while
+    the node keeps its own, which is a divergence in the opposite direction.
+    """
+    conn = _record_schema_conn()
+    tenant = _tenant()
+    row_key = f"pt-{uuid.uuid4().hex[:10]}"
+    _seed(conn, tenant, [row_key])
+    org, graph = tenant
+    try:
+        replay_conn = _app_role_conn()
+        try:
+            record_projection.replay(
+                [_point_record(row_key, "the stored span")], replay_conn,
+                org_id=org, graph_id=graph, position=False)
+            record_projection.replay(
+                [{"type": "PointRevised", "id": row_key,
+                  "new_content": "revised",
+                  "search_keys": {"odd": "shape"}}],
+                replay_conn, org_id=org, graph_id=graph, position=False)
+            replay_conn.commit()
+        finally:
+            replay_conn.close()
+
+        row = _column_row(conn, tenant, row_key, "search_keys")
+        assert row is not None, "the update dropped the point row (#11783)"
+        assert row[0] == "the stored span", (
+            "a Mapping the graph does not store must leave the column as it was, "
+            f"exactly as `SET n += $props` leaves the node's property: {row!r}"
+        )
+        assert row[1] == "revised", f"the rest of the update must land: {row!r}"
+    finally:
+        conn.close()
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 5. The migration's own array arm — the rows that ALREADY exist
 # ════════════════════════════════════════════════════════════════════════════
@@ -1331,11 +1519,11 @@ def _shipped_flatten_ddl() -> str:
     (["only"], "only"),
     ("err4032 release", "err4032 release"),
     # ⛔ The three arms BEYOND the write path (#10648 review P3). They are not
-    # reachable from a new record (`_record_column_value` refuses a dict and
-    # never emits a number/boolean), but a pre-existing row can hold one, and
-    # the conversion's job there is to PRESERVE the value — `ELSE NULL` would
-    # drop it. Pinned so a rewrite of any arm goes red instead of silently
-    # changing what an existing row becomes.
+    # reachable from a new record (`_record_column_value` contributes NO column
+    # for a dict and never emits a number/boolean), but a pre-existing row can
+    # hold one, and the conversion's job there is to PRESERVE the value —
+    # `ELSE NULL` would drop it. Pinned so a rewrite of any arm goes red instead
+    # of silently changing what an existing row becomes.
     # ⚠️ A NON-`str` ARRAY ELEMENT is the fourth divergence and it is deliberately
     # NOT a row here: the `assert actual == written` below holds `actual ==
     # written` for every list in this matrix, and that equality is FALSE for
@@ -1405,13 +1593,19 @@ def test_the_migration_converts_existing_rows_by_the_write_path_rule(value, expe
             f"path gives {written!r} — the two shapes diverge"
         )
     elif isinstance(value, dict):
-        # ⛔ The divergence IN THE OTHER DIRECTION, pinned (#10648 review P3):
-        # the conversion PRESERVES an object row, the write path REFUSES one.
-        # Both are deliberate — the record must not gain a second representation
-        # going forward, and a bootstrap must not drop a value that already
-        # exists — so the test states both rather than letting the arms drift.
-        with pytest.raises(record_projection.RecordProjectionError):
-            record_projection._record_column_value("point", "search_keys", value)
+        # ⛔ The two ends of the object shape, pinned (#10648 review P3, #11783):
+        # the conversion PRESERVES an object row (a bootstrap must not drop a
+        # value that already exists), while the WRITE path contributes NO column
+        # for one. Both are deliberate — the record must not gain a second
+        # representation going forward — and neither may drop the ROW, which is
+        # the #11783 defect: the write path used to raise here, taking the whole
+        # record write with it.
+        assert record_projection._record_column_value(
+            "point", "search_keys", value) is record_projection._OMIT, (
+            "a Mapping-valued search_keys must contribute NO column (the graph "
+            "stores no property for it either) — and must never raise, because "
+            "that refusal drops the whole record row"
+        )
 
 
 def test_the_array_arms_non_str_elements_are_the_stated_divergence():
