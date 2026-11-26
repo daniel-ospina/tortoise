@@ -1957,7 +1957,14 @@ _PRE_CUE_ONLY = _inversion_form(
     # places one between the pronoun and the modal, which the single pre-subject
     # run could not reach (#14679 review round 6).
     r"(?:(?:" + _ADVERBS + r")\s*,?\s+)*"
-    r"(?:(?:will|would|should|may|might|could|can|must|shall)\s+)?(?:need\s+to"
+    r"(?:(?:will|would|should|may|might|could|can|must|shall)\s+"
+    # ⛔ AND THE RUN REPEATS AT THE CHAIN BOUNDARY. The adverb slots sit around the
+    # chain but not INSIDE it, so `You will FIRST need to confirm …` — the most
+    # natural placement of `first` in this instruction — was GREEN while its
+    # adverb-free twin is a declared-RED row: the same one-inserted-word defect,
+    # one position further out (#14679 review round 7). `then`/`next` are in the
+    # slot because they escape it identically (measured).
+    r"(?:(?:(?:" + _ADVERBS + r")|then|next)\s*,?\s+)*)?(?:need\s+to"
     r"|have\s+to|want\s+to|be\s+able\s+to|be\s+going\s+to|going\s+to|must|should|can"
     r"|could|will|shall|may|might|ought\s+to|would)\s+"
     r"|be\s+sure\s+to\s+|make\s+sure\s+to\s+)?"
@@ -3543,9 +3550,24 @@ def _confirmation_predicate_setting_a_tool_list(clause: str) -> bool:
     """
     spans = [m.span() for m in _TOOLS_OBJECT_RE.finditer(clause)]
     for match in re.finditer(_CONFIRM_PREDICATE, clause, re.IGNORECASE):
-        if not any(start <= match.start() and match.end() <= end
-                   for start, end in spans):
-            return True
+        if any(start <= match.start() and match.end() <= end
+               for start, end in spans):
+            continue
+        # ⛔ AND THE SAME WORD IS A NOUN AFTER A DETERMINER. `list` is BOTH the
+        # verb in this closure and the docs' own name for the graded object, so
+        # `… until the tools appear in THE LIST` was graded as an inversion — the
+        # verdict turned on whether the sentence mentions a list, not on who
+        # confirms anything. A pure ABSENCE claim (`unless the tools are missing
+        # from the list`) was RED while its list-less twin is a declared-GREEN
+        # row: the over-block direction this file grades P1 (#14679 review round
+        # 7). The determiner test is the discriminative one, and it is monotone:
+        # `until you can SEE the tools in the list` keeps `see` as its predicate
+        # and stays RED.
+        preceding = clause[:match.start()].rstrip("`'\u2019\u201d ")
+        if re.search(r"(?i)\b(?:the|a|an|this|that|your|our|its|their|each|per)$",
+                     preceding):
+            continue
+        return True
     return False
 
 
@@ -5630,6 +5652,22 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "list.", False),
     ("You're going to need to confirm the tools are actually there. Restart "
      "your client.", False),
+    # (14) round-7: the adverb run must also repeat at the CHAIN BOUNDARY
+    #      (`will first need to`), and `list` is a NOUN after a determiner, not
+    #      the closure's verb — a pure absence claim naming the list is GREEN,
+    #      while the same clause with a real observation verb stays RED.
+    ("You will first need to confirm the tools are actually there. Restart "
+     "your client, then run a query.", True),
+    ("You will also need to confirm the tools are actually there. Restart your "
+     "client.", True),
+    ("You will still need to confirm the tools are actually there. Restart your "
+     "client.", True),
+    ("You will then need to confirm the tools are actually there. Restart your "
+     "client.", True),
+    ("Don't restart your client until the tools appear in the list.", False),
+    ("You shouldn't restart your client unless the tools are missing from the "
+     "list.", False),
+    ("Don't restart your client until you can see the tools in the list.", True),
     # (8) a LEADING CONJUNCTION introduces a sentence exactly as `Now`/`Then` do.
     ("And confirm the tools are actually there. Restart your client, then run "
      "a query.", True),
