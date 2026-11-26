@@ -11302,7 +11302,7 @@ ROWED_BY_THIS_FOLD = (
     # Listed here for the reason every row above states: the ENTRY-RULE pin iterates this
     # EXPLICIT tuple, so a file nobody listed has no row and nothing reds. ⛔ The missing
     # registration was the more expensive half: `select()` computes `test_files` FROM the
-    # surfaces, so an unregistered file is never SELECTED, and its 11 falsifiers would have
+    # surfaces, so an unregistered file is never SELECTED, and its falsifiers would have
     # been dead weight even after the red check was silenced.
     "test_13826_write_gate.py",
     # #13036 row V2 (PR #13886) - the capstone payload contract for the live MCP
@@ -11546,7 +11546,7 @@ ROWED_BY_THIS_FOLD = (
     # required `manifest-integrity` leg redded (`manifest drift:
     # ['test_14691_structure_evidence.py']`), and the larger half is the `#13826` shape
     # recorded above — selection is surface->membership, so a file in no surface is
-    # selected by no diff class and these 11 falsifiers would have run in NO CI leg,
+    # selected by no diff class and the file's falsifiers would have run in NO CI leg,
     # leaving the bundle's five verdicts guarded by nothing but prose. Listed here for
     # the reason every row above states: the ENTRY-RULE pin iterates this EXPLICIT
     # tuple, so a file nobody listed has no `durations:` row and nothing reds. ⛔ The row

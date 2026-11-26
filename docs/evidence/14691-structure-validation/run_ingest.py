@@ -56,6 +56,50 @@ def verdict(receipt: dict) -> int:
     return 0 if rows and all(row.get("ok") is True for row in rows) else 1
 
 
+#: `graph_overview()` paths that describe the CONNECTION, the installed KIND
+#: VOCABULARY, or a QUERY PARAMETER, never stored content, and are therefore
+#: legitimately non-empty on a brand-new graph. `stale.limit` is the page size the
+#: overview asks for — it reads 50 on an empty graph, and counting it would have
+#: refused every real run (measured: the first cut of this walk returned
+#: `{'stale.limit': 50}` for the receipt's OWN empty graph).
+_NOT_CONTENT = ("namespaces", "status.connected", "stale.limit")
+
+
+def occupancy(before) -> dict:
+    """Every field of a `graph_overview()` reply that holds CONTENT.
+
+    ⛔ THE ISOLATION PREMISE IS ENFORCED ON THE WHOLE REPLY, NOT ON TWO FIELDS
+    (#14691 review, 5th cycle, item (d)). The guard below used to read only
+    `taxonomy` and `structure.total`; a mutated `empty_before` carrying
+    `status.total_entities=500`, `audit.node_count=900`, `audit.edge_count=1200`
+    and a `pointkinds` list of a real product — a graph populated by every other
+    measure the same reply carries — passed the guard AND the bundle's own pin.
+    One of the two readers is now a walk over everything the overview says, so
+    the refusal cannot be satisfied by the two fields that happened to be zero in
+    the one graph observed.
+
+    Pure (no SDK, no I/O) so the bundle's falsifier drives it with crafted
+    overviews instead of trusting the `if` statement beside it to still be there.
+    """
+    found: dict = {}
+
+    def walk(node, path: str) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                walk(value, f"{path}.{key}" if path else str(key))
+        elif isinstance(node, list):
+            if node and path not in _NOT_CONTENT:
+                found[path] = f"{len(node)} rows"
+        elif isinstance(node, bool):
+            return                  # a flag (connected/clean), not a population
+        elif isinstance(node, (int, float)):
+            if node and path not in _NOT_CONTENT:
+                found[path] = node
+
+    walk(before, "")
+    return found
+
+
 def main() -> int:
     from tortoise.sdk import TortoiseSDK
 
@@ -94,11 +138,13 @@ def main() -> int:
     print(json.dumps(before, indent=2, default=str)[:4000])
     occupied = {k: v for k, v in (before.get("taxonomy") or {}).items() if v}
     structure_total = (before.get("structure") or {}).get("total") or 0
-    if occupied or structure_total:
+    contamination = occupancy(before)
+    if contamination:
         raise SystemExit(
             "REFUSING TO MEASURE A GRAPH THAT IS NOT FRESH: "
             f"{GRAPH} already holds {occupied or 'no taxonomy rows'} "
-            f"(structure.total={structure_total}). T6's isolation premise is an "
+            f"(structure.total={structure_total}); the overview also reports "
+            f"content at {contamination}. T6's isolation premise is an "
             "empty graph; point TORTOISE_DB_URI/graph_name at a fresh one "
             "rather than reporting a contaminated run.")
 

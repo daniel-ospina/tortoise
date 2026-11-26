@@ -1093,6 +1093,7 @@
       "dependency_present_and_correct": "7/7",
       "asymmetric_rows_correct": 7,
       "asymmetric_rows_inverted": 15,
+      "asymmetric_rows_unclassifiable": 0,
       "asymmetric_pairs_inverted": 13
     },
     "passes": false
@@ -1224,7 +1225,8 @@
       "verbatim": 11,
       "paraphrase": 27,
       "invented": 12,
-      "not_in_corpus": [
+      "not_in_corpus": 12,
+      "paraphrase_examples": [
         {
           "doc": "doc-01",
           "quote": "**Lumen Core**, the energy-operations platform that control-room customers run",
@@ -1347,7 +1349,8 @@
           "best_sentence_overlap": 0.3,
           "point": "The segment being the planning unit supports treating it as the durable commercial frame."
         }
-      ]
+      ],
+      "examples_truncated": true
     },
     "warnings": {
       "total": 36,
@@ -1374,6 +1377,7 @@
     "verbatim": 11,
     "paraphrase": 27,
     "invented": 12,
+    "not_in_corpus": 12,
     "invented_examples": [
       {
         "doc": "doc-01",

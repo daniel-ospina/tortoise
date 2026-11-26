@@ -536,7 +536,7 @@ def test_readback_provenance_binds_to_its_producer_or_the_stated_exception():
     that made it. The `agent-infra-ci / lint` commit renamed an unused loop
     variable in that script, which moved the hash without touching a byte of
     behaviour — verified mechanically by renaming it back and diffing against
-    `d4fc8fe` (identical). Rather than regenerate a 784 KB receipt to fix a
+    `d4fc8fe` (identical). Rather than regenerate an 809,812-byte receipt to fix a
     comment-sized defect, the exception is STATED in REPORT.md §8 and pinned
     here, so a future drift reds instead of going unnoticed.
     """
@@ -621,10 +621,15 @@ def test_a_bundle_only_diff_selects_this_suite():
     MEASURED on the pre-fix manifest,
     `select(['docs/evidence/14691-structure-validation/out/t6-score.json'],
     'pull_request')` -> `surfaces: []`, and the same for `REPORT.md`,
-    `score_t6.py`, `run_readback.py` and `corpus/structure-corpus.json`. The 13
-    falsifiers therefore ran when someone edited the TEST and NEVER when someone
-    edited the artifacts they pin — so a PR that hand-rewrote the score artifact
-    or restated a headline number shipped with the guard absent.
+    `score_t6.py`, `run_readback.py` and `corpus/structure-corpus.json`. Every
+    falsifier in this file therefore ran when someone edited the TEST and NEVER
+    when someone edited the artifacts they pin — so a PR that hand-rewrote the
+    score artifact or restated a headline number shipped with the guard absent.
+
+    ⛔ NO COUNT IS STATED HERE ANY MORE (#14691 review, 5th cycle, N8). This
+    docstring said "the 13 falsifiers" while the file carried 18, and the sibling
+    manifest comment said 11 — three numbers for one file, which is how a reader
+    learns to trust a stale figure. The suite's size is `grep -c '^def test_'`.
 
     ⛔ THE SUBJECT IS A PREFIX, and the assertion walks EVERY file the bundle
     commits rather than one representative: a new artifact added to the bundle is
@@ -661,3 +666,274 @@ def test_a_bundle_only_diff_selects_this_suite():
                     "docs/evidence/14691-structure-validation-extra/x.json"):
         assert ci_selection.select([sibling], "pull_request", manifest)["surfaces"] == [], (
             f"the T6 `CORE_ALSO` row widened to a sibling bundle: {sibling}")
+
+
+# ── the artifacts, the prose, and their derivations are ONE artifact ──────
+# The 5th review cycle's findings were one class: the suite pinned what the TEST
+# believed and never the edges between the committed artifacts, the prose that
+# quotes them, and the inputs they are derived from. Each arm below names the
+# mutation it was measured against.
+_NEGATIVE = ("no", "not", "none", "never", "cannot")
+
+
+def _norm_key(text: str) -> str:
+    """A name normalised for set comparison (case, whitespace, markdown noise)."""
+    return " ".join(str(text or "").lower().split())
+
+
+def _polarity(text: str) -> str:
+    words = re.sub(r"[^a-z0-9 ]+", " ", str(text).lower()).split()
+    return "negative" if words and words[0] in _NEGATIVE else "affirmative"
+
+
+def test_the_quote_audit_artifact_is_re_derived_from_the_receipt():
+    """Reds if `out/t6-quote-audit.json` drifts from the receipt it summarises.
+
+    #14691 review (5th cycle, N2): nothing in the tree opened this file. Measured
+    before this arm — `verbatim 11 -> 50`, `not_in_corpus 12 -> 0` rewrite →
+    **18/18 green**, so the PR's quote-fidelity claim and this artifact could
+    disagree forever. `score_t6.a4_invention()` re-derives the same buckets from
+    `out/ingest-receipt.json` + the corpus, so the artifact is now a CLAIM.
+    """
+    audit = json.loads((BUNDLE / "out" / "t6-quote-audit.json").read_text())
+    quotes = _load_score_module().a4_invention()["quotes"]
+    assert quotes["total"] == audit["quotes_total"], (quotes["total"], audit["quotes_total"])
+    assert quotes["verbatim"] == audit["verbatim"], (quotes["verbatim"], audit["verbatim"])
+    assert quotes["paraphrase"] == audit["paraphrase"], (quotes["paraphrase"], audit["paraphrase"])
+    # ⛔ THE BUCKET THE PR BODY READ, and the reason it read the wrong number:
+    # `not_in_corpus` used to be a 10-row list of the OPPOSITE bucket, so its
+    # LENGTH (the display cap) was read as a population. It is a count now, and it
+    # must equal the invented arm the same scorer reports.
+    assert quotes["not_in_corpus"] == audit["not_in_corpus"], (
+        quotes["not_in_corpus"], audit["not_in_corpus"])
+    assert quotes["not_in_corpus"] == quotes["invented"], (
+        "`not_in_corpus` and `invented` are the same population, counted twice")
+    assert (audit["quotes_total"]
+            == audit["verbatim"] + audit["paraphrase"] + audit["not_in_corpus"])
+    # The `audited` rows are a SAMPLE of the paraphrase band, not a population:
+    # they are all non-verbatim and all inside the band. Asserting their number
+    # against `not_in_corpus` would repeat the very defect this arm closes.
+    assert audit["audited"], "the audit shipped no rows at all"
+    for row in audit["audited"]:
+        assert row["verbatim_in_corpus"] is False, row
+        assert row["overlap"] >= 0.6, row
+    assert len(audit["audited"]) <= audit["paraphrase"], (
+        "the audit lists more rows than the band holds")
+
+
+def test_the_quote_breakdown_in_the_report_is_the_claim_layer():
+    """Reds if REPORT §7's quote breakdown drifts from the claim layer it quotes.
+
+    #14691 review (5th cycle, F1): `(11 verbatim / 27 paraphrase / 12 not in
+    corpus)` -> `(50 / 0 / 0)` left 18/18 green, so the prose could state a
+    fidelity the artifact refutes.
+    """
+    cl = _score()["claim_layer"]
+    want = (f"**{cl['verbatim']} verbatim / {cl['paraphrase']} paraphrase / "
+            f"{cl['invented']} not in the corpus**")
+    flat = " ".join(_report().split())
+    assert want in flat, (
+        f"REPORT.md's §7 quote breakdown is not the claim layer's: expected "
+        f"{want!r}")
+    # ...and the claim layer's own count is the artifact's (§8 table row)
+    assert cl["not_in_corpus"] == cl["invented"], cl
+
+
+def test_the_orphan_second_measurement_agrees_with_the_primary():
+    """Reds if `out/t6-independent-verification.json` is rewritten by hand.
+
+    #14691 review (5th cycle, F1/(b)): this is the graph-side CORROBORATION of the
+    A2 inversion and NO test opened it. Measured: replacing `A2` with
+    `{"note": "HAND-REWRITTEN: every ownedBy row is correctly oriented"}` and
+    emptying `declared` → **18/18 green**. The claims it is cited for are now
+    read out of the artifact's own rows.
+    """
+    iv = json.loads((BUNDLE / "out" / "t6-independent-verification.json").read_text())
+    declared = _corpus()["_declared_structure"]
+    for key in ("products", "features", "teams", "roles", "people", "components",
+                "customers", "customerSegments"):
+        assert len(iv["declared"][key]) == len(declared[key]), (
+            f"the independent measurement declares {len(iv['declared'][key])} "
+            f"{key} where the corpus declares {len(declared[key])}")
+    # the A2 corroboration — the pair count REPORT §7 rests on, and the rows
+    # the primary receipt counts. 6 write rows reduce to 4 distinct pairs; the
+    # peer's independent read saw the PAIRS.
+    owned = iv["A2"]["ownedBy"]
+    assert owned, "the independent measurement recorded no ownedBy rows"
+    pairs = {(_norm_key(r["src"]), _norm_key(r["dst"])) for r in owned}
+    assert len(pairs) == 4, (pairs, len(pairs))
+    # the hierarchy and dependency legs must agree with the primary scorer
+    a3 = _score()["A3_hierarchy"]["reported"]
+    assert iv["A3"]["distinct_hasPart_pairs"] == a3["hasPart_distinct_pairs"] == 5
+    assert len(iv["A2"]["hasPart"]) == 5
+    assert len(iv["A2"]["dependsOn"]) == 7
+
+
+def test_each_door_finding_answer_states_the_artifacts_polarity():
+    """Reds if a REPORT answer says the opposite of the artifact's answer.
+
+    #14691 review (5th cycle, N3): the row's QUESTION was pinned and its ANSWER
+    was not, so flipping D3 to `**YES — every declared spelling works.**` left
+    18/18 green while the artifact beside it answered NO. Polarity is exactly the
+    token that mutation moves; the two numbers D6's answer turns on are pinned too.
+    """
+    for finding in _score()["door_findings"]:
+        row = _report_line(rf"^\| \*\*{finding['id']}\*\* \|")
+        assert row, f"REPORT.md has no row for door finding {finding['id']}"
+        answer = row.split("|")[3]
+        assert _polarity(answer) == _polarity(finding["answer_over_mcp"]), (
+            f"REPORT.md's {finding['id']} answer is {_polarity(answer)!r} while "
+            f"its own artifact answers {_polarity(finding['answer_over_mcp'])!r}"
+            f" — {answer!r}")
+    d6 = _report_line(r"^\| \*\*D6\*\* \|").split("|")[3]
+    assert "6" in d6 and ("4" in d6 or "four" in d6.lower()), (
+        f"D6's answer no longer states the owners asked / the rows held: {d6!r}")
+
+
+def test_report_headline_counts_are_the_artifacts_counts():
+    """Reds if a heading's own COUNTS drift from the artifact (#14691 review, N4).
+
+    The verdict TOKEN was pinned; the numbers beside it were not. Measured:
+    `A1 … PASS (28/28)` -> `PASS (35/35)` and `A3 … PASS (5/5 distinct pairs, 2
+    parents, 5 children)` -> `PASS (99 …, 1 parent, 42 children)` both left 18/18
+    green while `t6-score.json` still said 28 and 5/2/5.
+    """
+    score = _score()
+    a1 = score["A1_type_coverage"]
+    head1 = _report_line(r"^#{2,4} A1 · ")
+    assert head1, "REPORT.md has no A1 heading"
+    assert f"({a1['right_kind']}/{a1['declared']})" in head1, (a1, head1)
+    a3 = score["A3_hierarchy"]
+    rep = a3["reported"]
+    want = (f"({a3['declared']['edges']}/{a3['declared']['edges']} distinct pairs, "
+            f"{rep['distinct_parents']} parents, {rep['distinct_children']} children)")
+    head3 = _report_line(r"^#{2,4} A3 · ")
+    assert head3, "REPORT.md has no A3 heading"
+    assert want in head3, (want, head3)
+
+
+def test_the_directions_table_is_the_ruling_table():
+    """Reds if the score artifact records an UNAVAILABLE or locally-copied table.
+
+    #14691 review (5th cycle, item (c)-artifact): the import guard records
+    `DIRECTIONS_SOURCE`/`DIRECTIONS` faithfully, but NOTHING read the artifact, so
+    a committed `t6-score.json` with `directions_source: UNAVAILABLE…` and
+    `directions: {}` passed. The table is `pack_registry`'s ruling (#11548).
+    """
+    score = _score()
+    assert score["directions_source"] == "tortoise.pack_registry.SEMANTICS_DIRECTIONS", (
+        score["directions_source"])
+    assert score["directions"], "the artifact records no orientation rulings"
+    from tortoise.pack_registry import SEMANTICS_DIRECTIONS
+    # ⛔ A SUBSET, NOT AN EQUALITY, and that is the honest claim: the artifact
+    # carries the rulings for the predicates it SCORES (`_DST_ROLE`'s six), never
+    # a local restatement of the whole table. Equality would red on a legitimate
+    # narrowing and would pass a local copy that happened to be complete.
+    for predicate, direction in score["directions"].items():
+        assert SEMANTICS_DIRECTIONS.get(predicate) == direction, (
+            f"the artifact records `{predicate}: {direction!r}` where the ruling "
+            f"table says {SEMANTICS_DIRECTIONS.get(predicate)!r} — a local copy, "
+            "not the table")
+
+
+def test_an_ERROR_reply_is_not_an_EMPTY_answer():
+    """Reds if a FAILED call is read as "the door answered nothing" (N1).
+
+    `rows()` maps an error envelope to `[]`, so a witness reply of `{"error": …}`
+    MANUFACTURED D4 — a claim about the product from a call that never answered.
+    Measured: replacing all seven witness `expand_relationships` replies with
+    `{"ok": false, "error": …}` left 18/18 green. Both arms run on a copy of the
+    module's own readback; the measured-empty arm is the non-vacuity control.
+    """
+    module = _load_score_module()
+    assert module.is_error_reply({"ok": False, "error": "boom"}) is True
+    assert module.is_error_reply('{"error": "boom"}') is True
+    assert module.is_error_reply({"result": []}) is False
+    readback = module.READBACK
+    witness = readback.get("link_witness") or {}
+    assert witness, "the readback carries no link witness to drive"
+    saved = json.loads(json.dumps(readback))
+    try:
+        readback["door_findings"] = [f for f in readback.get("door_findings") or []
+                                     if f.get("id") != "D4"]
+        for w in witness.values():
+            w["expand_relationships"] = {"ok": False, "error": "transport"}
+        assert "D4" not in [f["id"] for f in module._door_findings()], (
+            "an ERROR reply manufactured the D4 finding — a failed call is not an "
+            "answered-empty one")
+        for w in witness.values():
+            w["expand_relationships"] = {"reply": {"result": []}}
+        assert "D4" in [f["id"] for f in module._door_findings()], (
+            "a measured EMPTY answer no longer produces D4 — the arm above is "
+            "vacuous")
+    finally:
+        readback.clear()
+        readback.update(saved)
+
+
+def test_the_isolation_refusal_is_enforced_on_the_whole_overview():
+    """Reds if the fresh-graph refusal narrows back to two fields (N7 / item (d)).
+
+    The committed receipt was the only reader of the premise and the producer's
+    guard read two fields, so a mutated `empty_before` carrying
+    `status.total_entities=500`, `audit.node_count=900` and a real `pointkinds`
+    list — populated by every other measure the same reply carries — left 18/18
+    green AND the producer's guard satisfied. The guard is a pure function over
+    the WHOLE overview now, driven here directly.
+    """
+    keep_clause = importlib.util.spec_from_file_location(
+        "t6_run_ingest", BUNDLE / "run_ingest.py")
+    ingest = importlib.util.module_from_spec(keep_clause)
+    keep_clause.loader.exec_module(ingest)
+
+    before = _receipt()["empty_before"]
+    # non-vacuity: the receipt's OWN overview must read as empty, or the guard
+    # would refuse a real run (measured: the first cut of the walk returned
+    # `{'stale.limit': 50}` — a page size — for this very receipt)
+    assert ingest.occupancy(before) == {}, (
+        "the receipt's own empty_before reads as populated, so the guard would "
+        f"refuse a real run: {ingest.occupancy(before)}")
+    for dotted, value in (("taxonomy.Point", 5),
+                          ("structure.total", 2),
+                          ("status.total_entities", 500),
+                          ("audit.node_count", 900),
+                          ("pointkinds", ["product-strategy:product"])):
+        mutant = json.loads(json.dumps(before))
+        node = mutant
+        *parents, leaf = dotted.split(".")
+        for key in parents:
+            node = node[key]
+        node[leaf] = value
+        assert ingest.occupancy(mutant), (
+            f"the fresh-graph guard cannot see content at `{dotted}` — a "
+            "populated graph would be measured as fresh")
+
+
+def test_an_UNREADABLE_kind_is_not_graded_correct():
+    """Reds if an unclassifiable `produces` row falls through to "correct" (N6).
+
+    #14691 review (5th cycle, N6): `orientation = "INVERTED" if
+    src_kind_is_an_agent else "correct"` graded a row whose `src_kind` the scorer
+    could not read as CORRECT, so ONE unreadable row moved
+    `asymmetric_rows_correct` 7 -> 8 — inside the tally A2's verdict is read from.
+    Measured: reverting that line left the whole suite green, because the committed
+    artifact happens to carry no unreadable row — which is exactly why the arm has
+    to construct one instead of reading the artifact.
+    """
+    module = _load_score_module()
+    baseline = module.a2_edges()["totals"]
+    assert baseline["asymmetric_rows_unclassifiable"] == 0, baseline
+    row = {"doc": "test", "predicate": "produces", "write_path": "test",
+           "src_id": "UNKNOWN-SRC", "dst_id": "UNKNOWN-DST",
+           "src": "unknown-src", "dst": "unknown-dst",
+           "src_kind": "", "dst_kind": ""}
+    module.EDGES.append(row)
+    try:
+        mutated = module.a2_edges()["totals"]
+    finally:
+        module.EDGES.pop()
+    assert mutated["asymmetric_rows_unclassifiable"] == 1, (
+        "a `produces` row whose src_kind this scorer cannot read was graded "
+        "instead of being reported UNCLASSIFIABLE")
+    assert mutated["asymmetric_rows_correct"] == baseline["asymmetric_rows_correct"], (
+        "an unreadable row was counted into asymmetric_rows_correct")
