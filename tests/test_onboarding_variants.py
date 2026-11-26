@@ -2799,13 +2799,52 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     #            once the tools are listed run `tortoise mcp-status`.
     #     RED    the same sentence, after the splice landed in `remainder`
     # The merge therefore declines a clause whose post-`and` text opens a forward
-    # clause of its own.
+    # clause of its own — BUT ONLY WHEN THE PREDECESSOR IS NOT ITSELF A DEFERRAL.
+    # ⛔ WHETHER AN `and <opener>` HALF IS A FRESH STATEMENT OR THE SECOND CONJUNCT
+    # OF A CONDITION IS A PROPERTY OF THE PREDECESSOR, NOT OF THE HALF. Deciding
+    # from the half alone shipped a FALSE PASS one inserted word from this very
+    # commit's own declared-RED row (#14679 review at `ed87479fbb05`, measured):
+    #
+    #     RED    Restart your client after confirming the config is right, and
+    #            the tools are actually there.
+    #     GREEN  Restart your client after confirming the config is right, and
+    #            ONCE the tools are actually there.        ← must be RED
+    #
+    # and it reds the un-conjoined twin (`Restart your client once the tools are
+    # actually there.`), so the two differ only by which side of the comma the
+    # same words sit on. `_CONDITION_LEAD_RE` therefore keeps the merge when the
+    # predecessor opened a deferral/condition — which is exactly the
+    # config-conjunction case the merge exists for (`:2521`'s recorded mechanism)
+    # — and declines it only for a plain predecessor, where the `and <opener>`
+    # really is a new forward statement.
+    # ⛔ AND THE TEST READS A DECORATION-FREE COPY. `lstrip(_PRE_CUE_PREFIX)`
+    # strips only LEADING decoration, so `**and**` became `and**`, `^and\b`
+    # passed and the lookahead's `\s+` did not — the clause merged and the false
+    # red this commit removes came straight back, byte-identical, on a one-markdown
+    # edit (measured). `_SEQUENCER_TAIL_RE` and form (f) already search a
+    # `_DECORATION_RE`-free copy for this reason; this was the one site that did
+    # not.
     _AND_CONTINUATION_RE = re.compile(
         r"(?i)^and\b(?!\s+(?:then|once|when|after|next|afterwards?|now)\b)")
+    _CONDITION_LEAD_RE = re.compile(
+        r"(?i)^[\s,.;:—–-…('\"`*>#_\[\]{}]*"
+        r"(?:after|before|once|when|whenever|if|unless|until|having|while)\b")
     merged: list[str] = []
     for clause in post_clauses:
-        if merged and _AND_CONTINUATION_RE.match(
-                clause.lstrip(_PRE_CUE_PREFIX)):
+        # ⛔ THE TWO CASES ARE NOT SYMMETRIC. A clause that opens a forward
+        # clause of its own is DECLINED only when its predecessor is a plain cue
+        # clause; when the predecessor ITSELF opened a condition (`after …`), the
+        # `and <opener>` half is the second conjunct of that condition and MUST be
+        # merged, or the forward-sequencer skip drops it and the config-conjunction
+        # row this file pins goes GREEN (measured — six rows flip).
+        bare_clause = _DECORATION_RE.sub(" ", clause).lstrip(_PRE_CUE_PREFIX)
+        opens_its_own_forward = not _AND_CONTINUATION_RE.match(bare_clause)
+        predecessor_is_a_condition = bool(
+            merged and _CONDITION_LEAD_RE.match(
+                _DECORATION_RE.sub(" ", merged[-1])))
+        if (merged and re.match(r"(?i)^and\b", bare_clause)
+                and (not opens_its_own_forward
+                     or predecessor_is_a_condition)):
             merged[-1] = f"{merged[-1]}, {clause}"
         elif (merged
                 # ⛔ SEARCH A DECORATION-FREE COPY. The tail anchor is `$`, so a
@@ -4407,6 +4446,19 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # the config-scope rule still sees both halves.
     ("Restart your client after confirming the config is right, and the tools "
      "are actually there.", True),
+    # ── CYCLE 41 (#14679's review at `ed87479fbb05`): declining the merge from the
+    # `and`-half's OWN opener shipped a FALSE PASS one inserted word from the row
+    # above — whether that half is a fresh statement or the SECOND CONJUNCT of a
+    # condition is a property of the PREDECESSOR. It also came straight back on a
+    # one-markdown edit (`**and** once`), because the test read the raw clause.
+    ("Restart your client after confirming the config is right, and once the "
+     "tools are actually there.", True),
+    ("Restart your client after confirming the config is right, and when the "
+     "tools are actually there.", True),
+    ("Restart your client after confirming the config is right, **and** the "
+     "tools are actually there.", True),
+    ("Restart your client seeing no errors in the log, **and** once the tools "
+     "appear run `tortoise mcp-status --live`.", False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
