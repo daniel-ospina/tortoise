@@ -19300,11 +19300,11 @@ async def org_alerts(org_id: str, user: dict = Depends(get_current_user)):  # no
     the appeal path (scoping delta 12).
 
     #10156: each entry carries `register` ("alert" = something happened, or
-    "activity" = a detector measured a rate and changed nothing), `count` and
+    "activity" = a detector measured a rate and disabled nothing), `count` and
     `first_at` (one row per sustained BOUT, not per detector window), `acked`,
     and the opaque `episode` key the acknowledgement route takes. The panel
-    renders the two registers separately and can say "nothing was changed"
-    only because the register travels with the row.
+    renders the two registers separately and can say "nothing was disabled,
+    throttled or locked by them" only because the register travels with the row.
 
     ``scan_saturated`` says the scan was cut. It is NOT a per-row flag (that is
     ``truncated``): it exists for the empty-feed case, where there is no row to
@@ -24930,6 +24930,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # count. Conservative over-count when turns dedupe is accepted (the
             # dedup check runs inside the SDK write; recounting here would cost a
             # second query).
+            #
+            # #14687: this expression is PAYLOAD SIZE, not a request count, so it
+            # is unbounded by construction — the per-REQUEST cap that bounds the
+            # contribution lives in ``AbuseEngine.record_point_create`` (the entry
+            # point every recorder shares, including the MCP path), not here.
+            # Do not add a second cap at this call site: two bounds would drift.
             await _abuse_record_points(_audit_request, org, len(body.conversation) + len(extracted))
 
         # #1727 Slice 2 (Task 12, T1-P15): entity-linking pass — Session +
@@ -55261,7 +55267,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (727 distinct)
+# ABSOLUTE line number from 208 tracked files (729 distinct)
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
