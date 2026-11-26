@@ -124,6 +124,10 @@ def test_a_saturated_capture_is_accepted_with_a_status_address(
     assert payload["status"] == "accepted"
     assert payload["extraction"]["phase"] == "queued"
     assert payload["extraction"]["outcome_known"] is False
+    # ⛔ #14707 review P3: the client's "outcome never recorded" net reads the
+    # TOP-LEVEL marker (`capture_spool.UNRECORDED_OUTCOME_KEY`), so a nested-only
+    # `outcome_known` left a queued turn without the client-side net.
+    assert payload["extraction_outcome"] == "unknown", payload
     assert payload["status_url"] == "/v1/sessions/s1"
     assert payload["intake"]["item_id"]
     assert payload["intake"]["session_id"] == "s1"

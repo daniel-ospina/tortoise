@@ -1909,6 +1909,14 @@ def _capture_intake_ack(body, org: dict, acceptance,
     retry), which is the point — the turn is now ours, durably.
     """
     now = datetime.now(UTC).isoformat()
+    # ⛔ THE SAME CLIENT MARKER THE #14261 ACK CARRIES (#14707 review P3).
+    # Without it the queued capture's body says `outcome_known` only NESTED, and
+    # the client's "outcome never recorded" net reads the TOP-LEVEL
+    # `capture_spool.UNRECORDED_OUTCOME_KEY` — so a queued turn lost the client
+    # -side net while the server-side one has the restart hole `#14712` records.
+    from tortoise.capture_spool import UNRECORDED_OUTCOME_KEY as _UNRECORDED_KEY
+    from tortoise.capture_spool import UNRECORDED_OUTCOME_VALUE as _UNRECORDED_VALUE
+
     extra = {
         "session_id": session_id,
         "turns": len(body.conversation),
@@ -1929,6 +1937,8 @@ def _capture_intake_ack(body, org: dict, acceptance,
             "phase": "queued",
             "queued": True,
         },
+        # the client's OWN marker for "the server has not said either way"
+        _UNRECORDED_KEY: _UNRECORDED_VALUE,
         "status_url": f"/v1/sessions/{session_id}",
         "intake": acceptance.as_payload(),
     }
@@ -2065,7 +2075,7 @@ async def _capture_intake_sweep(interval: float) -> None:
     ⚠️ STATED RESIDUAL: a tenant with queued rows and NO traffic at all after a
     restart is still not resumed by this process, because the rows are
     tenant-scoped (there is no global scan) and enumerating every tenant needs an
-    org-dict builder this lane does not have. Tracked in `#14734`.
+    org-dict builder this lane does not have. Tracked in `#14712`.
     """
     while True:
         await asyncio.sleep(interval)
@@ -2298,10 +2308,16 @@ async def _capture_intake_defer_sync(org: dict, item, error: str,
     sdk = None
     try:
         sdk = await asyncio.to_thread(_data_sdk, org)
-        queue = _capture_intake_for_proj(sdk._get_proj())
+        # ⛔ `_get_proj()` inside the lambda, never on the loop: it opens/attaches
+        # the sync FalkorDB client (#3718/#4660), and `asyncio.to_thread` is the
+        # short-call seam the sibling settles (`fail`, `park`) already use.
         if delay_s is None:
-            return await asyncio.to_thread(queue.defer, item, error)
-        return await asyncio.to_thread(queue.defer, item, error, delay_s)
+            return await asyncio.to_thread(
+                lambda: _capture_intake_for_proj(sdk._get_proj()).defer(
+                    item, error))
+        return await asyncio.to_thread(
+            lambda: _capture_intake_for_proj(sdk._get_proj()).defer(
+                item, error, delay_s))
     except Exception:  # noqa: BLE001 - a failed settle must not mask the fault
         _logger.exception("capture intake item %s could not be deferred",
                           item.item_id)
@@ -55734,7 +55750,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (727 distinct
+# ABSOLUTE line number from 209 tracked files (733 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

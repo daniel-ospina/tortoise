@@ -28,6 +28,13 @@ parking lot is not a second store; **it is undelivered work**.
 
 ## 1. The map — every writer, queue, sink, drain and retry path
 
+**⚠️ Code citations — revision pin (#14707 review P3).** Every `file.py:NNNN` reference in this document was
+written against the tree this plan was drafted in, and it DRIFTED before the code landed (`:22793` is the
+route's `:23135` here, `:24112` is the tail's `:24112`-equivalent moved, and the intake door inserted ~370
+lines above them). Follow STORAGE-ARCHITECTURE's rule: **the symbol name is authoritative, the line number is
+a convenience.** Read `POST /v1/sessions` / `_reserve_capture_slot` / `_capture_session_impl` /
+`_capture_intake_*` by name, never by number.
+
 ### 1.1 The producers (two, and they are being reduced to one)
 
 | Producer | Writes | When | Where it is decided |
@@ -124,8 +131,15 @@ being accepted.**
 `SessionRequest` payload, `state`, `enqueued_at`, `attempts`, `item_id` — written at the door, drained
 by a worker, deleted only after the item reaches a terminal state.
 
-**Why:** the record is the system of record (STORAGE-ARCHITECTURE §2.0), so the hand-off is durable by
-the same rule that makes a capture durable; the row costs disk, not RAM (the payload is up to ~2.5 MB —
+**Why:** the record is the system of record (STORAGE-ARCHITECTURE §2.0). ⛔ **CORRECTION (#14707 review P1): the row as built does NOT land
+in the record.** It lands in the tenant's GRAPH — the derived hot cache — through the projection's handle,
+which is the same substrate `batch_ingest.GraphBatchStore` uses. So it survives the ACCEPTING PROCESS (a
+restart, a deploy, a dead drain task: the failure the client's in-line retry could not survive) and it does
+**not** survive a graph rebuild/re-provision, which drops every queued row while the client has already
+pruned its spool copy on our 2xx. This D1's original sentence — "durable by the same rule that makes a
+capture durable" — was FALSE: a capture is durable because the RECORD holds it. Record-backing the row
+(declared record type + `supabase/migrations/` + journal append) is **`#14712`**, and until it lands the
+guarantee above is the one the code actually provides. The row costs disk, not RAM (the payload is up to ~2.5 MB —
 500 turns × 5 000 chars — which is precisely why the current code refuses rather than queues: *"every
 later capture then waits forever while holding its stored-window transcript (~2 MBs) on a 4 GB VM"*,
 `hosted_api.py:420`). Same shape as `batch_ingest.GraphBatchStore`, deliberately.
@@ -155,10 +169,13 @@ captured more than once.
 ### D3 — Backpressure by depth, and what happens at the ceiling
 
 **Chosen:** the ceiling is a **depth**, not a refusal, and **it never refuses**. `_CAPTURE_QUEUE_MAX_DEPTH`
-(default 512) is a *pacing* threshold: below it the drain runs at `_CAPTURE_MAX_IN_FLIGHT`; at or above
-it the drain keeps running (nothing is dropped) and the condition is **published** (`intake_depth`,
-`intake_oldest_age_s` in `/health`, `intake.depth` in every 202) so the shape is visible instead of
-turning into a 429 the agent cannot act on.
+(default 512) is a **PUBLISHING** threshold: below it the drain runs at `_CAPTURE_MAX_IN_FLIGHT`; at or above
+it the drain keeps running (nothing is dropped) and the condition is **published** (`intake.over_depth` in the
+202 and in `/health`'s `intake` block) so the shape is visible instead of turning into a 429 the agent cannot
+act on. ⛔ **What bounds intake GROWTH is the door's per-org ingest window** (`commit_ingest_admit`, charged in
+the entry-gate preflight BEFORE the accept is written — see §4), not this number: an earlier revision of this
+D3 called the threshold "pacing" while nothing read it except an `over_depth` flag, i.e. no bound of any kind
+(#14707 review P3).
 
 **Why a queue depth and not a byte budget as the trigger:** depth is the thing that predicts latency;
 bytes are bounded by `BATCH_MAX_INLINE_BYTES`-style request limits already enforced at the door. Both
@@ -207,19 +224,25 @@ extraction tokens).
 
 ```
 POST /v1/sessions
-  ├─ gates that are about the ENTRY (402 quota, 402 cohort, 403 scope, 409 same-session) — unchanged
+  ├─ gates that are about the ENTRY (403 scope, 409 recording/off, 400 turn cap, 402 quota,
+  │  402 cohort, 429 per-org ingest window) — unchanged, and they run BEFORE the accept
   ├─ slot free ─────────────────────────────► today's path (record + in-window extraction, 200)
   └─ slot saturated
-        ├─ write :CaptureIntake row (payload, state=queued)   ← durable, system of record
+        ├─ RUN THE ENTRY GATES FIRST (`_capture_session_impl(gate_only=True)`, same impl,
+        │  stops at the first-write boundary): a 402/409/400/429 the caller must act on keeps
+        │  its refusal — it is NOT converted into an acceptance
+        ├─ write :CaptureIntake row (payload, state=queued)   ← survives the process, NOT a rebuild (#14712)
         └─ 202 accepted + status_url + intake{item_id, position, depth}
 
-intake worker (asyncio task, started at app startup)
+intake worker (asyncio task; kicked by an accept, and by a 60 s sweep over tenants this
+               process has served)
   ├─ claim oldest queued row (state → extracting, attempts+1)
-  ├─ acquire a capture slot  ← the ONLY consumer of the ceiling
-  ├─ re-enter _capture_session_impl(..., deferred_resume=True)
+  ├─ acquire a capture slot WITH THE SESSION KEY (#3129's duplicate-session guard), bounded wait
+  ├─ re-enter _capture_session_impl(..., deferred_resume=True, ingest_charged=True)
   │     └─ the same record/extract/report path; no second extraction implementation
-  └─ terminal → delete the row; failure → state=queued with backoff, attempts bounded,
-     and past the bound state=failed (visible in /health and on the session's status_url — never deleted)
+  └─ terminal → delete the row; TRANSIENT fault (capacity, same-session in flight, store 503)
+     → requeue with NO attempt charged; VERDICT (402/409/400/422) → park `failed` at once,
+     visible; unclassifiable → requeue with backoff up to the attempt bound
 ```
 
 `deferred_resume=True` exists for exactly one hazard: a capture that was **recorded** and then abandoned
@@ -246,15 +269,14 @@ already makes for a cancelled request, extended to a queued one.
 ## 6. Evidence this plan owes, and where it lands
 
 | Claim | Evidence |
-|---|---|
-| a burst past the old ceiling is accepted, not refused | one test: N concurrent captures against a pinned ceiling of 4, **all 2xx**, none 429 |
+|---|---|| a burst past the old ceiling is accepted, not refused | one test: N concurrent captures against a pinned ceiling of 4, **all 2xx**, none 429 |
 | every accepted turn is eventually processed | the same test: N in, N out, count published |
 | nothing is lost on a mid-flight kill | a test that kills the drain between accept and process, then drains again: N in, N out |
-| per-item status is answerable | `GET /v1/sessions/{id}` returns phase `queued` while the item waits |
-| the queue is bounded by depth, published | `/health` exposes `intake_depth` + `intake_oldest_age_s` |
+| per-item status is answerable | `GET /v1/sessions/{id}` returns phase `queued` while the item waits — **delivered**: the route consults the tenant's queue when no `:Session` exists yet, so the 202's `status_url` does not 404 for the whole queued period |
+| the queue is bounded by depth, published | `/health` publishes `intake: {enabled, accepted, completed, failed}` — **counters only, and restated here** (#14707 review P3): a deploy-wide DEPTH would have to scan every tenant's graph on a health path that collects no I/O, and rows are tenant-scoped, so the depth an operator can read for free is the 202's `intake.depth`/`over_depth` and the tenant's own status address. This table previously promised `intake_depth`/`intake_oldest_age_s` on `/health`; that promise is withdrawn, not quietly dropped |
+| the intake survives a rebuild | **NOT DELIVERED — `#14712`.** The row lives in the graph (the derived cache), so a rebuild drops it while the client has pruned its copy |
 
 ## 7. What this plan explicitly does NOT do
-
 - It does **not** drain the 17 894 parked records (gated on `#14691`, D4).
 - It does **not** change the MCP or SDK surface (D5).
 - It does **not** change extraction quality, the extractor lane, or the token meter.

@@ -261,7 +261,84 @@ def test_the_queue_label_is_a_single_constant_used_by_every_statement():
     cyphers = [
         mod._CLAIM_CYPHER, mod._PUT_CYPHER, mod._COMPLETE_CYPHER,
         mod._RELEASE_CYPHER, mod._DEPTH_CYPHER, mod._OLDEST_CYPHER,
-        mod._ROWS_CYPHER, mod._RECLAIM_STALE_CYPHER,
+        mod._ROWS_CYPHER, mod._RECLAIM_STALE_CYPHER, mod._SESSION_CYPHER,
     ]
     for cypher in cyphers:
         assert f":{CAPTURE_INTAKE_LABEL}" in cypher
+
+
+# ── #14707 review P3: `position` is the depth AHEAD of the item ────────────
+
+def test_position_is_the_depth_ahead_of_the_item_not_including_it():
+    """`position` was read AFTER `put()`, so it included the item itself.
+
+    D2 publishes `position` as "the queue depth ahead of it" — the only honest
+    ETA we have — and an empty queue's first item answered `position: 1` with
+    `depth: 1`. Both numbers are now read from the same pre-put depth.
+    """
+    q, _store, _ = _queue()
+    positions = [
+        q.accept(org_id="o1", graph=None, session_id=f"s{i}",
+                 payload={}).position
+        for i in range(3)
+    ]
+    assert positions == [0, 1, 2], (
+        f"positions must be the depth AHEAD of each item (got {positions})")
+    acc = q.accept(org_id="o1", graph=None, session_id="s3", payload={})
+    assert acc.position == 3 and acc.depth == 4, (
+        "`position` is ahead-of-it; `depth` counts it (got "
+        f"position={acc.position} depth={acc.depth})")
+
+
+# ── #14707 review P1/P2: a transient fault must not spend an attempt ───────
+
+def test_defer_requeues_without_charging_an_attempt():
+    """⛔ A CONDITION is not the item's fault.
+
+    `fail()` exists for the attempt bound; `defer()` is for capacity, a
+    same-session capture in flight, our own store answering 503. Counting those
+    against `CAPTURE_INTAKE_MAX_ATTEMPTS` turns a busy box into a `failed` row,
+    i.e. a lost turn.
+    """
+    q, store, clock = _queue()
+    q.accept(org_id="o1", graph=None, session_id="s1", payload={})
+    for _ in range(CAPTURE_INTAKE_MAX_ATTEMPTS + 2):
+        item = q.next_item()
+        assert item is not None, "a deferred item must stay claimable"
+        assert item.attempts == 1, (
+            "the claim's attempt must be REFUNDED by the defer — otherwise "
+            f"repeated transients exhaust the item (attempts={item.attempts})")
+        state = q.defer(item, "capacity")
+        assert state == IntakeState.QUEUED.value
+        clock.advance(3600)
+    assert store.rows(state=IntakeState.FAILED.value) == []
+    assert q.stats()["failed"] == 0
+
+
+def test_park_fails_immediately_on_a_verdict_that_cannot_change():
+    """A 402/409/400 verdict does not become answerable by waiting."""
+    q, store, clock = _queue()
+    q.accept(org_id="o1", graph=None, session_id="s1", payload={})
+    item = q.next_item()
+    assert q.park(item, "402 quota") == IntakeState.FAILED.value
+    parked = store.rows(state=IntakeState.FAILED.value)
+    assert len(parked) == 1
+    assert parked[0].last_error == "402 quota"
+    assert parked[0].attempts == 1, "parking does not refund — it was a real try"
+    assert q.stats()["failed"] == 1
+
+
+# ── #14707 review P2: the 202's status address reads the queue ─────────────
+
+def test_queued_for_session_answers_the_live_row_and_ignores_a_parked_one():
+    q, store, clock = _queue()
+    q.accept(org_id="o1", graph=None, session_id="s1", payload={})
+    q.accept(org_id="o1", graph=None, session_id="s2", payload={})
+    found = store.queued_for_session("s1")
+    assert found is not None and found.session_id == "s1"
+    assert store.queued_for_session("nope") is None
+    # a PARKED row is not "queued": the status address must not claim a turn is
+    # still coming when it has been given up on.
+    item = q.next_item()
+    q.park(item, "402 quota")
+    assert store.queued_for_session(item.session_id) is None

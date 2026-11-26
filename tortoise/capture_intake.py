@@ -31,7 +31,7 @@ replay rebuilds `:CaptureIntake` from NOTHING: no journal record describes this
 node, so `tortoise-rebuild` (a documented recovery path) DROPS every queued row
 while the client has already pruned its spool entry on our 2xx. That is real
 loss, and it is the same residual `:Batch` rows carry today — it is stated here,
-in the plan's D1, and tracked as its own issue (`#14734`) rather than described
+in the plan's D1, and tracked as its own issue (`#14712`) rather than described
 as "durable by the same rule that makes a capture durable", which was FALSE:
 a capture is durable because the RECORD holds it.
 
