@@ -1807,7 +1807,18 @@ _PRE_CUE_ONLY = _inversion_form(
     # exists to catch: "First confirm the tools are actually there. Restart …"
     # was GREEN (measured) while its unadorned twin was RED, and so was
     # "Please first confirm …" — one inserted word defeated the whole form.
-    r"^(?:please\s+)?(?:(?:first(?:ly)?|also|just)\s*,?\s+)?"
+    # ⛔ AND A MODAL SUBJECT IS THE SAME ONE-INSERTED-WORD DEFECT, one class over.
+    # The predicate (`confirm`) and object are already in the graded vocabulary;
+    # only the mood differs, so "You must confirm the tools are actually there.
+    # Restart …" stayed GREEN while its `Please`/`First`/`Confirm` twins are
+    # declared RED rows (measured, #14679 review at `2ce284961b`, which also
+    # measured `You must confirm … , then restart your client` end-to-end on the
+    # real doc as a false PASS). `make sure to` / `be sure to` are the same
+    # instruction; "after making sure the tools …" remains a DECLARED residual
+    # of form (a), not of this slot.
+    r"^(?:(?:please|kindly)\s+)?(?:(?:first(?:ly)?|also|just)\s*,?\s+)?"
+    r"(?:(?:you\s+)?(?:must|should|need\s+to|have\s+to|can|could|will)\s+"
+    r"|be\s+sure\s+to\s+|make\s+sure\s+to\s+)?"
     r"(?:"
     # (f.1) `list` takes the tools THEMSELVES as its object, so there is no
     # document it could be pointing at and no predicate to require:
@@ -2346,20 +2357,30 @@ def _negated_observation_only(clause: str) -> bool:
 # then …"), so a subordinator later in it is not a deferral of the restart.
 _FORWARD_SEQUENCER_RE = re.compile(r"^(?:then|and|next|afterwards?)\b", re.IGNORECASE)
 
-# ⛔ A CLAUSE THAT IS NOTHING BUT A SEQUENCER SEQUENCES THE CLAUSE BEFORE IT —
-# it says nothing itself. `_FORWARD_SEQUENCER_RE` above answers "does this
-# clause move forward"; this one answers "does this clause have a verb at all",
-# which is a different question and the one the PRE-cue side was missing.
-# Before this existed, the pre-cue side graded `[-1:]` unconditionally, so the
-# fragment that survived was the literal `then` and no form could match it: the
-# most natural English rendering of the very inversion the pin exists to catch —
-# "Confirm the tools are actually there, then restart your client" — was GREEN
-# at `5c6dda9dc3` (measured, and its `.` and `;` twins with it). The post-cue
-# side already had this machinery (`_SEQUENCER_TAIL_RE`); this is its pre-cue
-# counterpart, and `_cue_governing_clause` is what consumes it.
-_BARE_SEQUENCER_RE = re.compile(
-    r"^(?:and\s+)?(?:then|next|afterwards?|also|and)\b[\s,]*$",
-    re.IGNORECASE)
+# ⛔ A PRE-CUE FRAGMENT IS A CLAUSE WITH NO CONTENT WORD IN IT — not a clause
+# that matches a sequencer LIST. The first cut of this was
+# `^(?:and\s+)?(?:then|next|afterwards?|also|and)\b[\s,]*$`, i.e. a closed token
+# list, and #14679's review at `2ce284961b` measured what that costs: ONE INSERTED
+# WORD defeated it end-to-end on the real doc —
+#
+#     Confirm the tools are actually there, then PLEASE restart your client.   GREEN
+#     Confirm the tools are actually there, ONLY THEN restart your client.    GREEN
+#     Confirm the tools are actually there, then YOU MUST restart …           GREEN
+#     Confirm the tools are actually there, AFTER WHICH restart …             GREEN
+#
+# none of those fragments contains a verb, which is the property that makes it a
+# fragment — so the test is now that every word belongs to the closed class of
+# words that carry no imperation on their own (sequencers, restrictives,
+# courtesy, modal subjects, pronouns, subordinators). `Then`, `Then please`,
+# `only then`, `then you must`, `After which`, `Before you` are all fragments by
+# this test; `Delete the old entry`, `Then confirm the tools …` and
+# `Be sure to confirm the tools …` are not, because `delete` / `confirm` are not
+# in the class.
+_SEQUENCER_FRAGMENT_RE = re.compile(
+    r"^(?:\s*(?:then|next|afterwards?|which|only|just|also|and|but|so|please"
+    r"|kindly|you|we|must|should|need|needs|have|has|to|be|sure|make|makes"
+    r"|first|firstly|now|once|finally|lastly|subsequently|still|too"
+    r"|before|after|until|prior|when)\b\s*,?\s*)+$", re.IGNORECASE)
 
 # ⛔ A CUE GOVERNED BY A TEMPORAL SUBORDINATE INVERTS WHAT FOLLOWS IT. In
 # "Before you restart your client, confirm the tools are actually there" the
@@ -2565,13 +2586,17 @@ def _restart_cue_order_violation(quick: str) -> str | None:
 
 
 def _cue_governing_clause(statements: list[str]) -> list[str]:
-    """The clause that GOVERNS the cue: the last one with a verb in it.
+    """The clause that GOVERNS the cue: the last one that carries content.
 
-    A clause that is not nothing but a sequencer (`then`, `and then`, `next`,
-    `afterwards`, `also`) is a fragment, not an instruction — `_BARE_SEQUENCER_RE`
-    — so grading it reads the fragment and misses the imperative it sequences.
-    Walking back is what makes the pre-cue side symmetric with the post-cue side,
-    which has carried `_SEQUENCER_TAIL_RE` for the same reason.
+    A clause with no content word in it — only sequencers, restrictives,
+    courtesy, modal subjects, pronouns and subordinators (`then`, `only then`,
+    `then please`, `then you must`, `after which`, `before you`) — is a
+    FRAGMENT, not an instruction. Grading it reads the fragment and misses the
+    imperative it sequences, which is how one inserted word re-opened the false
+    PASS: `_SEQUENCER_FRAGMENT_RE` is the test, and it is a class rather than a
+    list on purpose (#14679's review at `2ce284961b`, measured). Walking back is
+    what makes the pre-cue side symmetric with the post-cue side, which has
+    carried `_SEQUENCER_TAIL_RE` for the same reason.
 
     ⛔ THE WALK CROSSES A STATEMENT BOUNDARY, and it must: `.`/`;` are statement
     breaks, so in "Confirm the tools are actually there. Then restart your
@@ -2594,7 +2619,7 @@ def _cue_governing_clause(statements: list[str]) -> list[str]:
         # GREEN while its bare twin is RED (measured — the verdict turns on a
         # markdown marker, which is the failure mode `_PRE_CUE_PREFIX` exists to
         # close).
-        elif _BARE_SEQUENCER_RE.match(
+        elif _SEQUENCER_FRAGMENT_RE.match(
                 _DECORATION_RE.sub(" ", clause_lists[-1][-1])):
             clause_lists[-1].pop()
         else:
@@ -3892,7 +3917,7 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # `5c6dda9dc3` — measured end-to-end on the real `docs/quickstart-cloud.md`,
     # rewording only line 135: each one left the doc-level test PASSING. The
     # post-cue side had this machinery (`_SEQUENCER_TAIL_RE`); the pre-cue side
-    # has `_BARE_SEQUENCER_RE` + `_cue_governing_clause` now.
+    # has `_SEQUENCER_FRAGMENT_RE` + `_cue_governing_clause` now.
     ("Confirm the tools are actually there, then restart your client.", True),
     ("Confirm the tools are actually there, **then** restart your client.", True),
     ("Confirm the tools are actually there, and then restart your client.", True),
@@ -3927,10 +3952,13 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Before you start; restart your client, confirm the tools are actually "
      "there.", False),
     # (3) the ONE-WORD twins of the declared-RED "…, then restart …" row, which
-    # no row pinned: removing `and|also|next|afterwards` from
-    # `_BARE_SEQUENCER_RE` flipped 0 declared rows while making each of these
-    # GREEN, so a future dead-arm sweep on this file's own stated ground would
-    # have silently re-opened the false PASS:
+    # no row pinned: the sequencer test this file shipped at that point flipped 0
+    # declared rows while making each of these GREEN, so a future dead-arm sweep
+    # on this file's own stated ground would have silently re-opened the false
+    # PASS. (That test was `_BARE_SEQUENCER_RE`, a closed token list; it is
+    # `_SEQUENCER_FRAGMENT_RE` now — a word-class test, because the list form was
+    # itself defeated by one inserted word — and these rows pin the member words
+    # either way.)
     ("Confirm the tools are actually there, and restart your client.", True),
     ("Confirm the tools are actually there. Also restart your client.", True),
     ("Confirm the tools are actually there, next restart your client.", True),
@@ -3950,6 +3978,42 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Before you restart your client, confirm the config is written.", False),
     ("Restart your client, before confirming the tools are actually there.",
      False),
+    # ── CYCLE 35 (#14679's review at `2ce284961b`): the fragment test was a
+    # sequencer TOKEN LIST, so ONE INSERTED WORD re-opened the false PASS the
+    # cycle-34 fix had just closed — measured end-to-end on the real doc, all
+    # four PASSING both doc-level asserts. `_SEQUENCER_FRAGMENT_RE` is now the
+    # class test its comment always claimed (a clause with no content word is a
+    # fragment), and these are its rows:
+    ("Confirm the tools are actually there, then please restart your client.",
+     True),
+    ("Confirm the tools are actually there, only then restart your client.",
+     True),
+    ("Confirm the tools are actually there, then you must restart your "
+     "client.", True),
+    ("Confirm the tools are actually there, after which restart your "
+     "client.", True),
+    # …and the OTHER half is the modal subject on the imperative itself: form
+    # (f)'s leading slot admitted only courtesy + adverbs, so the canonical
+    # two-sentence inversion stayed GREEN behind `You must`:
+    ("You must confirm the tools are actually there. Restart your client, "
+     "then run a query.", True),
+    ("You should confirm the tools are actually there. Restart your client, "
+     "then run a query.", True),
+    ("You need to confirm the tools are actually there. Restart your client, "
+     "then run a query.", True),
+    ("Be sure to confirm the tools are actually there. Restart your client, "
+     "then run a query.", True),
+    ("You must confirm the tools are actually there, then restart your "
+     "client.", True),
+    # ⛔ …and the same slot must NOT red forward copy: a modal subject that
+    # carries no tools-presence claim, or a fragment whose preceding clause
+    # carries none, is not an inversion.
+    ("You must save the config file. Restart your client, then confirm the "
+     "tools are actually there.", False),
+    ("You must restart your client, then confirm the tools are actually "
+     "there.", False),
+    ("Delete the old entry, after which restart your client, then confirm the "
+     "tools are actually there.", False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
