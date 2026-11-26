@@ -5461,9 +5461,12 @@ function claimIntentInFlight() {
         // written against them land in the NEW org's key. Same guard discipline
         // as the members/graphs loaders.
         //
-        // ⛔ CAPTURE-AND-COMPARE, the same `_teamAtCall` idiom loadAll,
-        // loadGraphs, loadRepos and loadBranches already use — NOT a comparison
-        // of the live ref against `tid`. Two earlier forms were both wrong, and
+        // ⛔ CAPTURE-AND-COMPARE, the same `_teamAtCall` idiom loadAll, loadRepos
+        // and loadBranches already use — NOT a comparison of the live ref against
+        // `tid`. (`loadGraphs` deliberately compares the live ref against its own
+        // `orgId` PARAMETER instead; that is correct there and only there, because
+        // its callers always pass the current org. `loadAlerts`' wizard caller
+        // does not, which is exactly why it must capture.) Two earlier forms were both wrong, and
         // this replaces both:
         //
         //  * `orgIdRef.current !== tid` wrongly DISCARDS a legitimate read when

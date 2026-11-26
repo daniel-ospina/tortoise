@@ -18,6 +18,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { stripComments } from './testSupport.js'
 import {
   ACTIVITY_HEADING,
   ACTIVITY_LEAD,
@@ -426,11 +427,21 @@ test('#14686: an in-flight alerts read cannot land on the wrong Organization', (
   const start = main.indexOf('async function loadAlerts')
   assert.ok(start !== -1, 'loadAlerts must exist in main.jsx')
   const end = main.indexOf('\n  }', start)
-  const body = main.slice(start, end)
+  // ⛔ STRIPPED, not raw. Every assertion below is about CODE, and two of them are
+  // `doesNotMatch` — run against the raw slice, a COMMENT that merely quotes an
+  // old form reds them. That is not hypothetical: the capture-ordering assertion
+  // here once matched "await" inside its own explanatory comment, and the strings
+  // at risk are the ones the commit message quotes verbatim, i.e. exactly what a
+  // future editor transcribes into the function. `stripComments` is the repo's own
+  // quote-aware stripper (testSupport.js), already used by overview.test.js.
+  const body = stripComments(main.slice(start, end))
   // ⛔ THE GUARD IS CAPTURE-AND-COMPARE — `_teamAtCall`, the idiom loadAll,
-  // loadGraphs, loadRepos and loadBranches already use in this file. TWO earlier
-  // forms were wrong here and this pin forbids both, because each is reachable
-  // and each has already been proposed once:
+  // loadRepos and loadBranches already use in this file. (`loadGraphs` does NOT:
+  // it compares the live ref against its own `orgId` PARAMETER, which is fine
+  // there and only there, because its callers always pass the current org —
+  // `loadAlerts`' wizard caller does not, which is the whole reason it must
+  // capture.) TWO earlier forms were wrong here and this pin forbids both,
+  // because each is reachable and each has already been proposed once:
   //
   //  * `orgIdRef.current !== tid` DISCARDS a legitimate read when no Organization
   //    is current yet. The org-creation wizard calls `loadAlerts(t.org_id)` after
@@ -447,9 +458,6 @@ test('#14686: an in-flight alerts read cannot land on the wrong Organization', (
   // and a first-org read (null -> null) is allowed.
   const captureAt = body.indexOf('const orgAtCall = orgIdRef.current')
   assert.ok(captureAt !== -1, 'loadAlerts must capture the Organization at call time')
-  // Anchor on the actual request, not on the word `await` — an earlier version of
-  // this assertion matched "await" inside this very comment and failed for the
-  // wrong reason.
   const firstRequestAt = body.search(/await fetch\(/)
   assert.ok(firstRequestAt !== -1, 'loadAlerts must still make the request')
   assert.ok(captureAt < firstRequestAt,

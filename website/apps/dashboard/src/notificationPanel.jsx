@@ -544,11 +544,19 @@ export function NotificationBell({
   //    vanished on the reader's very next click. Drawn in the panel CHROME, above
   //    the branch, so exactly one place owns it in every state — the detail inline
   //    when the detail IS that episode, the chrome otherwise.
-  const ackNote = ackError
-    && ackError.orgId === orgId
-    && (ackError.label || ackError.message)
-    && !(detailAlert && detailAlert.episode === ackError.episode)
-    ? ackError
+  // ⛔ ONE scoping, read by BOTH render sites. A refusal names an Organization,
+  // and a response still in flight when a team switch cleared the state can land
+  // afterwards — so it is discarded unless it belongs to the Organization on
+  // screen. Kept as a single value on purpose: `DetailView` used to compare only
+  // `episode`, so the same foreign refusal was suppressed in the chrome and
+  // RENDERED INLINE (review finding), and episode keys carry no Organization
+  // segment (`_episode_key` is `etype|subject|first_at` in tortoise/abuse.py), so
+  // two Organizations crossing the same rule in the same second collide.
+  const scopedAckError = ackError && ackError.orgId === orgId ? ackError : null
+  const ackNote = scopedAckError
+    && (scopedAckError.label || scopedAckError.message)
+    && !(detailAlert && detailAlert.episode === scopedAckError.episode)
+    ? scopedAckError
     : null
 
   // The badge counts UNRESOLVED notifications (not unread ones), and the label says
@@ -639,7 +647,7 @@ export function NotificationBell({
               canAcknowledge={canAcknowledge}
               onAcknowledge={onAcknowledge}
               ackPending={ackPending}
-              ackError={ackError}
+              ackError={scopedAckError}
               onBack={goBack}
               onDismiss={handleDismiss}
             />

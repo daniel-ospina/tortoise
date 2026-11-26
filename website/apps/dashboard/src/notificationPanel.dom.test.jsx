@@ -927,6 +927,34 @@ test('#14686: a refusal does not follow the reader into another Organization', (
     'the same refusal must render on the Organization it belongs to')
 })
 
+test('#14694: a foreign refusal does not render INLINE either (the detail view)', () => {
+  // The gate above covered the chrome. `DetailView` compared only `episode`, so
+  // the SAME foreign refusal was suppressed above and rendered inline — and
+  // episode keys carry no Organization segment (`_episode_key` is
+  // `etype|subject|first_at`), so two Organizations crossing the same rule in the
+  // same second produce equal episode strings. A refusal that says "Only an owner
+  // or admin can acknowledge an alert" must not appear against a reader who very
+  // likely can.
+  const shared = alert({ label: 'collided episode' })
+  const { container } = renderBell({
+    alerts: [shared],
+    orgId: 'org-2',
+    canAcknowledge: true,
+    onAcknowledge: () => {},
+    ackError: {
+      episode: shared.episode, // SAME episode string — the collision
+      orgId: 'org-1',          // …but a different Organization
+      label: 'collided episode',
+      message: 'Only an owner or admin can acknowledge an alert.',
+    },
+  })
+  fireEvent.click(bell(container))
+  fireEvent.click(container.querySelector('.notif-open'))
+  assert.ok(container.querySelector('.notif-detail'), 'precondition: the detail is open')
+  assert.doesNotMatch(container.textContent, /Only an owner or admin can acknowledge/,
+    'another Organization\'s refusal must not render inline either')
+})
+
 test('#14694: a refusal is not hidden by ANOTHER row\'s detail being open', () => {
   // Review finding 3. `DetailView` states the refusal inline only when the open
   // detail IS the episode it names. Gating the other render on "no detail is
