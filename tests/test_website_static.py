@@ -5933,34 +5933,35 @@ def _beats_whose_ground(
             # The same rule written WITHOUT the structural pseudo — the shape a
             # reset actually takes (`#beat-hero > .doc-grid { margin-top: 0 }`).
             # Its simple selector is resolved against the element the markup
-            # declares, and an EMPTY one (`#beat-hero > { … }`, unparseable) is
-            # not credited. ⛔ The class EXCLUDES `:`, so this arm can never
-            # attribute a pseudo to the WRONG end — `:first-child` is the primary
-            # arm's business, and letting it fall through here credited
-            # `margin-bottom: auto` on the first child to the last child's home
-            # (measured: the swapped-pair discriminator went GREEN).
-            #
-            # ⛔ THE LOOKAHEAD ENDS THE SELECTOR AT `:` OR `,` OR `{` — NOT at a
-            # SPACE (#14683 review cycle 6, measured). Accepting a space also
-            # accepts the DESCENDANT combinator, so a rule on a DESCENDANT of the
-            # ground was collected as a reset OF the ground and won the modelled
-            # cascade on the whole selector's specificity:
-            #
-            #     `#beat-hero > .doc-grid .hero-sub { margin-top: 0 }`  ->  RED
-            #
-            # over a page that renders identically to the shipped one: zeroing a
-            # descendant's own margin cannot touch the ground's margin, and the
-            # row's own `#beat-hero > h2` control is built on exactly that
-            # reasoning. The sibling spelling with a CHILD combinator
-            # (`> .doc-grid > .doc-copy`) was already not collected, which is what
-            # shows the space acceptance was accidental rather than a deliberate
-            # fail-closed trade. A real descendant-combinator reset of the GROUND
-            # (`> .doc-grid`) still REDs, as does a comma prelude and a
-            # `:hover`-qualified one.
-            match = re.search(rf"{subject_re}([^\s>{{:]+)(?=[:,{{]|$)",
-                              compact)
-            if match and _ground_selector_matches(match.group(1),
-                                                  sides.get(side)):
+            # ⛔ THE COMPOUND MUST BE THE WHOLE SUBJECT, and the class EXCLUDES
+            # `:` — one rule at both ends, each a measured fail-open or false RED
+            # (#14683 review cycles 4 and 6):
+            #   * excluding `:` means a pseudo is never attributed to the WRONG
+            #     end (`:first-child` is the primary arm's business; letting it
+            #     fall through credited `margin-bottom: auto` on the first child
+            #     to the last child's home — the swapped-pair discriminator went
+            #     GREEN);
+            #   * the tail after the compound must contain NO non-space
+            #     character. Accepting a SPACE accepted the DESCENDANT
+            #     combinator: `#beat-hero > .doc-grid .hero-sub { margin-top: 0 }`
+            #     was collected as a reset OF the ground and won the modelled
+            #     cascade on the WHOLE selector's specificity — RED over a page
+            #     that renders identically to the shipped one (measured: the
+            #     ground keeps `margin-top: auto`, 18.03px of shared slack,
+            #     off-centre 0.02), and the mirror image was worse: the same shape
+            #     carrying `margin-top: auto` was CREDITED as the ground's
+            #     centring home, GREEN over a hero that renders exactly like the
+            #     pair-removed control this same reader REDs. A child-combinator
+            #     sibling (`> .doc-grid > .doc-copy`) was already not collected,
+            #     which is what shows the space acceptance was accidental rather
+            #     than a deliberate trade. `> .doc-grid:hover` is dropped by the
+            #     same rule;
+            #   * `_ground_selector_matches` then decides it against the ELEMENT,
+            #     so `> .doc-grid` IS the ground and `> h2` is not.
+            match = re.search(rf"{subject_re}([^\s>{{:]+)", compact)
+            if match and not re.search(r"\S", compact[match.end():]) \
+                    and _ground_selector_matches(match.group(1),
+                                                 sides.get(side)):
                 out.append(beat)
                 break
     return out
@@ -6039,6 +6040,15 @@ def _ground_end_declaration(body: str, side: str) -> tuple[str, bool] | None:
             value = _without_important(value)
         if name in props:
             candidate: tuple[str, bool] | None = (value, important)
+        elif name == "all":
+            # ⛔ `all: initial|unset|revert|revert-layer` resets EVERY property,
+            # margins included, so it disables the centring on both ends. It was
+            # invisible (the reader looked only at the margin longhands and
+            # shorthands), leaving the guard GREEN over a beat that renders
+            # top-aligned — `all: initial` on the hero's ground measured
+            # off-centre −56.56 at 375x812 (#14683 review cycle 4, P3). No `all`
+            # value is `auto`, so every one of them is a candidate.
+            candidate = (value, important)
         elif name in _MARGIN_SHORTHANDS:
             end = _shorthand_end_value(value, side, name)
             candidate = None if end is None else (end, important)
@@ -6453,9 +6463,11 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
         and are re-measured here rather than inherited — #14683 review cycle 3,
         P3.)
 
-        and every title box at y=32 — 22.4px UNDER the fixed Login pill, whose
-        button ends at y=54.4 — for 567-1750px² of painted overlap on five of
-        the seven beats. The intro tween (`gsap.fromTo(el, { opacity: 0, y: 20 })`)
+        and every titled beat's box at y=32 — 22.4px UNDER the fixed Login
+        pill, whose button ends at y=54.4 — for 567-1750px² of painted overlap
+        on five of the seven beats. (The hero is the exception and cannot be at
+        32: its own `padding-top: 5rem` puts its h1 at 80 in this arm, so it
+        clips no pill at all.) The intro tween (`gsap.fromTo(el, { opacity: 0, y: 20 })`)
         carries the title to y=52 mid-animation, which is the 2.4px / 61-187px²
         frame the screenshots captured (#14683 review cycle 3: an earlier version
         of this paragraph quoted ONLY that frame while also saying y=52 and y=32,
@@ -6532,12 +6544,11 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
                 f"{' '.join(selector.split())} declares "
                 f"`justify-content: safe center` ({values!r}). A browser that "
                 "recognises `safe` but ignores the modifier KEEPS that "
-                "declaration and applies a plain `center` (before Chrome 115; "
-                "Safari before 17.6 drops it and inherits the base `center`), so "
-                "the alignment it is ordered after never runs and an "
-                "over-flowing beat is clipped at the top with its heading "
+                "declaration and applies a plain `center` before Chrome 115, so "
+                "the alignment it is ordered after never runs: an over-flowing "
+                "beat is pulled above its content box with its heading painted "
                 "under the Login pill. Centre the beat with `margin-*: auto` "
-                "instead — it has no such support band.")
+                "instead — it has no such support band, on any engine.")
             assert values[-1] == "flex-start", (
                 f"{PRODUCT_TEAMS_HTML.name}: the hatch for "
                 f"{' '.join(selector.split())} ends its `justify-content` at "
@@ -6835,6 +6846,77 @@ class TestShortViewportCentringIsGradedPerBlock:
         assert _short_viewport_centring_problems(page) == [], (
             "a centring pair in a WIDER max-height block was false-RED: the "
             "block fires wherever the hatch does, so the mechanism is intact")
+
+    def test_a_descendant_subject_is_not_the_ground(self):
+        """Mutant: `#beat-hero > .doc-grid .doc-copy { margin-top: auto }`.
+
+        A rule addressing a DESCENDANT of the ground is not a centring home for
+        the ground. The pseudo-free arm's lookahead accepted whitespace after the
+        compound, so the compound was attributed to `.doc-grid` anyway and the
+        row went GREEN over a hero that renders EXACTLY like the pair-removed
+        control this same reader REDs (#14683 review cycle 4, P1-adjacent P2 —
+        measured `top=80, offCentre=-12.05`, bit-identical to the control).
+        `> .doc-grid:hover` was the same shape.
+
+        The control is the legitimate case that must stay GREEN: a reset on the
+        ground's own child (`.doc-copy`) touches no margin the centring uses.
+        """
+        for subject in ("#beat-hero > .doc-grid .doc-copy",
+                        "#beat-hero > .doc-grid:hover"):
+            page = self._page(
+                hatch=self.ALIGNED_HATCH,
+                extra=(f"    {subject} {{ margin-top: auto; "
+                       f"margin-bottom: auto; }}"))
+            assert _short_viewport_centring_problems(page), (
+                f"{subject!r} addresses something other than the ground and was "
+                "credited as its centring home")
+        control = self._page(
+            hatch=self.CENTRED_HATCH,
+            extra="    #beat-hero > .doc-copy { margin-top: 0; }")
+        assert _short_viewport_centring_problems(control) == [], (
+            "a reset on the ground's descendant red the guard")
+
+    def test_the_disabling_half_of_the_asymmetry_is_pinned(self):
+        """Mutant: skip every rule inside an unmodelled condition (the cycle-2 reader).
+
+        The asymmetric ranking has two halves, and only the ENABLING one was
+        pinned. Replacing the whole `if unmodelled:` block with `continue` — the
+        cycle-2 behaviour — left every test in this class passing, while
+        `@media (max-width: 760px) { #beat-hero > :first-child { margin-top: 0 } }`
+        (which fires at 375 wide and top-aligns the hero, measured `top=80,
+        offCentre=-12.05`) was reported CLEAN: #14677 verbatim with CI green
+        (#14683 review cycle 4, P3). This case is that mutant's detector.
+
+        `@media print` is the same half in its weakest form: it cannot affect the
+        screen at all, and it is deliberately treated as a disabling candidate —
+        the declared over-block the docstring names.
+        """
+        for wrapper in ("@media (max-width: 760px) {\n%s\n}",
+                        "@media print {\n%s\n}"):
+            page = self._page(
+                hatch=self.CENTRED_HATCH,
+                extra=wrapper % (
+                    "      #beat-hero > :first-child { margin-top: 0; }"))
+            assert _short_viewport_centring_problems(page), (
+                f"a `margin-top: 0` inside {wrapper.splitlines()[0]!r} was "
+                "reported CLEAN — a disabling rule in an unmodelled condition "
+                "must be assumed to apply")
+
+    def test_an_all_reset_is_a_disabling_declaration(self):
+        """Mutant: `all: initial` on the ground — it resets the margins too.
+
+        Measured `offCentre=-56.56` on the hero at 375x812 with the row GREEN:
+        the reader looked only at the margin longhands and shorthands, so a
+        declaration that resets EVERY property was invisible (#14683 review
+        cycle 4, P3). `all: unset` / `revert` are the same.
+        """
+        for value in ("initial", "unset", "revert"):
+            page = self._page(
+                hatch=self.CENTRED_HATCH,
+                extra=(f"      #beat-hero > :first-child {{ all: {value}; }}"))
+            assert _short_viewport_centring_problems(page), (
+                f"`all: {value}` on the ground was not seen: it resets the "
+                "margins the centring depends on")
 
     def test_a_reset_that_names_the_ground_without_the_pseudo_is_red(self):
         """Mutant: `#beat-hero > .doc-grid { margin-top: 0 }` — #14677 on the hero.

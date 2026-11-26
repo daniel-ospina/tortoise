@@ -794,10 +794,11 @@
        17.6, and on a phone-facing page that is the larger exposure), so it
        KEEPS the declaration, applies it as a plain `center`, and the
        `flex-start` written above it never runs. On that band the hero would be
-       centred unsafely — its top 78.5px clipped and unreachable at scrollTop 0
-       ((687.95 copy - 531 box) / 2, measured 78.47), h1 painted 2844px² under
-       the Login pill at 375x643 — which is worse than
-       the bug being fixed. Auto margins have no support band: they absorb the
+       centred unsafely: the copy start is pulled 78.47px ABOVE its content box
+       ((687.95 - 531) / 2, measured 78.47) into the 80px `padding-top`, the h1
+       lands at y=1.53 and paints 2844px² under the Login pill at 375x643, and
+       the BOTTOM 46.5px is what is cut off at `scrollTop 0` — the overflow goes
+       both ways, which is worse than the bug being fixed. Auto margins have no support band: they absorb the
        free space when there is any and resolve to zero when there is not, which
        IS `safe center`'s predicate, in every engine.
 
@@ -819,11 +820,13 @@
          `safe` keyword. Chrome before 115 RECOGNISES `safe center` but ignores
          the modifier (MDN BCD: `version_added` 115, note "Before version 115,
          this value is recognized, but has no effect"), keeping the declaration
-         and aligning unsafely; Safari has no `safe` support before 17.6 and
-         DROPS the value instead, so the base rule's plain `center` takes over
-         there. Both land on an unsafe centre for an over-flowing beat, so
-         an order-based fallback silently does nothing there: the hero would be
-         clipped above and its h1 painted under the Login pill. Auto margins
+         and aligning unsafely — so the `flex-start` written above it never runs
+         and the ORDER trick is dead on that band, which is the whole argument
+         against it. (Safari is a different case: it has no `safe` support before
+         17.6 and DROPS the declaration, so there the fallback WOULD work — and
+         the base rule's plain `center` is what an unguarded `safe center` would
+         leave behind for an over-flowing beat. The auto margins need neither
+         engine's behaviour to be right.) Auto margins
          have no such band — they absorb the free space when there is any and
          resolve to zero when there is not, which is exactly `safe center`'s
          predicate. */
