@@ -434,7 +434,7 @@ test('a truncated bout says its count is a FLOOR, in the row and in the detail',
   )
 })
 
-test('an ACKNOWLEDGED newest row must not hide an older UNACKNOWLEDGED one', () => {
+test('an ACKNOWLEDGED row must not hide an older UNACKNOWLEDGED one', () => {
   // Review finding (P1): the server's identity for a `flag` is type + RULE, and the
   // customer message deliberately omits the rule — so two genuinely different
   // episodes share the client key. Collapsing to the newest meant that once
@@ -456,7 +456,10 @@ test('an ACKNOWLEDGED newest row must not hide an older UNACKNOWLEDGED one', () 
   for (const input of [[olderUnacked, newerAcked], [newerAcked, olderUnacked]]) {
     const ledger = buildLedger({ alerts: input, state: emptyState(), now: NOW })
     assert.equal(ledger.unresolved, 1, 'the unacknowledged bout must be counted')
-    assert.equal(ledger.acked.length, 0, 'the identity is unresolved, so it is not "acked"')
+    // The acknowledged row is acknowledged — it left the ledger, and it did NOT
+    // take its sibling with it (rows are bucketed on their own state now, so this
+    // holds without a collapse and without an ack-state ranking).
+    assert.deepEqual(ledger.acked.map((e) => e.alert), [newerAcked])
     const listed = [...ledger.current, ...ledger.older]
     assert.equal(listed.length, 1)
     assert.equal(listed[0].countLabel, '\u00d73', 'the row describes the UNRESOLVED bout')
@@ -468,7 +471,7 @@ test('an ACKNOWLEDGED newest row must not hide an older UNACKNOWLEDGED one', () 
     now: NOW,
   })
   assert.equal(bothAcked.unresolved, 0)
-  assert.equal(bothAcked.acked.length, 1)
+  assert.equal(bothAcked.acked.length, 2)
 })
 
 test('an activity row is flagged as a measurement, an incident row is not', () => {
@@ -580,6 +583,23 @@ test('an unclassified row does not claim that nothing was changed', () => {
   assert.equal(
     detailOf(alert(), NOW).fields.find((f) => f.label === 'Kind').value,
     KIND_INCIDENT,
+  )
+})
+
+test('a payload whose only values are EMPTY carries nothing', () => {
+  // Counting KEYS said a payload with an empty string carried machine detail the
+  // dashboard hides (review finding). Only a usable value counts.
+  for (const details of [{ country: '' }, { country: null }, { ip: undefined }, {}, []]) {
+    assert.equal(
+      detailOf(alert({ details }), NOW).detailState,
+      'none',
+      JSON.stringify(details),
+    )
+  }
+  // …and a payload with only internal vocabulary is still 'undisplayable', not 'none'.
+  assert.equal(
+    detailOf(alert({ details: { rule: 'point_create' } }), NOW).detailState,
+    'undisplayable',
   )
 })
 

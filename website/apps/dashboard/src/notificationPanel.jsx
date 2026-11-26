@@ -141,7 +141,19 @@ function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
           <strong>{entry.label}</strong>
           {entry.countLabel ? <span className="alert-count"> {entry.countLabel}</span> : null}
           {/* The register, in the reader's words: whether anything happened. */}
-          <span className="notif-chip">{entry.isIncident ? 'alert' : 'activity'}</span>
+          {/* THREE values, not two: `registerOf` fail-quiets an unrecognised
+              register into the activity register, so a two-valued chip labelled an
+              unclassified row "activity" — "a detector measured a rate and changed
+              nothing" — while the same row's detail view said we could not classify
+              it (review finding). Reachable whenever the API ships a new type before
+              this bundle. */}
+          <span className="notif-chip">
+            {entry.isIncident
+              ? 'alert'
+              : entry.registerKnown
+                ? 'activity'
+                : 'unclassified'}
+          </span>
         </span>
         <span className="notif-message">{entry.message}</span>
         <span className="dim small">
@@ -298,6 +310,7 @@ export function NotificationBell({
   const [saveFailed, setSaveFailed] = React.useState(false)
   const [lastKey, setLastKey] = React.useState(key)
   const rootRef = React.useRef(null)
+  const panelRef = React.useRef(null)
   const bellRef = React.useRef(null)
   // The panel's id, so the bell's `aria-expanded` has something to control. `useId`
   // rather than a literal: two bells on one page (a future surface) would otherwise
@@ -326,6 +339,17 @@ export function NotificationBell({
   // an hour on a panel left open, while a re-read on the wall clock could put a
   // snooze back).
   const freshClock = () => (nowProp ? new Date(nowProp) : new Date())
+
+  // A snooze that runs out while the panel sits OPEN must expire. `clock` is frozen
+  // at the last interaction, so without a tick a row snoozed at 09:00 was still
+  // hidden at 14:00 in the same tab, and "snoozed in 5 min" stayed 5 min forever
+  // (review finding). One coarse tick, only while the panel is open: no timer runs
+  // when nobody is looking, and a test that injects `now` gets no timer at all.
+  React.useEffect(() => {
+    if (!open || nowProp) return undefined
+    const id = setInterval(() => setOpenedAt(new Date()), 30_000)
+    return () => clearInterval(id)
+  }, [open, nowProp])
 
   const persist = (next) => {
     const ok = writeState(storage, key, next)
@@ -366,6 +390,12 @@ export function NotificationBell({
     }
   }
 
+  /** Leave the detail view and hand focus to the panel (never to `<body>`). */
+  const goBack = () => {
+    setDetailKey(null)
+    if (panelRef.current) panelRef.current.focus()
+  }
+
   /** Close the panel and hand focus back to the bell. */
   const closePanel = () => {
     setOpen(false)
@@ -376,14 +406,40 @@ export function NotificationBell({
   // Outside click + Escape. `pointerdown` (not `click`) so the panel closes before
   // the underlying control activates, and the press that dismisses is not also
   // the press that presses something behind it.
+  //
+  // ESCAPE IS HANDLED ON THE DOCUMENT TOO, not only on the panel: from the detail
+  // view, focus can be on `<body>` by the time the key is pressed, and a keydown
+  // that starts outside the panel's subtree never reaches a handler bound inside it
+  // — the panel stayed open with no Escape route and the keyboard user was stranded
+  // (review finding). The in-panel handler below covers the common case; this one
+  // covers the case where focus has left.
   React.useEffect(() => {
     if (!open) return undefined
     const onPointerDown = (e) => {
       if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false)
     }
+    const onKeyDown = (e) => {
+      if (e.key !== 'Escape') return
+      // The in-panel handler already handled this key; it runs first and closes or
+      // goes back, so this arm only fires when the keydown did NOT originate inside
+      // the panel (focus on `<body>`). Cheap to double-handle: both paths are
+      // idempotent on state.
+      if (rootRef.current && rootRef.current.contains(e.target)) return
+      if (detailKey) {
+        setDetailKey(null)
+        if (panelRef.current) panelRef.current.focus()
+      } else {
+        setOpen(false)
+        if (bellRef.current) bellRef.current.focus()
+      }
+    }
     document.addEventListener('pointerdown', onPointerDown)
-    return () => document.removeEventListener('pointerdown', onPointerDown)
-  }, [open])
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open, detailKey])
 
   const ledgerView = buildLedger({ alerts, state: ledger.state, now: clock })
   const entries = [...ledgerView.current]
@@ -457,6 +513,8 @@ export function NotificationBell({
         <div
           className="notif-panel"
           id={panelId}
+          ref={panelRef}
+          tabIndex={-1}
           role="group"
           aria-label={PANEL_TITLE}
           onKeyDown={(e) => {
@@ -464,7 +522,7 @@ export function NotificationBell({
               // Inside the panel, Escape must also RESTORE FOCUS — the bell's own
               // handler cannot fire while focus is in here, so the panel closed and
               // left `document.activeElement` on `<body>` (review finding).
-              if (detailKey) setDetailKey(null)
+              if (detailKey) goBack()
               else closePanel()
             }
           }}
@@ -485,7 +543,7 @@ export function NotificationBell({
               onAcknowledge={onAcknowledge}
               ackPending={ackPending}
               ackError={ackError}
-              onBack={() => setDetailKey(null)}
+              onBack={goBack}
               onDismiss={handleDismiss}
             />
           ) : (

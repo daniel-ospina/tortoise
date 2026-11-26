@@ -31,7 +31,7 @@
 import { afterEach, test, vi } from 'vitest'
 import assert from 'node:assert/strict'
 import React from 'react'
-import { cleanup, fireEvent, render } from '@testing-library/react'
+import { act, cleanup, fireEvent, render } from '@testing-library/react'
 
 // Imported on purpose: `css: true` only injects CSS this file's own module graph
 // pulls in, so without it the visibility assertion below runs in a document with
@@ -261,6 +261,28 @@ test('#14686: snoozing for 1 h hides the row, and the row is back once the hour 
 
 // ── 3b. A snooze is suppression, not a resolution ──────────────────────
 
+test('#14686: a snooze that runs out while the panel sits OPEN comes back on its own', () => {
+  // The render clock was frozen at the last interaction and there was no timer, so
+  // a row snoozed at 09:00 was still hidden at 14:00 in the same tab (review
+  // finding). One coarse tick while the panel is open is what makes the deadline
+  // real. Fake timers: this is a claim about the passage of time, and a tick.
+  vi.useFakeTimers()
+  try {
+    vi.setSystemTime(NOW)
+    const { container } = renderBell({ alerts: [alert({ message: 'expire me' })], now: null })
+    fireEvent.click(bell(container))
+    fireEvent.change(container.querySelector('.notif-snooze'), { target: { value: '1h' } })
+    assert.equal(bell(container).getAttribute('aria-label'), 'Notifications')
+
+    // 61 minutes of a panel left open: the snooze is over, and the row is back
+    // without a click, a reload or a reopen.
+    act(() => { vi.advanceTimersByTime(61 * MIN) })
+    assert.equal(bell(container).getAttribute('aria-label'), 'Notifications — 1 unresolved')
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
 test('#14686: a snoozed-only ledger does not claim everything was dealt with', () => {
   // A snooze is neither an acknowledgement nor a dismissal, so the old sentence
   // printed an affirmative directly above "Snoozed (1) … in 1 h". (The review
@@ -350,6 +372,41 @@ test('#14686: Escape from inside the panel restores focus to the bell', () => {
   assert.equal(document.activeElement, bell(container))
 })
 
+test('#14686: Escape from the DETAIL view returns to the ledger and keeps focus findable', () => {
+  // Lost once in the concurrent-lane merge, re-applied: with the handler bound only
+  // inside the panel, a keydown that started outside its subtree never reached it, so
+  // Escape from a detail view did nothing and focus sat on <body>.
+  const { container } = renderBell({ alerts: [alert({ message: 'detail escape' })] })
+  fireEvent.click(bell(container))
+  fireEvent.click(container.querySelector('.notif-open'))
+  assert.ok(container.querySelector('.notif-detail'))
+  const back = container.querySelector('.notif-back')
+  back.focus()
+  fireEvent.keyDown(back, { key: 'Escape' })
+  assert.equal(container.querySelector('.notif-detail'), null, 'back to the ledger')
+  assert.ok(container.querySelector('.notif-panel'), 'the panel stays open')
+  assert.equal(document.activeElement, container.querySelector('.notif-panel'))
+  // …and Escape still closes from there.
+  fireEvent.keyDown(document, { key: 'Escape' })
+  assert.equal(container.querySelector('.notif-panel'), null)
+  assert.equal(document.activeElement, bell(container))
+})
+
+test('#14686: a row we could not classify says so, and does not claim to be an activity row', () => {
+  // `registerOf` fail-quiets an unknown register into the activity register, so a
+  // two-valued chip labelled an unclassified row "activity" — a measurement that
+  // "changed nothing" — while the same row's detail view said we could not classify
+  // it (review finding). Reachable whenever the API ships a new type first.
+  const { container } = renderBell({
+    alerts: [alert({ type: 'brand_new', register: undefined, message: 'unknown kind' })],
+  })
+  fireEvent.click(bell(container))
+  const chip = container.querySelector('.notif-list .notif-chip')
+  assert.equal(chip.textContent, 'unclassified')
+  fireEvent.click(container.querySelector('.notif-open'))
+  assert.match(container.querySelector('.notif-detail').textContent, /could not classify/i)
+})
+
 test('#14686: the trigger declares what it controls', () => {
   const { container } = renderBell({ alerts: [alert()] })
   const control = bell(container)
@@ -364,6 +421,8 @@ test('#14686: the trigger declares what it controls', () => {
   // Asserting the absence is an assertion that can red if it is ever re-added.
   assert.equal(control.getAttribute('aria-haspopup'), null)
   assert.equal(control.getAttribute('aria-expanded'), 'true')
+  // …and the popup it controls really is the disclosed group, not a menu.
+  assert.equal(panelEl.getAttribute('role'), 'group')
   // The panel's own title is a real heading, reachable by heading navigation.
   assert.equal(panelEl.querySelector('h2').textContent, 'Notifications')
 })

@@ -642,7 +642,11 @@ export function detailOf(alert, now = new Date()) {
     : []
   // An EMPTY payload carries nothing, so it must not be reported as carrying
   // machine detail the dashboard hides (review finding: `{}` said exactly that).
-  const hasPayload = Boolean(extra) && Object.keys(extra).length > 0
+  // USABLE values, not keys: counting keys said a payload whose only value was an
+  // empty string carried machine detail the dashboard hides (review finding).
+  const hasPayload = Boolean(extra) && Object.values(extra).some(
+    (v) => v !== undefined && v !== null && v !== '',
+  )
   return {
     entry,
     fields,
