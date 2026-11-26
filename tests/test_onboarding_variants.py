@@ -2027,7 +2027,21 @@ _INVERSION_FORMS = (
         r"(?:" + _MODAL_TO_VERB + r"\s+(?:" + _ADVERBS + r"\s+)*)?"
         r"|(?:if|when)\s+(?:you(?:'(?:ve|re)|\u2019(?:ve|re)|\s+have)\s+|you\s+|having\s+)?"
         r"(?:" + _ADVERBS + r"\s+)*"
-        r"(?:" + _MODAL_TO_VERB + r"\s+(?:" + _ADVERBS + r"\s+)*)?"        r"(?!(?:see(?:s)?|saw|seen|look(?:ing|s|ed)?|list(?:ing|s|ed)?)\b"
+        r"(?:" + _MODAL_TO_VERB + r"\s+(?:" + _ADVERBS + r"\s+)*)?"
+        # ⛔ THE OBSERVATION GATE CARRIES THE PROGRESSIVE, and it did not until the
+        # `'re` subject arm made it REACHABLE: the spelling was `see(?:s)?|saw|seen`
+        # — no `seeing` — while its siblings on this line do carry it
+        # (`look(?:ing|s|ed)?`, `list(?:ing|s|ed)?`) and `_CONFIRM_PREDICATE` admits
+        # `see(?:ing|…)`. Until `you're` entered the subject slot nothing admitted
+        # could be followed by a grammatical progressive (`you seeing` / `you have
+        # seeing` / `you've seeing` are all ungrammatical), so the hole was
+        # UNREACHABLE and no row could see it. One contraction made it reachable and
+        # flipped a declared-GREEN row's contracted twin to RED — the very defect
+        # class the `'re` arm exists to close, re-created in the opposite direction
+        # (#14679 review cycle 41, measured: `if you see the tools from a previous
+        # session` GREEN, `if you're seeing …` RED, `if you are only seeing …` GREEN,
+        # so the verdict turned on the contraction alone).
+        r"(?!(?:see(?:ing|s)?|saw|seen|look(?:ing|s|ed)?|list(?:ing|s|ed)?)\b"
         r"(?!.*?\b(?:confirm|check|verif(?:y|ies|ied)|ensur(?:e|es|ed))\w*\b"
         # ⛔ THE GUARD READS THE GRADED OBJECT, not its own copy of it. It spelled
         # `tools|tool\s+list` inline, so `tool LISTS` was not found, the clause was
@@ -3535,6 +3549,19 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # `simply LISTED the tools` as confirmations (measured), which is the same
     # one-word-substitution defect one inflection over:
     ("Restart your client if you see the tools from a previous session.", False),
+    # ⛔ THE CONTRACTED/PROGRESSIVE TWINS OF THE ROW ABOVE ARE THE SAME SENTENCE, and
+    # they were RED (measured) because the observation gate spelled `see(?:s)?` with
+    # no `seeing` while it admitted `you're` in the subject slot — so one apostrophe
+    # flipped a declared-GREEN symptom clause to RED, and `you are … seeing` stayed
+    # GREEN because the uncontracted subject could not reach the progressive. The
+    # gate now carries the form and these three rows hold it.
+    ("Restart your client if you're seeing the tools from a previous session.",
+     False),
+    ("Restart your client if you\u2019re seeing the tools from a previous session.",
+     False),
+    ("Restart your client if you're only seeing the tools after a second "
+     "restart.", False),
+    ("Restart your client when you're seeing the tools listed twice.", False),
     ("Restart your client if you have rarely looked for the tools at all.",
      False),
     ("Restart your client if you simply listed the tools in the panel.", False),
