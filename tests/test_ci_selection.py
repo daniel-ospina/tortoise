@@ -10139,10 +10139,15 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
         "`tests/test_row_claim_enum_a.py`, #10's `tests/test_row_claim_enum_b.py` and #11's "
         "`tests/test_row_claim_enum_c.py` carry an explicit `2.0` `durations` row, and #12's "
         "`tests/test_row_claim_possessive.py`'s `core` row — the POSSESSIVE spelling a matcher "
-        "bound to an adjacent `row` cannot see")
+        "bound to an adjacent `row` cannot see — and #13's "
+        "`tests/test_row_claim_after_upper.py` **ROW** — the CAPS + EMPHASIS spelling of the "
+        "AFTER-FILE shape, which only `_ROW_CLAIM_AFTER_FILE_RE` can reach, so the two tolerances "
+        "that matcher documents (`re.IGNORECASE` and its emphasis character class) are graded by "
+        "this fixture rather than by the comment beside them")
     assert _row_claims(fixture) == [
         "eval/retrieval/test_row_claim_subdir.py",
         "test_row_claim_after.py",
+        "test_row_claim_after_upper.py",
         "test_row_claim_before.py",
         "test_row_claim_colon.py",
         "test_row_claim_enum_a.py",
@@ -10589,9 +10594,17 @@ def _h_14544_banned_claim(block: str) -> str | None:
 #: gap: code, so it cannot rot. `which is` and `durations`-first spellings are
 #: accepted because a TRUE rewording that this pattern refused was measured as a false block (#14623
 #: review round 4, P3): “the `durations` entry for it, which is `#14544`'s own edit”.
+#: ⛔ THE COPULA IS A SET, not `IS|is|which is` (measured on this head: “the row's WEIGHT remains
+#: `#14544`'s own edit” REDs this arm, and the diagnostic then tells the editor the paragraph “no
+#: longer records” a fact it records in front of them — a false block on true prose, the class
+#: `#14730` files for the row-NOUN matchers, reproduced here in a PROVENANCE pin). The set is bounded
+#: on purpose: each alternative is a copula that leaves the claim “this weight is #14544's edit”
+#: standing present-tense-or-continuing, and the polarity check below negates whichever one the live
+#: match carries, so widening the copula does not widen the polarity.
 _H_14544_ROW_PROVENANCE_RE = re.compile(
     r"(?:row\s+in\s+`durations`|`durations`[\s#]{0,3}(?:row|entry))[\s\S]{0,400}?"
-    r"(?:IS|is|which\s+is)\s+(?:`#14544`['\u2019]s\s+own\s+edit|an\s+edit\s+by\s+`#14544`)",
+    r"(?:which\s+)?(?:IS|is|was|remains)(?:\s+(?:still|now))?\s+"
+    r"(?:`#14544`['\u2019]s\s+own\s+edit|an\s+edit\s+by\s+`#14544`)",
     re.IGNORECASE)
 #: The SCOPE half: the paragraph must state that ONE half — the REGISTRATION — is exempt, with the
 #: polarity pinned. Measured at `d1f14298`: inverting it to “Both halves stay exempt” (the commit's
@@ -10761,7 +10774,7 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # ⛔ THE LAST COPULA, not the first: in “…, which is the bin's input and which is `#14544`'s own
     # edit” the first copula belongs to another clause, and negating it refused a TRUE sentence
     # (measured RED, #14623 review round 5, F3b).
-    copulas = list(re.finditer(r"\bwhich\s+is\b|\bIS\b|\bis\b", provenance.group(0)))
+    copulas = list(re.finditer(r"\b(?:which\s+)?(?:IS|is|was|remains)\b", provenance.group(0)))
     assert copulas, (
         "the matched provenance clause carries no copula to negate, so the polarity check below "
         f"grades nothing — re-point it at: {provenance.group(0)!r}")
@@ -10775,6 +10788,25 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
         "the provenance pattern still matches when the clause is NEGATED (`row is NOT `#14544`'s "
         f"own edit`, measured on {negated!r}) — it reads the row's name and the words `own edit` "
         "without the polarity, so a fold that restored the false reading would keep this arm GREEN")
+    # ⛔ THE COPULA SET IS GRADED, not only documented — the defect this closes was a positive pin
+    # whose COMMENT claimed a rewording was accepted while the pattern matched `IS|is|which is`
+    # alone; measured on this head, “the row's WEIGHT remains `#14544`'s own edit” RED, with the
+    # diagnostic below telling the editor the paragraph “no longer records” a fact it records. That
+    # is the same ungraded-tolerance class as `_ROW_CLAIM_AFTER_FILE_RE`'s two flags, so each
+    # alternative is driven through the pattern HERE, and the SAME copula negated must still be
+    # refused — otherwise a widening of the copula would widen the polarity with it.
+    for copula in ("is", "IS", "was", "remains", "which is", "is still", "remains now"):
+        reworded = ("The REGISTRATION is the ONLY half exempt: the row in `durations` "
+                    f"{copula} `#14544`'s own edit.")
+        assert _H_14544_ROW_PROVENANCE_RE.search(reworded), (
+            f"the provenance pin does not read the copula {copula!r}, so a TRUE rewording of the "
+            "paragraph REDs this arm with the message above — which asserts the opposite of what "
+            f"the paragraph then says: {reworded!r}")
+        cut = reworded.rindex(copula)
+        copula_negated = reworded[:cut] + f"{copula} NOT" + reworded[cut + len(copula):]
+        assert not _H_14544_ROW_PROVENANCE_RE.search(copula_negated), (
+            f"the provenance pin reads the NEGATED copula {copula!r} as the claim, so the polarity "
+            f"half above grades nothing for that spelling: {copula_negated!r}")
     # ⛔ NON-VACUITY for the WEIGHT rule and the INVERSE ban, so neither is decoration: the same
     # paragraph with a figure in it must red, and the inverse pattern must READ each spelling it
     # claims to refuse (a constant nothing exercises is a constant anyone can blank — measured
@@ -11125,11 +11157,20 @@ def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
             f"asymmetry the round-23 review measured: {noun_negative!r}")
     # ⛔ THE UNIT-SPELLED VALUE, the positive half's mirror of the noun-inserted absence above.
     # ⛔ NOT justified by the block's prose: this PR's own restructure replaced the `flat `2.0 s``
-    # `DEFAULT_FAST_WEIGHT` spelling with ``row in `durations` — `core`-registered``, and no
-    # `durations` row note carries a number with a unit beside this weight (#14623 review round 6,
-    # P1 — the same false justification `b2bc3fd892266` corrected at the sibling site and left
-    # standing here). The unit is admitted because `2.0 s` is a TRUE rewrite — `durations` carries
-    # 2.0 for those rows — and this fixture pins it. The matcher's value group read a bare number,
+    # `DEFAULT_FAST_WEIGHT` spelling with ``row in `durations` — `core`-registered``, and NONE OF
+    # THE ROWS THIS FIXTURE GRADES spells its weight with a unit — those four notes each say the row
+    # `takes the header's flat `DEFAULT_FAST_WEIGHT``, and the one unit-bearing figure in
+    # `tests/test_7879_record_chain.py`'s note is labelled `NOT as the weight`.
+    # ⛔ THAT SCOPE IS THE REPAIR, not a hedge: the sentence said "no `durations` row note carries a
+    # number with a unit", a claim about EVERY row in the map — which the map falsifies in bulk,
+    # because quoting a row's own reading WITH its unit is a normal spelling here (MEASURED on
+    # `test_10749_health_tail_under_transport_bound.py`'s `8.2` row, whose note carries `2.00 s`
+    # figures; a claim about the four rows this arm grades was written as a claim about the map, and
+    # nothing graded either form — the block's own doctrine, applied to its own sentence).
+    # The unit is admitted because `2.0 s` is a TRUE rewrite — `durations` carries
+    # 2.0 for those rows — and this fixture pins it (#14623 review round 6, P1 — the same false
+    # justification `b2bc3fd892266` corrected at the sibling site and left standing here).
+    # The matcher's value group read a bare number,
     # so a unit-preserving TRUE rewrite of the one clause emptied `positive`, and the
     # non-vacuity assertion above then reported that the block named NO file at all. False block on
     # true prose, same class and same regex as the `no … row` asymmetry (MEASURED: `2.0` -> `2.0 s`
