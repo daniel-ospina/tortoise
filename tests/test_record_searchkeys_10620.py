@@ -1424,12 +1424,14 @@ def test_a_missing_schema_is_plan_refused_because_it_raises_IN_the_plan_build(
     `table_columns()` scans the migrations for `CREATE TABLE` and raises
     "the record schema is not on disk" from INSIDE `replay_plan`, so a missing
     migration is a plan-build refusal: no statement ran, counted `plan_refused`,
-    and its remedy is a REDEPLOY. Nine sites (four modules, the runbook, the
-    capability docs and two test docstrings) state that, and until this test the
-    only evidence was a measurement in a commit message — so a later narrowing
-    of the stamp, or `table_columns()` moving outside the `try`, would have made
-    all nine false with every gate green (measured: exactly that edit leaves the
-    suite green without this pin).
+    and its remedy is a REDEPLOY. Twelve sites state that (five modules —
+    `record_projection`, `record_writer`, `monitoring`, `status_vocabulary`,
+    `hosted_api` — plus the infra runbook and two test docstrings; counted, not
+    estimated: review round 5 found this sentence's earlier inventory of "nine,
+    four modules, the capability docs" off on all three numbers), and until this
+    test the only evidence was a measurement in a commit message — so a later
+    narrowing of the stamp, or `table_columns()` moving outside the `try`, would
+    have made every one of them false with every other gate green.
     """
     from tortoise import monitoring, record_projection, record_writer
 
