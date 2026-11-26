@@ -722,17 +722,14 @@ def test_a_bundle_only_diff_selects_this_suite():
 # believed and never the edges between the committed artifacts, the prose that
 # quotes them, and the inputs they are derived from. Each arm below names the
 # mutation it was measured against.
-_NEGATIVE = ("no", "not", "none", "never", "cannot")
-
-
 def _norm_key(text: str) -> str:
     """A name normalised for set comparison (case, whitespace, markdown noise)."""
     return " ".join(str(text or "").lower().split())
 
 
-def _polarity(text: str) -> str:
-    words = re.sub(r"[^a-z0-9 ]+", " ", str(text).lower()).split()
-    return "negative" if words and words[0] in _NEGATIVE else "affirmative"
+def _norm_words(text: str) -> str:
+    """Prose reduced to its WORD SEQUENCE — markdown and punctuation removed."""
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", str(text).lower()).split())
 
 
 def test_the_quote_audit_artifact_is_re_derived_from_the_receipt():
@@ -759,15 +756,62 @@ def test_the_quote_audit_artifact_is_re_derived_from_the_receipt():
         "`not_in_corpus` and `invented` are the same population, counted twice")
     assert (audit["quotes_total"]
             == audit["verbatim"] + audit["paraphrase"] + audit["not_in_corpus"])
-    # The `audited` rows are a SAMPLE of the paraphrase band, not a population:
-    # they are all non-verbatim and all inside the band. Asserting their number
-    # against `not_in_corpus` would repeat the very defect this arm closes.
+    # The `audited` rows are a SAMPLE, not a population, and the artifact does not
+    # declare its sampling rule — so this pins what the artifact DOES declare:
+    # every listed row is non-verbatim (`verbatim_in_corpus: false`, its own
+    # field), the overlaps are shares, and the sample cannot exceed the
+    # non-verbatim population it is drawn from. Asserting `overlap >= 0.6` would
+    # pin a method the peer never stated and would false-red on a legitimate
+    # re-audit that sampled the invented band instead.
     assert audit["audited"], "the audit shipped no rows at all"
     for row in audit["audited"]:
         assert row["verbatim_in_corpus"] is False, row
-        assert row["overlap"] >= 0.6, row
-    assert len(audit["audited"]) <= audit["paraphrase"], (
-        "the audit lists more rows than the band holds")
+        assert 0.0 <= row["overlap"] <= 1.0, row
+    non_verbatim = audit["quotes_total"] - audit["verbatim"]
+    assert len(audit["audited"]) <= non_verbatim, (
+        "the audit lists more rows than the non-verbatim population holds",
+        len(audit["audited"]), non_verbatim)
+    # ⛔ AND THE ROWS MUST BE ROWS THE RUN ACTUALLY PRODUCED (#14691 review, 5th
+    # cycle, NEW-4). Shape-checking a sample is not checking it: with only the
+    # assertions above, `audited[0] = {"quote": "**FABRICATED** text the corpus
+    # never contains", "overlap": 0.64, …}` stayed GREEN (measured). The scorer
+    # already derives both populations on this run, so membership is available
+    # without trusting the peer's prose.
+    derived = [_norm_words(e["quote"])
+               for e in quotes["paraphrase_examples"] + quotes["invented_examples"]]
+    for row in audit["audited"]:
+        quote = _norm_words(row["quote"])[:80]
+        assert quote and any(d.startswith(quote) or quote.startswith(d)
+                             for d in derived), (
+            "the audit lists a row the receipt does not contain, so it is not a "
+            f"sample of this run: {quote!r}")
+    # one truncation flag PER LIST — a single shared boolean cannot say which
+    # sample is complete, which is the same "a length is not a count" defect.
+    assert quotes["paraphrase_examples_truncated"] is (quotes["paraphrase"] > 10)
+    assert quotes["invented_examples_truncated"] is (quotes["invented"] > 10)
+    for per_list, population in (("paraphrase_examples_truncated", "paraphrase"),
+                                 ("invented_examples_truncated", "invented")):
+        assert per_list in quotes, (
+            f"{per_list} is gone — a shared flag cannot say WHICH list truncated")
+        assert (len(quotes[per_list.replace("_truncated", "")])
+                <= min(10, quotes[population]))
+
+
+def test_the_committed_score_block_is_the_derivation():
+    """Reds if `out/t6-score.json`'s own quote block drifts from its re-derivation.
+
+    #14691 review (5th cycle, NEW-5). The arm above compares the DERIVATION to
+    `t6-quote-audit.json`; nothing compared it to the block the scorer WRITES into
+    `t6-score.json`, so setting that block to `verbatim: 50, paraphrase: 0,
+    invented: 0` while leaving `claim_layer` honest stayed GREEN (measured). The
+    committed artifact must be the function's own output, not a second opinion.
+    """
+    module = _load_score_module()
+    committed = _score()["A4_no_invention"]["quotes"]
+    derived = module.a4_invention()["quotes"]
+    assert committed == derived, (
+        "t6-score.json's quote block is not what the scorer derives from the "
+        "committed receipts — the artifact is a claim now, not an input)")
 
 
 def test_the_quote_breakdown_in_the_report_is_the_claim_layer():
@@ -811,6 +855,20 @@ def test_the_orphan_second_measurement_agrees_with_the_primary():
     assert owned, "the independent measurement recorded no ownedBy rows"
     pairs = {(_norm_key(r["src"]), _norm_key(r["dst"])) for r in owned}
     assert len(pairs) == 4, (pairs, len(pairs))
+    # ⛔ ORIENTATION, NOT JUST MEMBERSHIP (#14691 review, 5th cycle, NEW-1). The
+    # set above is UNORDERED, so swapping `src`/`dst` on EVERY row — the exact
+    # drift that would erase the corroboration of A2's inversion — left the suite
+    # GREEN (measured). This file is cited BECAUSE it corroborates which end the
+    # arrow points at, so the oriented pairs are compared to the primary receipt's
+    # own edges.
+    module = _load_score_module()
+    want = {(_norm_key(e["src"]), _norm_key(e["dst"]))
+            for e in module.EDGES if e["predicate"] == "ownedBy"}
+    got = {(_norm_key(r["src"]), _norm_key(r["dst"])) for r in owned}
+    assert got == want, (
+        "the independent measurement's ownedBy rows are not the receipt's rows "
+        f"in the receipt's orientation: missing={sorted(want - got)}, "
+        f"unexpected={sorted(got - want)}")
     # the hierarchy and dependency legs must agree with the primary scorer
     a3 = _score()["A3_hierarchy"]["reported"]
     assert iv["A3"]["distinct_hasPart_pairs"] == a3["hasPart_distinct_pairs"] == 5
@@ -818,25 +876,29 @@ def test_the_orphan_second_measurement_agrees_with_the_primary():
     assert len(iv["A2"]["dependsOn"]) == 7
 
 
-def test_each_door_finding_answer_states_the_artifacts_polarity():
-    """Reds if a REPORT answer says the opposite of the artifact's answer.
+def test_each_door_finding_answer_states_the_artifacts_ANSWER():
+    """Reds if a REPORT answer CONTRADICTS its artifact — not merely if it
+    changes its first word.
 
-    #14691 review (5th cycle, N3): the row's QUESTION was pinned and its ANSWER
-    was not, so flipping D3 to `**YES — every declared spelling works.**` left
-    18/18 green while the artifact beside it answered NO. Polarity is exactly the
-    token that mutation moves; the two numbers D6's answer turns on are pinned too.
+    #14691 review (5th cycle, N3, then NEW-3). The 5th-cycle fix compared
+    POLARITY only, so the exact contradiction the finding is about —
+    `**No — a bare kind returns exactly the same rows as the namespaced spelling,
+    so every declared spelling works.**`, led by "No" — stayed GREEN (measured).
+    The cell must now state the artifact's answer: its normalised words PREFIX the
+    cell, so the prose may add colour after the machine's answer but may not
+    reverse it. The five cells that paraphrased were aligned to the artifact's own
+    wording for this reason — the answer is a machine output, and prose about a
+    machine output should be the machine's words.
     """
     for finding in _score()["door_findings"]:
         row = _report_line(rf"^\| \*\*{finding['id']}\*\* \|")
         assert row, f"REPORT.md has no row for door finding {finding['id']}"
-        answer = row.split("|")[3]
-        assert _polarity(answer) == _polarity(finding["answer_over_mcp"]), (
-            f"REPORT.md's {finding['id']} answer is {_polarity(answer)!r} while "
-            f"its own artifact answers {_polarity(finding['answer_over_mcp'])!r}"
-            f" — {answer!r}")
-    d6 = _report_line(r"^\| \*\*D6\*\* \|").split("|")[3]
-    assert "6" in d6 and ("4" in d6 or "four" in d6.lower()), (
-        f"D6's answer no longer states the owners asked / the rows held: {d6!r}")
+        cell = _norm_words(row.split("|")[3])
+        answer = _norm_words(finding["answer_over_mcp"])
+        assert answer, f"{finding['id']} carries no answer in the artifact"
+        assert cell.startswith(answer), (
+            f"REPORT.md's {finding['id']} answer does not state the artifact's: "
+            f"expected the cell to begin {answer!r}, got {cell!r}")
 
 
 def test_report_headline_counts_are_the_artifacts_counts():
@@ -915,6 +977,45 @@ def test_an_ERROR_reply_is_not_an_EMPTY_answer():
         assert "D4" in [f["id"] for f in module._door_findings()], (
             "a measured EMPTY answer no longer produces D4 — the arm above is "
             "vacuous")
+
+        # ⛔ THE SAME GAP ON THE OWNERSHIP DOOR (#14691 review, 5th cycle, NEW-2).
+        # A failure spelled `{"ok": false, "error": …, "reply": []}` satisfies
+        # BOTH the "the owner was asked" arm and `rows(...) == []`, so without the
+        # guard it counts as a measured empty and manufactures D6. Measured:
+        # deleting `if call_failed(probe): continue` left the suite GREEN.
+        readback["door_findings"] = [f for f in readback["door_findings"]
+                                     if f.get("id") != "D6"]
+        for w in witness.values():
+            w["governance_owned_by"] = {"ok": False, "error": "transport",
+                                        "reply": []}
+        assert "D6" not in [f["id"] for f in module._door_findings()], (
+            "a FAILED ownership probe was counted as a measured empty answer — a "
+            "failed envelope carrying `reply: []` is not an answer")
+        for w in witness.values():
+            w["governance_owned_by"] = {"reply": []}
+        assert "D6" in [f["id"] for f in module._door_findings()], (
+            "a measured EMPTY ownership answer no longer produces D6 — the arm "
+            "above is vacuous")
+
+        # ⛔ AND ON THE BARE-KIND DOOR (the D3 leg — #14691 review, 5th cycle,
+        # N1 STILL-OPEN). D1/D2/D3/D5 arrive from `readback.json` as prose, and
+        # nothing re-read the probes D3 cites: with BOTH `bare_kind_probes`
+        # rewritten to error envelopes the suite stayed green and D3 — "a bare
+        # kind returns an EMPTY list" — was still reported from two calls that
+        # never answered.
+        probes = readback.get("bare_kind_probes") or {}
+        assert probes, "the readback carries no bare-kind probes to drive"
+        measured = json.loads(json.dumps(probes))
+        for name in probes:
+            readback["bare_kind_probes"][name] = {"ok": False,
+                                                 "error": "transport"}
+        assert "D3" not in [f["id"] for f in module._door_findings()], (
+            "D3 survived its own probes failing — a finding built on two error "
+            "envelopes is a claim the measurement never made")
+        readback["bare_kind_probes"] = measured
+        assert "D3" in [f["id"] for f in module._door_findings()], (
+            "D3 no longer appears on measured empty probes — the arm above is "
+            "vacuous")
     finally:
         readback.clear()
         readback.update(saved)
@@ -942,6 +1043,11 @@ def test_the_isolation_refusal_is_enforced_on_the_whole_overview():
     assert ingest.occupancy(before) == {}, (
         "the receipt's own empty_before reads as populated, so the guard would "
         f"refuse a real run: {ingest.occupancy(before)}")
+    # ⛔ THE RAISE ITSELF IS DRIVEN, NOT JUST THE PREDICATE (#14691 review, 5th
+    # cycle, N7). With only `occupancy` exercised, `if contamination:` →
+    # `if False:` inside the refusal left the suite GREEN (measured): a guard whose
+    # enforcement can be deleted while its evidence stays measurable.
+    assert ingest.refuse_if_not_fresh(before) is None
     for dotted, value in (("taxonomy.Point", 5),
                           ("structure.total", 2),
                           ("status.total_entities", 500),
@@ -956,6 +1062,28 @@ def test_the_isolation_refusal_is_enforced_on_the_whole_overview():
         assert ingest.occupancy(mutant), (
             f"the fresh-graph guard cannot see content at `{dotted}` — a "
             "populated graph would be measured as fresh")
+        try:
+            ingest.refuse_if_not_fresh(mutant)
+        except SystemExit:
+            continue
+        raise AssertionError(
+            f"the fresh-graph guard MEASURES content at `{dotted}` but does not "
+            "refuse it — the premise is recorded, not enforced")
+    # the guard must be WIRED into the run, not merely importable
+    source = (BUNDLE / "run_ingest.py").read_text()
+    assert "refuse_if_not_fresh(before)" in source, (
+        "run_ingest.main() no longer calls the refusal — the guard is "
+        "measurable but inert")
+    # ⛔ A DIAGNOSTIC CODE IS NOT CONTENT (#14691 review, 5th cycle, NEW-6).
+    # `audit.exit_code` counts issues the audit check FOUND (as do `node_count`
+    # and `summary.total_issues`, which stay counted); scoring it too refused a
+    # legitimate run with the wrong reason (measured: `{'audit.exit_code': 3}` on
+    # the receipt's own empty graph).
+    diagnostic = json.loads(json.dumps(before))
+    diagnostic["audit"]["exit_code"] = 3
+    assert ingest.refuse_if_not_fresh(diagnostic) is None, (
+        "a non-zero audit exit code is being read as graph CONTENT, so a "
+        "diagnostic would refuse a legitimate run")
 
 
 def test_an_UNREADABLE_kind_is_not_graded_correct():

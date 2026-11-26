@@ -57,12 +57,26 @@ def verdict(receipt: dict) -> int:
 
 
 #: `graph_overview()` paths that describe the CONNECTION, the installed KIND
-#: VOCABULARY, or a QUERY PARAMETER, never stored content, and are therefore
-#: legitimately non-empty on a brand-new graph. `stale.limit` is the page size the
-#: overview asks for — it reads 50 on an empty graph, and counting it would have
-#: refused every real run (measured: the first cut of this walk returned
-#: `{'stale.limit': 50}` for the receipt's OWN empty graph).
-_NOT_CONTENT = ("namespaces", "status.connected", "stale.limit")
+#: VOCABULARY, a QUERY PARAMETER, or a DIAGNOSTIC CODE — never stored content, and
+#: therefore legitimately non-empty on a brand-new graph.
+#:   · `namespaces`      — the installed packs' kind vocabulary (`kind_count` 4–32)
+#:   · `status.connected` — a flag
+#:   · `stale.limit`     — the page size the overview asks for; reads 50 on an
+#:                         EMPTY graph, and counting it refused every real run in
+#:                         the first cut of this walk (measured)
+#:   · `audit.exit_code` — the audit check's own exit status, not a population.
+#:                         Its CONTENT signals (`node_count`, `edge_count`,
+#:                         `summary.total_issues`) are counted on their own; scoring
+#:                         this too reported a diagnostic code as "content" and
+#:                         refused a legitimate run with the wrong reason (measured:
+#:                         `{'audit.exit_code': 3}` on the receipt's own empty graph).
+#: Matched by PATH SUBTREE (`p == key or p.startswith(key + '.')`), so a field that
+#: later becomes an object does not silently start refusing every run.
+_NOT_CONTENT = ("namespaces", "status.connected", "stale.limit", "audit.exit_code")
+
+
+def _not_content(path: str) -> bool:
+    return any(path == key or path.startswith(key + ".") for key in _NOT_CONTENT)
 
 
 def occupancy(before) -> dict:
@@ -88,15 +102,38 @@ def occupancy(before) -> dict:
             for key, value in node.items():
                 walk(value, f"{path}.{key}" if path else str(key))
         elif isinstance(node, list):
-            if node and path not in _NOT_CONTENT:
+            if node and not _not_content(path):
                 found[path] = f"{len(node)} rows"
         elif isinstance(node, bool):
             return                  # a flag (connected/clean), not a population
-        elif isinstance(node, (int, float)) and node and path not in _NOT_CONTENT:
+        elif isinstance(node, (int, float)) and node and not _not_content(path):
             found[path] = node
 
     walk(before, "")
     return found
+
+
+def refuse_if_not_fresh(before, graph: str = GRAPH) -> None:
+    """Raise SystemExit unless `before` describes an EMPTY graph.
+
+    ⛔ THE RAISE IS THE GUARD, so it is a FUNCTION and not an `if` inside
+    `main()` (#14691 review, 5th cycle, N7). Measured: `if contamination:` →
+    `if False:` left every test green, because the suite could only drive the
+    PREDICATE (`occupancy`) and never the refusal that acts on it — a guard whose
+    enforcement can be deleted while its evidence stays measurable. A falsifier
+    can now call this and observe the SystemExit itself.
+    """
+    occupied = {k: v for k, v in ((before or {}).get("taxonomy") or {}).items() if v}
+    structure_total = ((before or {}).get("structure") or {}).get("total") or 0
+    contamination = occupancy(before)
+    if contamination:
+        raise SystemExit(
+            "REFUSING TO MEASURE A GRAPH THAT IS NOT FRESH: "
+            f"{graph} already holds {occupied or 'no taxonomy rows'} "
+            f"(structure.total={structure_total}); the overview also reports "
+            f"content at {contamination}. T6's isolation premise is an "
+            "empty graph; point TORTOISE_DB_URI/graph_name at a fresh one "
+            "rather than reporting a contaminated run.")
 
 
 def main() -> int:
@@ -135,17 +172,9 @@ def main() -> int:
     receipt["empty_before"] = before
     print("=== graph_overview BEFORE any write ===")
     print(json.dumps(before, indent=2, default=str)[:4000])
-    occupied = {k: v for k, v in (before.get("taxonomy") or {}).items() if v}
-    structure_total = (before.get("structure") or {}).get("total") or 0
-    contamination = occupancy(before)
-    if contamination:
-        raise SystemExit(
-            "REFUSING TO MEASURE A GRAPH THAT IS NOT FRESH: "
-            f"{GRAPH} already holds {occupied or 'no taxonomy rows'} "
-            f"(structure.total={structure_total}); the overview also reports "
-            f"content at {contamination}. T6's isolation premise is an "
-            "empty graph; point TORTOISE_DB_URI/graph_name at a fresh one "
-            "rather than reporting a contaminated run.")
+    # The premise is ENFORCED, not merely recorded — in `refuse_if_not_fresh`,
+    # which the bundle's falsifier drives directly (see its docstring).
+    refuse_if_not_fresh(before)
 
     # ── The graph's installed packs: the kind vocabulary this run may use ──
     # Recorded, not assumed: T6 assertion 1 asks whether each structure arrives

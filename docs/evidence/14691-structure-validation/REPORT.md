@@ -319,12 +319,16 @@ Every one of these was measured through MCP; none was worked around.
 
 | id | question | answer over MCP | evidence |
 |---|---|---|---|
-| **D1** | is this structural edge oriented `src → dst`? | **No.** The edge and its type are visible; its direction is gone by the time a caller reads it. | `explore_connections` UNIONs `(n)-[r]->(m)` with `(n)<-[r]-(m)` and keeps `type(r)` only (`tortoise/navigation.py:172-179`). The one read that reports direction, `entity_reads.entity_relations`, is behind `GET /v1/entities/{id}/relations` and has **no MCP/SDK door** (`tortoise/entity_reads.py:533-559`). |
-| **D4** | does `expand_relationships` report the STRUCTURAL edges of an entity, the way it reports the epistemic ones? | **No — it returns `[]` for a node that has edges, so a connected entity reads as ISOLATED.** | Lumen Core: 1 row (its `IMPL` to `control-room customers`), 19 real neighbours. Amara Osei / Platform team / event-bus: **0 rows** each, while `explore_connections` sees 6 / 10 / 10. The read covers `IMPL\|NAND\|hasPart` only (`entity_reads.py:551-559`) — and `hasPart` only where it is an operator/point edge. |
+| **D1** | is this structural edge oriented `src → dst`? | **No — the edge and its type are visible; its direction is not** by the time a caller reads it. | `explore_connections` UNIONs `(n)-[r]->(m)` with `(n)<-[r]-(m)` and keeps `type(r)` only (`tortoise/navigation.py:172-179`). The one read that reports direction, `entity_reads.entity_relations`, is behind `GET /v1/entities/{id}/relations` and has **no MCP/SDK door** (`tortoise/entity_reads.py:533-559`). |
+| **D4** | does `expand_relationships` report the STRUCTURAL edges of an entity, the way it reports the epistemic ones? | **No — it returns `[]` for a node that has edges, so a structurally-connected entity reads as ISOLATED.** | Lumen Core: 1 row (its `IMPL` to `control-room customers`), 19 real neighbours. Amara Osei / Platform team / event-bus: **0 rows** each, while `explore_connections` sees 6 / 10 / 10. The read covers `IMPL\|NAND\|hasPart` only (`entity_reads.py:551-559`) — and `hasPart` only where it is an operator/point edge. |
 | **D3** | does the full-scan door accept the **bare** kind the packs declare? | **No — a bare kind returns an EMPTY list with no error, while the namespaced spelling returns rows.** | `search_knowledge(kind="product", entity_type="object")` → `[]`; `kind="product-strategy:product"` → 2 rows. Same for `team`/`core:team`. A caller who reads `objectKinds: [product]` in a manifest and asks for it is told *"there is nothing"* — an answer, not a refusal (AX: a surface must not answer where it cannot know). |
 | **D5** | does `graph_overview(section='topics', entity_id=…)` resolve an entity that `get_entity` and `explore_connections` both resolve? | **NO — it answers 'Entity … not found' for every node asked about, including nodes those two doors return.** | Lumen Core, Amara Osei, Platform team, event-bus — all four resolve through `get_entity` and walk through `explore_connections`. |
 | **D6** | does the product's OWNERSHIP door — `tortoise_get_entity(id, type='governance')` — return what each person owns? | **NO — it returns `[]` for all 4 owners asked, on a graph holding 6 `ownedBy` rows.** | `tortoise_get_entity(id, type="governance")` → `_get_owned_entities` reads `MATCH (s:Subject)<-[:ownedBy]-(e)` (`sdk.py:62739-62758`), the declared orientation; the written rows point the other way, so nothing points *into* a Subject. |
 | **D2** | can a declared structure element be resolved by NAME through the MCP doors? | **NO for 2 of 32** declared element names — `explore_connections(query=…)` resolves names to **Points**, and one component's stored name carries a welded collective noun (`ingest-gateway` → `ingest-gateway component`, from the sentence *"owns the ingest-gateway component"*). | `out/readback.json` → `unresolved_elements`, `elements[].walk_root_kind` (empty on 5/5 retrieval walks). |
+||||||| parent of 55d66a86a70fa (fix(14691): close the 6 findings the review of the fix found — orientation, D3, and an inert guard)
+| **D5** | does `graph_overview(section='topics', entity_id=…)` resolve an entity that `get_entity` and `explore_connections` both resolve? | **No — `{"error": "Entity … not found"}` for every node asked about.** | Lumen Core, Amara Osei, Platform team, event-bus — all four resolve through `get_entity` and walk through `explore_connections`. |
+| **D6** | does the product's OWNERSHIP door — `tortoise_get_entity(id, type='governance')` — return what each person owns? | **No — `[]` for all four owners**, on a graph holding 6 `ownedBy` rows. | `tortoise_get_entity(id, type="governance")` → `_get_owned_entities` reads `MATCH (s:Subject)<-[:ownedBy]-(e)` (`sdk.py:62739-62758`), the declared orientation; the written rows point the other way, so nothing points *into* a Subject. |
+| **D2** | can a declared structure element be resolved by NAME through the MCP doors? | **Not reliably** — `explore_connections(query=…)` resolves names to **Points**, and one component's stored name carries a welded collective noun (`ingest-gateway` → `ingest-gateway component`, from the sentence *"owns the ingest-gateway component"*). | `out/readback.json` → `unresolved_elements`, `elements[].walk_root_kind` (empty on 5/5 retrieval walks). |
 
 ⛔ **THE IDs ABOVE ARE THE ARTIFACT'S OWN** (`out/t6-score.json` → `door_findings`,
 emitted by `score_t6.py`). An earlier revision of this section had D2/D4/D5 permuted
@@ -460,12 +464,19 @@ names its mutant in its own docstring:
 | `out/t6-independent-verification.json`'s `A2` replaced with a hand-written note, `declared` emptied | `test_the_orphan_second_measurement_agrees_with_the_primary` |
 | `out/t6-quote-audit.json` `verbatim 11→50`, `not_in_corpus 12→0` | `test_the_quote_audit_artifact_is_re_derived_from_the_receipt` |
 | `REPORT.md` §7 `(11 / 27 / 12)` → `(50 / 0 / 0)` | `test_the_quote_breakdown_in_the_report_is_the_claim_layer` |
-| a door finding's **answer** flipped `No → YES` | `test_each_door_finding_answer_states_the_artifacts_polarity` |
+| a door finding's **answer** flipped `No → YES` | `test_each_door_finding_answer_states_the_artifacts_ANSWER` |
 | A1/A3 heading **counts** rewritten (`28/28` → `35/35`, `5/2/5` → `99/1/42`) | `test_report_headline_counts_are_the_artifacts_counts` |
 | `directions_source: UNAVAILABLE`, `directions: {}` | `test_the_directions_table_is_the_ruling_table` |
 | `empty_before` carrying `total_entities: 500` / `node_count: 900` / a real `pointkinds` list | `test_the_isolation_refusal_is_enforced_on_the_whole_overview` |
 | an `{"error": …}` witness reply read as an answered-empty one (it manufactured D4) | `test_an_ERROR_reply_is_not_an_EMPTY_answer` |
 | an unreadable `src_kind` graded `correct`, moving `asymmetric_rows_correct` 7 → 8 | `test_an_UNREADABLE_kind_is_not_graded_correct` |
+| the independent measurement's `A2` rows **`src`/`dst`-swapped** (an unordered pair set could not see it) | `test_the_orphan_second_measurement_agrees_with_the_primary` |
+| `t6-score.json`'s own `A4_no_invention.quotes` block set to `50 / 0 / 0` | `test_the_committed_score_block_is_the_derivation` |
+| a **fabricated** row in `t6-quote-audit.json`'s `audited[]` | `test_the_quote_audit_artifact_is_re_derived_from_the_receipt` |
+| a door answer led by "No" and then reversed in the same cell | `test_each_door_finding_answer_states_the_artifacts_ANSWER` |
+| the fresh-graph refusal's **`if`** deleted (the predicate still measured clean) | `test_the_isolation_refusal_is_enforced_on_the_whole_overview` |
+| the ownership probe's `call_failed` guard deleted (a failure with `reply: []` counted as an answer) | `test_an_ERROR_reply_is_not_an_EMPTY_answer` |
+| both `bare_kind_probes` rewritten to error envelopes, D3 still reported | `test_an_ERROR_reply_is_not_an_EMPTY_answer` |
 
 Three content defects were corrected rather than re-pinned:
 
@@ -473,22 +484,28 @@ Three content defects were corrected rather than re-pinned:
   of the **best-anchored paraphrases** (overlaps 0.636–1.0) — the opposite population — so a consumer
   reading its length as "quotes the corpus never states" got the display cap, `10`, which is the
   figure the PR description carried. It is now a **count** (`12`, equal to `invented`), the paraphrase
-  rows live under `paraphrase_examples`, and both capped lists carry `examples_truncated`.
+  rows live under `paraphrase_examples`, and each capped list carries its OWN
+  `*_examples_truncated` flag (one shared boolean could not say which sample was complete).
 * **An unclassifiable `produces` row was graded `correct`** because the check was
   `"INVERTED" if src_kind_is_an_agent else "correct"`. It is now its own
   `UNCLASSIFIABLE` bucket, counted in `asymmetric_rows_unclassifiable` and in neither arm.
-* **The fresh-graph refusal read two fields.** It is now a pure `occupancy()` walk over the whole
-  `graph_overview()` reply, excluding only what describes the connection or the installed vocabulary
-  (`namespaces`, `status.connected`, and `stale.limit` — a page size, which the first cut of the walk
-  wrongly counted and which would have refused every real run).
+* **The fresh-graph refusal read two fields, and its enforcement was unpinned.** It is now
+  `refuse_if_not_fresh()` — a function the falsifier drives to observe the `SystemExit` itself, not
+  just the predicate behind it — over an `occupancy()` walk of the whole `graph_overview()` reply.
+  Excluded, each because it is not content: `namespaces` (the installed kind vocabulary),
+  `status.connected` (a flag), `stale.limit` (the page size, which the first cut of the walk wrongly
+  counted and which would have refused every real run), and `audit.exit_code` (a diagnostic code —
+  its content signals `node_count` and `summary.total_issues` are still counted). The exclusion is a
+  path SUBTREE match, so a field that later becomes an object cannot silently start refusing runs.
 
 ⚠️ **One residual, stated rather than silently closed:** `run_readback.py`'s own `report["ok"]` still
 only inspects three `layers` calls, so it does not see a failed `bare_kind_probes` or
 `expand_relationships` call either. That file's bytes are the provenance binding of a committed 791 KB
 artifact — it cannot be edited without regenerating a receipt this box cannot reproduce (no graph, no
-LLM key) — so the fix was taken on the **consumer** side, where the scorer now refuses to read an
-error envelope as an answer for D4/D6, and the falsifier above pins it. The D3 finding itself is
-carried in `readback.json` as measured.
+LLM key) — so the fix was taken on the **consumer** side, where `score_t6` now refuses to read an error
+envelope as an answer for D4/D6 and no longer lets D3 outlive its own `bare_kind_probes` — if those
+probes did not answer, D3 is withdrawn rather than reported from a failed call. The D3 finding itself
+is carried in `readback.json` as measured.
 
 ### 8.2 What the 6th review cycle added (the artifact's EVIDENCE, and the prose everywhere)
 

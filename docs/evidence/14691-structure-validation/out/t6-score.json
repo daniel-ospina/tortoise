@@ -1352,7 +1352,8 @@
           "point": "The segment being the planning unit supports treating it as the durable commercial frame."
         }
       ],
-      "examples_truncated": true
+      "paraphrase_examples_truncated": true,
+      "invented_examples_truncated": true
     },
     "warnings": {
       "total": 36,
