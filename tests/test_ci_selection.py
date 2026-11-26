@@ -10204,7 +10204,11 @@ _H_14544_CHANGE_VERB = (
 _H_14544_NEGATED_ACTOR_CHANGE_RE = re.compile(
     r"(?:#14544|that\s+cut|the\s+cut)[\s\S]{0,400}?" + _H_14544_NEGATION
     + r"[\s\S]{0,80}?" + _H_14544_CHANGE_VERB
-    + r"[\s\S]{0,40}?(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)",
+    # ⛔ THE OBJECT MUST BE IN THE VERB'S OWN CLAUSE (`[^,;.!?]`), not merely within 40 characters:
+    # measured at #14623 review round 7, "`#14544`'s cut does not move a bin, and the row in
+    # `durations` is that edit" reached `row` at 35 characters ACROSS the comma, so a negated change
+    # of a BIN — the paragraph's own true claim — was refused whenever the next clause named the row.
+    + r"[^,;.!?]{0,40}?(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)",
     re.IGNORECASE)
 #: PASSIVE order: `row|row(s)|entry|entries|durations|weight` FIRST, then a negation, then the
 #: change verb. Two guards — the caller also requires `_H_14544_ACTOR_RE` in the SENTENCE, and the
@@ -10240,12 +10244,24 @@ _H_14544_NEGATED_ROW_CHANGE_RE = re.compile(
 #: touched by the reaper." and "The `durations` row was not touched by the reaper; that is separate
 #: from `#14544`'s cut." Sentence granularity merges the two clauses, and an actor-anywhere rule
 #: then reads the cut as the negated subject.
+#: ⛔ ANCHORED TO THE CHANGE VERB, never to the sentence — the first cut read `\bby\s+<not the
+#: cut>\w` ANYWHERE, so `… was never touched by `#14544`, by design.` was read as FOREIGN and the
+#: retired claim shipped CLEAN (#14623 review round 7, P1). The block itself carries plain
+#: `by <word>` prose ("is not touched by this line", "S is chosen by that formula"), so the
+#: actor-anywhere form fails open on the live file. `verb … by <agent>` is the shape that
+#: distinguishes "touched by the reaper" (foreign) from "touched by `#14544`, by design" (the cut).
 _H_14544_FOREIGN_AGENT_RE = re.compile(
-    r"\bby\s+`?(?!#14544|that\s+cut|the\s+cut)\w", re.IGNORECASE)
+    _H_14544_CHANGE_VERB
+    + r"[a-z]{0,8}\s+by\s+`?(?!#14544|that\s+cut|the\s+cut)\w",
+    re.IGNORECASE)
 _H_14544_ROW_ADJECTIVAL_RE = re.compile(
-    r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[\s\S]{0,80}?"
-    r"(?:untouched|unchanged|left\s+alone)[\s\S]{0,80}?(?:#14544|that\s+cut|the\s+cut)"
-    r"|#14544[\s\S]{0,40}?touch(?:ed|es|ing)?\s+neither\s+that\s+row",
+    # ⛔ ONE CLAUSE PER GAP (`[^,;.!?]`), not `[\s\S]`: measured at #14623 review round 7, the
+    # clause-bridging form read the REGISTRATION's adjective as the ROW's — "The `durations` row is
+    # `#14544`'s own edit, and the `eval` registration was left alone by that cut." — two TRUE
+    # statements in one sentence, refused. Both gaps stop at clause punctuation.
+    r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,80}?"
+    r"(?:untouched|unchanged|left\s+alone)[^,;.!?]{0,80}?(?:#14544|that\s+cut|the\s+cut)"
+    r"|#14544[^,;.!?]{0,40}?touch(?:ed|es|ing)?\s+neither\s+that\s+row",
     re.IGNORECASE)
 #: The required claims stated the OTHER way round, beside the true one — measured GREEN at
 #: `148ab7c` (#14623 review round 5, F1d/F1e): keep `The REGISTRATION is the ONLY half exempt` and
@@ -10482,18 +10498,20 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # …and the SCOPE and CONCLUSION pins read their polarity the same way: each mutant is the live
     # paragraph with that ONE claim inverted, so a pattern that lost its polarity direction reds here
     # instead of certifying the inversion.
-    # ⛔ BOTH FIXTURES ARE DERIVED FROM THE LIVE MATCH, not from a literal spelling: keying them to
-    # the exact words the block uses today made a TRUE rewording (`… does not rule out`) a false
-    # block on the FIXTURE rather than a grade (#14623 review round 6, F5). Dropping the polarity
-    # token from the matched span is the mutation, whichever words the span happens to use.
-    scope_inverted = scope.group(0).replace("ONLY", "not the ONLY", 1)
+    # ⛔ BOTH FIXTURES ARE DERIVED FROM THE LIVE MATCH, so a TRUE rewording is a GRADE rather than a
+    # false block on a literal spelling (#14623 review round 6, F5). ⛔ BUT THE SCOPE MUTATION SWAPS
+    # THE HALF, it does not insert a negation (#14623 review round 7, P2): `_H_14544_SCOPE_RE`'s only
+    # polarity is WHICH half, and inserting `not the` before `ONLY` keeps `ONLY` contiguous, so the
+    # mutant only proved the words are adjacent — a pattern blind to the half (`(?:REGISTRATION|row)
+    # is the ONLY half`) satisfied it while the row half was exempt again.
+    scope_inverted = scope.group(0).replace("REGISTRATION", "row", 1)
     assert scope_inverted != scope.group(0), (
-        "the matched scope clause carries no `ONLY` to negate, so the inversion check below grades "
+        "the matched scope clause does not name the REGISTRATION, so the half-swap below grades "
         f"nothing — re-point it at: {scope.group(0)!r}")
     assert not _H_14544_SCOPE_RE.search(scope_inverted), (
-        "the scope pattern still matches when the scope is NEGATED (`… is not the ONLY half`) — it "
-        "grades the word `exempt` rather than which half, so a fold that exempted the row again "
-        "would keep this arm GREEN")
+        "the scope pattern still matches when the OTHER half holds the exemption ("
+        "`row is the ONLY half`) — it grades the word `exempt`/`ONLY` rather than WHICH half, so a "
+        "fold that exempted the row again would keep this arm GREEN")
     conclusion_inverted = re.sub(
         r"\bnot\b\s+", "", conclusion.group(0), count=1, flags=re.IGNORECASE)
     assert conclusion_inverted != conclusion.group(0), (
@@ -10537,6 +10555,10 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The row's weight was unchanged by `#14544`.",
             "`#14544` touched neither that row nor its weight.",
             "the `durations` entries were not touched by `#14544`",
+            # ⛔ THE CUT IS STILL THE NEGATED AGENT when a FOREIGN `by …` follows it — the shape an
+            # actor-anywhere rule read as foreign and shipped CLEAN (#14623 review round 7, P1).
+            "The `durations` row was never touched by `#14544`, by design.",
+            "Held by the `durations` map, the row was never touched by `#14544`",
             # NOT honest prose, though it reads like it: it asserts the row's weight `was never
             # re-read` in the same sentence that names the cut which DID re-read it — the claim is
             # false, and refusing it is the guard working (the alternative, dropping the row-first
@@ -10567,6 +10589,13 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "`#14544`'s cut.",
             "another row's weight was retimed; the retime does not touch the shard layout, and "
             "`#14544`'s cut is separate",
+            # ⛔ ONE CLAUSE AT A TIME: both statements are TRUE and the sentence pairs them, so an
+            # arm whose gaps cross a comma reads the REGISTRATION's adjective as the ROW's (#14623
+            # review round 7, P2), and one whose OBJECT clause crosses a comma reads a negated BIN
+            # as a negated row.
+            "The `durations` row is `#14544`'s own edit, and the `eval` registration was left "
+            "alone by that cut.",
+            "`#14544`'s cut does not move a bin, and the row in `durations` is that edit.",
             "`#14544`'s removal of the file from the `core` surface cannot move a bin"):
         assert _h_14544_banned_claim(honest) is None, (
             f"the anaphor ban REDS honest prose ({honest!r}) — the passive arm is missing its BE "
