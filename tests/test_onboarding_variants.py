@@ -1711,19 +1711,40 @@ _PRE_CUE_ONLY = _inversion_form(
     # was GREEN (measured) while its unadorned twin was RED, and so was
     # "Please first confirm …" — one inserted word defeated the whole form.
     r"^(?:please\s+)?(?:(?:first|also|just)\s*,?\s+)?"
-    r"(?:confirm|check|verify|see|look|ensure|list)\w*\b"
-    r"[^\n]*?\btools\b"
-    # ⛔ A DOC CROSS-REFERENCE IS NOT A PRESENCE CHECK. Without this, ordinary
-    # forward copy was REFUSED with a message asserting an inversion it does not
-    # contain — "See the tools section below for the full list. Restart …" (and
-    # its `reference` / `table` / `guide` / `page` twins) was RED (measured), and
-    # a rule that reds correct copy is how a pin gets deleted (#3429). The noun
-    # must name the RUNNING SESSION's tools, so a following documentation noun
-    # disqualifies it. ⛔ `list` is deliberately NOT in this set: "the tools
-    # list" is the session's own list ("Confirm the tools list is complete …"
-    # stays an inversion), and excluding it would swallow this form's `list`-verb
-    # arm — "Please list the tools you see" is a declared-RED row.
-    r"(?!\s+(?:section|reference|table|guide|docs?|page)\b)"
+    r"(?:"
+    # (f.1) `list` takes the tools THEMSELVES as its object, so there is no
+    # document it could be pointing at and no predicate to require:
+    # "Please list the tools you see" is an instruction about the session.
+    r"list\w*\s+(?:the\s+|all\s+|your\s+)?tools\b"
+    r"|"
+    # (f.2) every other verb: the object must be a PRESENCE PREDICATE on
+    # `tools` — "the tools ARE actually there", "the tools appear", "the tools
+    # list IS complete". ⛔ THE PREDICATE IS THE MECHANISM, not a decoration: a
+    # DOCUMENTATION NOUN IS NOT ONE, so "See the tools overview for the full
+    # list" carries no claim about the running session and must stay GREEN.
+    # Without this arm the form graded a bare `tools`, and enumerating the
+    # documentation nouns that must be let through was measured to fail —
+    # `overview`, `summary`, `readme`, `appendix`, `index`, `chapter`,
+    # `diagram`, `screenshot`, `catalog(ue)`, `manifest`, `documentation`,
+    # `tour`, `walkthrough`, `cheatsheet`, `cheat-sheet`, `matrix` and
+    # `inventory` were ALL RED on "Check the tools <noun> for the full tool
+    # list" (18 of 24 probed), each one a refusal of correct copy — the failure
+    # mode that gets a pin deleted (#3429). A noun list cannot be completed; a
+    # predicate list can, because a presence claim has a closed vocabulary.
+    r"(?:confirm|see|look|ensure)\w*\b[^\n]*?\btools\b"
+    # …and a documentation noun immediately after `tools` is not a presence
+    # claim even when a copula follows it ("Ensure the tools table is up to
+    # date" — the one shape the predicate arm alone would still refuse). The
+    # predicate arm above is what carries the general case; this list only
+    # guards the copula-after-a-doc-noun shape, so it stays small on purpose.
+    r"(?!\s+(?:section|reference|table|guide|docs?|page|overview|summary"
+    r"|readme|appendix)\b)"
+    r"(?:\s+[\w'’-]+){0,3}\s+"
+    r"(?:are|is|was|were|be|been|appear|appears|show|shows|listed|visible"
+    r"|available|loaded|enabled|present|running|live|up|there|exist|exists"
+    r"|work|works|load|loads|connect|connects|respond|responds|import"
+    r"|see|saw|seen|have|has|had)\b"
+    r")"
 )
 
 # Prefixes that decorate a CLAUSE without being part of it: separators, brackets
@@ -1743,7 +1764,7 @@ _PRE_CUE_ONLY = _inversion_form(
 # Deliberately a SEPARATE set from the post-cue `lstrip`, which is pinned by rows
 # of its own — widening that one would move behaviour this fix has no reason to
 # touch.
-_PRE_CUE_PREFIX = " \t,.;:—–-('\"`*>#_"
+_PRE_CUE_PREFIX = " \t,.;:—–-('\"`*>#_[]{}"
 
 
 _INVERSION_FORMS = (
@@ -1774,9 +1795,18 @@ _INVERSION_FORMS = (
     #     change the verdict, so a closed four-word list only re-opened the hole
     #     for `previously` / `recently` / `thoroughly` / `also already` (each
     #     measured GREEN with the closed list).
+    #     ⛔ A COMMA-WRAPPED adverb is OUT OF SCOPE BY DESIGN, and that is stated
+    #     rather than hidden: `… after you have, first, verified the tools …` is
+    #     GREEN, because post-cue clauses are split on `,` BEFORE the forms are
+    #     applied, so the auxiliary and its predicate never share a clause. The
+    #     `,?` this slot used to carry was unreachable for that reason and has
+    #     been dropped rather than left looking like an arm (measured: removing
+    #     it changed no row). Grading it would mean re-joining clause fragments
+    #     around a comma, which is a different (and much wider) rewrite than
+    #     this pin claims.
     _inversion_form(
         r"\b(?:after|once|when|if)\s+(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
-        r"(?:(?:\w+ly|first|already|just|also)\s*,?\s+)*"
+        r"(?:(?:\w+ly|first|already|just|also)\s+)*"
         + _CONFIRM_PREDICATE
         + r"[^\n]*?\btools\b"
     ),
@@ -1864,7 +1894,31 @@ _CONFIG_NOUN_RE = re.compile(
 # both were measured as FALSE REDS before their arm existed.
 _CONFIG_PREP_RE = re.compile(
     r"\b(?:in|from|inside|per|under)\s+(?:it|them|that|those)\b"
-    r"|\b(?:in|from|inside|per|under)\b[^\n]{0,40}?\b(?:config|settings)\b",
+    # ⛔ NO FREE 40-CHAR WINDOW. `[^\n]{0,40}?` let ANY mention of the config
+    # within 40 characters excuse the clause, which contradicted this module's
+    # own rule that "a bare mention of 'config' elsewhere in the clause is NOT
+    # enough" — `… after confirming the tools are actually there in the current
+    # session (the config is fine).` was GREEN (measured), a confirmation of the
+    # RUNNING session's tools excused by a parenthetical aside. The noun must
+    # follow its preposition directly, through at most a determiner/possessor and
+    # an optional owner ("in your client settings"), which is the shape the arm
+    # exists for.
+    r"|\b(?:in|from|inside|per|under)\s+(?:your\s+|the\s+|its\s+)?"
+    r"(?:client\s+|harness\s+|mcp\s+)?(?:config|settings)\b",
+    re.IGNORECASE)
+# ⛔ AN INSTALLATION-SIDE STATE IS A FILE-SIDE FACT, NOT A SESSION ONE. The
+# config-scope escape keys on NOUNS (`config|settings|installer`), so it could
+# not exempt an installation VERB, and correct copy in this repo's own vocabulary
+# — "Restart your client once the tools are installed / are configured / are set
+# up / are on the allowlist" — went RED with a message claiming an inversion
+# (measured). An install/config participle is a claim about what the FILE says;
+# only `are actually there` / `are listed` / `appear` are claims about the
+# running session. Deliberately bound to the state copula (`are|is|get`), never
+# to a confirmation predicate — "after confirming the tools are installed" is a
+# check of the file and is exempt for the same reason.
+_INSTALL_SIDE_RE = re.compile(
+    r"\btools\b[^\n]*?\b(?:are|is|get|gets|getting)\s+"
+    r"(?:installed|configured|enabled|set\s+up|added|wired|on\s+the\s+allowlist)\b",
     re.IGNORECASE)
 # ⛔ A TERMINATOR ENDS A STATEMENT ONLY WHEN IT REALLY ENDS ONE. Splitting on a
 # bare `[.;—]` cut INSIDE dotted tokens — `v1.2`, `e.g.`, `.mcp.json` — which let
@@ -1931,6 +1985,12 @@ _SEQUENCER_TAIL_RE = re.compile(
 # guard existed).
 _ADVERSATIVE_LEAD_RE = re.compile(r"^(?:but|however|though|yet)\b", re.IGNORECASE)
 
+# Markdown/quoting decoration, for comparing a clause against a structural regex
+# that anchors on its own punctuation. Replaced by a SPACE, never deleted: `_`
+# and `*` can sit between the words of a sequencer run, and deleting them would
+# fuse tokens a `\b` boundary depends on.
+_DECORATION_RE = re.compile(r"[*_`>]")
+
 
 def _confirmation_scopes_the_config(clause: str) -> bool:
     """Is this clause's confirmation about the CONFIG (a file) rather than the
@@ -1959,6 +2019,9 @@ def _confirmation_scopes_the_config(clause: str) -> bool:
     tools_at = clause.lower().find("tools")
     if tools_at < 0:
         return False
+    # An installation/config STATE is file-side whatever else the clause says.
+    if _INSTALL_SIDE_RE.search(clause):
+        return True
     before = clause[:tools_at]
     after_object = clause[tools_at:]
     config = _CONFIG_NOUN_RE.search(before)
@@ -2079,9 +2142,19 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     # first lets the config-conjunction rule see both halves.
     merged: list[str] = []
     for clause in post_clauses:
-        if merged and re.match(r"(?i)^and\b", clause.lstrip('—–-:;(\'" \t')):
+        if merged and re.match(r"(?i)^and\b",
+                               clause.lstrip(_PRE_CUE_PREFIX)):
             merged[-1] = f"{merged[-1]}, {clause}"
-        elif (merged and (introducer := _SEQUENCER_TAIL_RE.search(merged[-1]))
+        elif (merged
+                # ⛔ SEARCH A DECORATION-FREE COPY. The tail anchor is `$`, so a
+                # decorated sequencer (`**then**`, `*then*`, `` `then` ``,
+                # `_then_`) never matched, the clause it introduces was graded
+                # standalone, and correct copy went RED — 8 forms measured, each
+                # a one-decoration edit of a DECLARED-GREEN row. Stripping for
+                # the SEARCH only keeps the introducer text intact for the
+                # rebuild below.
+                and (introducer := _SEQUENCER_TAIL_RE.search(
+                    _DECORATION_RE.sub(" ", merged[-1])))
                 and not _ADVERSATIVE_LEAD_RE.match(
                     clause.lstrip(_PRE_CUE_PREFIX))):
             # ⛔ A SEQUENCER THAT INTRODUCES THE NEXT CLAUSE MAY SIT ON EITHER
@@ -2374,6 +2447,52 @@ def test_3232_generic_restart_lines_are_exact():
      "`tortoise mcp-status`.", False),
     ("Restart your client and then, but first confirm the tools are actually "
      "there, run `tortoise mcp-status`.", True),
+    # ── a DECORATED or BRACKETED connective is the same word to a reader.
+    # `_PRE_CUE_PREFIX` now carries `[`/`]` and the `and`-merge uses it, because
+    # `**and** the tools …` failed `^and\b`, was NOT merged into the config
+    # clause, and was then skipped by the forward sequencer — so a declared-RED
+    # inversion shipped GREEN while its plain-comma twin was RED (measured):
+    ("Restart your client after confirming the config is right, **and** the "
+     "tools are actually there.", True),
+    ("Restart your client after confirming the config is right, `and` the "
+     "tools are actually there.", True),
+    ("Restart your client after confirming the config is right, [but first "
+     "confirm the tools are actually there].", True),
+    # ── a DECORATED forward sequencer introduces the next clause just the same.
+    # The tail anchor is `$`, so `**then**` never matched it, the clause it
+    # introduces was graded standalone and correct copy went RED — 8 forms
+    # measured, each a one-decoration edit of a DECLARED-GREEN row. The search
+    # now runs on a `_DECORATION_RE`-cleared copy:
+    ("Restart your client, **then**, once the tools are listed, run `tortoise "
+     "mcp-status`.", False),
+    ("Restart your client and **then**, once the tools are listed, run `tortoise "
+     "mcp-status`.", False),
+    # ── an INSTALLATION-side state is a file-side fact, not a session one.
+    # `_INSTALL_SIDE_RE` — every one of these was RED with a message claiming an
+    # inversion, while the noun form (`once the config lists the tools`) was
+    # GREEN, which is the inconsistency the arm closes:
+    ("Restart your client once the tools are installed.", False),
+    ("Restart your client once the tools are configured.", False),
+    ("Restart your client once the tools are set up.", False),
+    ("Restart your client once the tools are on the allowlist.", False),
+    # ── a BARE config mention no longer excuses the clause: the free 40-char
+    # window is gone, so a parenthetical aside cannot exempt a confirmation of
+    # the RUNNING session's tools (measured GREEN before, which contradicted this
+    # module's own rule that a bare mention is not enough):
+    ("Restart your client after confirming the tools are actually there in the "
+     "current session (the config is fine).", True),
+    # ── the SPACED MID-STRING SINGLE HYPHEN arm is load-bearing and had no row.
+    # Deleting `(?<=\s)-(?!-)\s+` from `_STATEMENT_BREAK_RE` flips exactly this
+    # row GREEN — a silent false PASS of a pre-cue adversative (measured):
+    ("Delete the old entry - but first confirm the tools are actually there. "
+     "Restart your client, then confirm the tools are actually there.", True),
+    # ── form (f)'s `check` and `verify` verb arms, which no row exercised (the
+    # disclosure named only `see|list`), so removing either from the predicate
+    # changed nothing (measured):
+    ("Check the tools are actually there. Restart your client, then confirm "
+     "the tools are actually there.", True),
+    ("Verify the tools are actually there. Restart your client, then confirm "
+     "the tools are actually there.", True),
     # two file-side facts CONJOINED are still file-side (measured RED before the
     # pronoun arm existed), and so is a config fact named after the object:
     ("Restart your client after confirming the config file exists and the tools "
@@ -2634,10 +2753,15 @@ def test_3232_generic_restart_lines_are_exact():
     # are live but carry no row of their own: spelling variants, a few untested
     # pronoun/synonym/preposition alternatives (form (e)'s `visible|load`, form
     # (a)'s `when`, form (c)'s `yet`, `_CONFIG_PREP_RE`'s `that|those` and
-    # `from|inside|per|under`, `_CONFIG_NOUN_RE`'s plural `configs?`), and a handful that are REDUNDANT rather than
-    # untested (form (a)'s `having` by form (b), the
-    # predicate's `list`). The comments claim the
-    # behaviour, not a row for every alternative ───────────────────────────────────
+    # `from|inside|per|under`, `_CONFIG_NOUN_RE`'s plural `configs?`, form (f)'s
+    # `look|ensure` verbs), and one that is REDUNDANT rather than untested (form
+    # (a)'s `having`, by form (b) — measured: removing it changes no row).
+    # ⛔ `list` is NOT redundant and is not in that list: it is load-bearing for
+    # form (d) and row-pinned (`list the tools beforehand`), which is how a claim
+    # of redundancy about a live arm was caught here — measured by deleting it
+    # from `_CONFIRM_PREDICATE`, which flips that row from RED to GREEN. The
+    # comments claim the behaviour, not a row for every alternative
+    # ───────────────────────────────────
     ("Restart your client, and once the tools are listed run `tortoise "
      "mcp-status`.", False),
     ("Restart your client, next once the tools are listed run `tortoise "
