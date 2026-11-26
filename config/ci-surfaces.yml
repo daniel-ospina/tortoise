@@ -57,16 +57,15 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `c1c8df1a3817` folded in — the verb
-# packs the pool into two bins: nine shards at 827.4 s (a, c, d, e, f, h, i, j, k) and two at
-# 827.5 s (b, g), so `ceil(827.5/60 x 2)` = 28 m governs (a shard's job-level wall clock is the
-# SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.03` (1680 / 827.5 = 2.0302) on every one of the eleven shards, so the two
-# agree by construction rather than by a hand re-read. ⛔ THAT PAIR IS THIS TREE'S ALONE: no
-# parent's figure may be carried here, and none is — `main`'s own partition must be re-derived on
-# `main`, never read out of this sentence.
-# ⛔ THE POOL DELTA IS RE-COUNTED ON THE RESOLVED TREE, not carried: `fast_pool()` holds **1340**
-# files at this head against **1339** on `origin/main` `c1c8df1a3817`, both counted by loading each
+# reader of the prose can see. On THIS tree — `origin/main` `bbef0b8840d7` folded in — the verb
+# packs eleven shards at 827.6 s (a–k), so `ceil(827.6/60 x 2)` = 28 m governs (a shard's
+# job-level wall clock is the SLOWEST shard's) — and the same emission prints
+# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.6 = 2.0300) on every one of
+# the eleven shards, so the two agree by construction rather than by a hand re-read. ⛔ THAT PAIR
+# IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s own
+# partition must be re-derived on `main`, never read out of this sentence.
+# ⛔ THE POOL DELTA IS RE-COUNTED ON THE RESOLVED TREE, not carried: `fast_pool()` holds **1341**
+# files at this head against **1340** on `origin/main` `bbef0b8840d7`, both counted by loading each
 # tree's OWN manifest through `fast_pool()` — and the set difference is exactly ONE entry:
 # `tests/test_14582_creation_hook.py` (`core`, flat 2.0 s), this PR's own (#14582) suite. `main`
 # carries nothing this tree lacks. ⛔ Every OTHER row the emission names is `main`'s at this head,
@@ -78,31 +77,12 @@ version: 1
 # (`tests/test_fly_secret_declaration_report.py`), #14607's two core rows
 # (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`) and #14593's
 # `tests/test_14592_read_parity.py` — so counting one of them as this PR's would contradict the
-# 1340 − 1339 = 1 the two readings give.
+# 1341 − 1340 = 1 the two readings give.
 # The name lists are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), and
 # `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
 # derivation, so they are a graded claim about THIS head — a fold re-derives them with the verb, it
 # never carries them.
-# ⛔ THIS BLOCK ARRIVED SPLICED AGAIN AT THE `origin/main` `c1c8df1a3817` MERGE, and the repair is
-# reader of the prose can see. On THIS tree — `origin/main` `c1c8df1a3817` folded in, plus THIS
-# lane's own row (`tests/test_14700_capture_in_flight_typed_refusal.py`, `api`, at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) — the verb packs nine shards at 827.4 s (a, c, d, e, f, h, i, j, k) and
-# two at 827.5 s (b, g), so `ceil(827.5/60 x 2)` = 28 m governs (a shard's job-level wall clock is
-# the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.03` (1680 / 827.5 = 2.0302), so the two agree by construction rather than
-# by a hand re-read.
-# ⛔ THAT PAIR IS THIS TREE'S ALONE, and the move is measurable: `fast_pool()` holds 1340 entries
-# here against 1339 on `origin/main` `c1c8df1a3817`, both read by loading each tree's OWN manifest
-# through the verb, and the set difference is exactly ONE entry —
-# `tests/test_14700_capture_in_flight_typed_refusal.py`, this PR's (`#14700`) own suite. `main`
-# carries nothing this tree lacks. ⛔ Every other row this tree carries is `main`'s at this head,
-# NOT this PR's; counting one as this PR's would contradict the 1340 − 1339 = 1 the two readings
-# give. The name lists above are what the guard COMPARES against the live emission
-# (`test_the_fast_shards_header_block_states_the_measured_emission`), and
-# `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
-# derivation, so they are a graded claim about THIS head — re-derived with the verb on every fold,
-# never carried.
 # ⛔ THIS BLOCK ARRIVED SPLICED AGAIN AT THE `origin/main` `4b2fba3e8a` MERGE, and the repair is
 # recorded rather than hidden: `config/ci-surfaces.yml` carries a `merge=union` driver, so the fold
 # applied BOTH parents' derivations — one cut against `origin/main` `1aef0b618b` with this PR's own
@@ -112,16 +92,11 @@ version: 1
 # tree, and both parents' copies are deleted rather than re-pointed. Each fold's own figures stay
 # on the commit that measured them — `git log` holds them, and restating one here is what produced
 # the duplicated spellings in the first place.
-# applied BOTH parents' derivations — one naming `origin/main` `29bb16b5b6` with this branch's own
-# `tests/test_14592_read_parity.py`, one spelling the same base with `#14607`'s two rows called this
-# branch's own. The copies DISAGREED on the figures (826.7/826.6 against 826.9/826.8) and neither
-# describes this head. Neither side is picked: the sentence above is a fresh re-derivation with
-# `--emit-push-matrix` on this merged tree, and both parents' copies are deleted rather than
-# re-pointed.
 # ⛔ IT ARRIVED SPLICED ONCE MORE ON THIS LANE'S REBASE ONTO `origin/main` `c1c8df1a3817` — the same
 # driver, the same failure — and this time NEITHER copy described this tree: both stated the
-# 827.2/827.3 partition and a `fast_pool()` of 1339, against the 827.4/827.5 and 1340 the verb emits
-# here. Neither copy was picked either; the paragraph above is a third fresh re-derivation.
+# 827.2/827.3 partition and a `fast_pool()` of 1339, against the 827.4/827.5 and 1340 the verb
+# emitted at that rebase. Neither copy was picked either; the paragraph above is a third fresh
+# re-derivation.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
