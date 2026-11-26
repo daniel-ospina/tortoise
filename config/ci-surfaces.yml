@@ -66,10 +66,13 @@ version: 1
 # ⛔ THAT LABEL IS HAND-CHECKED, and it is stated here rather than left implied: it has been wrong
 # REPEATEDLY inside this issue (`90c125a736a0c`, `d6a2104518762`, `cc7b1f3f2c6a3`, `e182b8b8b0cb3`,
 # and `dc479c6f` — the last of which is the correction this head carries), each time caught by a
-# reader rather than by a gate. ⛔ NO NUMERAL AND NO EXHAUSTIVE ENUMERATION: two earlier spellings of
+# reader rather than by a gate. ⛔ NO NUMERAL AND NO EXHAUSTIVE ENUMERATION: earlier spellings of
 # this sentence were falsified by their own count (a spelled-out number is still a count, as the
-# paragraph below says), and a walk of the label transitions since `origin/main` finds more than the
-# list names. The claim a reader needs is that it has rotted repeatedly. ⛔ A MECHANICAL PIN WAS TRIED AND REJECTED, and the reason is a measurement rather than a
+# paragraph below says — and an earlier draft of THIS note carried a count of its own drafts,
+# which nothing in the tree can verify and which is the same graded-or-absent rule one level
+# in), and a walk of the label transitions since `origin/main` finds more than the list names.
+# The claim a reader needs is that it has rotted repeatedly.
+# ⛔ A MECHANICAL PIN WAS TRIED AND REJECTED, and the reason is a measurement rather than a
 # preference: asserting the label prefixes `git rev-parse origin/main` is TRUE only for a tree that
 # has itself just folded the tip. ⛔ THAT SNAPSHOT IS PAST TENSE ON PURPOSE: it was MEASURED while
 # this change was under review, and landing it moves `origin/main` past the label, so a present-tense

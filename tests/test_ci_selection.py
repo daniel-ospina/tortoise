@@ -9917,8 +9917,12 @@ def _emission_block_claims(
         # ⛔ The WINDOW admits digit grouping and a decimal (`1,680`, `1680.0`), because the shape
         # backstop below matches those and refusing them was a FALSE BLOCK on TRUE prose: the same
         # figure, twice, refused as "a figure nobody reads" (#14623 round 32, P3).
-        stated_window = int(float(window_str.replace(",", "")))
-        assert stated_window == minutes * 60, (
+        # ⛔ COMPARED AS A FLOAT, never truncated. `int(float(...))` was the first cut and it made
+        # `1680.9`, `1,680.5` and `1680.99` — all FALSE windows — read as the budget, so the widening
+        # that removed a false block simultaneously converted three false figures from RED to GREEN
+        # (measured; #14623 round 33, P2). Equality keeps every legal spelling and refuses every
+        # figure that is not the budget.
+        assert float(window_str.replace(",", "")) == minutes * 60, (
             f"the block states the headroom window as {window_str} s, but the emitted budget beside "
             f"it is {minutes} m = {minutes * 60} s — the numerator is not the budget it divides.")
         expected = cs.watchdog_headroom(ratio_est, minutes)
@@ -10064,7 +10068,8 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
                   # ⛔ THE WINDOW'S NUMBER FORMAT, admitted so the shape backstop cannot refuse a
                   # TRUE sentence on its digit grouping (#14623 round 32, P3).
                   "(1,680 / 827.6 = 2.0300)",
-                  "(1680.0 / 827.6 = 2.0300)"):
+                  "(1680.0 / 827.6 = 2.0300)",
+                  "(1,680.0 / 827.6 = 2.0300)"):
         # ⛔ ASSERT THE READ, not merely that the block parsed. The pre-fix assertion was
         # `_emission_block_claims(...) is not None`, which is TRUE whenever the `ceil(...)` clause
         # parses — so it passed over spellings the ratio reader never saw (measured: `(1680 divided
@@ -10109,7 +10114,25 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
             raise AssertionError(
                 f"a FALSE quotient re-spelled as {wrong!r} passed every check — the widening "
                 "admitted the spelling without grading the figure, which is the round-30 P2 itself")
-    # ⛔ AND THE DIAGNOSTIC QUOTES THE AUTHOR'S OWN TEXT (#14623 round 31, P3): rebuilding the
+    # ⛔ THE WINDOW IS REFUSED WHEN IT IS NOT THE BUDGET, including the truncation escape (#14623
+    # round 33, P2): `int(float(...))` made every `1680.x` a match, so these three FALSE windows
+    # passed GREEN under a comment claiming the numerator is checked. Pinned so equality cannot be
+    # traded back for truncation.
+    for not_the_budget in ("(1680.9 / 827.6 = 2.0300)",
+                           "(1,680.5 / 827.6 = 2.0300)",
+                           "(1680.99 / 827.6 = 2.0300)",
+                           "(16800 / 827.6 = 2.0300)"):
+        try:
+            _emission_block_claims(_ratio_header(not_the_budget))
+        except AssertionError as exc:
+            assert "numerator is not the budget" in str(exc), (
+                f"the window {not_the_budget!r} was refused for the wrong reason: {exc}")
+        else:
+            raise AssertionError(
+                f"a FALSE window {not_the_budget!r} passed as the emitted budget — the numerator is "
+                "truncated rather than compared, so a figure that is not the budget reads as "
+                "verified (#14623 round 33, P2)")
+    # ⛔ THE DIAGNOSTIC QUOTES THE AUTHOR'S OWN TEXT (#14623 round 31, P3): rebuilding the
     # sentence from named groups silently re-spelled `÷` back to `/`, so a reader searching the
     # manifest for the quoted figure found nothing.
     try:
