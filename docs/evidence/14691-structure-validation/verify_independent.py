@@ -99,8 +99,9 @@ async def _call(client, tool, args):
         # bundle's ONE predicate, but it decides over a CALL DICT, while the flag
         # here lives on the MCP RESULT OBJECT (`res.isError`) that has not become a
         # dict yet. That — not portability — is why this file keeps its own arm: it
-        # resolves its worktree from its own location (`parents[3]`, below) and is
-        # run from a checkout, so a sibling import WOULD resolve. The consequence
+        # resolves its worktree from its own location (`parents[3]`, defined ABOVE
+        # at module level) and is run from a checkout, so a sibling import WOULD
+        # resolve. The consequence
         # of a mirror is that the two spellings CAN drift, so it is pinned by
         # `tests/test_14691_structure_evidence.py::test_the_PEER_probe_keeps_the_MCP_error_arm`
         # rather than left to a comment (#14691 review, cycle 3 P2, corrected

@@ -4104,8 +4104,18 @@ def test_the_PRODUCER_and_the_SCORER_share_ONE_error_predicate():
 
 
 def _arm_start(flat_src: str) -> int:
-    """Index of `verify_independent._call`'s MCP-error `if` in normalised source."""
-    return flat_src.index('if getattr(res, "isError", None) is True')
+    """Index of `verify_independent._call`'s MCP-error `if` in normalised source.
+
+    ⛔ BOUNDED TO `_call`'s BODY, NOT THE FILE (#14723 review, cycle 5, P2).
+    Searching from index 0 found the FIRST MCP-error arm anywhere in the file, so
+    a second arm added ABOVE `_call` — a shared helper, say — made `_arm_end` close
+    on THAT one and the envelope assertion passed on the helper's `"ok": False`
+    while `_call`'s own arm was broken. Measured: inserting such a helper and
+    flipping `_call`'s envelope to `"ok": True` left this test GREEN, i.e. a false
+    pass on the exact arm the test names.
+    """
+    call = flat_src.index("async def _call(")
+    return flat_src.index('if getattr(res, "isError", None) is True', call)
 
 
 def _arm_end(flat_src: str) -> int:
@@ -4149,6 +4159,15 @@ def test_the_PEER_probe_keeps_the_MCP_error_arm():
     assert 'getattr(res, "is_error", None) is True' in flat_src, (
         "verify_independent._call keeps only one spelling of the MCP error flag; "
         "the snake_case one is what some client versions set")
+    # ⛔ A LEGIBLE RED FOR A BOUNDARY MOVE. `_arm_end` locates the SUCCESS return,
+    # so re-ordering that dict's keys — a semantics-preserving edit — raised a bare
+    # `ValueError: substring not found` and never printed the pin's message
+    # (#14723 review, cycle 5, observation). This says what moved, first.
+    success = 'return {"tool": tool, "args": args, "ok": True, "reply": out}'
+    assert success in flat_src, (
+        "verify_independent._call's SUCCESS return changed shape, so this pin can "
+        "no longer find the end of the MCP-error arm. That is a boundary move, not "
+        "a missing arm: re-derive `_arm_end`'s token rather than deleting this arm")
     assert '"ok": False' in flat_src[_arm_start(flat_src):_arm_end(flat_src)], (
         "verify_independent._call's MCP-error arm no longer returns a failure "
         "ENVELOPE, so a consumer reading `ok` sees True for the error it "
