@@ -141,11 +141,25 @@ KNOWN_STALE_TOOL_NAMES = {
         # tracked in #13764 (which carries the three steps and names this row as
         # the expiry), rather than fixed in a red-clearing change.
         "tortoise_delete_point",  # → tortoise_delete(dry_run=True) then tortoise_delete(confirmation=...)
+        # #11609 lane P11 (the nine envelope doors) retired these THREE forward. The
+        # mirror's invocation map and prose still name them, and the map is sha-pinned,
+        # so they are RATCHETED for the reason stated above: an edit here DRIFTS the
+        # mirror and the next `--sync` reverts it. Each name still resolves through the
+        # #3883 warning shim, whose warning names the container; re-cutting the mirror
+        # upstream SHRINKS these rows out (`analyse-for-contradictions`, `research-domain`
+        # and `tortoise-onboarding` ARE authored here and were re-pointed in this change).
+        "tortoise_search",              # → tortoise_search_knowledge(query=...)
+        "tortoise_check_structure",     # → tortoise_graph_overview(section="structure_check")
+        "tortoise_suggest_entry_points",  # → tortoise_search_knowledge(mode="entry_points", ...)
     },
     "research-domain": {
         # #4282 → tortoise_graph_overview(section=...) — see the note above.
         "tortoise_audit",
-        "tortoise_overview",
+        # ⛔ `tortoise_overview` LEFT this map with #11609 lane P11: the G4 sentence that
+        # named it (`tortoise_overview(section="structure_check")`) was re-pointed to
+        # `tortoise_graph_overview(section="structure_check")`, so the name is gone from
+        # the file and the ratchet shrinks by one. `tortoise_audit` stays — no section
+        # spelling for it is part of this change.
         # #11609 Phase 2 → tortoise_review_link_candidates(kind="connections"); the
         # mirror is upstream-authored (see the note above), and the retired name
         # still resolves through the #3883 warning shim.
@@ -172,6 +186,11 @@ KNOWN_STALE_TOOL_NAMES = {
         "tortoise_create_operator",     # → tortoise_link_entities(relation, from_id, target_ids=...)
         # → tortoise_create_entity(type="point", ...); see the note at the top.
         "tortoise_create_point",
+        # #11609 lane P11 retired these two forward; sha-pinned mirror, RATCHETED (see the
+        # note above). Each still resolves through the #3883 shim, whose warning names the
+        # container.
+        "tortoise_calibrate_summary",   # → tortoise_check_confidence(calibrate=True)
+        "tortoise_check_structure",     # → tortoise_graph_overview(section="structure_check")
     },
     "tortoise-file-finding": {
         # → tortoise_create_entity(type="point", ...); see the note above.

@@ -237,8 +237,10 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 > `tortoise_diary_write` into them, and then **#11609 P2's confidence arms took it 46 → 44**,
 > and then **#11609 P6's `rest_spec` retirements took it 44 → 42**, and then **P6's DELETE pair
 > took it 42 → 40**, and then **#11609 lane P7 registered the four approved target names that had
-> no entry and retired five doors forward in the same change, took it 40 → 39 — which is the live advertised
-> count at this head** (`uv run python
+> no entry and retired five doors forward in the same change, took it 40 → 39**, and then
+> **#11609 lane P11 gave the FOUR read/query containers the list envelope at the handler
+> (`_row_section_envelope`) and retired the nine doors that had been held for it, so it took it 39 → 30
+> — which is the live advertised count at this head** (`uv run python
 > tools/surface_manifest.py check` is the live count). Each of those last two moves retires doors by GROWING a container
 > rather than by landing one: `tortoise_check_confidence` gained a `recompute=True` arm
 > (absorbing `tortoise_compute_confidence`) and a `recall=True` arm (absorbing
@@ -464,26 +466,31 @@ answer (each was measured on its own base). They retire DISJOINT door sets — t
 wave's nine, the WRITE/MUTATE wave's fourteen and the SOURCES/MINE/SESSION wave's seven share no
 name — so the composed surface is:
 
-- the surface is now **39 advertised tools** with **73** retired-forward entries: the three
-  container waves, the door-retirement wave, the POINT/DIARY wave, the confidence-arms wave and
-  the `rest_spec` pair compose on ONE tree — each wave was measured on its own base, so
+- the surface is now **30 advertised tools** with **82** retired-forward entries: the three
+  container waves, the door-retirement wave, the POINT/DIARY wave, the confidence-arms wave, the
+  `rest_spec` pair and the NINE-DOOR ENVELOPE wave compose on ONE tree — each wave was measured on
+  its own base, so
   (68 − 9 + 5 − 14 + 6 − 7 + 6 = 55, then the door wave's −7 with no container row arriving =
   48, then the POINT/DIARY wave's −2 with no container row arriving = 46, then the confidence-arms
   wave's −2 with no container row arriving = 44, then the P6 wave's −2 with no container row arriving =
   42, then the P6-delete wave's −2 with no container row arriving = 40, then the P7-registration
-  wave's +4 = 44, then the P7-retirement wave's −5 with no container row arriving = 39, and
-  23 + 9 + 14 + 7 + 7 + 2 + 2 + 2 + 2 + 5 = 73) over a
-  SERVED population of **112** rows (39 live + 73 shims) — the registry total `tools/bridge_table.py --check` reports
+  wave's +4 = 44, then the P7-retirement wave's −5 with no container row arriving = 39,
+  then the envelope wave's −9 with no container row arriving = 30, and
+  23 + 9 + 14 + 7 + 7 + 2 + 2 + 2 + 2 + 5 + 9 = 82) over a
+  SERVED population of **112** rows (30 live + 82 shims) — the registry total `tools/bridge_table.py --check` reports
   as `current (112 registry tools)` and `tools/mcp_rename_table.py` prints as
-  `served tools: 112` — and `surface_manifest.py check` re-derives the 39/73 split.
-  ⛔ The SERVED total is unchanged by those last three waves, which is the property that makes them
-  consolidations: eight doors stopped being advertised and started being shims, and the capability
+  `served tools: 112` — and `surface_manifest.py check` re-derives the 30/82 split.
+  ⛔ The SERVED total is unchanged by those last four waves, which is the property that makes them
+  consolidations: the doors stopped being advertised and started being shims, and the capability
   each named moved into an arm of a live tool (48 + 60 = 46 + 62 = 44 + 64 = 42 + 66 = 40 + 68 = 108);
   P7 is the wave that ADDS rows, so the served total moves for the first time in that chain —
-  39 + 73 = 112.
+  30 + 82 = 112. ⛔ THE ENVELOPE WAVE IS THE PUREST CASE OF THAT PROPERTY: nine doors left the
+  advertised surface, nine shims arrived, and NOT ONE container row was added, because the
+  capability was already reachable — what was missing was the WIRE SHAPE, and it was added at the
+  container (`_row_section_envelope`) rather than by anything on the registry.
   ⛔ NOT `config/surface-order.yml`: that file is the ordering / keyword table (its header says
   the lint "must not be satisfiable by editing the rows it checks"), and its `baseline_counts`
-  sum to the **advertised 39**, not the served 112, so it cannot total a served population;
+  sum to the **advertised 30**, not the served 112, so it cannot total a served population;
 - **105 public SDK methods**, composed the same way, on a surface this wave does not touch:
   125 → 120 (#12901 wave 1) → 112 (#11609's READ/QUERY family A, #12951: six containers in,
   fourteen read methods re-privatised) → 111 (lane B: four retired, three delivered) → 110
@@ -500,7 +507,7 @@ Three consequences for readers of the paragraph below, which is left as written 
 the 2026-10-27 ruling, not the current state:
 
 1. The count there (**18**) and its `18 of 18 verified` are that day's measurement. The population is
-   **73** now (the composition this document works out below), and it is still 73 of 73 verified —
+   **82** now (the composition this document works out below), and it is still 82 of 82 verified —
    every pointer names a call that resolves.
 2. `tortoise_health` no longer redirects to `tortoise_overview`: that name is itself retired, and
    `RETIRED_USE_INSTEAD` resolves ONE hop (aliases are not transitive — the same limit GitHub's own
@@ -511,12 +518,13 @@ the 2026-10-27 ruling, not the current state:
    both names, which is why it fails silently.
 3. **Row 6 lists seven names; the batch accounts for all seven.** Five retire into the container
    (`overview`, `summarize_structure`, `validate_domain`, `audit`, `dream_health`).
-   `tortoise_check_structure` is absorbed as the `structure_check` **section** while its own door
-   stays **live**, until the container has a **declared output envelope**: that read is the one
-   member with a wrap envelope (`-> list[dict]`) and it carries the #8482 failure repair for a
-   payload the array schema cannot otherwise express, while a `-> Any` container cannot carry it —
-   retiring the door first would move the repair off the advertised path. The section and the door
-   answer the same rows today.
+   `tortoise_check_structure` was absorbed as the `structure_check` **section** while its own door
+   stayed **live**, until the container could carry the same **envelope** — that read declared a
+   wrap envelope (`-> list[dict]`) and shipped `{"result": [...]}`, while a `-> Any` container's list
+   arm shipped a bare text block. **It retired in #11609 lane P11**, in the batch that gave the
+   container the envelope by building it at the handler (`_row_section_envelope`) rather than by
+   re-annotating a live tool — so the section and the door had already been answering the same rows,
+   and are now the same door.
    `tortoise_issue_insight` is **not** part of this batch: its Phase-0.1 destination
    (`tools/bridge_table.py` `DESTINATION`) is **`search_knowledge`**, so it retires with that
    container. Folding it in here as a section would also have given one SDK method two different
