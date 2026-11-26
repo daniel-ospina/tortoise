@@ -788,6 +788,25 @@ i.e. exactly the contrast the field exists to draw. The cited lines are now read
 out of the file: the range must mention each predicate it claims to cover and must
 still say the read is epistemic-only.
 
+### 8.12 What the tenth round closed (every door citation, not just D4's)
+
+The round-9 fix pinned D4's line range; the reviewer measured the SAME defect on
+the other three findings, each byte-neutral and `--check`-green:
+
+- **D1** — a second copy of D4's claim: `structural_edges_seen` (`hasPart` →
+  `ownedBy`), the `expand_relationships` range (`551-559` → `533-541`) and the
+  `navigation.py` range (`172-179` → `166-173`) were all free. The predicate list
+  is now the graph's own (four real structural predicates, disjoint from the
+  epistemic ones) and each cited range is read out of the file and asked whether it
+  is about what it is cited for (`UNION`, the three epistemic predicates).
+- **D3** — its evidence duplicated the probes' counts, so the artifact could claim
+  `bare_returned 0/0 → 2/3` while its own answer says "EMPTY list", i.e. refute
+  itself. The counts are now derived from `bare_kind_probes`, and a FAILED probe is
+  refused as a measurement.
+- **D6** — `sdk.py:62739-62758` → `:61000-61019` (unrelated code) was free. The
+  cited lines must mention `ownedBy`, and `owners_asked`/`rows_returned` must be the
+  witnesses that actually answered nothing.
+
 The generic coverage arm (`test_no_FIGURE_in_the_two_documents_is_free`) is a
 **floor, not a substitute for a pin**: it proves a number is carried by some
 artifact, never that it belongs to the field quoting it — which is why six of the
