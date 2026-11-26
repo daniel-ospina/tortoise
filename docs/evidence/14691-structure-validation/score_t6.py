@@ -822,19 +822,23 @@ def _door_findings() -> list[dict]:
                                    "isolated",
                 "evidence": silent,
             })
-    # ⛔ A MISSING PROBE IS NOT A MEASURED `[]` (#14691 review, 3rd cycle). The
-    # condition used to be `.get("reply") in ([], None)`, and `.get` returns
-    # `None` for a row where the probe is ABSENT — so a witness that never asked
-    # the door was counted as one that asked and got an empty answer, and D6 (the
-    # bundle's headline mechanism finding) could be asserted from rows that were
-    # never measured. Driven: deleting `governance_owned_by` from every witness
-    # row still emitted D6 with all four owners listed. The committed artifact is
-    # honest today (all seven witness rows carry a real `reply: []`), so this was
-    # a fail-open in the PRODUCER, not a false number — and it is the same shape
-    # as the findings that came before it: a claim satisfiable without the
-    # measurement. `== []` requires the key AND the empty answer.
-    owned = {n: w for n, w in witness.items()
-             if (w.get("governance_owned_by") or {}).get("reply") == []}
+    # ⛔ BOTH SPELLINGS OF AN EMPTY ANSWER, and absence is still not one of them
+    # (#14691 review, 4th cycle). The previous arm required the BARE list `== []`,
+    # which is one of the two shapes this readback actually uses — six other doors
+    # in the same file answer `{"result": []}` (e.g. `structure_check`), and the
+    # pin beside this code accepted both. Measured: rewriting the seven witness
+    # replies to the envelope spelling dropped D6 from the artifact while all 18
+    # tests stayed green, so the bundle's headline finding could vanish through a
+    # shape change alone. Normalising through `rows()` here is the same unwrap
+    # `a2_edges()` already does, and it keeps the distinction this fix exists for:
+    # a MISSING probe has no `reply` key at all and is still NOT a measured empty.
+    owned = {}
+    for n, w in witness.items():
+        probe = w.get("governance_owned_by")
+        if not isinstance(probe, dict) or "reply" not in probe:
+            continue
+        if rows(probe["reply"]) == []:
+            owned[n] = w
     asked_owners = [n for n in owned
                     if n in {"Amara Osei", "Dana Whitlock", "Tomas Ferreira",
                              "Jonas Bauer"}]

@@ -215,6 +215,16 @@ def test_every_owner_was_actually_ASKED_the_ownership_door():
     assert a2["owners_not_asked"] == [], a2["owners_not_asked"]
     assert set(a2["owners_asked"]) == owners, a2["owners_asked"]
     assert a2["total_rows"] == 0
+    # ⛔ AND THE FINDING ITSELF MUST NOT VANISH (#14691 review, 4th cycle).
+    # Every arm above reads the witness; none of them notices D6 DISAPPEARING from
+    # the artifact, which is what a shape change alone used to do (bare `[]` →
+    # `{"result": []}` dropped it while the suite stayed green). The id set is
+    # pinned whole, so a finding that stops being emitted reds here instead of
+    # leaving REPORT.md §4 asserting a row the artifact no longer carries.
+    ids = [f["id"] for f in _score()["door_findings"]]
+    assert "D6" in ids, (
+        f"D6 vanished from the artifact's door findings: {ids}")
+    assert set(ids) == {"D1", "D2", "D3", "D4", "D5", "D6"}, ids
 
 
 def test_a3_hierarchy_has_two_parents_and_five_children():
