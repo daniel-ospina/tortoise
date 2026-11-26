@@ -692,27 +692,93 @@ def _squash(text: str) -> str:
     return _QUOTE_KEY.sub("", _norm(text))
 
 
-#: The KIND nouns the corpus's own declared groups are named after. These are the
+#: The KIND nouns the corpus's own declared GROUPS are named after. These are the
 #: words a writer can WELD onto an entity name (`ingest-gateway component`), so
-#: they are the only words the name-variance retry may drop — derived from
-#: `_declared_structure`, never a hand-typed list. A retry that dropped any word
-#: would be truncation, which turns `Northwind Logistics` into a different entity
-#: and grades an invented edge as stated (#14723 review, round 10, P2).
-_KIND_WORDS = {_squash(singular) for singular in (
-    "product", "feature", "team", "role", "person", "component",
-    "customer", "customer segment")}
+#: they are the only words the name-variance retry may drop.
+#: ⛔ DERIVED FROM THE DECLARED GROUPS, THROUGH AN EXPLICIT MORPHOLOGY TABLE
+#: (#14723 review, round 10, P3). The previous revision CALLED itself derived
+#: ("derived from `_declared_structure`, never a hand-typed list") while being a
+#: hand-typed tuple, and a naive derivation — singularise each key — does not even
+#: reproduce it: `people` → `person` and `customerSegments` → `customer segment`
+#: are not reachable from the key. The table is explicit, and it is CHECKED
+#: against the declared structure at import, so a declared group with no kind
+#: word raises here instead of leaving a silent gap in the retry.
+_KIND_OF_GROUP = {
+    "products": "product", "features": "feature", "teams": "team",
+    "roles": "role", "people": "person", "components": "component",
+    "customers": "customer", "customerSegments": "customer segment",
+}
+
+#: The groups in `_declared_structure` whose values are NAMES. The edge tables
+#: (`containment`, `membership`, `ownership`, `dependencies`, …) hold pairs and
+#: are deliberately not part of the kind-word population.
+_DECLARED_GROUPS = {key for key, value in DECL.items()
+                    if isinstance(value, list) and value
+                    and all(isinstance(item, str) for item in value)}
+
+
+def _kind_words(decl: dict) -> set[str]:
+    """The trailing KIND words a declared structure allows, FAIL-CLOSED.
+
+    Raises when a declared name group has no kind word, so a corpus that adds a
+    group cannot leave a silent gap in `_unweld` (and the raise is reachable — it
+    is exercised by the suite with a group that is not in the table).
+    """
+    groups = {key for key, value in decl.items()
+              if isinstance(value, list) and value
+              and all(isinstance(item, str) for item in value)}
+    missing = groups - set(_KIND_OF_GROUP)
+    if missing:
+        raise ValueError(
+            f"no kind word for the declared name group(s) {sorted(missing)} — "
+            "add them to _KIND_OF_GROUP beside the corpus group they name")
+    stale = set(_KIND_OF_GROUP) - groups
+    if stale:
+        raise ValueError(
+            f"_KIND_OF_GROUP names group(s) the corpus does not declare: "
+            f"{sorted(stale)}")
+    return {_squash(kind) for kind in _KIND_OF_GROUP.values()}
+
+
+_KIND_WORDS = _kind_words(DECL)
+
+#: Every name the corpus DECLARES, squashed. A retry may only un-weld a word when
+#: what is left is one of these — see `_unweld`.
+_DECLARED = {_squash(name) for value in DECL.values() if isinstance(value, list)
+             for name in value if isinstance(name, str)}
 
 
 def _unweld(name) -> str:
     """Drop ONE trailing kind word welded to a name (`ingest-gateway component`).
 
-    Names without a kind suffix are returned unchanged, so the retry is a
-    name-variance allowance and not a substring search.
+    ⛔ AND ONLY WHEN THE REMAINDER IS A DECLARED NAME (#14723 review, round 10,
+    P1). Every declared team ENDS with its kind word (`Platform team`,
+    `Product team`, `Customer team`), so dropping the word TRUNCATES a legitimate
+    name to a bare common noun — `Customer team` → `Customer`, which the corpus
+    also says on its own — and two edges the corpus never states
+    (`Grid Map --managedBy--> Customer team`, `Asset Register --managedBy-->
+    Customer team`) then cleared A4 on the retry alone (`passes: True`,
+    `relations_not_co_stated: []`). That is the truncation the round-9 fix was
+    meant to remove, one word narrower. The un-welded form must BE a declared
+    name and the welded form must not be, so
+    `ingest-gateway component → ingest-gateway` still passes and
+    `Customer team → Customer` does not. Names without a kind suffix are returned
+    unchanged, so this is a name-variance allowance, not a substring search.
     """
     parts = str(name or "").split()
     if len(parts) > 1 and _squash(parts[-1]) in _KIND_WORDS:
-        return " ".join(parts[:-1])
+        welded, unwelded = _squash(name), _squash(" ".join(parts[:-1]))
+        if unwelded in _DECLARED and welded not in _DECLARED:
+            return " ".join(parts[:-1])
     return str(name or "")
+
+
+#: Example lists are capped for artifact size. A cap is a DISPLAY concern and
+#: never a count, so each list records when its cap bit. Module-level so the
+#: falsifier suite can FORCE the cap and observe that the flag it declares is the
+#: flag that fires (#14723 review, round 10, P2) — at the default cap this corpus
+#: never truncates a summary sample, so the setter's name was unobservable.
+CAP = 10
 
 
 def a4_invention() -> dict:
@@ -738,6 +804,14 @@ def a4_invention() -> dict:
     #: support from.
     corpus_turns = [_norm(t["content"])
                     for d in CORPUS["documents"] for t in d["turns"]]
+    #: The SAME units, per DOCUMENT. A4 asks whether the BUSINESS states a claim,
+    #: not whether the document the extractor attributed it to does — so the
+    #: decider stays corpus-wide. What must not stay unstated is WHERE the support
+    #: came from: `best_own_doc_turn_overlap` records the doc-scoped figure beside
+    #: the corpus-wide one, and `supported_outside_own_doc` counts the rows that
+    #: clear the band only through another document (#14723 review, round 10, P2).
+    own_turns_by_doc = {d["doc_id"]: [_norm(t["content"]) for t in d["turns"]]
+                        for d in CORPUS["documents"]}
 
     def _best_overlap(quote: str, units: list[str]) -> float:
         """Share of the quote's content words present in its best-matching UNIT."""
@@ -772,15 +846,21 @@ def a4_invention() -> dict:
         The turn unit is BOUNDED on purpose: support cannot be assembled across
         unrelated paragraphs, so a recombined claim still scores low (`invented`
         stays 9, and the claim-layer FAIL direction is unchanged).
+        ⛔ AND THE SEARCH SPAN IS CORPUS-WIDE, WHICH THE ROWS NOW STATE (#14723
+        review, round 10, P2). The three summaries are the corpus stating them,
+        but one of them — doc-04's enterprise-renewals row — clears the band only
+        on a doc-02 turn (0.714 corpus-wide, 0.571 inside its own doc), so a
+        reader told "supported by its own turn" of every row would be told
+        something the measure never established. Doc-scoping the decider instead
+        would re-grade that row `invented`, which is a different (and wrong)
+        claim: the business DOES state it. Both figures are therefore recorded per
+        row, and the rows that depend on another document are counted.
         """
         return _best_overlap(quote, corpus_turns)
 
     #: The paraphrase band: above it the content words survive and only the
     #: wording changed; below it the corpus does not state the thing at all.
     BAND = 0.6
-    #: Example lists are capped for artifact size. A cap is a DISPLAY concern and
-    #: never a count, so each list records when its cap bit.
-    CAP = 10
     quotes = {"total": 0, "verbatim": 0, "paraphrase": 0, "invented": 0,
               # ⛔ A THIRD BUCKET, because two could not describe the population
               # (#14723 review, round 10, P2): a quote whose support exists only
@@ -800,6 +880,14 @@ def a4_invention() -> dict:
               "below_sentence_band": 0,
               "paraphrase_examples": [], "invented_examples": [],
               "summary_examples": [],
+              # ⛔ THE SCOPE OF THE SUPPORT SEARCH, AS A NUMBER (#14723 review,
+              # round 10, P2): rows that clear the turn band only through a
+              # document OTHER than the one they are attributed to. A count and a
+              # capped sample, like every other population here — the count is the
+              # claim, the sample is what a reader can check.
+              "supported_outside_own_doc": 0,
+              "supported_outside_own_doc_examples": [],
+              "supported_outside_own_doc_examples_truncated": False,
               # ONE FLAG PER LIST (#14691 review, 5th cycle, NEW-4): a single
               # shared boolean cannot say WHICH list's cap bit, so a consumer
               # still cannot tell which of the two samples is complete.
@@ -820,6 +908,17 @@ def a4_invention() -> dict:
     #: bucket -> its own example list (a shared name would make a cap ambiguous)
     quotes["_EXAMPLES"] = {"paraphrase": quotes["paraphrase_examples"],
                            "summary_in_one_turn": quotes["summary_examples"]}
+    #: bucket -> the truncation FLAG its list is declared under.
+    #: ⛔ THE FLAG'S NAME IS NOT THE BUCKET'S (#14723 review, round 10, P2). The
+    #: setter derived the flag from the bucket (`f"{bucket}_examples_truncated"`)
+    #: while the initialiser — and the arm that reads it — spell
+    #: `summary_examples_truncated`, so a capped summary sample set a key nobody
+    #: reads and the consumer was told the sample was COMPLETE. Masked only because
+    #: this corpus holds 3 summaries: measured with the cap forced to 0,
+    #: `summary_examples_truncated` stayed `False`.
+    quotes["_EXAMPLES_TRUNCATED"] = {
+        "paraphrase": "paraphrase_examples_truncated",
+        "summary_in_one_turn": "summary_examples_truncated"}
     for doc in RECEIPT.get("documents") or []:
         for point in (doc.get("result") or {}).get("points") or []:
             props = point.get("props") or {}
@@ -832,9 +931,11 @@ def a4_invention() -> dict:
                 continue
             ov = sentence_overlap(quote)
             t_ov = turn_overlap(quote)
+            own_ov = _best_overlap(quote, own_turns_by_doc.get(doc.get("doc_id"), []))
             entry = {"doc": doc.get("doc_id"), "quote": quote[:200],
                      "best_sentence_overlap": ov,
                      "best_turn_overlap": t_ov,
+                     "best_own_doc_turn_overlap": own_ov,
                      "point": str(point.get("text") or point.get("content"))[:140]}
             if ov < 0.5:
                 quotes["bands"]["below_0_5"] += 1
@@ -852,13 +953,20 @@ def a4_invention() -> dict:
                 quotes["below_sentence_band"] += 1
             if t_ov >= BAND:
                 # supported by the corpus — the only question is WHERE
+                if own_ov < BAND:
+                    quotes["supported_outside_own_doc"] += 1
+                    if (len(quotes["supported_outside_own_doc_examples"])
+                            < CAP):
+                        quotes["supported_outside_own_doc_examples"].append(entry)
+                    else:
+                        quotes["supported_outside_own_doc_examples_truncated"] = True
                 bucket = "paraphrase" if ov >= BAND else "summary_in_one_turn"
                 quotes[bucket] += 1
                 examples = quotes["_EXAMPLES"][bucket]
                 if len(examples) < CAP:
                     examples.append(entry)
                 else:
-                    quotes[f"{bucket}_examples_truncated"] = True
+                    quotes[quotes["_EXAMPLES_TRUNCATED"][bucket]] = True
             else:
                 quotes["invented"] += 1
                 if len(quotes["invented_examples"]) < CAP:
@@ -1054,6 +1162,27 @@ def a5_retrieval() -> dict:
     }
 
 
+def _ownership_empty_answers() -> dict:
+    """The witnesses whose OWNERSHIP probe answered an empty list — not an error.
+
+    ONE reading of the door, used by both the finding (`_door_findings`) and the
+    withheld record (`_withheld_findings`), so the two can never disagree about
+    which witnesses answered nothing (#14723 review, round 10, P3).
+    """
+    owned = {}
+    for name, w in (READBACK.get("link_witness") or {}).items():
+        probe = w.get("governance_owned_by")
+        if not isinstance(probe, dict) or "reply" not in probe:
+            continue
+        if call_failed(probe):
+            # same distinction as D4: a failed call is NOT a measured empty, so
+            # it can neither witness the finding nor be counted as an answer.
+            continue
+        if rows(probe["reply"]) == []:
+            owned[name] = w
+    return owned
+
+
 def _door_findings() -> list[dict]:
     """The door findings, from the readback's own witness rows.
 
@@ -1211,17 +1340,7 @@ def _door_findings() -> list[dict]:
     # shape change alone. Normalising through `rows()` here is the same unwrap
     # `a2_edges()` already does, and it keeps the distinction this fix exists for:
     # a MISSING probe has no `reply` key at all and is still NOT a measured empty.
-    owned = {}
-    for n, w in witness.items():
-        probe = w.get("governance_owned_by")
-        if not isinstance(probe, dict) or "reply" not in probe:
-            continue
-        if call_failed(probe):
-            # same distinction as D4: a failed call is NOT a measured empty, so
-            # it can neither witness the finding nor be counted as an answer.
-            continue
-        if rows(probe["reply"]) == []:
-            owned[n] = w
+    owned = _ownership_empty_answers()
     #: The owners asked, from the CORPUS's declared people — not a typed list.
     #: ⛔ #14723 review, round 10, P3: this set used to be hardcoded
     #: (`{"Amara Osei", "Dana Whitlock", "Tomas Ferreira", "Jonas Bauer"}`), so a
@@ -1284,6 +1403,35 @@ def _door_findings() -> list[dict]:
                          "nodes_asked": asked_total},
         })
     return found
+
+
+def _withheld_findings() -> list:
+    """The door findings this run could NOT emit, and WHY — never a silence.
+
+    ⛔ A FINDING THAT CANNOT BE DERIVED MUST SAY SO (#14723 review, round 10,
+    P3). D6 is emitted only when at least two DECLARED owners were asked, and with
+    `DECL["people"] = []` it simply disappeared from `door_findings` —
+    `['D1','D2','D3','D4','D6','D5']` → `['D1','D2','D3','D4','D5']` — with
+    nothing recording that the bundle's headline ownership finding had been
+    withdrawn, so a reader could not tell a withdrawn finding from one the run
+    never asked. A2 already states its own unasked population
+    (`ownership_door.owners_not_asked`); this is the same shape for the findings
+    list, and it is DERIVED from the same reading `_door_findings` uses
+    (`_ownership_empty_answers`), so the two cannot disagree.
+    """
+    owned = _ownership_empty_answers()
+    asked = [name for name in owned if name in set(DECL["people"])]
+    if len(asked) >= 2:
+        return []
+    return [{
+        "id": "D6",
+        "reason": "fewer than two DECLARED owners answered an empty reply, so "
+                  "'it returns [] for all N owners' has no population to be "
+                  "about — the finding is WITHDRAWN, not absent",
+        "owners_asked": sorted(asked),
+        "declared_people": sorted(DECL["people"]),
+        "witnesses_answering_empty": sorted(owned),
+    }]
 
 
 def _claim_layer() -> dict:
@@ -1365,6 +1513,8 @@ def build_score() -> dict:
         "claim_layer": _claim_layer(),
         "A5_retrieval": a5_retrieval(),
         "door_findings": _door_findings(),
+        # findings the run could not derive, with the reason — never a silence
+        "withheld_findings": _withheld_findings(),
         "extraction_tokens": _tokens(),
         "edge_count": len(EDGES),
         "edges_by_predicate": {},

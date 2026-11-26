@@ -293,6 +293,15 @@ counts as `not_in_corpus`); the **invented** count is **9**, and it is the one t
 The turn unit is bounded on purpose: support cannot be assembled across unrelated paragraphs, so a
 recombined claim still scores low and the FAIL direction is unchanged.
 
+⛔ **And the search SPAN is corpus-wide, which the receipt now states.** A row's `doc` is the
+document the extractor attributed it to; the turn band is measured against every corpus turn. Exactly
+**one** of the 30 supported rows clears the band only through a different document: doc-04's
+`Enterprise renewals, owned by Jonas Bauer …` scores **0.571** inside doc-04 and **0.714** on a
+doc-02 turn, and `claim_layer.supported_outside_own_doc` is **1** (the row is carried in
+`supported_outside_own_doc_examples`). Doc-scoping the band instead would re-grade a fact the
+business does state as *invented*, so the scope stays corpus-wide and is **recorded per row**
+(`best_own_doc_turn_overlap`) rather than left for a reader to infer.
+
 Examples of the invented 9 (`out/t6-score.json` → `claim_layer.invented_examples`):
 
 ```text
@@ -873,6 +882,45 @@ The generic coverage arm (`test_no_FIGURE_in_the_two_documents_is_free`) is a
 artifact, never that it belongs to the field quoting it — which is why six of the
 ten above were green under it. A future round that finds an unpinned cell should
 add a pin, not widen an allowlist.
+
+### 8.16 What the fourteenth round closed (a retry that truncated, a flag nobody read, two arms that could not red)
+
+- **P1 — the name-variance retry truncated a DECLARED name.** Every declared team
+  ENDS with its kind word (`Platform team`, `Product team`, `Customer team`), so
+  dropping the trailing kind word turned a legitimate name into a bare common
+  noun — `Customer team` → `Customer`, which the corpus says on its own. Both
+  `Grid Map --managedBy--> Customer team` and `Asset Register --managedBy-->
+  Customer team` (never stated) then cleared A4 through the retry alone. The
+  retry now additionally requires the un-welded form to BE a declared name and
+  the welded form not to be, so `ingest-gateway component → ingest-gateway`
+  survives and `Customer team → Customer` is refused. The committed artifact is
+  unchanged by this (its only variance row is the legitimate one) — the fail-open
+  was reachable only through a corrupted receipt, which the new arm constructs.
+- **P2 — the summary cap set a flag nothing read.** `quotes` declares
+  `summary_examples_truncated`, while the setter derived
+  `f"{bucket}_examples_truncated"` and the summary bucket is `summary_in_one_turn`,
+  so a capped summary sample told the consumer the sample was COMPLETE. Masked by
+  this corpus holding 3 summaries; the arm forces `CAP = 0` to observe it.
+- **P2 — the turn band's SPAN was unstated.** See §3: one row clears the band only
+  through another document, and the artifact now counts and samples it
+  (`supported_outside_own_doc`, per-row `best_own_doc_turn_overlap`).
+- **P3 — `_KIND_WORDS` was hand-typed while its comment claimed derivation.** The
+  table is now explicit (`_KIND_OF_GROUP`, keyed by the declared structure's own
+  groups) and the set is READ from it; a declared group with no kind word raises at
+  import instead of leaving a silent gap.
+- **P3 — D6 could still vanish with no record.** When fewer than two declared
+  owners answered empty, the finding was simply absent from `door_findings`. The
+  artifact now carries `withheld_findings`, derived from the same witness reading,
+  naming the finding and why it was withdrawn.
+- **Three arms could not red, and one had the wrong sense.** D1's module check was
+  a tautology (`… or "entity_reads" in sentence`, on a sentence that begins
+  `entity_reads.`); D5 compared `reported[name]` to the witness id the artifact was
+  derived from (`X == X`); and D5's "two doors …" clause was guarded by its own
+  wording, with the `reject` branch written in the `return` sense — so
+  `two doors reject` passed. D1 now derives REACH from the served handler's AST,
+  D5 compares the reported id to the probe's own `args`, and the clause's verb
+  decides the sense (`return` → positive neighbour count, `reject` → zero,
+  anything unmeasured → red).
 
 ---
 
