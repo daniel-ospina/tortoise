@@ -455,17 +455,24 @@ test('#14686: a team switch drops the previous Organization\'s alerts', () => {
   // without the reset the panel prints "You have no notifications." over the feed
   // it has not read yet. This pin said THREE until #14694 added the fourth, and a
   // stale count is how the pin stops meaning what it claims.
-  assert.match(body, /setAlerts\(\[\]\)/,
-    'the previous Organization\'s rows must not survive a switch')
-  assert.match(body, /setAlertsSaturated\(false\)/, 'nor its cut-scan flag')
-  assert.match(body, /setAlertsUnavailable\(false\)/, 'nor its failed-read flag')
-  assert.match(body, /setAlertsLoaded\(false\)/,
-    'nor its "feed has been read" fact — the read below has not happened yet')
-  // A COUNT, not a presence check. The slice covers BOTH reset sites (the switch
-  // at `setAlerts([])` and the revert path at 10-space indent), so an "at least
-  // one" match is satisfied by whichever one survives — measured: removing the
-  // switch's reset left this pin GREEN, because the revert's still matched it.
-  // Two is the whole set, so dropping either reds here.
+  //
+  // ⛔ COUNTS, NOT PRESENCE CHECKS — all four. `switchTeam` resets these at TWO
+  // sites (the switch itself and the failed-switch revert arm a few lines down),
+  // and a presence check is satisfied by whichever one survives: measured,
+  // deleting the switch's `setAlerts([])`, `setAlertsSaturated(false)` or
+  // `setAlertsUnavailable(false)` left this test GREEN because the revert's line
+  // still matched — so the F2 defect (org A's rows / cut-scan / failed-read flags
+  // surviving a live switch) could be reintroduced with every suite green. Two is
+  // the whole set, so dropping either site reds here.
+  assert.equal((body.match(/setAlerts\(\[\]\)/g) || []).length, 2,
+    'BOTH reset sites (the switch and its revert) must drop the previous '
+    + 'Organization\'s rows')
+  assert.equal((body.match(/setAlertsSaturated\(false\)/g) || []).length, 2,
+    'BOTH reset sites must clear the cut-scan flag — otherwise org A\'s CUT scan '
+    + 'speaks for org B')
+  assert.equal((body.match(/setAlertsUnavailable\(false\)/g) || []).length, 2,
+    'BOTH reset sites must clear the failed-read flag — otherwise org A\'s failed '
+    + 'read is announced under org B')
   assert.equal((body.match(/setAlertsLoaded\(false\)/g) || []).length, 2,
     'BOTH reset sites (the switch and its revert) must clear the settled fact — '
     + 'a `[]` feed they just cleared must not be accompanied by "you have no '
@@ -565,12 +572,35 @@ test('#14686: an in-flight alerts read cannot land on the wrong Organization', (
   // …and where it has to be: before EACH write. A guard anywhere in the body is
   // satisfied by one in the success branch alone, while the failure arms stamp
   // the previous Organization's failed read onto the new one's state.
-  assert.match(body, /if \(orgIdRef\.current !== orgAtCall\) return\s*\n\s+setAlerts\(feed\.alerts\)/,
-    'the success write must be discarded when the Organization changed mid-read')
+  //
+  // ⛔ THE GUARD IS A TWO-HALVED PREDICATE, and the second half is #14694's P2.
+  // Capture-and-compare alone answers "did the Organization change under this
+  // read?" — but a first-Organization read is started with `orgAtCall` null and
+  // the org is pinned to that read's OWN `tid` while it is in flight, so the
+  // capture half discards a read that was FOR the current Organization: the feed
+  // is never read, `alertsRequested` stays true and `alertsLoaded` false, and the
+  // panel claims "Checking for notifications…" for the rest of the session. The
+  // predicate must therefore accept a response whose target IS the live org, and
+  // that half is asserted by TEXT below (dropping it reds), because the live-org
+  // comparison cannot be spelled any other way without becoming the wrong form
+  // the two `doesNotMatch` pins above forbid.
+  assert.match(body, /const stale = \(\) => orgIdRef\.current !== orgAtCall && orgIdRef\.current !== tid/,
+    'a read is stale only when the Organization changed under it AND the read is '
+    + 'not for the Organization that is current now — without the second half a '
+    + 'first-Organization read that lands after the pin is discarded and the bell '
+    + 'says "Checking…" forever')
+  assert.doesNotMatch(body, /if \(orgIdRef\.current !== orgAtCall\) return/,
+    'the capture-only guard discards a read for the CURRENT Organization (measured: '
+    + '`completeLogin` starts the read at `orgAtCall === null`, then pins the org)')
+  assert.match(body, /if \(stale\(\)\) return\s*\n\s+setAlerts\(feed\.alerts\)/,
+    'the success write must be discarded when the read is STALE, and only then')
   const failureGuards = body.match(
-    /if \(orgIdRef\.current !== orgAtCall\) return\s*\n\s+setAlertsUnavailable\(true\)/g) || []
+    /if \(stale\(\)\) return\s*\n\s+setAlertsUnavailable\(true\)/g) || []
   assert.equal(failureGuards.length, 2,
     'BOTH failure arms (non-2xx and throw) must be guarded — not only the success branch')
+  assert.equal((body.match(/if \(stale\(\)\) return/g) || []).length, 3,
+    'all three post-await arms must use the shared predicate — a fourth spelling '
+    + 'means an arm was added without deciding the staleness question')
   // …and the read must be FOR the Organization that is current when it STARTS.
   // The in-flight guard compares the ref before and after the awaits, so it
   // cannot see a caller that captured `tid` before an await of its own:

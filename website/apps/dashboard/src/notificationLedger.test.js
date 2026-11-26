@@ -795,6 +795,102 @@ test('the ACTIVITY bound matches the server on BOTH sides — the backward case 
   )
 })
 
+test('the persisted ack WINDOW and the snooze ANCHOR survive a reload — the sibling maps are not dropped on read', () => {
+  // ⛔ EVERY ASSERTION HERE IS ABOUT THE ROUND TRIP, and that is the whole point.
+  // The maps above are only useful if `writeState` stores them AND `readState`
+  // restores them: a restore that is quietly dropped (`dismissedFirst` -> `{}`,
+  // `dismissedLast` -> `void`, `snoozedAt` -> `if (false)`) leaves the module's own
+  // "the mirror is exact" claim unbacked while the in-memory tests stay green —
+  // `dismiss()` builds the state the reader's NEXT page load must reconstruct.
+  // Measured on the pre-fix test file: all four mutants below (the two writes in
+  // `dismiss`, and each of the three restore loops in `readState`) exited 0 over
+  // the whole ledger suite; the assertions here red on exactly the one they name.
+  const storage = fakeStorage()
+  const key = storageKey({ userId: 'u1', orgId: 'org-a' })
+  const measured = alert({
+    type: 'read_velocity',
+    register: 'activity',
+    message: 'Read volume crossed the threshold.',
+    first_at: new Date(NOW.getTime() - 30 * MIN).toISOString(),
+    at: new Date(NOW.getTime() - 5 * MIN).toISOString(),
+  })
+  const decisionKey = entryKeyOf(measured)
+  assert.equal(writeState(storage, key, dismiss(emptyState(), decisionKey, NOW, measured)), true)
+  const { state: restored, persisted } = readState(storage, key, NOW)
+  assert.equal(persisted, true, 'the store must read back')
+  assert.ok(decisionKey in restored.dismissed, 'the dismissal itself survives')
+
+  // (1) `dismissedFirst`: a bout that ENDED inside the acknowledged window but
+  // BEFORE its end. That is the only case the reconstructed point-window gets
+  // wrong: with the START restored the two windows overlap and the row stays
+  // covered; without it the window collapses to the END, the overlap fails and the
+  // row resurfaces — so this reds on BOTH the `dismiss` write and the `readState`
+  // restore.
+  const endedInside = {
+    ...measured,
+    first_at: new Date(NOW.getTime() - 40 * MIN).toISOString(),
+    at: new Date(NOW.getTime() - 20 * MIN).toISOString(),
+    episode: 'read_velocity||ended-inside',
+  }
+  assert.equal(
+    isDismissed(restored, decisionKey, endedInside), true,
+    'a bout that overlaps the RESTORED window is still covered — a dropped '
+    + '`dismissedFirst` collapses the window to its end and resurfaces it',
+  )
+
+  // (2) `dismissedLast`: a bout that started after the acknowledged window's END
+  // but within the server's gap. The window arm matches it; the LEGACY fallback
+  // (no `dismissedLast` -> the watermark point test) answers "happened after the
+  // dismissal" and treats it as a new fact — so this reds only when the END is
+  // dropped on read.
+  const withinGap = {
+    ...measured,
+    first_at: new Date(NOW.getTime() + 2 * HOUR).toISOString(),
+    at: new Date(NOW.getTime() + 2 * HOUR + 30 * MIN).toISOString(),
+    episode: 'read_velocity||within-gap',
+  }
+  assert.equal(
+    isDismissed(restored, decisionKey, withinGap), true,
+    'a bout inside the server gap is the same bout — a dropped `dismissedLast` '
+    + 'falls back to the point test and calls it a new fact',
+  )
+
+  // (3) `snoozedAt`: WHICH row the reader snoozed. An incident snoozed on its own
+  // row must not cover a NEWER suspension of the same decision key; a store that
+  // loses the anchor falls back to the gap-sized clamp, which does cover it.
+  const suspended = alert({
+    type: 'suspend',
+    label: 'Organization suspended',
+    message: 'Organization suspended by an operator',
+    at: new Date(NOW.getTime() - 1 * HOUR).toISOString(),
+    first_at: new Date(NOW.getTime() - 1 * HOUR).toISOString(),
+    episode: 'suspend||snoozed',
+  })
+  const suspendKey = entryKeyOf(suspended)
+  assert.equal(
+    writeState(storage, key, snooze(emptyState(), suspendKey, periodMs('1w'), NOW, suspended)),
+    true,
+  )
+  const { state: restoredSnooze } = readState(storage, key, NOW)
+  const newerSuspension = {
+    ...suspended,
+    at: new Date(NOW.getTime() + 1 * HOUR).toISOString(),
+    first_at: new Date(NOW.getTime() + 1 * HOUR).toISOString(),
+    episode: 'suspend||newer',
+  }
+  assert.equal(
+    effectiveSnoozedUntil(restoredSnooze, entryOf(newerSuspension), NOW), 0,
+    'a NEWER suspension is not what the reader snoozed — a dropped `snoozedAt` '
+    + 'leaves only the gap clamp, which does cover it',
+  )
+  // Non-vacuity: the row the reader actually snoozed is still suppressed after the
+  // reload, so this is a bound and not a blanket removal.
+  assert.ok(
+    effectiveSnoozedUntil(restoredSnooze, entryOf(suspended), NOW) > 0,
+    'the snoozed row itself stays covered across the reload',
+  )
+})
+
 test('a store with only the window END still does not inherit a newer dismissal', () => {
   // `dismissedFirst` is new. A store on a reader's disk has only the END, so the
   // ack window is reconstructed as that POINT: it intersects a continuing bout

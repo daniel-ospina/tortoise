@@ -5476,6 +5476,21 @@ function claimIntentInFlight() {
     // A not-yet-known Organization (the first-organization read, `orgAtCall`
     // null) is still allowed — that is a real read for the org being selected.
     if (orgAtCall && orgAtCall !== tid) return
+    // ⛔ STALE means "the Organization changed under this read AND this read was
+    // not for the Organization that is current NOW". Both halves are needed, and
+    // the second is #14694's P2: the pre-request guard above lets a
+    // first-Organization read through (`orgAtCall` null is a real read), and
+    // `completeLogin` starts exactly that read and THEN pins the first selectable
+    // org — so `orgIdRef.current` moves null -> X while `tid` is already `X`. A
+    // capture-only guard compares `X !== null`, discards a read that was FOR the
+    // current Organization, and this path resets neither flag — leaving
+    // `alertsRequested` true and `alertsLoaded` false forever, i.e. the panel
+    // renders "Checking for notifications…" for the rest of the session over a
+    // feed nothing ever re-reads (`loadAlerts` is not in the `[currentOrgId]`
+    // effect and is not polled). Accepting the response when `tid` IS the live
+    // org still discards a real switch (A -> B keeps `B !== tid`) and a logout
+    // (keeps `null !== tid`), so nothing the capture guard protects is lost.
+    const stale = () => orgIdRef.current !== orgAtCall && orgIdRef.current !== tid
     // Every guard that can abandon this call runs ABOVE this line, so setting it
     // here means exactly "a request is starting now" — a discarded call leaves
     // the feed honestly unrequested rather than claiming a check that never began
@@ -5520,10 +5535,13 @@ function claimIntentInFlight() {
         //    logout (`orgIdRef.current = null`) write into the next state.
         //
         // Capturing the org at call time and comparing after the awaits gets both
-        // right: the guard now means exactly what it says — "did the Organization
-        // change under this read?" — so logout (A -> null) discards, a switch
-        // (A -> B) discards, and a first-org read (null -> null) is allowed.
-        if (orgIdRef.current !== orgAtCall) return
+        // right: the guard means "did the Organization change under this read,
+        // and is this read not for the one that is current now?" — so logout
+        // (A -> null) discards, a switch (A -> B) discards, a first-org read
+        // (null -> null) is allowed, and a first-org read that lands after the
+        // org was pinned to ITS OWN target is allowed too (`stale()`'s second
+        // half).
+        if (stale()) return
         setAlerts(feed.alerts)
         setAlertsSaturated(feed.saturated)
         setAlertsUnavailable(feed.unavailable)
@@ -5534,7 +5552,7 @@ function claimIntentInFlight() {
         // state makes B's closed bell say "the alerts could not be loaded" about a
         // read B never made — a claim about the wrong Organization (review finding).
         // Same guard as the success branch.
-        if (orgIdRef.current !== orgAtCall) return
+        if (stale()) return
         setAlertsUnavailable(true)
         setAlertsLoaded(true)
       }
@@ -5542,7 +5560,7 @@ function claimIntentInFlight() {
       // Best-effort — alert history never blocks the dashboard — but the panel
       // must be able to say it could not look. Guarded for the same reason as the
       // arms above: the read may have started before an Organization switch.
-      if (orgIdRef.current !== orgAtCall) return
+      if (stale()) return
       setAlertsUnavailable(true)
       setAlertsLoaded(true)
     }
