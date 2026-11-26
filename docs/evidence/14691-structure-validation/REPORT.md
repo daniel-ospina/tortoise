@@ -325,10 +325,6 @@ Every one of these was measured through MCP; none was worked around.
 | **D5** | does `graph_overview(section='topics', entity_id=…)` resolve an entity that `get_entity` and `explore_connections` both resolve? | **NO — it answers 'Entity … not found' for every node asked about, including nodes those two doors return.** | Lumen Core, Amara Osei, Platform team, event-bus — all four resolve through `get_entity` and walk through `explore_connections`. |
 | **D6** | does the product's OWNERSHIP door — `tortoise_get_entity(id, type='governance')` — return what each person owns? | **NO — it returns `[]` for all 4 owners asked, on a graph holding 6 `ownedBy` rows.** | `tortoise_get_entity(id, type="governance")` → `_get_owned_entities` reads `MATCH (s:Subject)<-[:ownedBy]-(e)` (`sdk.py:62739-62758`), the declared orientation; the written rows point the other way, so nothing points *into* a Subject. |
 | **D2** | can a declared structure element be resolved by NAME through the MCP doors? | **NO for 2 of 32** declared element names — `explore_connections(query=…)` resolves names to **Points**, and one component's stored name carries a welded collective noun (`ingest-gateway` → `ingest-gateway component`, from the sentence *"owns the ingest-gateway component"*). | `out/readback.json` → `unresolved_elements`, `elements[].walk_root_kind` (empty on 5/5 retrieval walks). |
-||||||| parent of 55d66a86a70fa (fix(14691): close the 6 findings the review of the fix found — orientation, D3, and an inert guard)
-| **D5** | does `graph_overview(section='topics', entity_id=…)` resolve an entity that `get_entity` and `explore_connections` both resolve? | **No — `{"error": "Entity … not found"}` for every node asked about.** | Lumen Core, Amara Osei, Platform team, event-bus — all four resolve through `get_entity` and walk through `explore_connections`. |
-| **D6** | does the product's OWNERSHIP door — `tortoise_get_entity(id, type='governance')` — return what each person owns? | **No — `[]` for all four owners**, on a graph holding 6 `ownedBy` rows. | `tortoise_get_entity(id, type="governance")` → `_get_owned_entities` reads `MATCH (s:Subject)<-[:ownedBy]-(e)` (`sdk.py:62739-62758`), the declared orientation; the written rows point the other way, so nothing points *into* a Subject. |
-| **D2** | can a declared structure element be resolved by NAME through the MCP doors? | **Not reliably** — `explore_connections(query=…)` resolves names to **Points**, and one component's stored name carries a welded collective noun (`ingest-gateway` → `ingest-gateway component`, from the sentence *"owns the ingest-gateway component"*). | `out/readback.json` → `unresolved_elements`, `elements[].walk_root_kind` (empty on 5/5 retrieval walks). |
 
 ⛔ **THE IDs ABOVE ARE THE ARTIFACT'S OWN** (`out/t6-score.json` → `door_findings`,
 emitted by `score_t6.py`). An earlier revision of this section had D2/D4/D5 permuted
@@ -506,6 +502,15 @@ LLM key) — so the fix was taken on the **consumer** side, where `score_t6` now
 envelope as an answer for D4/D6 and no longer lets D3 outlive its own `bare_kind_probes` — if those
 probes did not answer, D3 is withdrawn rather than reported from a failed call. The D3 finding itself
 is carried in `readback.json` as measured.
+
+⚠️ **Two lanes measured these cycles in parallel, into this one worktree.** §8.1 and §8.2 are
+each one lane's record; they overlap because both lanes found the same class and pinned it
+independently, and both sets of arms are kept. Two reconciliations were needed and are stated
+rather than hidden: `examples_truncated` became one flag **per list** (a single boolean could not say
+which sample was incomplete, so §8.2's arm now checks each bucket's own flag), and the
+source-substring wiring pin for the run path was retired in favour of the behavioural arm that drives
+`main()` against a stub SDK — a substring pin cannot see an inserted filter, and hard-coding one
+refactor's spelling is friction on the next.
 
 ### 8.2 What the 6th review cycle added (the artifact's EVIDENCE, and the prose everywhere)
 
