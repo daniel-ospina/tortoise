@@ -2429,7 +2429,19 @@ _INVERSION_FORMS = (
         # ("a closed four-word list only re-opened the hole for `previously` /"
         # "`recently` / `thoroughly`"), applied to the marker itself.
         # `although` is `though` for the same reason, one synonym over.
-        r"[^\n]*?\b(?:first(?:ly)?|beforehand|in\s+advance)\b"
+        r"[^\n]*?\b(?:first(?:ly)?|beforehand|in\s+advance"
+        # ⛔ FORM (d) ALREADY CARRIES THESE, FORM (c) DID NOT, and the two lists
+        # describe the same order claim. `before restarting` / `prior to
+        # restarting` were graded in the TRAILING position and invisible in the
+        # LEADING one, so a synonym gap made the adversarial lead blind
+        # (#14679 review cycle 50, measured):
+        #
+        #     RED    Restart your client, but first confirm the tools …
+        #     RED    Restart your client, confirm the tools … before restarting. (trailing)
+        #     GREEN  Restart your client, but before that, confirm …            (measured)
+        #     GREEN  Restart your client, but prior to that, confirm …          (measured)
+        r"|before\s+(?:that|doing\s+so|restarting)|before\s+you\s+restart"
+        r"|prior\s+to\s+(?:that|restarting)|ahead\s+of\s+(?:that|restarting))\b"
         # …and an intervening IMPERATIVE that is not the confirmation must not
         # carry the match through to a later `confirm the tools`: a `then`
         # between the marker and the predicate means the reader is told to do
@@ -2745,8 +2757,16 @@ _CONFIG_PREP_RE = re.compile(
 # adverbial run is skipped, then the arm grades the polarity of the state");
 # `_INSTALL_SIDE_RE` already carries `(?:all|both)\s+`. Interpolated into BOTH
 # patterns so the two cannot drift again (#14679 review cycle 48).
-_PRESENCE_ADVERB = (r"(?:actually|all|both|really|definitely|plainly|truly"
-                    r"|clearly|visibly|indeed|still|already|now|already)")
+# ⛔ THE OPEN `-ly` ARM. Its own comment names `_ABSENCE_ADVERB_RUN` as the
+# precedent ("exists one form over for exactly this reason") and that constant IS
+# open, while this one stayed a closed list — so ONE unlisted adverb defeated the
+# presence pattern, the conjunct read as file-side, and the clause was exempted
+# (#14679 review cycle 50, measured):
+#
+#     RED    … and the tools are actually there       (control)
+#     GREEN  … and the tools are temporarily there    (measured)
+_PRESENCE_ADVERB = (r"(?:\w+ly|actually|all|both|really|definitely|plainly|truly"
+                    r"|clearly|visibly|indeed|still|already|now)")
 
 _SESSION_AND_CONJUNCT_RE = re.compile(
     r"\band\b[^\n]*?\b(?:" + _PRESENCE_ADVERB + r"\s+there"
@@ -3017,8 +3037,10 @@ _SEQUENCER_FRAGMENT_RE = re.compile(
     #     GREEN  … , then all you need to do is restart …   (measured)
     #
     # `immediately|again|additionally` are already members of `_PRE_CUE_ONLY`'s
-    # leading run, and the six contractions are the same one-apostrophe family
-    # cycle 48 closed ten of (`it'd` vs the declared-RED `it is` twin).
+    # leading run, and the EIGHT contractions below (counted off the literal, not
+    # from memory — this said "six" while the alternation carried eight) are the
+    # same one-apostrophe family cycle 48 closed ten of (`it'd` vs the
+    # declared-RED `it is` twin).
     r"|\w+ly|immediately|again|additionally|soon|already"
     r"|all|do|does|next|step|going|the|a|an|of"
     r"|it'd|it'll|that'd|they'll|we're|we've|there'll|i'll"
@@ -3044,7 +3066,7 @@ _SEQUENCER_FRAGMENT_RE = re.compile(
     r"|it|that|this|there|they|is|are|was|were|am"
     r"|able|ready|done|possible|necessary|important|wise|safe"
     r"|quite|rather|already"
-    r"|before|after|until|unless|prior|when)\b\s*,?\s*)+$", re.IGNORECASE)
+    r"|before|after|until|unless|prior|when|whenever|as\s+soon\s+as)\b\s*,?\s*)+$", re.IGNORECASE)
 
 # ⛔ A CUE GOVERNED BY A TEMPORAL SUBORDINATE INVERTS WHAT FOLLOWS IT. In
 # "Before you restart your client, confirm the tools are actually there" the
@@ -3120,6 +3142,19 @@ _NEGATED_CUE_LEAD_RE = re.compile(
     r"(?:\bnever"
     r"|\b(?:do|does|did|should|could|would|must|need|can|may|might|ought)"
     r"(?:\s+not(?:\s+to)?|n['\u2019]t)"
+    # ⛔ `can` + `n't` IS `can't`, NOT `cann't` — the double n made the `can` arm
+    # structurally DEAD, so the most common negated modal in English was GREEN
+    # while its `shouldn't` twin is a declared-RED row (#14679 review cycle 50,
+    # measured). `cannot` was covered only by its own literal:
+    #
+    #     RED    You shouldn't restart your client until you have confirmed the tools …
+    #     RED    You cannot   restart your client until you have confirmed the tools …
+    #     GREEN  You can't    restart your client until you have confirmed the tools …
+    #
+    # `won't` (will + not) and `shan't` are the same contraction class.
+    r"|\b(?:ca|wo|sha)n['\u2019]t"
+    # …and the spelled-out forms of the same modals, which involve no contraction:
+    r"|\b(?:will|shall|are)\s+not(?:\s+to)?"
     r"|\b(?:had|'d|\u2019d)\s+better\s+not"
     r"|\bcannot)\s*$", re.IGNORECASE)
 # ⛔ `unless` IS `until`, SPELLED DIFFERENTLY — and it was in NEITHER this set
@@ -3884,7 +3919,18 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
             post_clauses = ([_stmt] if _FORWARD_SEQUENCER_RE.match(_stmt)
                             else [c.strip().lstrip(_PRE_CUE_PREFIX).strip()
                                   for c in _stmt.split(",")])
-    cue_is_negated = bool(_NEGATED_CUE_LEAD_RE.search(before))
+    # ⛔ SEARCH A DECORATION-FREE COPY, exactly as every other arm does
+    # (`_PRE_CUE_PREFIX`, `_DECORATION_RE`, form (f)'s subject substitution). This
+    # arm read the RAW pre-cue text, and its `\s*$` must land ON the cue, so any
+    # markdown between the negation and the cue broke it (#14679 review cycle 50,
+    # measured):
+    #
+    #     RED    Don't restart your client until you have confirmed the tools …
+    #     GREEN  **Don't** restart your client until …          (measured)
+    #     GREEN  Don't **restart your client** until …          (measured)
+    #     GREEN  `Don't` restart your client until …            (measured)
+    cue_is_negated = bool(_NEGATED_CUE_LEAD_RE.search(
+        _DECORATION_RE.sub(" ", before)))
     for clause in post_clauses:
         # ⛔ A NEGATED CUE DEFERS THE RESTART TO ITS OWN `until`/`before` CLAUSE,
         # so a confirmation inside that clause happens FIRST — see
@@ -6128,6 +6174,56 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # Pinned rather than fixed: a `confirmation that` arm is a second grammar
     # (noun + complementiser), not a member of a verb list.
     ("Restart your client after confirmation that the tools are actually "
+     "there.", False),
+    # ⛔ CYCLE 50 — four one-token gaps, each a GREEN twin of a declared-RED row.
+    # `whenever`/`as soon as` are the spellings the file itself names as `when`/
+    # `once`; `can`+`n't` was structurally DEAD (the double n), so the most
+    # common negated modal in English was GREEN; the negated-cue arm read RAW
+    # pre-cue text, so any markdown between the negation and the cue broke it;
+    # and `_PRESENCE_ADVERB` was a closed list beside an OPEN sibling.
+    ("Confirm the tools are actually there, and whenever that's done, restart "
+     "your client, then confirm the tools are actually there.", True),
+    ("Confirm the tools are actually there, and as soon as that's done, "
+     "restart your client, then confirm the tools are actually there.", True),
+    ("You can't restart your client until you have confirmed the tools are "
+     "actually there.", True),
+    ("You won't restart your client until you have confirmed the tools are "
+     "actually there.", True),
+    ("You will not restart your client until you have confirmed the tools are "
+     "actually there.", True),
+    ("**Don't** restart your client until you have confirmed the tools are "
+     "actually there.", True),
+    ("Don't **restart your client** until you have confirmed the tools are "
+     "actually there.", True),
+    ("Restart your client after confirming the config lists the tools and the "
+     "tools are temporarily there, then confirm the tools are actually there.",
+     True),
+    # ⛔ CYCLE 50 — DECLARED RESIDUAL (1): a LEAD-IN clause that fronts the
+    # confirmation. Form (f) is `^`-anchored on the imperative, so a lead phrase
+    # hides it, and the lead phrases are an UNBOUNDED set of English idioms:
+    # `It is best to confirm …`, `It's a good idea to confirm …`, `The first step
+    # is to confirm …`, `Your first task is to confirm …`, `Start by confirming
+    # …`, `Begin by confirming …`, `Remember to confirm …`, `Don't forget to
+    # confirm …`, `Be careful to confirm …` (all measured GREEN). Declared, not
+    # fixed: widening form (f)'s anchor to swallow arbitrary lead phrases is the
+    # direction this file records as the one that gets a pin deleted (#3429 —
+    # enumerating the lead phrasings that must stay GREEN produced 18 of 24
+    # false REDs on correct copy). Pinned so the residual is MEASURED.
+    ("It is best to confirm the tools are actually there. Restart your client, "
+     "then run a query.", False),
+    ("The first step is to confirm the tools are actually there. Restart your "
+     "client, then run a query.", False),
+    # ⛔ CYCLE 50 — DECLARED RESIDUAL (2): a pre-restart MARKET PHRASE THAT
+    # CARRIES ITS OWN COMMA. Post-cue clauses are split on `,` before grading, so
+    # `but before that, confirm …` becomes three clauses (`but` / `before that` /
+    # `confirm the tools …`) and the marker never meets the predicate it orders.
+    # The comma-less twin `but first confirm …` IS RED. Declared rather than
+    # fixed because the remedy is merging clauses across commas — the
+    # `_and_half_opens_its_own_clause` problem one conjunction over, whose own
+    # measured history is that a naive merge reds ordinary copy. Pinned.
+    ("Restart your client, but before that, confirm the tools are actually "
+     "there.", False),
+    ("Restart your client, but before doing so, confirm the tools are actually "
      "there.", False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
