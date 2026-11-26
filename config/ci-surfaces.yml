@@ -57,25 +57,31 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — the `origin/main` `bbef0b88` fold, which carries
-# everything the `c1c8df1a` fold brought: `#14548`'s residue RATCHET
+# reader of the prose can see. On THIS tree — the `origin/main` `ff10fb32` fold, which carries
+# everything the `bbef0b88` and `c1c8df1a` folds brought: `#14548`'s residue RATCHET
 # (`tests/test_sdk_privatise_sweep.py`, `core`, 28.0 s — the ONE
 # non-flat weight in this list), `#14560`'s operator-vector row, `#14565`'s reaper-schedule row,
 # `#14574`'s drift-reporter row, `#14552`'s point-vector-keys row, `#14592`'s operating-model
-# evidence row, `#14597`'s expansion-fusion row and `#14607`'s two `core` rows
-# (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`) — the verb packs the pool
-# into ONE bin: eleven shards at 827.6 s (a, b, c, d, e, f, g, h, i, j, k), so
-# `ceil(827.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# evidence row, `#14597`'s expansion-fusion row, `#14607`'s two `core` rows
+# (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`) and the two rows `main`
+# landed after those (`#14700`'s `tests/test_14700_capture_in_flight_typed_refusal.py` and
+# `#14621`'s `tests/test_14592_read_parity.py`) — the verb packs the pool into TWO bins: nine
+# shards at 827.8 s (a, b, e, f, g, h, i, j, k) and two at 827.7 s (c, d), so
+# `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
-# (1680 / 827.6 ≈ 2.0300), so the two agree by construction rather than by a hand re-read.
+# (1680 / 827.8 ≈ 2.0295, which the verb prints as `2.03`), so the two agree by construction
+# rather than by a hand re-read.
 # ⛔ THE PARENT NAMED IN THAT CLAUSE IS THIS HEAD'S FOLD, not the `c1c8df1a` one the figure was
 # first read at (#14587 review P3). The fold itself was consistent — at `7281eeab9ccc` this clause
 # stated 827.4/827.5 at `c1c8df1a`, which is exactly what the REBASE paragraph below says that head
-# emitted — and the clash was made by `1f39e3539bdb`, which re-pointed the FIGURE to this fold's
-# one-bin reading and left the parent id behind. The rows listed are the `c1c8df1a` fold's because
-# that is where they landed; the EMISSION is this fold's, because the packer is greedy and one
-# added row re-packs every bin. ⛔ The FIFTH-FOLD paragraph below is not the clause that disagreed:
-# it states one bin too, and says so of both parents' two-bin readings.
+# emitted — and the clash was made by `1f39e3539bdb`, which re-pointed the FIGURE to its own fold's
+# reading and left the parent id behind. ⛔ The partition has MOVED since, and the clause above is
+# re-derived rather than carried: `main`'s two later rows grew the pool, the greedy packer split the
+# eleven shards into nine at 827.8 s and two at 827.7 s, and ONE added row re-packs EVERY bin, which
+# is why the figure is a claim about this head alone. The rows listed are `main`'s at the fold
+# named; the EMISSION is this merge's. ⛔ The SPLICE HISTORY below is not the clause that disagreed:
+# each paragraph there describes the fold it names, and the `bbef0b88` one states one bin because
+# that is what that head emitted.
 # ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
 # `main`'s own partition must be re-derived on `main`, never read out of this sentence.
 # ⛔ A POOL CENSUS IS NOT A LIVE CLAIM, and stating it as one is how this block went stale twice.
@@ -124,8 +130,8 @@ version: 1
 # applied BOTH parents' derivations — one naming `origin/main` `29bb16b5b6` with this branch's own
 # `tests/test_14592_read_parity.py`, one spelling the same base with `#14607`'s two rows called this
 # branch's own. The copies DISAGREED on the figures (826.7/826.6 against 826.9/826.8) and neither
-# describes this head. Neither side is picked: the sentence above is a fresh re-derivation with
-# `--emit-push-matrix` on this merged tree, and both parents' copies are deleted rather than
+# describes this head. Neither side is picked: the sentence above is a third reading taken with
+# `--emit-push-matrix` on the tree this fold produced, and both parents' copies are deleted rather than
 # re-pointed. ⛔ AND IT ARRIVED SPLICED A FOURTH TIME AT THE `origin/main` `c1c8df1a` FOLD, so the
 # same repair is applied again and recorded here: `merge=union` applied BOTH parents' hunks with no
 # marker, the second copy opening mid-sentence at "INTO, never carried from the branch…", and it
@@ -145,7 +151,7 @@ version: 1
 # picked either; the sentence above was a third fresh re-derivation, and it has since been
 # re-derived again rather than re-pointed. ⛔ Neither copy's CENSUS is quoted here: a census figure
 # is history and belongs inside the fence, bound to the sha it was measured at.
-# ⛔ AND IT ARRIVED SPLICED AGAIN AT THE `origin/main` `bbef0b88` FOLD (this head), where the
+# ⛔ AND IT ARRIVED SPLICED AGAIN AT THE `origin/main` `bbef0b88` FOLD (the previous head), where the
 # `merge=union` driver applied BOTH parents' derivations once more: this branch's read nine shards
 # at 827.4 s and two at 827.5 s, `main`'s own paragraph — opening mid-sentence, the splice's usual
 # tell — restated that same pair, and `main`'s copy ALSO carried a LIVE `fast_pool()` census (this
@@ -156,33 +162,12 @@ version: 1
 # next fold, which is why the fenced HISTORY above exists. ⛔ The 28 m minute did not move across
 # that fold, which is why nothing but the emission guard can catch this class: the arithmetic on the
 # minute agrees either way.
-# reader of the prose can see. On THIS tree — `origin/main` `bbef0b8840` folded in, plus THIS
-# change's own row (`tests/test_own_site_fragment_targets.py`, `core` AND `onboarding`, at the flat
-# 2.0 s `DEFAULT_FAST_WEIGHT`) — the verb packs eleven shards at 827.6 s (a, b, c, d, e, f, g, h,
-# i, j, k), so `ceil(827.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the
-# SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
-# (1680 / 827.6 = 2.0300), so the two agree by construction rather than by a hand re-read.
-# ⛔ THAT PAIR IS THIS TREE'S ALONE, and the move is measurable: `fast_pool()` holds 1341 entries
-# here against 1340 on `origin/main` `bbef0b8840`, each read by loading that tree's OWN manifest
-# through the verb, and the set difference is exactly ONE entry —
-# `tests/test_own_site_fragment_targets.py`, this change's own suite. `main` carries nothing this
-# tree lacks. ⛔ Every other row this tree carries is `main`'s at this head, NOT this change's
-# (`#14700`'s `tests/test_14700_capture_in_flight_typed_refusal.py`, `#14621`'s
-# `tests/test_14592_read_parity.py`, `#14548`'s residue RATCHET `tests/test_sdk_privatise_sweep.py`
-# — the one `core` row here whose weight is NOT the flat 2.0 s — `#14607`'s
-# `tests/test_mcp_selfcheck.py` and `tests/test_recall_neighborhood.py`): each landed before this
-# fold, and reading one as this change's delta would attribute a partition move to a row that did
-# not cause it. The name lists above are what the guard COMPARES against the live emission
-# (`test_the_fast_shards_header_block_states_the_measured_emission`), and
-# `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
-# derivation, so they are a graded claim about THIS head — re-derived with the verb on every fold,
-# never carried.
 # ⛔ THIS BLOCK ARRIVES SPLICED, REPEATEDLY, and that is mechanical rather than mysterious:
 # `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
 # derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. Measured on
 # this rebase: two copies arrived, one naming `origin/main` `c1c8df1a3817` with `#14700`'s row, one
 # naming the same base with this change's row, and NEITHER described the merged tree (both said
-# 827.4/827.5 and a `fast_pool()` of 1340 against the 827.6 and 1341 the verb emits here). Neither
+# 827.4/827.5 and a `fast_pool()` of 1340 against the 827.6 and 1341 the verb emitted on that
 # side is picked: both are DELETED and the paragraph above is a fresh re-derivation with
 # `--emit-push-matrix` on this merged tree. Each earlier fold's figures live on the commit that
 # measured them (`git log`), which is where a spliced copy belongs.
