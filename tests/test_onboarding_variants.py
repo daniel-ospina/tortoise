@@ -1665,6 +1665,18 @@ QUICKSTART = REPO_ROOT / "docs" / "quickstart-cloud.md"
 # PARAGRAPH" (#14679 review at `b5b1ee005941`, measured). `your|the` is the whole
 # definite-article variation; a doc that drops the possessive is not a different
 # instruction, it is the same one spelled the way the docs already spell it.
+# ⛔ THE PASSIVE SPELLING IS THE SAME INSTRUCTION — but it is NOT a cue, and the
+# first cut of this fix got that wrong in a way that broke a declared row (#14679
+# review at `d2b9f1f4`, measured). A passive arm in this pattern matches `the
+# client is restarted` ANYWHERE, including inside a PRE-CUE clause, so
+#   "If you checked the tools before the client is restarted, restart your
+#    client, then confirm the tools are actually there."
+# found its cue at the END of the pre-cue clause and the inversion stopped being
+# graded (declared RED row -> GREEN). The cue is the IMPERATIVE `restart`, whose
+# position IS the order this pin grades; a passive participle is not an
+# instruction the user acts on. So the cue set stays exact and the PROSE ANCHOR
+# below uses a restart WORD instead — it asks "is the instruction still in prose",
+# never "where is the imperative".
 _RESTART_CUE_TEXT = r"restart(?:ing)?\s+(?:your|the|its)\s+(?:MCP\s+)?(?:client|app|IDE|editor|application)"
 # ⛔ THE CUE IS A MORPHOLOGY NOT ONE SPELLING, for the same reason `_PRE_CUE_VERB`
 # is (see it): pinning ONE wording reds the legitimate reword that #3429 is about.
@@ -1694,6 +1706,11 @@ _RESTART_CUE_TEXT = r"restart(?:ing)?\s+(?:your|the|its)\s+(?:MCP\s+)?(?:client|
 # actually there") failed the "must keep its restart cue" assert (measured) and
 # silently stopped the paragraph being graded at all.
 _RESTART_CUE_RE = re.compile(_RESTART_CUE_TEXT, re.IGNORECASE)
+#: The restart WORD, for the prose anchor only — `\brestart` covers the imperative,
+#: the gerund AND the passive participle, so the anchor can ask "does a
+#: non-blockquote paragraph still instruct a restart?" without touching the cue set
+#: the ORDER grader positions against (see the note on `_RESTART_CUE_TEXT`).
+_RESTART_WORD_RE = re.compile(r"\brestart", re.IGNORECASE)
 
 
 def _cue_start(text: str) -> int:
@@ -2052,9 +2069,20 @@ _PRE_CUE_ONLY = _inversion_form(
     # declared-RED row, so the family was graded in one spelling and not the
     # other. Inserted as members of the SAME run, not a second slot: two arms for
     # one behaviour is the defect cycle 17 deleted.
+    # ⛔ …AND THE MEMBER LIST IS THE FILE'S OWN CLOSED CLASS, not a hand-typed
+    # subset. `but|yet|though|although` closed the first round; `however` was
+    # still open ONE ROUND LATER, and it is the member this same file grades in
+    # four other places (`_ADVERSATIVE_LEAD_RE` and forms (c)/(d′) all spell
+    # `but|however|though|although|yet`). Measured at `d2b9f1f4`: `However confirm
+    # the tools are actually there. Restart your client, …` GREEN on the shipped
+    # doc's own shape while `However, confirm …` (its comma variant) was RED — one
+    # comma flipped the verdict, the class this file forbids. `nevertheless` /
+    # `nonetheless` are the same slot's remaining spellings. Each takes the
+    # `\s*,?\s+` separator, so the comma is optional in both directions.
     r"^(?:(?:(?:now|then|next|finally|lastly|immediately|again|simply|still"
     r"|afterwards?|subsequently|additionally|please|kindly"
-    r"|and|so|or|plus|but|yet|though|although)\s*,?\s+)+)?"
+    r"|and|so|or|plus|but|yet|though|although"
+    r"|however|nevertheless|nonetheless)\s*,?\s+)+)?"
     # ⛔ THE ADVERB RUN **REPEATS** AND SITS ON BOTH SIDES OF THE SUBJECT, because
     # form (a) does both and a single optional slot defeated one word twice over:
     # `You first must confirm …` (adverb before the subject) and
@@ -4658,16 +4686,36 @@ def test_3232_generic_restart_lines_are_exact():
     # paragraph that is not a blockquote must carry the tools bound. A blockquote
     # is a caveat about one harness variant; the instruction a user follows is
     # prose. Renaming or moving that prose stays GREEN; deleting it does not.
+    # ⛔ DECORATION IS NOT A DIFFERENT INSTRUCTION, BUT IT IS STILL A HOLE IN THE
+    # ORDER HALF (#14679 review at `d2b9f1f4`, measured). The ANCHOR searched RAW
+    # text, so `**Restart** your client, …` stopped the paragraph counting as cue
+    # PROSE and this assertion reported a DELETED instruction — a false red on a
+    # line that is still there, which is the class #14676 exists to stop. The
+    # SEARCH therefore strips `_DECORATION_RE` (the blockquote test stays on the
+    # raw text: a `>` is structure, not decoration).
+    # ⛔ WHAT THIS DOES *NOT* FIX, stated so nobody reads the anchor as covering it:
+    # `_restart_cue_order_violation` still windows CUE PARAGRAPHS by
+    # `_RESTART_CUE_RE`, so a DECORATED cue is still not a cue and its ORDER is
+    # still ungraded — `**Restart** your client after confirming the tools are
+    # actually there.` is GREEN, measured at `a46a2b21` (parent) and here, i.e.
+    # PRE-EXISTING, not introduced by this commit. Filed as #14750; fixing it moves
+    # the cue set the seven `_INVERSION_FORMS` position against and needs its own
+    # mutation matrix, so it is declared rather than slipped into this commit.
+    # ⛔ AND THIS ANCHOR CARRIES NO SECOND GUARD. An earlier revision of this fix
+    # also asserted `all(_tools_appear_after_cue_in(p) for p in prose_cues)`; since
+    # `prose_cues ⊆ cue_paras`, it was strictly implied by the document-wide assert
+    # above and could never fail — an unpinned second mechanism for one behaviour,
+    # which is precisely what this file refuses elsewhere. Removed rather than
+    # left in: a reader who believed it load-bearing would believe the wrong arm
+    # was protecting the bound.
     prose_cues = [p for p in quick.split("\n\n")
-                  if _RESTART_CUE_RE.search(p) and not p.lstrip().startswith(">")]
+                  if _RESTART_WORD_RE.search(_DECORATION_RE.sub(" ", p))
+                  and not p.lstrip().startswith(">")]
     assert prose_cues, (
         "docs/quickstart-cloud.md must keep a NON-blockquote paragraph that "
         "restarts the client and then sends the user to the tools — the "
         "`--harness pi` blockquote is a caveat, not the instruction (measured: "
         "deleting the instruction left this suite green, 780 passed)")
-    assert all(_tools_appear_after_cue_in(p) for p in prose_cues), (
-        "every non-blockquote cue paragraph must keep its tools-appear clause "
-        "after the cue (#3232)")
     # ⛔ POSITION IS NOT ORDER — the index check above has a false PASS.
     # Measured on the landed pin: "Restart your client after confirming the
     # tools are actually there" places `tools` after the cue and is GREEN, while
@@ -4937,6 +4985,10 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Though confirm the tools are actually there. Restart your client, then "
      "confirm the tools are actually there.", True),
     ("Although confirm the tools are actually there. Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("However confirm the tools are actually there. Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("Nevertheless confirm the tools are actually there. Restart your client, then "
      "confirm the tools are actually there.", True),
     # …while an adversative in a FORWARD post-cue clause orders nothing: the
     # restart still comes first, so this must stay GREEN (it does with and
