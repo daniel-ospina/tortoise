@@ -44,6 +44,8 @@ import {
   DETAIL_TITLE,
   DISMISSED_LOCAL_NOTE,
   LEDGER_ALL_CLEAR,
+  OLDER_HIDE,
+  OLDER_TOGGLE,
   SAVE_FAILED,
   SNOOZE_PERIODS,
   STORAGE_UNAVAILABLE,
@@ -51,7 +53,7 @@ import {
   entryKeyOf,
   storageKey,
 } from './notificationLedger.js'
-import { ALERTS_UNAVAILABLE, SCAN_SATURATED_EMPTY } from './securityAlerts.js'
+import { ALERTS_UNAVAILABLE, OLD_AFTER_DAYS, SCAN_SATURATED_EMPTY } from './securityAlerts.js'
 
 afterEach(cleanup)
 
@@ -221,6 +223,47 @@ test('#14686: an activity row is chipped as a measurement, an incident row as an
   // The alarm weight is carried by the incident row only.
   assert.ok(incident.className.includes('notif-row-incident'))
   assert.ok(!activity.className.includes('notif-row-incident'))
+})
+
+test('#14686 + #10156: an aged row is COUNTED by the badge and REACHABLE behind one toggle', () => {
+  // The ageing rule exists so a month-old row is not presented as current — never so
+  // it becomes unreachable: `buildLedger` still counts `older` in `unresolved`. The
+  // DELETED panel pinned this at render level (#10156, `securityAlertsPanel.dom
+  // .test.jsx`: "an aged row shows its age and collapses behind Show older") and its
+  // replacement did NOT: every fixture in this file is minutes-to-hours old, so
+  // `ledgerView.older` was always empty at render time and the whole reveal —
+  // `showOlder`, `OLDER_TOGGLE`, and the `entries.push(...ledgerView.older)` that
+  // makes it work — could be deleted with the suite green. An aged unresolved alert
+  // would then be counted by the badge and invisible in the ledger: the "counted but
+  // unreachable" shape this surface exists to avoid (review finding, P2). No other
+  // test in this file uses a fixture past the ageing line.
+  const agedAt = new Date(NOW.getTime() - (OLD_AFTER_DAYS + 1) * 24 * HOUR).toISOString()
+  const aged = alert({ message: 'aged row', at: agedAt, first_at: agedAt })
+  const fresh = alert({ message: 'fresh row' })
+  const { container } = renderBell({ alerts: [aged, fresh] })
+  fireEvent.click(bell(container))
+
+  // (i) The default list does not present the aged row as current…
+  assert.equal(rows(container).length, 1)
+  assert.match(rows(container)[0].textContent, /fresh row/)
+  assert.doesNotMatch(container.textContent, /aged row/)
+
+  // (ii) …but the badge still COUNTS it, and the toggle says how many are behind it.
+  assert.equal(bell(container).getAttribute('aria-label'), 'Notifications — 2 unresolved')
+  const toggle = container.querySelector('.notif-more')
+  assert.ok(toggle, 'an aged row must have a reveal control, or it is unreachable')
+  assert.equal(toggle.textContent, OLDER_TOGGLE(1))
+
+  // (iii) The click REVEALS it, and the control flips to the hide label.
+  fireEvent.click(toggle)
+  assert.equal(rows(container).length, 2)
+  assert.match(container.textContent, /aged row/)
+  assert.equal(container.querySelector('.notif-more').textContent, OLDER_HIDE)
+
+  // (iv) …and hiding puts it back. A one-way toggle is a delete with a label.
+  fireEvent.click(container.querySelector('.notif-more'))
+  assert.equal(rows(container).length, 1)
+  assert.doesNotMatch(container.textContent, /aged row/)
 })
 
 // ── 3. Snooze ──────────────────────────────────────────────────────────────
