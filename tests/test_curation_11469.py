@@ -3177,7 +3177,7 @@ def _with_operator_count(call, operators=(), events=()):
     """
     def wrapped(name, args):
         args = args or {}
-        if name == "tortoise_search":
+        if name == "tortoise_search_knowledge":
             return {"result": list(operators)}
         if name == "tortoise_get_entity" and args.get("type") == "events":
             return {"result": list(events)}
@@ -3215,7 +3215,7 @@ def _operator_surface(operators=None, *, reported=_UNSET, points=None, events=()
 
     def call(name, args):
         args = args or {}
-        if name == "tortoise_search":
+        if name == "tortoise_search_knowledge":
             if args.get("entity_type") == "operator":
                 return {"result": list(operators)}
             return {"result": []}
@@ -3365,7 +3365,7 @@ def test_an_operator_layer_beyond_one_call_is_refused_not_truncated(monkeypatch,
     rc = mod.main(["inventory", "--out", str(tmp_path / "inv.json"), "--no-verify-read"])
     assert rc == 3, (rc, capsys.readouterr())
     assert "offset" in capsys.readouterr().err.lower()
-    assert "tortoise_search" not in calls, (
+    assert "tortoise_search_knowledge" not in calls, (
         "a layer above the single-call ceiling must be refused BEFORE the read is spent"
     )
 
@@ -3424,7 +3424,7 @@ def test_an_operator_layer_at_the_bound_is_refused_before_the_read(
     assert rc == 3, (rc, capsys.readouterr())
     assert "RESPONSE BOUND" in capsys.readouterr().err, (
         "the refusal must be the bound gate's, not the disagreement arm's")
-    assert "tortoise_search" not in calls, (
+    assert "tortoise_search_knowledge" not in calls, (
         "a count at the bound must refuse BEFORE the read is spent")
 
 
@@ -3497,7 +3497,7 @@ def test_the_operator_read_is_routed_to_the_graph_and_falls_back_on_a_binding_re
 
     def call(name, args):
         args = args or {}
-        if name == "tortoise_search":
+        if name == "tortoise_search_knowledge":
             seen.append(dict(args))
             # A graph-BOUND credential refuses ANY graph argument, and the layer is
             # then read from the credential's own graph — recorded, never silent.
@@ -3882,7 +3882,7 @@ def test_an_operator_payload_that_is_not_a_row_listing_is_refused(monkeypatch, c
 
     def call(name, args):
         args = args or {}
-        if name == "tortoise_search":
+        if name == "tortoise_search_knowledge":
             return {"unexpected": "shape"}
         if args.get("section") == "structure":
             return {"total": 1, "operators": 0}
@@ -3966,7 +3966,7 @@ def test_a_disarmed_census_failure_carries_the_sections_fallback_note(
             if failure == "raised":
                 return {"result": [], "total": 0}      # the unmeasurable points read
             return {"result": [{"id": "p1", "kind": "decision", "content": "a"}], "total": 1}
-        if name == "tortoise_search":
+        if name == "tortoise_search_knowledge":
             return {"result": list(OPERATOR_ROWS)}
         return {"result": []}
 
@@ -4110,7 +4110,7 @@ def test_both_verbs_take_the_count_and_the_layer_in_one_window(monkeypatch, tmp_
         assert mod.main(argv) == 0, verb
         count_at = seen.index(("tortoise_graph_overview", "structure"))
         # the layer read is the ONLY `tortoise_search` this run makes
-        layer_at = next(i for i, (name, _) in enumerate(seen) if name == "tortoise_search")
+        layer_at = next(i for i, (name, _) in enumerate(seen) if name == "tortoise_search_knowledge")
         assert layer_at == count_at + 1, (verb, seen)
         # ⛔ THE EVENT LAYER'S OWN FRESH COUNT (review cycle 13, measured UNPINNED). The
         # operator pair above was pinned, but the Event layer — added OVER it — was not,
@@ -4259,7 +4259,7 @@ def _event_surface(events=None, *, reported=_UNSET, points=None, operators=None)
         args = args or {}
         if name == "tortoise_get_entity" and args.get("type") == "events":
             return {"result": list(events)}
-        if name == "tortoise_search":
+        if name == "tortoise_search_knowledge":
             return {"result": list(operators or [])}
         if name == "tortoise_query":
             pts = ([{"id": "p1", "kind": "decision", "content": "a durable claim"}]

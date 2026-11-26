@@ -80,4 +80,4 @@ Every deploy should end with these checks recorded on the PR/issue:
 - [ ] `/health` 200
 - [ ] `count(n.embedding IS NOT NULL)` ≥ 90% after backfill
 - [ ] `/v1/search` returns `match_source: "rrf"` with vector participation
-- [ ] `tortoise_search(entity_type="event")` returns session results (#244)
+- [ ] `tortoise_search_knowledge(entity_type="event")` returns session results (#244)
