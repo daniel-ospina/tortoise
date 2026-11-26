@@ -379,6 +379,25 @@ _CAPTURE_EXECUTOR = ThreadPoolExecutor(
     max_workers=max(1, min(_int_env("TORTOISE_CAPTURE_WORKERS", 4), 8)),
     thread_name_prefix="capture-extract")
 
+# ── #14342: THE RECORD POOL, separate from the extraction pool ─────────────
+# The admission/ack question and the execution question are DIFFERENT bounds,
+# and conflating them is why the pre-#14342 code had to refuse: at 8 admitted
+# captures on a 4-worker pool, anything else queues behind ~19 s model calls.
+#
+# For an ACCEPTED-but-not-yet-extracted capture the durable half is the RECORD
+# phase (Session MERGE + turn Points + the sessionCaptured Event — journalled to
+# Postgres, the actual system of record per STORAGE-ARCHITECTURE §3), and it must
+# not wait behind somebody else's model call. Hence a small pool of its own.
+#
+# ⛔ WHY TWO WORKERS AND NOT MORE: this pool bounds the RAM the record phase
+# holds (one stored-window transcript each). Two is the smallest count that keeps
+# accepts flowing while one record write is in progress; it is a CAPACITY bound,
+# not a throughput knob, and it is deliberately far below the extraction pool so
+# the two bounds stay legible.
+_CAPTURE_RECORD_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, min(_int_env("TORTOISE_CAPTURE_RECORD_WORKERS", 2), 4)),
+    thread_name_prefix="capture-record")
+
 
 # ── #3087 item 1: dispose the capture pool during THREADING SHUTDOWN, before
 # the executor's own teardown hook joins every worker.
@@ -403,6 +422,8 @@ _CAPTURE_EXECUTOR = ThreadPoolExecutor(
 # term, not the running-worker term.
 def _dispose_capture_executor() -> None:
     """Cancel queued captures and release the pool during thread shutdown."""
+    with contextlib.suppress(Exception):
+        _CAPTURE_RECORD_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     with contextlib.suppress(Exception):
         _CAPTURE_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
