@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -5908,11 +5909,15 @@ def _beats_whose_ground(
     decides it against the ELEMENT, so a rule naming some other child does not
     qualify.
 
-    Still NOT collected, and now stated without the false "unreachable" claim
-    an earlier version made: a subject carrying a functional pseudo
-    (`:has()`, `:is()`) or extra qualification (`.beat.workflow`), and an inline
-    `style=` attribute. Recorded as #13837 R-C; every in-idiom spelling this
-    page uses is caught.
+    Still NOT collected: a subject carrying a functional pseudo (`:has()`,
+    `:is()`), extra qualification (`.beat.workflow`), a DESCENDANT combinator
+    (`#beat-hero .doc-grid`), or an inline `style=` attribute. Two of those
+    directions differ in kind and are recorded as #13837 R-C with the evidence:
+    `:has()`/`.beat.workflow`/inline-`style=` hide a DISABLING rule (fail-open —
+    measured GREEN over a page rendering #14677), while an `:is()` subject
+    written for the ENABLING pair is a false RED only (measured: a page that
+    renders identically to the shipped one). Every in-idiom spelling this page
+    uses is collected.
     """
     compact = _compact_selector(selector)
     out: list[str] = []
@@ -6192,6 +6197,38 @@ def _winning_ground_margin(candidates: list[_GroundMargin],
                                       c.order)).value
 
 
+def _first_unaligned_height(candidates: list[_GroundMargin],
+                            arm_height: int) -> tuple[float, str | None] | None:
+    """The first height in `[0, arm_height]` the centring does NOT hold at.
+
+    ⛔ THE HATCH FIRES FOR EVERY HEIGHT UP TO `arm_height`, so probing only at
+    `arm_height` was a fail-open one `min-height` away (#14683 review cycle 3,
+    P1 — measured): a centring pair inside `@media (min-height: 800px)` is
+    active at 820 and reads as "fires at least as often as the hatch", while
+    every phone below 800 — including the 375x764 one the hatch exists for —
+    top-aligns. Rendered on that mutant: `topGap 0`, titles back at 32, pill
+    overlap 1180-1750px², row GREEN.
+
+    So the interval is PROBED, not sampled once: every candidate edge inside the
+    arm's band is a boundary, and each boundary plus each midpoint between
+    consecutive boundaries is evaluated. Two candidates can change owner only at
+    an edge, so if the winner is `auto` at every such point it is `auto`
+    throughout.
+    """
+    edges = {0.0, float(arm_height)}
+    for candidate in candidates:
+        for edge in (candidate.min_height, candidate.height):
+            if math.isfinite(edge) and 0 <= edge <= arm_height:
+                edges.add(float(edge))
+    points = sorted(edges)
+    probes = set(points) | {(a + b) / 2 for a, b in itertools.pairwise(points)}
+    for probe in sorted(probes):
+        value = _winning_ground_margin(candidates, probe)
+        if value != "auto":
+            return probe, value
+    return None
+
+
 def _base_beat_justify_values(html: str) -> list[str] | None:
     """The base `.beat` rule's `justify-content` values, or `None` if absent.
 
@@ -6288,25 +6325,31 @@ def _short_viewport_centring_problems(html: str) -> list[str]:
             continue
         for height in sorted(arms[beat]):
             for side, props in GROUND_ENDS:
-                # ⛔ The WINNER of the CASCADE at this height, not "some rule
-                # says `auto`" (#14697 residual 1) and not "some rule on the
-                # ground says auto" (#14697 residual 2) — both were measured
+                # ⛔ The WINNER of the CASCADE across the WHOLE BAND the hatch
+                # covers, not "some rule says `auto`" (#14697 residual 1), not
+                # "some rule on the ground says auto" (#14697 residual 2), and
+                # not "`auto` wins AT the arm's own height" (#14683 review
+                # cycle 3, P1 — a `min-height: 800px` pair is active at 820 and
+                # absent at every phone below it). Both of those were measured
                 # green over a page that renders #14677.
-                value = _winning_ground_margin(
+                failure = _first_unaligned_height(
                     candidates.get(beat, {}).get(side, ()), height)
-                if value == "auto":
+                if failure is None:
                     continue
+                failing_height, value = failure
+                where = (f"where the hatch switches it to `flex-start` "
+                         f"(all heights <= {height}px)")
                 if value is None:
                     problems.append(
                         f"{beat} > :{side}: no `{props[0]}: auto` fires at "
-                        f"`max-height: {height}px`, where the hatch switches it "
-                        f"to `flex-start`")
+                        f"`max-height: {height}px` {where}")
                 else:
                     problems.append(
                         f"{beat} > :{side}: `{props[0]}` resolves to `{value}` "
-                        f"at `max-height: {height}px`, where the hatch switches "
-                        f"it to `flex-start` — a later or more specific rule "
-                        f"wins the cascade, so the free space is not shared out")
+                        f"at `max-height: {height}px` {where} — it is "
+                        f"`{value}` at a {int(failing_height)}px viewport, so "
+                        f"a later or more specific rule wins the cascade and "
+                        f"the free space is not shared out")
     return problems
 
 
@@ -6392,9 +6435,13 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
         and are re-measured here rather than inherited — #14683 review cycle 3,
         P3.)
 
-        and every title box at y=52 — 2.4px UNDER the fixed Login pill, whose
-        button ends at y=54.4 — for 61-187px² of painted overlap on five of the
-        seven beats.
+        and every title box at y=32 — 22.4px UNDER the fixed Login pill, whose
+        button ends at y=54.4 — for 567-1750px² of painted overlap on five of
+        the seven beats. The intro tween (`gsap.fromTo(el, { opacity: 0, y: 20 })`)
+        carries the title to y=52 mid-animation, which is the 2.4px / 61-187px²
+        frame the screenshots captured (#14683 review cycle 3: an earlier version
+        of this paragraph quoted ONLY that frame while also saying y=52 and y=32,
+        which cannot both be the resting position).
 
         ⛔ AND WHY THE HATCH CANNOT SAY `justify-content: safe center`, although
         the base `.beat` rule does: `safe` cannot express this on a browser that
@@ -6731,6 +6778,29 @@ class TestShortViewportCentringIsGradedPerBlock:
                 "reported CLEAN — a condition this reader cannot evaluate was "
                 "credited as firing at the hatch's height, so the guard "
                 "certifies a page that top-aligns every beat")
+
+    def test_centring_in_a_min_height_block_is_red(self):
+        """Mutant: the pair moved into `@media (min-height: 800px)`.
+
+        The hatch fires for EVERY height up to 820, so a pair that only exists
+        from 800 upward leaves every phone below it top-aligned. Probing the
+        cascade only at the arm's own height credited `min-height: 800` as
+        "fires at least as often as the hatch" (it IS active at 820) and
+        reported the row GREEN — measured on the rendered page: `topGap 0`,
+        titles back at 32, pill overlap 1180-1750px² at 375x764, 390x675 and
+        375x643 while 375x812 alone looked centred. That is #14683 review
+        cycle 3, P1, and this case pins the two-ended probe that closes it.
+        """
+        for wrapper in ("@media (min-height: 800px) {\n%s\n}",
+                        "@media (min-height: 700px) and (max-height: 820px) {\n%s\n}"):
+            page = self._page(hatch=self.ALIGNED_HATCH,
+                              extra=wrapper % (self.AUTO_MARGINS_HATCH))
+            problems = _short_viewport_centring_problems(page)
+            assert problems, (
+                f"a centring pair inside {wrapper.splitlines()[0]!r} was "
+                "reported CLEAN: it is active at the arm's own height but "
+                "absent at every shorter one, where the hatch still fires")
+            assert "820" in problems[0], problems
 
     def test_centring_in_a_WIDER_unmodelled_condition_is_accepted(self):
         """The over-block the asymmetric ranking must NOT buy.

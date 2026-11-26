@@ -772,11 +772,14 @@
        layout for the whole page.
 
        Measured before this at 375x812 (the hatch's own arm), content riding at
-       y=32 in a box with 748px of room: #beat-onboard 189.2px of copy with
-       590.8px empty below it, #beat-ingest 173.9px with 606.1px empty, and every
-       beat's title box at y=52 — i.e. 2.4px UNDER the fixed Login pill
-       (`padding: 18px 24px`, so its button ends at 54.4), 61-187px² of painted
-       overlap on five of the seven beats. That is the owner's "title+body
+       y=32 in a box with 748px of room: #beat-onboard 169.2px of copy with
+       590.8px empty below it, #beat-ingest 153.9px with 606.1px empty, and every
+       beat's title box at y=32 — 22.4px UNDER the fixed Login pill's bottom edge
+       (`padding: 18px 24px`, so its button ends at 54.4), i.e. 567-1750px² of
+       painted overlap on five of the seven beats. The intro tween
+       (`gsap.fromTo(el, { opacity: 0, y: 20 })`) then carries the title to y=52
+       mid-animation, which is the 2.4px / 61-187px² frame the screenshots
+       captured; both are measured, and the at-rest one is the worse of the two. That is the owner's "title+body
        appears too high … looks weirdly cropped … instead of centre on the
        screen": not clipping, top-alignment plus the radial `#vignette`, which
        is transparent only inside its central 55% and therefore dimmed the copy
