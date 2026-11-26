@@ -285,6 +285,16 @@ export function readState(storage, key, now = new Date()) {
       .filter((a) => a.until > nowMs)
     if (anchors.length) snoozedAt[episode] = anchors
   }
+  // ⛔ THE INVARIANT, ENFORCED WHERE EVERY STORE PASSES THROUGH. A key whose
+  // `snoozedAt` entry exists but whose anchors have ALL expired must not keep its
+  // deadline: `effectiveSnoozedUntil` reads that as "the reader snoozed something we
+  // cannot name" and gap-clamps EVERY incident row of the key, so a suspension
+  // nobody snoozed is hidden with the badge at 0. A store with NO `snoozedAt` entry
+  // at all is the documented legacy fallback and keeps its deadline.
+  const anchoredKeys = isPlainObject(parsed.snoozedAt) ? parsed.snoozedAt : {}
+  for (const episode of Object.keys(snoozed)) {
+    if (episode in anchoredKeys && !(episode in snoozedAt)) delete snoozed[episode]
+  }
   const dismissed = {}
   const dismissedEntries = Object.entries(
     isPlainObject(parsed.dismissed) ? parsed.dismissed : {},
@@ -424,7 +434,12 @@ export function snooze(state, episode, ms, now = new Date(), alert = null) {
   // was evicted by `MAX_SNOOZE_ANCHORS`, and never one a released row took with it.
   // A deadline outliving every anchor is the state that gap-clamps a suspension
   // nobody snoozed (#14694 review P2).
-  const keyUntil = finalAnchors.length && atMs > 0
+  // …and the same clamp applies in the no-row arm WHENEVER anchors exist: a caller
+  // with no row in hand may not stretch the deadline past every anchor that would
+  // have to justify it, because `readState` would prune those and leave the live,
+  // anchor-less key the invariant forbids. (`snooze(state, key, ms, now)` is a
+  // supported call — the docstring says omitting the row is not an error.)
+  const keyUntil = finalAnchors.length
     ? Math.max(until, ...finalAnchors.map((a) => a.until))
     : Math.max(liveKey, until)
   const next = { ...base, snoozed: { ...base.snoozed, [episode]: keyUntil } }
@@ -551,7 +566,15 @@ export function dismiss(state, episode, now = new Date(), alert = null) {
   const deduped = win
     ? prevWindows.filter((w) => !(w.first === win.first && w.last === win.last))
     : prevWindows
-  const windows = win ? [...deduped, win].slice(-MAX_DISMISSED_WINDOWS) : deduped
+  // ⛔ THE CAP KEEPS THE NEWEST ACKNOWLEDGEMENTS, ordered by their own `last` — NOT by
+  // insertion. Dismissals arrive in whatever order the reader clicks them, so keeping
+  // the last-inserted would drop a fresh dismissal of a NEWER row while keeping stale
+  // ones, and the row just cleared would come straight back. Same reasoning as
+  // `MAX_DISMISSED`'s newest-first cap: the newest windows are the ones an in-window
+  // episode can still match.
+  const windows = win
+    ? [...deduped, win].sort((a, b) => a.last - b.last).slice(-MAX_DISMISSED_WINDOWS)
+    : deduped
   return {
     ...base,
     // The watermark never moves BACKWARDS: the legacy fallback below reads it, and a

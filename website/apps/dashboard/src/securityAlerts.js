@@ -252,7 +252,12 @@ export function episodeRangeLabel(alert) {
 
 // ── #14686: RESIDUE ────────────────────────────────────────────────────────
 //
-// The exports below this line lost their only production consumer when the
+// ⛔ THE NAMES BELOW, NOT "everything below this line": `feedStateOf` sits below
+// too and is LIVE (`main.jsx` imports it and parses the feed with it). A blanket
+// positional claim in the one note whose purpose is to let a lane delete dead copy
+// is how live copy gets deleted.
+//
+// These exports lost their only production consumer when the
 // two-register panel (`securityAlertsPanel.jsx`, deleted) became the notifications
 // ledger: `ALERTS_HEADING`/`ALERTS_LEAD`/`ACTIVITY_HEADING`/`ACTIVITY_LEAD`,
 // `ACKED_CHIP`/`ACK_BUTTON`/`ACK_PENDING`, `SHOW_OLDER`/`HIDE_OLDER`,

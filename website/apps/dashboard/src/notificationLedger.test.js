@@ -472,8 +472,15 @@ test('#14694 P2: Unsnooze on an ACTIVITY row releases the WHOLE key — and is n
   let state = snooze(emptyState(), key, periodMs('1h'), NOW, a)
   state = snooze(state, key, periodMs('1h'), NOW, b)
   assert.equal(buildLedger({ alerts: [a, b], state, now: NOW }).unresolved, 0)
+  // ⛔ THE PREMISE THE COMMENT STATES, ASSERTED: TWO LIVE ANCHORS. Without it the
+  // row-scoped branch is unreachable and this test passes on a mutated module for
+  // the wrong reason — and the release must take the FIXTURE clock, not the wall
+  // clock, or every anchor looks expired on any host past `NOW` (measured: the
+  // mutant survived the whole suite that way).
+  assert.equal(state.snoozedAt[key].length, 2, 'premise: two live anchors')
+  assert.ok(state.snoozedAt[key].every((x) => x.until > NOW.getTime()))
 
-  const released = unsnooze(state, key, a)
+  const released = unsnooze(state, key, a, new Date(NOW))
   assert.equal(released.snoozed[key], undefined, 'the KEY is released, not just one anchor')
   assert.equal(released.snoozedAt[key], undefined)
   assert.equal(buildLedger({ alerts: [a, b], state: released, now: NOW }).unresolved, 2)
@@ -531,6 +538,19 @@ test('#14694 P1: TWO dismissals on one decision key both hold — in BOTH orders
   const restoredAll = undismiss(restored, key)
   assert.equal(restoredAll.dismissedWindows[key], undefined)
   assert.equal(buildLedger({ alerts: [NEWER, OLDER], state: restoredAll, now: NOW }).unresolved, 2)
+
+  // ⛔ THE WINDOW CAP KEEPS THE NEWEST, and that was unpinned: flipping `.slice(-8)`
+  // to `.slice(0, 8)` drops the dismissal the reader JUST made (it comes straight
+  // back) with every suite green. Nine dismissals on one key, then the newest must
+  // still be covered.
+  const many = Array.from({ length: 9 }, (_, i) => row(NOW.getTime() - (i + 1) * HOUR, `rv||w${i}`))
+  let wide = emptyState()
+  for (const r of many) wide = dismiss(wide, key, NOW, r)
+  assert.equal(wide.dismissedWindows[key].length, 8, 'premise: the cap applies')
+  assert.equal(isDismissed(wide, key, many[0]), true,
+    'the newest dismissal must survive the cap')
+  assert.equal(isDismissed(wide, key, many[8]), false,
+    'the oldest is the one dropped, and dropping it only RE-SHOWS')
 
   // The INCIDENT gate is unchanged and applies PER WINDOW: each row is covered by
   // its OWN window, and neither window covers a suspension that happened later.
@@ -641,6 +661,89 @@ test('#14694 P2: releasing the row that holds the LONGEST period clamps the key 
   assert.equal(ledger.unresolved, 3, 'the never-snoozed suspension must be counted')
   assert.ok(ledger.current.concat(ledger.older).some((e) => e.rowKey === rowKeyOf(fresh)))
 })
+test('#14694 P2: the ANCHOR CAP cannot leave a deadline no surviving anchor justifies', () => {
+  // `MAX_SNOOZE_ANCHORS` is the only other way `liveKey` can exceed every surviving
+  // anchor's `until` at a `snooze` call, and it had NO pin at all: a 1-week snooze
+  // followed by 64 one-hour snoozes on the same key evicted the week-long anchor
+  // while the key deadline stayed at +1 w, so after a reload the key was live with
+  // no anchor and a fresh suspension was hidden (badge 0). Measured: the clamp could
+  // be reverted with every suite green.
+  // DISTINCT `at` per row: anchors are identified by their instant, so 65 rows
+  // sharing one `at` would collapse into a single anchor and never reach the cap.
+  const activityRow = (i) => alert({
+    register: 'activity',
+    message: 'a rate measurement',
+    at: new Date(NOW.getTime() - 30 * MIN - i * 1000).toISOString(),
+    first_at: new Date(NOW.getTime() - 30 * MIN - i * 1000).toISOString(),
+    count: 2,
+    episode: `rv||cap${i}`,
+  })
+  const rows = Array.from({ length: 65 }, (_, i) => activityRow(i))
+  const key = entryKeyOf(rows[0])
+  // The first click is the long one; every later click is short.
+  let state = snooze(emptyState(), key, periodMs('1w'), NOW, rows[0])
+  for (const r of rows.slice(1)) state = snooze(state, key, periodMs('1h'), NOW, r)
+  assert.ok(state.snoozedAt[key].length <= 64, 'premise: the cap evicted the older anchors')
+  assert.ok(
+    !state.snoozedAt[key].some((a) => a.until === NOW.getTime() + periodMs('1w')),
+    'premise: the week-long anchor was the one evicted',
+  )
+  // THE PIN: the key deadline is now the longest SURVIVING anchor, not the evicted week.
+  assert.equal(state.snoozed[key], NOW.getTime() + periodMs('1h'),
+    'the deadline must be clamped to what survives the cap')
+
+  // …so an hour later the key is gone and nothing is hidden by a leftover deadline.
+  const later = new Date(NOW.getTime() + 61 * MIN)
+  const storage = fakeStorage()
+  writeState(storage, 'k', state)
+  const { state: reloaded } = readState(storage, 'k', later)
+  assert.equal(reloaded.snoozed[key], undefined, 'no live anchor may leave a live key')
+
+  const fresh = alert({
+    type: 'suspend',
+    label: 'Organization suspended',
+    message: 'Organization suspended by an operator',
+    at: new Date(NOW.getTime() + 30 * MIN).toISOString(),
+    first_at: new Date(NOW.getTime() + 30 * MIN).toISOString(),
+    episode: 'suspend||capfresh',
+  })
+  assert.equal(buildLedger({ alerts: [fresh], state: reloaded, now: later }).unresolved, 1,
+    'a never-snoozed suspension must be counted')
+})
+test('#14694 P2: a NO-ROW snooze cannot outlive the anchors that must justify it', () => {
+  // `snooze(state, key, ms, now)` without a row is a DOCUMENTED call, and its arm wrote
+  // `Math.max(liveKey, until)` — a week's deadline over anchors that all end in an
+  // hour. `readState` then pruned them and kept the key, leaving the anchor-less live
+  // key the invariant forbids, so a suspension nobody snoozed was gap-clamped. The
+  // invariant is now enforced where every store passes through: `readState` drops a
+  // key whose `snoozedAt` entry exists but has no live anchor.
+  const take = (at, episode) => alert({
+    type: 'suspend',
+    label: 'Organization suspended',
+    message: 'Organization suspended by an operator',
+    at,
+    first_at: at,
+    episode,
+  })
+  const a = take(new Date(NOW.getTime() - 2 * DAY).toISOString(), 'suspend||nr')
+  const key = entryKeyOf(a)
+  let state = snooze(emptyState(), key, periodMs('1h'), NOW, a)
+  // No row in hand, and a much longer period.
+  state = snooze(state, key, periodMs('1w'), new Date(NOW.getTime() + 30 * MIN), null)
+  assert.equal(state.snoozedAt[key].length, 1, 'premise: the anchor is still the only one')
+
+  const t90 = new Date(NOW.getTime() + 90 * MIN)
+  const storage = fakeStorage()
+  writeState(storage, 'k', state)
+  const { state: reloaded } = readState(storage, 'k', t90)
+  assert.equal(reloaded.snoozed[key], undefined,
+    'a key that HAS anchors but keeps no live one must not keep its deadline')
+
+  const fresh = take(new Date(NOW.getTime() + 80 * MIN).toISOString(), 'suspend||nrf')
+  assert.equal(buildLedger({ alerts: [fresh], state: reloaded, now: t90 }).unresolved, 1,
+    'a never-snoozed suspension must be counted')
+})
+
 
 test('#14694 P1: a snooze on an INCIDENT does not cover a NEWER one', () => {
   // `suspend`'s customer message is a CONSTANT, so every suspension shares one
