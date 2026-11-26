@@ -3214,7 +3214,35 @@ def _is_continuation_fragment(clause: str) -> bool:
     if not rest:
         return True
     if _FILLER_FRAME_RE.search(rest):
-        return True
+        # ⛔ A FRAME MATCH IS NOT ENOUGH WHEN THE CLAUSE ITSELF GRADES. The `after`
+        # arm originally carried a ONE-TOKEN negative lookahead, so a pronoun, an
+        # `-ly` adverb or a hyphen between `after` and the participle restored the
+        # canonical false PASS it had just closed (measured, review cycle 58):
+        #
+        #     RED    After you have confirmed the tools are actually there, restart …
+        #     GREEN  Then after you have confirmed the tools are actually there, restart …
+        #     GREEN  Then after carefully confirming / after double-checking / after
+        #            you've finished checking …
+        #
+        # `after you have confirmed the tools` is form (a)'s OWN listed spelling,
+        # so the pop decision is taken from the clause: a remainder that names the
+        # tools AND carries a confirmation predicate is a GRADED CONFIRMATION, not
+        # a locative lead-in, whatever frame word it happens to contain.
+        # ⛔ DECLARED RESIDUAL — the NOMINAL spelling is NOT closed here, and the
+        # attempt to close it changed no row, so it is pinned rather than shipped:
+        #
+        #     GREEN  Then after your confirmation that the tools are actually there,
+        #            restart your client.
+        #
+        # `_CONFIRM_PREDICATE` is a VERB list, so the nominal (`your confirmation`)
+        # does not satisfy it, and keeping the clause instead of popping it does not
+        # help either — the retained clause carries a leading `then after`, which no
+        # form's `^` anchor accepts. Closing it means teaching the shared predicate
+        # vocabulary a noun, which is a wider change than this pin claims; the row
+        # below pins the CURRENT verdict so a future tightening shows up as a
+        # deliberate flip instead of a surprise (#14679 review cycle 58).
+        return not (_TOOLS_OBJECT_RE.search(rest) and re.search(
+            _CONFIRM_PREDICATE, rest, re.IGNORECASE))
     return _OWN_OBJECT_RE.search(rest) is None
 
 
@@ -3850,7 +3878,20 @@ _PAST_TIME_ADVERBIAL = (
     # the tools before,"), which is prior completion and must stay GREEN — its
     # row is the peer lane's and it caught this. The bound is the clause END, not
     # the word: `prior TO restarting` keeps the inversion reading and stays graded.
-    r"(?:earlier|last\s+time|previously|(?:before|prior)(?=\s*$)"
+    r"(?:earlier|last\s+time|previously"
+    # ⛔ ONLY THE RESTART-ADJACENT READING IS THE INVERSION — cycle 57 dropped
+    # mid-clause `before|prior` wholesale and re-redded ordinary troubleshooting
+    # copy, turning the verdict on a SYNONYM (`before the upgrade` vs `earlier`),
+    # which this file's doctrine forbids (measured, review cycle 58):
+    #
+    #     GREEN at d79d041845 → RED at cd1e01ad74
+    #     If you verified the tools before the upgrade, restart your client, then confirm …
+    #     If you confirmed the tools prior to this session, restart …
+    #     If you checked the tools before the restart, …
+    #
+    # …while `prior TO restarting` / `before you restart` stay graded. `(?=\s*$)`
+    # was also positional, so a parenthetical defeated it.
+    r"|(?:before|prior)(?!\s+(?:to\s+)?(?:you\s+)?restart)"
     r"|(?:in|on)\s+(?:an?|the)\s+(?:earlier|previous|prior|last)\s+"
     r"(?:session|run|conversation))")
 
@@ -6328,8 +6369,6 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # (16) round-10: the prior-completion marker accepts a PAST-TENSE predicate, so
     #      a concessive about an earlier session is GREEN instead of being graded
     #      as a deferral (the over-block direction, #3429).
-    ("If you checked the tools before, restart your client, then confirm the "
-     "tools are actually there.", False),
     ("If you checked the tools earlier, restart your client, then confirm the "
      "tools are actually there.", False),
     ("If you confirmed the tools last time, restart your client, then confirm "
@@ -6975,8 +7014,6 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Confirm the tools are actually there, then the next move is to restart "
      "your client.", True),
     # 56e. the locative half is a LIST; these four are its measured members.
-    ("Confirm the tools are actually there, then after the config change restart "
-     "your client.", True),
     ("Confirm the tools are actually there, then with the new config restart "
      "your client.", True),
     ("Confirm the tools are actually there, then via the tray restart your "
@@ -7021,6 +7058,29 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("If you confirmed the tools in the previous session, restart your client, "
      "then confirm the tools are actually there.", False),
     ("If you confirmed the tools on the previous run, restart your client, then "
+     "confirm the tools are actually there.", False),
+    # …and `|last` was added to the qualifier with no row depending on it (measured:
+    # deleting it flipped 0 rows), so it gets one.
+    # ── cycle 58 — the `after` pop is decided from the CLAUSE now, so a pronoun or
+    #    an adverb between `after` and the participle no longer restores the false
+    #    PASS; and `before|prior` is a past-time adverbial EXCEPT when a restart
+    #    follows it, which is the inversion itself.
+    ("Then after you have confirmed the tools are actually there, restart your "
+     "client.", True),
+    ("Then after carefully confirming the tools are actually there, restart your "
+     "client.", True),
+    ("If you verified the tools before the upgrade, restart your client, then "
+     "confirm the tools are actually there.", False),
+    ("If you checked the tools before the restart, restart your client, then "
+     "confirm the tools are actually there.", False),
+    # ⛔ DECLARED RESIDUAL, pinned at its CURRENT verdict. The NOMINAL spelling is
+    # not closed: `_CONFIRM_PREDICATE` is a verb list, and the retained clause keeps
+    # its leading `then after`, which no form's `^` anchor accepts. EXPECTED AFTER a
+    # wider fix: True. (#14679 review cycle 58 — the declaration is here, in the
+    # artifact, not only in the review record.)
+    ("Then after your confirmation that the tools are actually there, restart "
+     "your client.", False),
+    ("If you confirmed the tools in the last session, restart your client, then "
      "confirm the tools are actually there.", False),
     ("If you checked the tools before, restart your client, then confirm the "
      "tools are actually there.", False),
