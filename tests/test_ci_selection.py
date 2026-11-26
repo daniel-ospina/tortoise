@@ -9296,10 +9296,15 @@ _ROW_CLAIM_CARRY_RE = re.compile(
     r"(?:\s*,\s*(?:`?#\d+`?\s*'s\s*)?`?tests/[\w/.-]+\.py`?"
     r"|\s+and\s+(?:`?#\d+`?\s*'s\s*)?`?tests/[\w/.-]+\.py`?)*)"
     r"\s+carry\s+"
-    #: The unit is optional and INSIDE the value, because the block states this weight with a
-    #: unit in its own prose and the row's note does too. Requiring the bare number made a
-    #: unit-preserving TRUE rewrite empty `positive`, and the arm then reported the block as
-    #: naming no file at all — a false block, reproduced on `2.0` -> `2.0 s`.
+    #: The unit is optional and INSIDE the value. ⛔ NOT because the block states it with a unit —
+    #: it does not: this PR's own restructure replaced the `flat `2.0 s`` spelling with
+    #: ``row in `durations` — `core`-registered``, so the justification that stood here cited prose
+    #: the block no longer carries, and the carry rows' own notes say "takes the header's flat
+    #: `DEFAULT_FAST_WEIGHT`" with no number and no unit (#14623 review round 5, P2). The unit is
+    #: admitted because `2.0 s` is a TRUE rewrite of those rows — `durations` carries 2.0 for each —
+    #: and the fixture below pins it, so the arm grades the CLAIM rather than the spelling. Requiring
+    #: the bare number made a unit-preserving TRUE rewrite empty `positive`, and the arm then
+    #: reported the block as naming no file at all — a false block, reproduced on `2.0` -> `2.0 s`.
     r"(?:(?:an?\s+)?explicit\s+`?(?P<value>\d+(?:\.\d+)?)(?:\s*s)?`?\s+`?durations`?\s+"
     r"(?:rows?|entr(?:y|ies))"
     r"|no\s+(?:`?durations`?\s+)?(?:rows?|entr(?:y|ies)))",
@@ -11319,7 +11324,17 @@ def test_the_fast_shards_header_block_does_not_claim_its_row_list_is_complete():
 #: and its path, and a matcher bound to the unwrapped spelling reads a reachable item as unreached
 #: (the one-spelling class this block keeps re-learning).
 _ROW_ENUMERATION_ISSUE_RE = re.compile(r"`#(?P<issue>\d+)`'s")
-_ROW_ISSUE_SHORTHAND_RE = r"`#%s`'s[\s#]*`tests/(?P<file>[\w/.-]+\.py)`\s*rows?\b"
+#: ⛔ THE NOUN IS THE SAME ALTERNATION the other two row-claim matchers carry, and it was NOT,
+#: which is #14730's third instance: `_ROW_CLAIM_AFTER_FILE_RE` was widened to the block's own
+#: definitional synonym (`entry in `durations``) and this one was left on `rows?\b`, so the SPELLING
+#: half of `test_the_row_list_alone_reaches_every_item_it_names` RED a TRUE rewrite of a live list
+#: item — with a diagnostic asserting the item had no path beside it, which it did (measured at
+#: `de311a35a2da`: rewriting `tests/test_14560_operator_vectors.py`'s item to
+#: ``entry in `durations`` reported `14560` as issue-only; reproduced on `#14597`'s and `#14565`'s
+#: items too). The QUALIFIER stays mandatory for the reason `_ROW_CLAIM_AFTER_FILE_RE` records: bare
+#: `entry` is the block's word for a REGISTRATION, the opposite claim.
+_ROW_ISSUE_SHORTHAND_RE = (r"`#%s`'s[\s#]*`tests/(?P<file>[\w/.-]+\.py)`\s*"
+                          r"(?:rows?\b|entr(?:y|ies)\s+in\s+`?durations`?\b)")
 
 
 def _issue_shorthand_row_file(unquoted: str, issue: str) -> str | None:
