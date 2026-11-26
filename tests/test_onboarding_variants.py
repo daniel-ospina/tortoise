@@ -1766,6 +1766,20 @@ _ABSENCE_ADVERB_RUN = (
 
 _CONFIRM_PREDICATE = (
     r"\b(?:confirm|check|verif(?:y|ies|ied|ying)|ensur(?:e|es|ed|ing)"
+    # ⛔ `make sure` / `be sure` / `validate` ARE THE SAME PREDICATE, and the
+    # closure below was missing the two highest-frequency members of the very
+    # vocabulary it claims is closable. `make sure` is not an exotic synonym:
+    # this file STATES the equivalence 60 lines down (`make sure to` / `be sure
+    # to` are the same instruction) and already admits `make\s+sure\s+to` in
+    # form (f)'s modal slot — it simply never admitted it in the OBJECT
+    # position, so the declared-RED `Before you restart your client, confirm the
+    # tools are actually there.` went GREEN one word over (#14679 review at
+    # `1dedd33da07e`, measured: `make sure` flips 82 declared-RED rows, `made
+    # sure` 31, `validate` 107, and the doc-level test passes end-to-end on
+    # `Restart your client upon confirming the tools are actually there`'s
+    # `make sure` twin). The list stays CLOSED — these are members of it, not a
+    # new arm.
+    r"|mak(?:e|es|ing)\s+sure|made\s+sure|be\s+sure|validat(?:e|es|ed|ing)"
     r"|see|saw|seen|look|list)(?:ing|ed|s|es|d)?\b"
 )
 
@@ -1878,7 +1892,13 @@ _PRE_CUE_ONLY = _inversion_form(
     # so "Please double-check the tools are actually there. Restart …" was GREEN
     # while its `check` twin is a declared RED row — the same lesson form (a)
     # already carries as `(?:\w+-)?` (#14679 review cycle 29, measured).
-    r"(?:\w+-)?(?:confirm|check|verify|see|look|ensure)\w*\b[^\n]*?"
+    r"(?:\w+-)?(?:confirm|check|verify|see|look|ensure"
+    # …and the same three-closure gap in THIS copy: it is a SECOND spelling of
+    # `_CONFIRM_PREDICATE`, so form (f) kept the pre-cue sentence GREEN after the
+    # shared constant was widened (`Make sure the tools are actually there.
+    # Restart your client, then run a query.` — measured, #14679 review at
+    # `1dedd33da07e`).
+    r"|make\s+sure|be\s+sure|validate)\w*\b[^\n]*?"
     + _TOOLS_OBJECT
     # …and a documentation noun immediately after `tools` is not a presence
     # claim even when a copula follows it ("Ensure the tools table is up to
@@ -1946,6 +1966,13 @@ _MODAL_TO_VERB = (
 # slot closes: `once you can actually confirm …` was GREEN while both
 # `once you can confirm …` and `once you actually confirm …` are RED (measured).
 _ADVERBS = r"(?:\w+ly|very|so|too|quite|rather|first|already|just|also)"
+# ⛔ `rather` IS AN ALLOW-LIST MEMBER, and it is DECLARED here rather than
+# dropped as dead weight: mutating it out flips 0 of 493 rows (measured), but
+# removing an allow-list adverb does not close a hole — it risks a future FALSE
+# RED on copy this pin has simply never seen (`… after you have rather confirmed`
+# is not a sentence a doc ships). Same standing as `page` in `_DOC_NOUN`: the
+# 0-row measurement is recorded so the next auditor can tell it from an arm that
+# does load (#14679 review at `1dedd33da07e`).
 
 _PRE_CUE_PREFIX = " \t,.;:—–-…('\"`*>#_[]{}"
 
@@ -2043,13 +2070,28 @@ _INVERSION_FORMS = (
     #     can confirm the tools …` and `… once you're through with setup and
     #     confirm the tools …` are declared-GREEN rows below.
     _inversion_form(
-        r"\b(?:(?:after|once)\s+"
+        # ⛔ `following` AND `upon` ARE `after`, SPELLED DIFFERENTLY, and the
+        # denial of that here is what made them false PASSes: this file already
+        # treats them as the same relation in `_DEFERRED_CHECK_RE`
+        # (`(?:after|once|when|following|upon)\s+…restart…`), and both put the
+        # confirmation strictly BEFORE the restart — the inversion this pin
+        # exists to red. Measured at the review of `1dedd33da07e`: `after <gerund>`
+        # → `upon <gerund>` flips 26 declared-RED rows GREEN, and the doc-level test
+        # passes end-to-end on `Restart your client upon confirming the tools are
+        # actually there`.
+        r"\b(?:(?:after|once|following|upon)\s+"
         r"(?:you(?:'(?:ve|re)|\u2019(?:ve|re)|\s+have)\s+|you\s+|having\s+)?"
         r"(?:" + _ADVERBS + r"\s+)*"
         r"(?:" + _MODAL_TO_VERB + r"\s+(?:" + _ADVERBS + r"\s+)*)?"
         # the completive slot — see the block above `_inversion_form(`
         r"(?:(?:done|finished|through)\s+)?"
-        r"|(?:if|when)\s+(?:you(?:'(?:ve|re)|\u2019(?:ve|re)|\s+have)\s+|you\s+|having\s+)?"
+        # ⛔ `whenever` IS `when` AND `as soon as` IS `once`, and both were GREEN
+        # twins of declared-RED rows (`Restart your client whenever the tools are
+        # actually there.` vs the declared-RED `when` row — 14 rows flipped;
+        # `once`→`whenever` flips 40). This is the SAME defect class the file
+        # already closed once for `first`→`firstly` (cycle 29), and `whenever` is
+        # not exotic — `_AND_SUBORDINATE_HALF_RE` lists it 900 lines up.
+        r"|(?:if|when|whenever|as\s+soon\s+as)\s+(?:you(?:'(?:ve|re)|\u2019(?:ve|re)|\s+have)\s+|you\s+|having\s+)?"
         r"(?:" + _ADVERBS + r"\s+)*"
         r"(?:" + _MODAL_TO_VERB + r"\s+(?:" + _ADVERBS + r"\s+)*)?"
         # the completive slot — see the block above `_inversion_form(`
@@ -2130,7 +2172,17 @@ _INVERSION_FORMS = (
         # admits it; leaving it out here kept "… though you should confirm the
         # tools are actually there in advance" GREEN while its `beforehand`
         # twin is a declared RED row (#14679 review cycle 29, measured).
-        r"|in\s+advance)\b"
+        r"|in\s+advance"
+        # ⛔ `prior to restarting` / `ahead of restarting` ARE `before
+        # restarting`, and `:2500` SAYS SO ("`until`/`prior to` are the same
+        # inversion") — the deletion note below is about the CUE-side pattern,
+        # where the bare `Restart your client` makes `prior to restart your
+        # client` ungrammatical. That argument never applied HERE: in form (d)
+        # the object is `restarting`, so it is reachable ordinary English, and
+        # the declared-RED row's GREEN twin was one synonym over (#14679 review
+        # at `1dedd33da07e`, measured: `before`→`prior to` flips 2 rows).
+        r"|prior\s+to\s+restarting|ahead\s+of\s+restarting"
+        r")\b"
         r"|\bfirst(?:ly)?\b(?=[\s.,;:!?)\]}\"'`*_—–…]*$))"
     ),
     # (d′) `already` DOES carry an order claim — but only where an adversative,
@@ -2205,7 +2257,17 @@ _INVERSION_FORMS = (
         # graded form requires a tools PREDICATE inside the connective's own
         # clause, and "after which restart your client" carries none — a
         # relative clause can only attach to what the restart already did.
-        r"\b(?:once|when|after)(?!\s+(?:which|that)\b)\s+"
+        # ⛔ `whenever` AND `as soon as` — see form (a)'s note. They are `when`
+        # and `once` for this purpose and were GREEN twins of declared-RED rows
+        # (14 rows for `when`→`whenever`, 40 for `once`→`whenever`).
+        # ⛔ `following`/`upon` are deliberately NOT here, and the measurement is
+        # why: mutating them out flips 0 of 491 rows, and the presence shapes they
+        # would cover are FORWARD copy anyway ("Restart your client upon the tools
+        # being listed" = after they are listed). Form (a) is where they load —
+        # that is the CONFIRMATION shape (`upon confirming the tools …`), which is
+        # the inversion (#14679 review at `1dedd33da07e`).
+        r"\b(?:once|when|after|whenever|as\s+soon\s+as)"
+        r"(?!\s+(?:which|that)\b)\s+"
         r"(?:[A-Za-z0-9_`*.-]+\s+){0,2}?"
         + _TOOLS_OBJECT + r"\s+"
         # ⛔ `is` is REACHABLE again, and required: it was dropped as "an arm no
@@ -2221,8 +2283,13 @@ _INVERSION_FORMS = (
         # with the object widened and no singular verb (#14717, measured).
         # A verb set that assumes plural agreement silently re-opens the gap the
         # object widening just closed.
+        # ⛔ `visible` is NOT here: after the object, the copula arm `are|is`
+        # already grades "the tools ARE visible", and the bare "the tools visible"
+        # is ungrammatical — mutating it out flips 0 of 491 rows and no
+        # well-formed row can depend on it (#14679 review at `1dedd33da07e`,
+        # measured). Declared rather than silently carried as an arm.
         r"(?:are|is|appear|appears|show|shows|exist|exists|load|loads"
-        r"|listed|visible)\b"
+        r"|listed)\b"
         # ⛔ AN ABSENCE IS NOT A PRESENCE CLAIM, and `when` is a CONDITIONAL —
         # the module's own doctrine. Admitting `when` without this arm redded the
         # symptom copy `when`-led clauses are made of: "Restart your client when
@@ -2489,7 +2556,12 @@ def _negated_observation_only(clause: str) -> bool:
     # requirement that the predicate sit in the connective's OWN clause, which is
     # the reason stated two lines above.
     if re.search(r"\b(?:confirm|check|verif(?:y|ies|ied|ying)"
-                 r"|ensur(?:e|es|ed|ing))\w*\b", clause[neg.end():]):
+                 r"|ensur(?:e|es|ed|ing)"
+                 # …and the THIRD copy (see `_CONFIRM_PREDICATE`): a negated
+                 # observation followed by `make sure` is still a confirmation
+                 # the skip must not swallow.
+                 r"|mak(?:e|es|ing)\s+sure|made\s+sure|be\s+sure"
+                 r"|validat(?:e|es|ed|ing))\w*\b", clause[neg.end():]):
         return False
     # ⛔ THE REMAINDER IS THE CLAUSE WITH THE NEGATED OBSERVATION *DELETED*, NOT
     # THE PREFIX IN FRONT OF IT. A prefix-only remainder asks only what is LEFT of
@@ -2559,6 +2631,29 @@ _CUE_UNDER_INVERTING_SUBORDINATE_RE = re.compile(
     # and with a comma the pattern cannot match) — `prior\s+to` flipped 0 of 359
     # rows on removal. An arm no row can depend on is dead weight.
     r"\b(?:before|by\s+the\s+time|until)\b[^,;.]*$", re.IGNORECASE)
+
+# ⛔ THE SAME INVERSION, WITH THE CUE NEGATED — and NOTHING on the post-cue side
+# saw it, because `_CUE_UNDER_INVERTING_SUBORDINATE_RE` is PRE-cue only. The cue
+# `Restart your client` matches INSIDE `Don't restart your client`, so the
+# negation lead falls into `before` (where no pre-cue form grades it, having no
+# confirmation predicate of its own) and the post-cue half is graded against
+# forms whose connective sets contain no `until`:
+#     RED    Until you restart your client, confirm the tools are actually there.
+#     GREEN  Don't restart your client until you have confirmed the tools are actually there.
+# The second sentence asks for the confirmation BEFORE the restart, which is the
+# inversion, and this file already states the rule at `_CUE_UNDER_INVERTING_`
+# `SUBORDINATE_RE`'s rationale ("`until`/`prior to` are the same inversion")
+# (#14679 review at `1dedd33da07e`, measured).
+# The arm is deliberately MONOTONE — it fires ONLY when the cue itself is
+# negated, so no forward copy can reach it — and it requires a CONFIRMATION
+# predicate, so the presence-only shape (`Don't restart your client until the
+# tools appear.`) stays GREEN: nothing there names who confirms what, and
+# grading it would widen the pin into copy the docs do not ship (declared
+# residual, measured on the three spellings above).
+_NEGATED_CUE_LEAD_RE = re.compile(
+    r"(?:\bdo\s+not|\bdon['\u2019]t|\bnever)\s*$", re.IGNORECASE)
+_DEFERRING_CONNECTIVE_RE = re.compile(
+    r"^(?:until|before|by\s+the\s+time|prior\s+to)\b", re.IGNORECASE)
 
 # …and a clause that ENDS on one introduces the NEXT clause, whichever side of
 # its own comma the sequencer sits on. `_FORWARD_SEQUENCER_RE` can only see an
@@ -3216,7 +3311,18 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
             post_clauses = ([_stmt] if _FORWARD_SEQUENCER_RE.match(_stmt)
                             else [c.strip().lstrip(_PRE_CUE_PREFIX).strip()
                                   for c in _stmt.split(",")])
+    cue_is_negated = bool(_NEGATED_CUE_LEAD_RE.search(before))
     for clause in post_clauses:
+        # ⛔ A NEGATED CUE DEFERS THE RESTART TO ITS OWN `until`/`before` CLAUSE,
+        # so a confirmation inside that clause happens FIRST — see
+        # `_NEGATED_CUE_LEAD_RE`. Checked BEFORE the sequencer skip: the skip's
+        # rationale (a sequencer continues the cue's predication forward) does
+        # not hold for a restart that was told NOT to happen yet.
+        if (cue_is_negated
+                and _DEFERRING_CONNECTIVE_RE.match(clause)
+                and re.search(_CONFIRM_PREDICATE, clause)
+                and _TOOLS_OBJECT_RE.search(clause)):
+            return clause
         # A clause led by a FORWARD sequencer continues the cue's own
         # predication in the forward direction: "then once the tools are listed
         # run …", "and once the tools are listed, run …", "then after confirming
@@ -3351,10 +3457,21 @@ def test_3232_generic_restart_lines_are_exact():
     #   post-cue scan cannot see. ⛔ (d′) is the one every enumeration used to
     #   omit while the tuple held seven — it is load-bearing, so a reader
     #   auditing the graded surface under-counted it.
-    # - It is NOT an open-ended inversion detector. "… when the tools appear";
-    #   "after making sure the tools …"; and any other rephrasing outside those
-    #   SEVEN (a, b, c, d, d′, e, and the pre-cue-only f) are deliberately NOT
-    #   graded — widening a prose denylist is how both defects this pin fixes got
+    # - It is NOT an open-ended inversion detector. "Restart your client; having
+    #   first confirmed the tools are actually there" (a BREAK GLYPH between the
+    #   cue and the inversion marker) and "Restart your client, confirm the tools
+    #   are actually there first, and run a query" (a coordinate imperative with
+    #   no forward sequencer, folded into its predecessor) are deliberately NOT
+    #   graded, and both are pinned as declared GREEN rows in the table — as is
+    #   any other rephrasing outside those
+    #   SEVEN (a, b, c, d, d′, e, and the pre-cue-only f). ⛔ The two examples that
+    #   used to stand here (`… when the tools appear` and `after making sure the
+    #   tools …`) are both GRADED TODAY (rows `Restart your client when the tools
+    #   appear.` and `Restart your client after making sure the tools are
+    #   actually there.`), so the block asserted an exemption its own table
+    #   contradicts — a doc-vs-row disagreement of the kind that has already
+    #   cost this file two review cycles (#14679 review at `1dedd33da07e`,
+    #   measured). Widening a prose denylist is how both defects this pin fixes got
     #   in. The comment and the assert message claim only the seven, so neither
     #   outruns the measurement.
     # - A confirmation scoped to the CONFIG stays GREEN: the file is readable
@@ -4251,15 +4368,22 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Before you restart your client: then, confirm the tools are actually "
      "there.", False),
     # ── CYCLE 37 RESIDUALS, pinned RED so they are visible rather than claimed
-    # away. Each is measured and each needs a decision, not another widening:
-    # (a) an inserted `, then` splits the clause and re-opens the negated-
+    # away. Each is measured and each needs a decision, not another widening:    # (a) an inserted `, then` splits the clause and re-opens the negated-
     #     observation false PASS closed two rows above:
     ("Restart your client after seeing no errors, then confirming the tools "
      "are actually there.", False),
-    # (b) `be|make sure` is a confirmation with no confirmation VERB, so it is
-    #     missed by both the suffix arm and form (f)'s verb slot:
+    # (b) CLOSED (was: `be|make sure` is a confirmation with no confirmation
+    #     VERB, so it was missed by both the suffix arm and form (f)'s verb
+    #     slot — 82 declared-RED rows had a `make sure` GREEN twin). Closing it
+    #     was a DECISION, not a widening: this sentence's `and` may conjoin
+    #     INSIDE the `after` clause ("after [seeing no errors and making sure the
+    #     tools are there]" = confirm first), which is exactly why its `confirm`
+    #     twin two rows up is declared RED. Grading the two spellings
+    #     differently was the defect, so the `make sure` twin now reds too — at
+    #     the cost of reding one ambiguous shape no doc ships, which is the
+    #     conservative side of a false PASS (#14679 review at `1dedd33da07e`).
     ("Restart your client after seeing no errors and make sure the tools are "
-     "actually there.", False),
+     "actually there.", True),
     # (c) a comma-free run-on where the config check follows the object: form
     #     (d)'s clause-final `first` fires and `_confirmation_scopes_the_config`
     #     cannot see the config noun, so a file-side check goes RED (its comma
@@ -4849,6 +4973,76 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # a new arm.
     ("Restart your client after confirming the config is right, and once the "
      "tools are listed grep the log.", True),
+    # ── CYCLE 42 (#14679's review at `1dedd33da07e`): FIVE closed-vocabulary
+    # gaps, each measured as a GREEN twin of a DECLARED-RED row and each one
+    # word or one synonym away. Every row below is that twin; the constant or
+    # form it pins is named in its comment, and each arm's load is proven by
+    # removal (see the mutation table in this file's history).
+    #
+    # (1) `_CONFIRM_PREDICATE`'s closure omitted the highest-frequency members
+    #     of the vocabulary it claims is closable. All seven forms route through
+    #     it, so one synonym defeated every form at once (82 rows for `make
+    #     sure`, 27 for `making sure`, 31 for `made sure`, 107 for `validate`).
+    ("Before you restart your client, confirm the tools are actually there — "
+     "`tortoise_*` in the client's MCP/tool list.", True),
+    ("Before you restart your client, make sure the tools are actually there — "
+     "`tortoise_*` in the client's MCP/tool list.", True),
+    ("Restart your client after making sure the tools are actually there.", True),
+    ("Restart your client after you have made sure the tools are actually "
+     "there.", True),
+    ("Restart your client after you have made sure the tool list is complete.",
+     True),
+    ("Restart your client, having first made sure the tools are actually "
+     "there.", True),
+    ("Restart your client, but first make sure the tools are actually there.",
+     True),
+    ("Restart your client, though you should make sure the tools are actually "
+     "there beforehand.", True),
+    ("Restart your client, but make sure the tools are already there.", True),
+    ("Make sure the tools are actually there. Restart your client, then run a "
+     "query.", True),
+    ("Restart your client only once you have made sure the tools are actually "
+     "there.", True),
+    ("Restart your client after validating the tools are actually there.", True),
+    ("Restart your client, confirm the tools are actually there prior to "
+     "restarting.", True),
+    # …and the CLOSED set stays closed in the other direction: a `make sure`
+    # that scopes the CONFIG is the file-side check the pin calls forward copy,
+    # exactly as its `confirm` twin is.
+    ("Restart your client after making sure the config lists the tools.", False),
+    # (2) `following` / `upon` are `after` in this file's own `_DEFERRED_CHECK_RE`.
+    ("Restart your client upon confirming the tools are actually there.", True),
+    ("Restart your client following confirming the tools are actually there.",
+     True),
+    ("Restart your client upon making sure the tools are actually there.", True),
+    # (3) `whenever` is `when`, and `as soon as` is `once` — the same one-word
+    #     inflection class the file already closed once for `first`→`firstly`.
+    ("Restart your client whenever the tools are actually there.", True),
+    ("Restart your client as soon as the tools are actually there.", True),
+    ("Restart your client whenever the tool list is complete.", True),
+    ("Restart your client once the tools are visible in the list.", True),
+    # …and the CONFIRMATION shapes, which only form (a) can catch (form (e)'s
+    # object slot admits at most two words before `tools`, so these are the rows
+    # that make form (a)'s `whenever|as soon as` arm load-bearing).
+    ("Restart your client whenever you have confirmed the tools are actually "
+     "there.", True),
+    ("Restart your client as soon as you have made sure the tools are actually "
+     "there.", True),
+    # (4) a NEGATED cue defers the restart into its own `until`/`before` clause,
+    #     so the confirmation inside it happens first. `until` was admitted on
+    #     the PRE-cue side only.
+    ("Don't restart your client until you have confirmed the tools are "
+     "actually there.", True),
+    ("Do not restart your client until you have confirmed the tools are "
+     "actually there.", True),
+    ("Never restart your client before you have made sure the tools are "
+     "actually there.", True),
+    # …while a negated cue followed by a FORWARD step stays GREEN (the arm is
+    # monotone: it only fires on a deferring connective + a confirmation).
+    ("Don't restart your client, then confirm the tools are actually there.",
+     False),
+    # …and the presence-only shape stays GREEN, declared above `_NEGATED_CUE_LEAD_RE`.
+    ("Don't restart your client until the tools appear.", False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
