@@ -9345,7 +9345,14 @@ _ROW_CLAIM_CARRY_RE = re.compile(
     r"(?P<names>`?tests/[\w/.-]+\.py`?"
     r"(?:\s*,\s*(?:`?#\d+`?\s*'s\s*)?`?tests/[\w/.-]+\.py`?"
     r"|\s+and\s+(?:`?#\d+`?\s*'s\s*)?`?tests/[\w/.-]+\.py`?)*)"
-    r"\s+carry\s+"
+    r"\s+carr(?:y|ies)\s+"
+    #: ⛔ THE VERB NUMBER IS PROSE TOO, and it is the last one-word lock in this unit (#14623 review
+    #: round 25). MEASURED at `1b34f53f55a0`: `carries a `2.0` `durations` row` — the identical
+    #: claim with singular agreement, which is what a sentence naming ONE file says — emptied
+    #: `positive` exactly as the adjective did one round earlier, so the arm reported the block as
+    #: naming NO file. `carry`/`carries` is the same three-character stem and neither touches the
+    #: VALUE group or the polarity, so admitting both cannot widen what is graded; the fixture below
+    #: pins it rather than trusting the prose.
     #: The unit is optional and INSIDE the value. ⛔ NOT because the block states it with a unit —
     #: it does not: this PR's own restructure replaced the `flat `2.0 s`` spelling with
     #: ``row in `durations` — `core`-registered``, so the justification that stood here cited prose
@@ -10578,6 +10585,16 @@ _H_14544_INVERTED_RE = re.compile(
     # the row.`, `The row alone is the only half exempt.` and the conclusion's `forecloses|rules out|
     # excludes` shipping CLEAN — the very keep-the-true-sentence-add-its-inverse shape this ban is for.
     r"|exempt\s+half\s+is\s+the\s+row|row\s+alone\s+is\s+the\s+(?:only\s+)?half"
+    # ⛔ AND THE SHAPE THAT EXTENDS THE EXEMPTION WITHOUT RE-SPELLING `exempts the row` — found by
+    # driving the polarity mutation itself (`#14623` review round 25): rewrite the live sentence to
+    # `The REGISTRATION is exempt, and so is the row:` and the SCOPE pin above STILL matches (it
+    # reads the clause before the comma) while this ban matched NOTHING, so the arm stayed GREEN on
+    # the very reading `#14612` deletes. That is a FALSE PASS on the arm whose whole subject it is —
+    # the same one-spelling gap the round-15 note above records, in the BAN this time. Both halves
+    # of the predicate are now read: the `so is the row` continuation, and the row named as the
+    # exempt subject. `the row is NOT exempt` is deliberately NOT matched — that is TRUE prose, and
+    # a ban that reds it would be the false block this arm exists to refuse.
+    r"|so\s+is\s+the\s+row\b|the\s+row\s+(?:is|stays|remains)\s+(?:also\s+|still\s+|now\s+)?exempt\b"
     r"|paragraph\s+(?:forecloses|rules\s+out|excludes)\b"
     # ⛔ AND THE NEGATION AFTER THE PINNED SPAN: `_H_14544_SCOPE_RE` stops at `half`, so "the
     # REGISTRATION is the ONLY half that is NOT exempt" satisfied it while stating the inverse
@@ -10670,17 +10687,33 @@ _H_14544_ROW_PROVENANCE_RE = re.compile(
 #: asserting the opposite of what the paragraph says (#14623 review round 14, P3). Naming an
 #: explicitly enumerated LIST of spellings reproduces that defect one step later (#14623 review
 #: round 24, P3: `The REGISTRATION alone is exempt` states the identical scope claim and matched
-#: none of the three, so the pin had been widened from one spelling to three and no further). What
-#: is admitted is therefore the SHAPE of the claim — the paragraph says the exempt half IS the
-#: REGISTRATION, in either word order, with or without the `ONLY` emphasis, and with `half` /
-#: `alone` / no qualifier between. The polarity mutation (swap the half, or "Both halves stay
-#: exempt") still reds: it names no REGISTRATION-only scope at all, which is what this arm exists
-#: to catch — see the fixture in the arm.
+#: none of the three, so the pin had been widened from one spelling to three and no further).
+#: ⛔ ROUND 24's OWN WIDENING REPRODUCED IT A THIRD TIME, and the comment beside it is what makes
+#: that findable rather than arguable: it claimed the SHAPE was admitted "in either word order …
+#: with `half` / `alone` / no qualifier between", and MEASURED against the alternation it actually
+#: shipped (`1b34f53f55a0`), three TRUE statements of the identical claim matched NOTHING —
+#: `The REGISTRATION half alone is exempt.` (BOTH qualifiers; `(?:\s+half|\s+alone)?` admits only
+#: one at a time), `The only exempt half is the REGISTRATION.` (the same copula inverted), and
+#: `It is only the REGISTRATION that is exempt.` (a cleft). Each would red this arm on true prose
+#: with a diagnostic asserting the paragraph named no scope at all — precisely the false block this
+#: note exists to forbid, shipped inside the note. A comment that claims a shape while shipping an
+#: enumeration is a false claim in the one place a later widener reads, which is why this survived
+#: three rounds: the fixture asserted six spellings and the prose claimed a shape, so nothing could
+#: disagree with it.
+#: SO THE SHAPE IS GRADED BY CONSTRUCTION, not by a longer enumeration: every alternative fixes the
+#: CLAIM — the exempt half IS the REGISTRATION — and lets the prose vary AROUND it. A bounded
+#: qualifier run (`half` / `alone` / both) sits between the noun and the copula; three copulas that
+#: all leave the claim standing are admitted (`is` / `stays` / `remains`); and the four attested
+#: ORDERS are covered (noun-first, `only`-first, cleft, predicate-first). The POLARITY is NOT
+#: widened with it: every alternative names the REGISTRATION on the exempt side and none tolerates
+#: a negation between noun and copula, so the half-swap mutation and "Both halves stay exempt"
+#: still red — see the fixtures in the arm.
 _H_14544_SCOPE_RE = re.compile(
-    r"REGISTRATION(?:\s+alone)?\s+is\s+(?:the\s+)?ONLY\s+half"
-    r"|REGISTRATION(?:\s+half|\s+alone)?\s+is\s+exempt"
-    r"|only\s+the\s+REGISTRATION(?:\s+half)?\s+is\s+exempt"
-    r"|the\s+exempt\s+half\s+is\s+the\s+REGISTRATION", re.IGNORECASE)
+    r"REGISTRATION(?:\s+(?:half|alone|side)){0,2}\s+(?:is|stays|remains)\s+"
+    r"(?:(?:the\s+)?ONLY\s+half|exempt)"
+    r"|only\s+the\s+REGISTRATION(?:\s+(?:half|alone))?\s+(?:(?:is|stays|remains)\s+)?exempt"
+    r"|it\s+is\s+only\s+the\s+REGISTRATION\s+that\s+(?:(?:is|stays|remains)\s+)?exempt"
+    r"|the\s+(?:only\s+)?exempt\s+half\s+is\s+the\s+REGISTRATION", re.IGNORECASE)
 #: The CONCLUSION half: the paragraph's own payoff sentence — a packing change attributed to that row
 #: is a cause it does NOT exclude. Measured at `d1f14298`: flipping `NOT` -> nothing (i.e. “…is a
 #: cause this paragraph DOES exclude”, the exact reading `#14612` deletes) left this arm GREEN — it
@@ -10888,10 +10921,24 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "a cause this paragraph rules out.",
             "a cause this paragraph excludes.",
             "This paragraph exempts the row too.",
+            # …and the SHAPES that extend the exemption without re-spelling `exempts the row`
+            # (#14623 review round 25 — driven as a mutation of the live sentence, shipped GREEN):
+            "The REGISTRATION is exempt, and so is the row.",
+            "The REGISTRATION is exempt; the row is exempt too.",
+            "The REGISTRATION stays exempt, and the row remains exempt.",
             "On the record's own numbers this paragraph DOES exclude it."):
         assert _H_14544_INVERTED_RE.search(inverse), (
             f"the inverse ban misses {inverse!r} — a constant no fixture exercises can be blanked "
             "and the arm stays GREEN, so the inverse of a required claim would ship clean")
+    # …and the SAME widening must not have turned the ban into a false block: the true claim with the
+    # row explicitly NOT exempt is TRUE prose, and a ban that refuses it would red the paragraph this
+    # arm exists to certify. Both directions, because a one-way pin is the defect being repaired.
+    for true_prose in ("The REGISTRATION is exempt, and the row is not.",
+                       "The REGISTRATION is exempt; the row is not exempt.",
+                       "Neither half is excluded from the pack."):
+        assert _H_14544_INVERTED_RE.search(true_prose) is None, (
+            f"the widened inverse ban now refuses {true_prose!r} — that is the TRUE claim, so the "
+            "ban would false-block the paragraph it exists to certify, the opposite failure")
     # …and the SCOPE and CONCLUSION pins read their polarity the same way: each mutant is the live
     # paragraph with that ONE claim inverted, so a pattern that lost its polarity direction reds here
     # instead of certifying the inversion.
@@ -10916,20 +10963,36 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # pre-fix alternation: `The REGISTRATION alone is exempt` and `The REGISTRATION half is exempt`
     # matched none of its three spellings. The `scope_inverted` swap above does not cover this: it
     # only proves WHICH half is graded, never that a differently-spelled TRUE claim is read.
+    #: ⛔ THE FIRST SIX ARE ROUND 24's SET; the ones after them are the spellings ROUND 24's OWN
+    #: COMMENT CLAIMED AND ITS ALTERNATION MISSED (measured at `1b34f53f55a0`: `half alone` — both
+    #: qualifiers — plus the predicate-first and cleft orders). A six-item fixture beside a "the
+    #: SHAPE is admitted" comment is exactly how this defect survived three rounds, so the fixture
+    #: now covers every ORDER the comment names rather than one spelling per round.
     for scope_spelling in (
             "The REGISTRATION is the ONLY half exempt.",
             "The REGISTRATION alone is the ONLY half exempt.",
             "The REGISTRATION alone is exempt.",
             "The REGISTRATION half is exempt.",
             "Only the REGISTRATION half is exempt.",
-            "The exempt half is the REGISTRATION, not the row."):
+            "The exempt half is the REGISTRATION, not the row.",
+            # …the three orders the round-24 alternation still MISSED:
+            "The REGISTRATION half alone is exempt.",
+            "The only exempt half is the REGISTRATION.",
+            "It is only the REGISTRATION that is exempt.",
+            # …and the copulas the shape admits without changing the claim:
+            "The REGISTRATION stays exempt.",
+            "The REGISTRATION half remains exempt."):
         assert _H_14544_SCOPE_RE.search(scope_spelling), (
             f"the scope pin no longer reads {scope_spelling!r} — a TRUE statement of the scope the "
             "paragraph makes would red this arm, and the diagnostic would assert the opposite of "
             "what the paragraph says (the spelling lock #14623 review round 24 measured)")
     # …and widening it must not have widened the POLARITY with it: neither half-swapped inverse may
     # read, or the pin now certifies the reading `#14612` deletes.
-    for scope_inverse in ("Both halves stay exempt.", "The row alone is the only half exempt."):
+    for scope_inverse in ("Both halves stay exempt.", "The row alone is the only half exempt.",
+                          # …plus the NEGATION the `is`/`stays`/`remains` copula run makes
+                          # reachable: a widened copula must not also admit `is not`.
+                          "The REGISTRATION is not the ONLY half exempt.",
+                          "The REGISTRATION half is not exempt."):
         assert _H_14544_SCOPE_RE.search(scope_inverse) is None, (
             f"the widened scope pin reads {scope_inverse!r}, so the half it exists to name is no "
             "longer graded — the widening admitted the SHAPE of the true claim, not its inverse")
@@ -11282,7 +11345,10 @@ def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
     # what stops it being re-narrowed, since the live sentence spells the adjective.
     for claim in ("carry an explicit `2.0` `durations` row",
                   "carry a `2.0` `durations` row",
-                  "carry `2.0` `durations` row"):
+                  "carry `2.0` `durations` row",
+                  # …and the singular agreement the same claim takes for one file:
+                  "carries an explicit `2.0` `durations` row",
+                  "carries a `2.0` `durations` row"):
         adjective_positive, _ = _carry_row_claims(
             f"`tests/test_carry_planted_first.py` {claim}")
         assert adjective_positive == {"test_carry_planted_first.py": {2.0}}, (
