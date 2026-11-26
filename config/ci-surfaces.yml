@@ -163,11 +163,14 @@ version: 1
 # rather than mysterious: `config/ci-surfaces.yml` carries a `merge=union` driver, so where both
 # parents change this text the fold applies BOTH derivations, raises no conflict marker, and the
 # guard then reads `<est stated twice>` / `<ceil stated 2 times>`. ⛔ NOT on every fold, and the
-# quantifier matters: `union` fires on a CONFLICTING hunk, so a fold with the block changed on ONE
-# side applies that one derivation and cannot splice — measured on this branch's last eight folds,
-# five of them (`1d001462535a`, `ec138d054af0`, `a203dbc76ed2`, `fc4a3a4302c9`, `a5f68bf78e75`) changed
-# this file on one side only. Measured on the `a0cea310786d` fold: two copies arrived, one naming `origin/main`
-# `bbef0b8840d7` with this branch's derivation (827.4/827.5), one naming `origin/main` `bbef0b8840`
+# quantifier matters: `union` fires on a CONFLICTING hunk, so a fold with this block changed on ONE
+# side applies that one derivation and cannot splice it. ⛔ THE ONE-SIDED-FOLD MEASUREMENT IS NOT
+# CARRIED HERE: how many of the branch's last N folds were one-sided is a window that the NEXT fold
+# renumbers — measured, it read four of the last eight after the `ff10fb328891` fold and five of the
+# last eight before it, with a sha the window no longer contained — so this paragraph states the
+# RULE, and any enumeration belongs on the commit that measured it (`git log`). Measured on the
+# `a0cea310786d` fold: two copies arrived, one naming `origin/main` `bbef0b8840d7` with this
+# branch's derivation (827.4/827.5), one naming `origin/main` `bbef0b8840`
 # with `#14726`'s (827.6). They DISAGREED on the bins, and neither describes this head AS WRITTEN —
 # the second copy gets the figures right by coincidence and the ATTRIBUTION wrong, calling
 # `#14726`'s row "this change's own" when on this tree it arrived with the fold. Neither side is
