@@ -62,6 +62,19 @@ print("  stored shape:", q("MATCH (n:Object {id:$id}) RETURN n.status, "
                          "coalesce(n.isClosed,false), n.pipelineSlot, "
                          "n.posterior_alpha, n.posterior_beta, n.confidence", id=obj1))
 
+# #13450 — the #2490 DECAY question, measured rather than argued, now that the
+# position axis strips an ended input from participation: does the closed
+# record's own posterior change ANY EP outcome? Same closed Object, a strong
+# (9,1) prior and vacuity (1,1): an identical target means decay can only
+# rewrite the record's own stored/served belief, never a propagation result.
+for _a, _b, _conf in ((9.0, 1.0, 0.9), (1.0, 1.0, 0.5)):
+    _closed = sdk._create_object(f"o1d-{uuid.uuid4().hex[:6]}", "core:goal")["id"]
+    q("MATCH (n:Object {id:$id}) SET n.posterior_alpha=$a, "
+      "n.posterior_beta=$b, n.confidence=$conf, n.isClosed=true",
+      id=_closed, a=_a, b=_b, conf=_conf)
+    _tgt, _tb = wire_and_run(_closed)
+    print(f"  closed Object ({_a},{_b}) as an operator input -> target {_tb}")
+
 print()
 print("=" * 96)
 print("2. A :Point ended with `retract_point` — decay control (the documented path)")
