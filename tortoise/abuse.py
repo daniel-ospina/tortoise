@@ -325,9 +325,13 @@ def _ratio_env(name: str, default: float) -> float:
 
 #: #14687: how long a successfully-read tier allowance is reused before the org's
 #: own allowance is read again. The read sits on the capture path and a tier does
-#: not change per request; 5 minutes bounds a stale level to a window shorter
-#: than the rule's own 1-hour window, so a tier upgrade can never be hidden
-#: behind a stale HIGHER floor for longer than a fifth of it.
+#: not change per request; 5 minutes bounds a stale level to a TWELFTH of the
+#: rule's own 1-hour window (300 of 3 600 s), not the fifth an earlier version of
+#: this note claimed — a fifth would be 720 s. And the direction matters, because
+#: a stale floor errs the SAME way as a failed read must NOT: a DOWNGRADE leaves a
+#: stale HIGHER floor cached, which keeps R1 blind (level too high, nothing fires)
+#: until the TTL expires. An UPGRADE leaves a stale LOWER floor, so the level is
+#: merely applied late and errs toward alerting rather than away from it.
 _TIER_FLOOR_TTL_S = 300.0
 
 #: #14687: how long a FAILED allowance read is remembered before another attempt.
