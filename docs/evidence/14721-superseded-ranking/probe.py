@@ -92,7 +92,7 @@ async def run(label: str) -> int:
                 if payload is None:
                     payload = getattr(res, "content", None)
                 return {"tool": tool, "args": args, "reply": payload}
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 return {"tool": tool, "args": args,
                         "error": f"{type(exc).__name__}: {exc}"}
 

@@ -10526,6 +10526,16 @@ surfaces:
   - test_source_credibility.py
   - test_source_inheritance_own.py
   - test_supersede_edges.py
+  # #14721 (#14737 review F1): the SUPERSESSION ORDER — a claim carrying
+  # `superseded_by` never outranks the claim that superseded it, chains resolve
+  # newest-first, and neither a page edge, a cycle, a non-injective id nor a
+  # self-named successor may drop or duplicate a row. Selects `ep` because the
+  # change is in `tortoise/ranking.py` (a named-surface match replaces the `core`
+  # fallback, #2938/#7951); the file is HERMETIC (it imports `tortoise.ranking`
+  # only — no graph, no Docker), so the fast shard is correct. Before this row,
+  # the file was selected by NO leg and the required `manifest-integrity` check
+  # redded on it — so the PR's own proof-of-fix ran in no CI job at all.
+  - test_14721_superseded_never_outranks.py
   - test_supplementary.py
   - test_w4_why_enrichment.py
   - test_weights.py
@@ -16056,6 +16066,7 @@ durations:
   # run in CI. `--integrity` cannot see a missing row, so this line is what records the
   # weight; re-point it from a real junit reading once CI has measured the file.
   test_14700_capture_in_flight_typed_refusal.py: 2.0
+  test_14721_superseded_never_outranks.py: 2.0  # unmeasured — new in #14721 (PR #14737). The #3400/#4348 trap applies: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so this is the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `ep` registration above is what puts the file in `fast_pool()`, and `--integrity` is a 0.90 RATIO check that stays green over an absent row, so only this row records the weight. Hermetic: it imports `tortoise.ranking` only — no DB, no graph, no docker, no network, no model call. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local seconds figure and no case count are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_13084_demand_census.py: 0.1
   test_13084_ram_cap.py: 2.4
   test_13084_ram_window_census.py: 0.1

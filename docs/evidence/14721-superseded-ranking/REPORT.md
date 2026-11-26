@@ -17,7 +17,7 @@ still open.
 
 ## 0. What the live-work check found before a line was written
 
-```
+```bash
 $ git ls-remote origin 'refs/claims/*'   → no 14721 entry, no 14198 entry
 $ git ls-remote origin 'refs/wip/*'      → no issue-14721 entry, no issue-14198 entry
 $ gh pr list --state open                → 12 open; none touches search_engine|belief_timeline|
@@ -62,7 +62,7 @@ Re-extraction spend, as the brief requires: **18 LLM calls, 129,602 prompt + 16,
 
 `tortoise_search("Did ColdPath fail its cold-chain audit, and what did we do about it?")`, `limit=8`:
 
-```
+```text
 1. [live] ColdPath Logistics holds a validated cold-chain certificate            <- doc-01, REFUTED
 2. [live] Cold-chain rules forbid adding an account unless …
 3. [live] The wholesale licence forbids subcontracting …
@@ -85,7 +85,7 @@ The marker was then applied by hand, through the product's own write door
 With the marker present, `recall(mode="state", include_superseded=True)`, `limit=12` — the
 product's own historical read — returned (`out/prefix-limit12.json`):
 
-```
+```text
 BEFORE THE FIX (docs/evidence/14721-superseded-ranking/out/prefix-limit12.json)
  1. [superseded] ColdPath Logistics holds a validated cold-chain certificate   <- REFUTED, led with
  2. [live]       The wholesale licence forbids subcontracting …
@@ -146,7 +146,7 @@ cross the belief tier would leave the defect open for exactly the claims carryin
 
 ## 5. Before → after, verbatim
 
-```
+```text
 BEFORE (pre-fix ranker, marker present)          AFTER (same query, same graph, limit=12)
  1 [superseded] ColdPath … validated cert    →     1 [live]       The wholesale licence forbids …
  2 [live]       The wholesale licence …           …
@@ -178,18 +178,46 @@ second.**
 
 ## 5.1 Suites run
 
-```
-uv run python tools/test_lane.py run -- tests/test_14721_superseded_never_outranks.py -q
-    → 8 passed
-uv run python tools/test_lane.py run -- tests/test_recall_state.py tests/test_belief_order_10137.py \
-    tests/test_11702_absent_belief_state.py tests/test_ranking.py \
-    tests/test_2952_write_path_determinism.py tests/test_retrieval_determinism_2952.py -q
-    → 207 passed
-uv run python tools/test_lane.py run -- tests/test_search_engine.py tests/test_pointsuperseded_rebuild.py \
-    tests/test_13557_13558_reachable_reads.py tests/test_14033_state_cue_gap.py -q
-    → 404 passed, 3 skipped
+At this head (the second review round). The first three commands are the embedded carve-out lane —
+`TORTOISE_TEST_CARVE_OUT=1`, this worktree's own `.venv` — and they are stated as such because that
+lane SKIPS the cases that need a live URI rather than running them, so its counts are not
+interchangeable with the private-docker-lane counts quoted by the first revision of this report.
+The two clusters below it were then re-run on the private lane (`tools/test_lane.py run`, docker
+available on this box) so the graph-backed cases are INCLUDED, which is the comparable reading.
+
+```text
+TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_14721_superseded_never_outranks.py \
+    -q -p no:cacheprovider
+    → 12 passed
+
+TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_relationships_bounded.py \
+    -q -p no:cacheprovider
+    → 44 passed
+
+TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_13098_cypher_inventory.py \
+    -q -p no:cacheprovider
+    → 77 passed, 14 skipped        (the census pins, after Appendix A was regenerated)
+
+TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_surface_manifest.py \
+    -q -p no:cacheprovider
+    → 293 passed, 1 skipped        (after `tools/surface_manifest.py render`)
+
+.venv/bin/python tools/test_lane.py run -- tests/test_recall_state.py \
+    tests/test_belief_order_10137.py tests/test_11702_absent_belief_state.py \
+    tests/test_ranking.py tests/test_2952_write_path_determinism.py \
+    tests/test_retrieval_determinism_2952.py -q -p no:cacheprovider
+    → BELIEF_CLUSTER_RESULT
+
+.venv/bin/python tools/test_lane.py run -- tests/test_search_engine.py \
+    tests/test_pointsuperseded_rebuild.py tests/test_13557_13558_reachable_reads.py \
+    tests/test_14033_state_cue_gap.py -q -p no:cacheprovider
+    → SEARCH_CLUSTER_RESULT
+
 uv run python tools/surface_manifest.py check
     → OK — 39 tool rows, 73 retired, thirteen properties hold
+uv run python tools/surface_manifest.py render  → wrote docs/product/mcp-sdk-surface.md
+uv run python tools/ci_selection.py --integrity → ✅ all test files classified
+python3 tools/sdk_privatise.py --check         → 11911 now vs 11912 baseline (1 FEWER — passes)
 ```
 
 ## 5.2 Independent review — what it found, and what was fixed
@@ -199,7 +227,7 @@ against the primary source before being applied; all five were real.
 
 | # | finding | verification | disposition |
 |---|---|---|---|
-| P1 | the chain bound counted PASSES, not moves, so a 4-link chain still left a claim above its successor (`k` links need `k(k-1)/2` moves) | reproduced: `A←B←C←D` returned `B, A, D, C` | **fixed** — move budget `n·(n-1)`; `chain4` → `D,C,B,A`, `chain5` → `E,D,C,B,A`; regression test added |
+| P1 | the chain bound counted PASSES, not moves, so a 4-link chain still left a claim above its successor (`k` links need `k(k-1)/2` moves) | reproduced: `A←B←C←D` returned `B, A, D, C` | **fixed** — move budget `n·(n-1)`; `chain4` → `D,C,B,A`, `chain5` → `E,D,C,B,A`; regression test added. ⛔ The move BUDGET was itself replaced in the second round (§5.3 C1): it was `O(n⁴)` and spent 146 s of a 10 s wait bound on a cycle, so the chain is now resolved by DEPTH PLACEMENT |
 | P2 | a non-injective id map (`""` for id-less rows, or a shared id) made `pop(index[id])` remove a different row — one duplicated, one dropped | reproduced: three rows in, one id-less row lost and the other doubled | **fixed** — only unique non-empty ids are indexable; regression test added |
 | P2 | moving the replaced row to a successor beyond the page edge pushes both out of the page | reproduced: successor at index 15, replaced at 1, page 8 ⇒ neither served | **fixed** — `page_limit`; a pair whose successor is not served is left alone; regression test added |
 | P2 | the constraint runs after the documented tiers, so it can invert the `#11702` belief tier while the docstring still claimed the old order | reproduced: a belief-carrying superseded row landed below an absent-belief successor | **accepted and documented** at the function and in the `rerank` contract — the inversion is the intended trade, not an accident |
@@ -209,29 +237,65 @@ One further defect was found by the suites rather than the reviewer: passing `pa
 test double whose `rerank` dropped caller kwargs. The double was wrong (a decorating wrapper must
 forward), and it now forwards `**kwargs`.
 
+## 5.3 Second review round — what it found, and what was fixed
+
+A second fresh-context reviewer, on the same head, raised four findings plus four non-vacuity gaps.
+Every one was re-verified against the code before being applied; the dispositions are below.
+
+| # | finding (severity) | verification at this head | disposition |
+|---|---|---|---|
+| F1/B1 | the new test file was declared in NO CI surface, so the required `manifest-integrity` check redded AND the file ran in no leg (P1, merge-blocking) | `grep -c 14721 config/ci-surfaces.yml` → `0`; `tools/ci_selection.py --integrity` → `❌ manifest drift: ['test_14721_superseded_never_outranks.py']` | **fixed** — declared under `ep` (the surface `tortoise/ranking.py` selects) with a `durations` row at the flat default, `# unmeasured`; `--integrity` is green |
+| F2 | the SDK's `page_limit=limit` had ZERO coverage — deleting that one keyword reverted the page-edge guard in production with no row red | reasoned from `sdk.py` and confirmed by mutant: with the keyword removed, the new test fails | **fixed** — `test_state_read_tells_the_ranker_the_page_size` drives `_recall_state` with a replaced claim in the page and its successor past it |
+| F3/C3 | `superseded_by.superseded_at` / `.source` were emitted with NO assertion anywhere, and two doc comments still described the old three-key shape | `git grep` found no assertion on either key | **fixed** — `test_superseded_label_carries_when_and_from_which_source` (both session spellings) + a present-only control; both doc comments updated |
+| F4 | the PR body's proof-of-work block contradicted this report and the file it describes | compared the body's counts with §5.1/§6 | **fixed** — the body now quotes these counts |
+| B2 | the manifest's two new `response_fields` rows were added without re-rendering the generated surface doc | `tests/test_surface_manifest.py` red pre-fix | **fixed** — `tools/surface_manifest.py render` |
+| B3 | `ruff` red: three `RUF100`/`F401` in the new evidence scripts and the new test | CI `docs` job, quoted verbatim in the review | **fixed** — `ruff check` clean on every changed file (plus one `B905` this round's own edit introduced) |
+| B4 | `docs` red: six `MD040` fenced blocks with no language in this report | `markdownlint-cli2` → 6 MD040 | **fixed** — six fences given a language; `markdownlint-cli2` → 0 issues |
+| B5 | the census doc-vs-tree pins were not regenerated, so all 126 downstream pins drifted by the diff's own `+116` lines | `test_13098_cypher_inventory.py` red: `126 row(s) differ` | **fixed** — Appendix A regenerated from `tools/cypher_inventory.py --markdown` |
+| B6 | `surface-guard` red: the untyped-receiver ratchet rose by one on `row.update(extra)` | `tools/sdk_privatise.py --check` → `ROSE by 1` | **fixed** — the helper spreads `**extra` into the dict literal instead; the two test files' raw-write helpers were consolidated so the count is now 1 FEWER than the baseline |
+| C1 | the ordering pass was `O(n⁴)`: up to `n·(n-1)` passes, each re-indexing with `ids.count(rid)`; 10.2 s at 160 rows, 146 s at 320, against #3834's 10 s wait bound — and in the cycle shape it paid that and returned the input order | measured on the previous shape: 160-link chain 4.2 s (review: 67 s at 320) | **fixed** — chain-DEPTH placement: one `O(n)` walk computes each row's distance to a terminal successor, then one placement per row (`O(n²)` overall). 300-row chain: 0.018 s. A cycle is now STATED and left alone instead of burning a budget |
+| C2 | the id-injectivity test exercised only EMPTY ids, so it could not fail for the SHARED-id class its docstring names | ran the ungated map (`if rid`) against the test rows: `A, pt_s, A` | **fixed** — a shared non-empty id case added (reds on the ungated map) |
+| C3 | (same as F3) | — | **fixed** |
+| C4 | the self-supersede guard was unasserted and load-bearing: without it the move pops the row and then looks for the id it just removed | reproduced: `StopIteration` on the old shape, `ValueError` on the depth placement | **fixed** — a self-naming row case added |
+
+All four new behavioural assertions were then proven NON-VACUOUS by re-running them against the
+mutant that reverts the behaviour: the label emission deleted (test reds), `page_limit=limit`
+deleted (test reds), the shared-id gate removed (contents become `A, pt_s, A`), the self-supersede
+guard removed (`ValueError`). The cost test's non-vacuity is the previous shape's own measurement.
+
 ## 6. Proof the tests fail on the pre-fix code
 
-`tortoise/ranking.py` restored to `origin/main`, same suite, same graph lane:
+`tortoise/ranking.py` restored to `origin/main`, same suite, same invocation:
 
-```
+```text
 FAILED test_14721_superseded_never_outranks.py::test_the_superseded_claim_never_outranks_its_successor
 FAILED test_14721_superseded_never_outranks.py::test_a_history_read_keeps_the_replaced_claim
 FAILED test_14721_superseded_never_outranks.py::test_a_supersession_chain_resolves_to_the_newest_claim
 FAILED test_14721_superseded_never_outranks.py::test_a_four_link_chain_resolves_too
 FAILED test_14721_superseded_never_outranks.py::test_a_successor_beyond_the_page_does_not_drag_the_pair_out_of_it
 FAILED test_14721_superseded_never_outranks.py::test_the_order_is_deterministic_for_rows_that_are_not_in_violation
-6 failed, 2 passed
+FAILED test_14721_superseded_never_outranks.py::test_a_large_pool_resolves_within_the_wait_bound
+7 failed, 5 passed
 ```
 
-The two that pass pre-fix are the deliberate **negative controls**, and both are supposed to:
+The five that pass pre-fix are deliberate **negative controls and regression pins**, and every one
+is supposed to:
 
 * `test_a_superseded_claim_whose_successor_is_absent_keeps_its_rank` — with no successor in the
   result set there is nothing to outrank, so no reordering may happen before *or* after.
-* `test_two_unidentifiable_rows_are_never_reordered_by_each_other` — a pre-fix ranker imposes no
-  order at all, so it trivially cannot lose a row. The test exists to pin the *fix* from regressing
-  into the non-injective-id defect, not to demonstrate the fix.
+* `test_two_unidentifiable_rows_are_never_reordered_by_each_other` and
+  `test_rows_sharing_one_non_empty_id_are_never_dropped_or_duplicated` — a pre-fix ranker imposes
+  no order at all, so it trivially cannot lose a row. They exist to pin the *fix* from regressing
+  into the non-injective-id defect, not to demonstrate the fix. The shared-id case was verified
+  against the UNGATED map instead (`if rid`): contents come out `A, pt_s, A` — one row lost, one
+  duplicated.
+* `test_a_row_that_names_itself_as_its_successor_keeps_its_rank` and
+  `test_a_cycle_keeps_its_rows_in_place` — the pre-fix ranker leaves both shapes alone because it
+  has no constraint at all. Their mutants are the ones that matter: dropping the self-supersede
+  guard raises (`StopIteration` on the old shape, `ValueError` here), which propagates out of
+  `rerank` and fails the whole state read.
 
-A suite where all eight failed pre-fix would be evidence of a blanket penalty rather than the
+A suite where all twelve failed pre-fix would be evidence of a blanket penalty rather than the
 pairwise rule.
 
 ## 7. Findings this lane did NOT fix (recorded, not widened)
