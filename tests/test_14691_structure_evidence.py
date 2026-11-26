@@ -1153,6 +1153,42 @@ def test_the_A4_count_TABLE_and_the_S8_artifact_row_are_the_claim_layer():
 
 
 # ── the 6th review cycle: the artifact's EVIDENCE rows, and the prose ────
+def test_the_D2_evidence_cell_cites_fields_that_EXIST():
+    """Reds if D2's evidence cell names a path neither artifact has (6th review, N2).
+
+    The cell cited `out/readback.json -> elements[].walk_root_kind`. Measured:
+    `walk_root_kind` occurs **0** times in `readback.json` (the field is
+    `root_kind`), and `walk_root_kind` actually lives in `out/t6-score.json`'s
+    `A5_retrieval.probes[]` — a DIFFERENT artifact for a DIFFERENT population (the
+    32 element walks vs the 5 retrieval walks). Replacing the whole cell with a
+    path that does not exist at all stayed green, because only cells [2] and [3]
+    of a finding row are parsed anywhere.
+
+    A citation naming a non-existent field is the fail-open class this bundle
+    exists to catch: a reader cannot falsify it without re-deriving by hand.
+    (§6's "12 inverted-or-untyped relation classes", the same review's N1, is now
+    pinned by the sibling table sweep and corrected to "15 inverted relation rows
+    (13 distinct pairs)" — sourced from `A2_edges.totals`, so it needs no arm here.)
+    """
+    row = _report_line(r"^\| \*\*D2\*\* \|")
+    assert row, "REPORT.md has no D2 row"
+    cell = row.split("|")[4]
+    # ⛔ SCAN ONLY THE CITATION, before the "⚠️ An earlier revision" note: that
+    # note necessarily QUOTES the stale field name, so a substring test over the
+    # whole cell is satisfied by the correction itself (measured).
+    citation = cell.split("⚠️")[0]
+    assert "root_kind" in citation and "A5_retrieval" in citation, (
+        "the D2 evidence cell must name the element walk's `root_kind` AND the "
+        f"retrieval artifact's `A5_retrieval`: {citation[:220]!r}")
+    readback = _readback()
+    for named in ("unresolved_elements", "elements"):
+        assert named in readback, f"readback.json has no `{named}`"
+    assert all("root_kind" in e for e in readback["elements"]), (
+        "elements[] no longer carries `root_kind`, so the cell's citation is stale")
+    assert "walk_root_is_entity" in _score()["A5_retrieval"]["probes"][0], (
+        "A5's probes no longer carry `walk_root_is_entity`, so the cell's "
+        "retrieval citation is stale")
+
 def test_the_remaining_prose_figures_are_the_artifacts_figures():
     """Reds on the three figures that sat outside every pin (3rd review, P3).
 
