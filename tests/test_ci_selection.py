@@ -10194,21 +10194,25 @@ _H_14544_NEGATION = (
 _H_14544_CHANGE_VERB = (
     r"(?:touch|chang|mov|rewr|re-read|reread|edit|alter|affect|modif|shift)")
 #: ACTIVE order: the cut named FIRST, then a negation, then the change verb, and — ⛔ THE OBJECT IS
-#: READ, not assumed — the row/weight as the thing the verb acts on, within 40 characters. Without
-#: that third clause this arm refused the TRUE sentences the paragraph exists to establish: a
+#: READ, not assumed — the row/weight as the thing the verb acts on, inside the VERB'S OWN CLAUSE.
+#: Without that third clause this arm refused the TRUE sentences the paragraph exists to establish: a
 #: review measured RED on “`#14544` did not touch that `eval` registration, so the file stays in the
 #: pool”, on the live `cannot move a bin` rewritten as `does not move a bin`, and on the honest
 #: clause pair with its halves swapped (#14623 review round 6, F1). A negated change of a
 #: REGISTRATION or of a BIN is the paragraph's own true claim, so only a negated change of the ROW
 #: is the retired one.
+#: ⛔ "OWN CLAUSE" MEANS PUNCTUATION **AND** SUBORDINATORS (#14623 review round 8, P2). A clause
+#: bound of `[^,;.!?]` alone was not enough: “`#14544`'s cut does not move a bin since the bin is
+#: held by the `durations` row” joins its subordinate clause with no punctuation, so the object was
+#: reached 38 characters later and the paragraph's own true claim was refused. The subordinator
+#: list is what ends a clause when no punctuation does.
+_H_14544_SUBORDINATOR = (
+    r"(?:because|since|while|whereas|although|though|unless|so\b|which|who|whose|where)")
 _H_14544_NEGATED_ACTOR_CHANGE_RE = re.compile(
     r"(?:#14544|that\s+cut|the\s+cut)[\s\S]{0,400}?" + _H_14544_NEGATION
     + r"[\s\S]{0,80}?" + _H_14544_CHANGE_VERB
-    # ⛔ THE OBJECT MUST BE IN THE VERB'S OWN CLAUSE (`[^,;.!?]`), not merely within 40 characters:
-    # measured at #14623 review round 7, "`#14544`'s cut does not move a bin, and the row in
-    # `durations` is that edit" reached `row` at 35 characters ACROSS the comma, so a negated change
-    # of a BIN — the paragraph's own true claim — was refused whenever the next clause named the row.
-    + r"[^,;.!?]{0,40}?(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)",
+    + r"(?:(?!\b" + _H_14544_SUBORDINATOR + r"\b)[^,;.!?]){0,40}?"
+    + r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)",
     re.IGNORECASE)
 #: PASSIVE order: `row|row(s)|entry|entries|durations|weight` FIRST, then a negation, then the
 #: change verb. Two guards — the caller also requires `_H_14544_ACTOR_RE` in the SENTENCE, and the
@@ -10238,29 +10242,55 @@ _H_14544_NEGATED_ROW_CHANGE_RE = re.compile(
 #: arm above: `<row|weight> … untouched / unchanged / left alone … `#14544``, and the transposed
 #: deleted sentence `` `#14544` touched neither that row nor its weight ``. Measured GREEN before
 #: this arm existed (#14623 review round 6, F4).
+#: ⛔ ONE CLAUSE PER GAP, PLUS ONE ATTRIBUTION FORM (#14623 review round 8). `[\s\S]` bridged
+#: clauses and read a REGISTRATION's adjective as the ROW's (“The `durations` row is `#14544`'s own
+#: edit, and the `eval` registration was left alone by that cut.” — two TRUE statements). Bounding
+#: the gaps at punctuation ALONE then dropped a real restatement, because an attribution
+#: legitimately crosses a comma: “The `durations` row's weight is unchanged, as that cut's own note
+#: records.” The second alternative admits exactly that form — `, as|per|according to|by` — and
+#: nothing wider.
 #: …and a FOREIGN agent after the change verb — `by the reaper`, `by a retime` — which means the
 #: negation belongs to another clause's actor, not to the cut. Measured RED before this guard, on
 #: two TRUE sentences (#14623 review round 7): "`#14544`'s cut is separate, and the row was not
 #: touched by the reaper." and "The `durations` row was not touched by the reaper; that is separate
 #: from `#14544`'s cut." Sentence granularity merges the two clauses, and an actor-anywhere rule
 #: then reads the cut as the negated subject.
-#: ⛔ ANCHORED TO THE CHANGE VERB, never to the sentence — the first cut read `\bby\s+<not the
-#: cut>\w` ANYWHERE, so `… was never touched by `#14544`, by design.` was read as FOREIGN and the
-#: retired claim shipped CLEAN (#14623 review round 7, P1). The block itself carries plain
-#: `by <word>` prose ("is not touched by this line", "S is chosen by that formula"), so the
-#: actor-anywhere form fails open on the live file. `verb … by <agent>` is the shape that
-#: distinguishes "touched by the reaper" (foreign) from "touched by `#14544`, by design" (the cut).
-_H_14544_FOREIGN_AGENT_RE = re.compile(
-    _H_14544_CHANGE_VERB
-    + r"[a-z]{0,8}\s+by\s+`?(?!#14544|that\s+cut|the\s+cut)\w",
+#: ⛔ THE FOREIGN-AGENT EXCUSE, AS A RULE RATHER THAN A REGEX SEARCH. Three rounds were spent on the
+#: two failure directions of getting this wrong, and each is a fixture now:
+#:   • SEARCHED ANYWHERE (round 7), a trailing `by …` neutralised the ban — “The `durations` row was
+#:     never touched by `#14544`, by design.” shipped CLEAN, and the block itself carries plain
+#:     `by <word>` prose (“is not touched by this line”), so it failed open on the live file.
+#:   • ANCHORED AS `verb by` ADJACENTLY (round 7's fix), the excuse was lost whenever a comma or an
+#:     adverb sat between them — “was never touched, even by the reaper” was REFUSED.
+#:   • STILL READ ACROSS CLAUSES (round 8), an agent belonging to a LATER clause excused the claim.
+#: The rule below is the one the prose actually needs: look at the FIRST `by` after the claim's own
+#: verb, and only accept the excuse when (a) nothing but a comma and a short adverb phrase sits
+#: between the verb and that `by` — so a `by` in another clause is never reached — and (b) its agent
+#: is not the cut. Reading the FIRST `by` is what keeps “touched by `#14544`, by design” banned: the
+#: cut IS the agent there, and a backtracking regex used to slide past it to the later `by design`.
+_H_14544_FOREIGN_BEFORE_RE = re.compile(
+    r"^\s*(?:,?\s*(?:even|also|really)\s+)?\s*(?:at\s+any(?:\s+single)?\s+point\s+)?$",
     re.IGNORECASE)
+_H_14544_AGENT_IS_CUT_RE = re.compile(r"^\s*`?(?:#14544|that\s+cut|the\s+cut)\b", re.IGNORECASE)
+
+
+def _h_14544_foreign_agent_at(sentence: str, pos: int) -> bool:
+    """Is the change verb ENDING at `pos` attributed to an agent OTHER than the cut?
+
+    `pos` is the end of the claim's own verb, so `by <agent>` is read from there and nowhere else.
+    """
+    tail = sentence[pos:]
+    first_by = re.search(r"\bby\b", tail, re.IGNORECASE)
+    if first_by is None or first_by.start() > 40:
+        return False
+    if _H_14544_FOREIGN_BEFORE_RE.match(tail[:first_by.start()]) is None:
+        return False
+    return _H_14544_AGENT_IS_CUT_RE.match(tail[first_by.end():]) is None
 _H_14544_ROW_ADJECTIVAL_RE = re.compile(
-    # ⛔ ONE CLAUSE PER GAP (`[^,;.!?]`), not `[\s\S]`: measured at #14623 review round 7, the
-    # clause-bridging form read the REGISTRATION's adjective as the ROW's — "The `durations` row is
-    # `#14544`'s own edit, and the `eval` registration was left alone by that cut." — two TRUE
-    # statements in one sentence, refused. Both gaps stop at clause punctuation.
     r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,80}?"
-    r"(?:untouched|unchanged|left\s+alone)[^,;.!?]{0,80}?(?:#14544|that\s+cut|the\s+cut)"
+    r"(?:untouched|unchanged|left\s+alone)"
+    r"(?:[^,;.!?]{0,80}?(?:#14544|that\s+cut|the\s+cut)"
+    r"|\s*,\s*(?:as|per|according\s+to|by)\b[^,;.!?]{0,60}?(?:#14544|that\s+cut|the\s+cut))"
     r"|#14544[^,;.!?]{0,40}?touch(?:ed|es|ing)?\s+neither\s+that\s+row",
     re.IGNORECASE)
 #: The required claims stated the OTHER way round, beside the true one — measured GREEN at
@@ -10299,10 +10329,18 @@ def _h_14544_banned_claim(block: str) -> str | None:
             return sentence.strip()
         if _H_14544_NEGATED_ACTOR_CHANGE_RE.search(sentence):
             return sentence.strip()
-        if (_H_14544_NEGATED_ROW_CHANGE_RE.search(sentence)
-                and _H_14544_ACTOR_RE.search(sentence)
-                and not _H_14544_FOREIGN_AGENT_RE.search(sentence)):
-            return sentence.strip()
+        row_change = _H_14544_NEGATED_ROW_CHANGE_RE.search(sentence)
+        if row_change and _H_14544_ACTOR_RE.search(sentence):
+            # ⛔ THE EXCUSE IS READ FROM THE CLAIM'S OWN VERB OUTWARD (`_h_14544_foreign_agent_at`),
+            # never searched for in the sentence (#14623 review round 8, P1). The row arm ends at the
+            # verb STEM, so the position is advanced past the rest of that word (`touched` -> after
+            # `ed`) and the agent is read from there; an agent belonging to a LATER clause is
+            # therefore unreachable and cannot excuse the claim. Both directions are fixtures.
+            pos = row_change.end()
+            while pos < len(sentence) and (sentence[pos].isalnum() or sentence[pos] in "_'\u2019-"):
+                pos += 1
+            if not _h_14544_foreign_agent_at(sentence, pos):
+                return sentence.strip()
         if _H_14544_ROW_ADJECTIVAL_RE.search(sentence):
             return sentence.strip()
     return None
@@ -10555,10 +10593,18 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The row's weight was unchanged by `#14544`.",
             "`#14544` touched neither that row nor its weight.",
             "the `durations` entries were not touched by `#14544`",
-            # ⛔ THE CUT IS STILL THE NEGATED AGENT when a FOREIGN `by …` follows it — the shape an
-            # actor-anywhere rule read as foreign and shipped CLEAN (#14623 review round 7, P1).
+            # ⛔ THE CUT IS STILL THE NEGATED AGENT when a FOREIGN `by …` follows it, or a LATER
+            # clause carries one — the two shapes an actor-anywhere rule excused (#14623 review
+            # round 7 P1, round 8 P1).
             "The `durations` row was never touched by `#14544`, by design.",
             "Held by the `durations` map, the row was never touched by `#14544`",
+            "The `durations` row's weight was never re-read, and the `#6792` ceiling is not touched "
+            "by this line, as `#14544` itself records.",
+            # ⛔ THE ATTRIBUTION FORM CROSSES A COMMA LEGITIMATELY, so a clause bound alone shipped
+            # it CLEAN (#14623 review round 8, P1). Both spellings are fixtures beside the arm's
+            # `, as|per|according to|by` alternative.
+            "The `durations` row's weight is unchanged, as that cut's own note records.",
+            "The `durations` row was left alone, according to `#14544`'s cut.",
             # NOT honest prose, though it reads like it: it asserts the row's weight `was never
             # re-read` in the same sentence that names the cut which DID re-read it — the claim is
             # false, and refusing it is the guard working (the alternative, dropping the row-first
@@ -10587,6 +10633,12 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "`#14544`'s cut is separate, and the row was not touched by the reaper.",
             "The `durations` row was not touched by the reaper; that is separate from "
             "`#14544`'s cut.",
+            # the adverb forms: a comma or a short adverb phrase between the verb and its agent is
+            # still the VERB'S agent, so the excuse applies (round 8 P2 measured one as a false red).
+            "The `durations` row was never touched, even by the reaper, and `#14544`'s cut is "
+            "separate.",
+            "The `durations` row was not touched at any point by the reaper; `#14544`'s cut is "
+            "separate.",
             "another row's weight was retimed; the retime does not touch the shard layout, and "
             "`#14544`'s cut is separate",
             # ⛔ ONE CLAUSE AT A TIME: both statements are TRUE and the sentence pairs them, so an
@@ -10596,6 +10648,10 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The `durations` row is `#14544`'s own edit, and the `eval` registration was left "
             "alone by that cut.",
             "`#14544`'s cut does not move a bin, and the row in `durations` is that edit.",
+            # ⛔ A SUBORDINATE CLAUSE JOINED WITH NO PUNCTUATION is the same false red as a comma
+            # (#14623 review round 8, P2): the object was reached across `since`, so the clause
+            # bound now ends at a subordinator too.
+            "`#14544`'s cut does not move a bin since the bin is held by the `durations` row.",
             "`#14544`'s removal of the file from the `core` surface cannot move a bin"):
         assert _h_14544_banned_claim(honest) is None, (
             f"the anaphor ban REDS honest prose ({honest!r}) — the passive arm is missing its BE "
