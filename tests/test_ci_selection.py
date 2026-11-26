@@ -10618,8 +10618,9 @@ _H_14544_INVERTED_RE = re.compile(
 #: THE ROW-EXEMPTION CLASS, graded STRUCTURALLY instead of by a list of conjunctions (#14623 round 28).
 #: The paragraph's false reading is that the `durations` ROW is exempt as well as the REGISTRATION,
 #: and English says that two ways, both of them GRAMMATICAL rather than lexical:
-#:   * the row (or the weight it carries) is the SUBJECT of an exemption predicate; and
-#:   * the row (or its weight) is the COMPLEMENT of an additive marker — `so is` / `as is` /
+#:   * the row (or that weight, in EITHER order) is the SUBJECT of an exemption predicate; and
+#:   * the row (or its weight, in EITHER order — `the row's weight` / `the weight of the row`) is the
+#:     COMPLEMENT of an additive marker — `so is` / `as is` /
 #:     `as well as` / `likewise` / `along with` / an elliptical `…, and the row is too`.
 #: ⛔ THREE THINGS THIS IS DELIBERATELY NOT, each one a defect a review measured in the round before:
 #:   * NOT a list of whole phrases. Round 26 pinned `so is` to `the row`, so ONE inserted word
@@ -10640,11 +10641,31 @@ _H_14544_INVERTED_RE = re.compile(
 #: statement of fact in this very block (`durations_floors` pins a value ALONGSIDE a row's weight) and
 #: carries no exemption; so the additive branches fire only in a sentence that asserts one.
 #: ⛔ WHAT THIS DOES NOT COVER, stated rather than implied: a row exemption spelled with NO exemption
-#: predicate and NO additive marker ("the row keeps its exemption") is not read, and a NEGATED
-#: exemption is tolerated on purpose (`the row is NOT exempt` is TRUE prose). Both are residuals of
-#: reading grammar with a regex, named here so a later round widens knowingly.
+#: predicate and NO additive marker ("the row keeps its exemption") is not read; a NEGATED
+#: exemption is tolerated on purpose (`the row is NOT exempt` is TRUE prose); and an ANAPHORIC
+#: weight names no row at all (`as is the weight it carries`, `as is its weight`), so the noun phrase
+#: is required to name one. All three are residuals of reading grammar with a regex, named here so a
+#: later round widens knowingly.
 _H_14544_ROW_NOUN = (r"(?:(?:the|that|this|its|a|durations)\s+(?:\w+\s+){0,2})?"
                      r"row\b(?:['\u2019]s)?(?:\s+weight\b)?")
+#: ⛔ THE SAME NOUN PHRASE IN THE REVERSE ORDER — `the weight of the row`, `the weight carried by
+#: that row`, `the weight on the row` — which `_H_14544_ROW_NOUN` cannot reach: its determiner
+#: prefix allows two words before `row`, and this order puts three there (`the weight of the`).
+#: ⛔ MEASURED FAIL-OPEN, and it is exactly the round-26 lesson one level down: the additive branches
+#: anchor the noun phrase AT THE MARKER, so `The REGISTRATION is the ONLY half exempt, as is the
+#: weight of the row.` shipped GREEN through the arm that exists to refuse that reading (#14623 round
+#: 30 — reproduced end-to-end through `_h_14544_banned_claim`; the same sentence's SUBJECT form was
+#: caught, which is what made the hole invisible: `.search` finds `the row is exempt` inside the
+#: possessive order but not inside this one). The order is not a spelling — this paragraph's own
+#: subject is `that row's WEIGHT`, so `the weight of the row` is the natural way to write it.
+_H_14544_ROW_WEIGHT_REVERSE = (
+    r"(?:the|that|this)\s+(?:\w+\s+){0,2}weight\s+"
+    r"(?:of|on|in|carried\s+by|from|belonging\s+to)\s+"
+    r"(?:the|that|this)\s+(?:\w+\s+){0,2}row\b")
+#: Either order of the row noun, LONGEST FIRST so a failure names the weight phrase rather than the
+#: `the row` inside it. Used by every branch below — the reverse order is not a spelling of the
+#: subject test alone.
+_H_14544_ROW_NOUN_ANY = r"(?:" + _H_14544_ROW_WEIGHT_REVERSE + r"|" + _H_14544_ROW_NOUN + r")"
 #: The two attested copulas sets. `was`/`were` are not padding: this block describes a PAST commit
 #: ("the fold that took the row"), so past tense is an attested spelling of the same claim.
 _H_14544_COPULA = r"(?:is|are|was|were|stays|remains|stayed|remained)"
@@ -10652,19 +10673,19 @@ _H_14544_EXEMPT_AFTER_COPULA = (r"\s+" + _H_14544_COPULA + r"\s+"
                                 r"(?:also\s+|still\s+|now\s+|likewise\s+|thereby\s+|too\s+)?exempt\b")
 _H_14544_ROW_EXEMPTED_RE = re.compile(
     # (a) the row / its weight as the SUBJECT of an exemption predicate (never across a negation)
-    _H_14544_ROW_NOUN + _H_14544_EXEMPT_AFTER_COPULA, re.IGNORECASE)
+    _H_14544_ROW_NOUN_ANY + _H_14544_EXEMPT_AFTER_COPULA, re.IGNORECASE)
 #: (b) the row as the COMPLEMENT of an additive marker. Applied inside `_h_14544_row_exempted`, and
 #: only to a sentence that already asserts an exemption, for the two reasons in the comment above.
 _H_14544_ROW_ADDITIVE_RE = re.compile(
-    r"(?:so|as)\s+(?:too\s+)?" + _H_14544_COPULA + r"\s+" + _H_14544_ROW_NOUN
+    r"(?:so|as)\s+(?:too\s+)?" + _H_14544_COPULA + r"\s+" + _H_14544_ROW_NOUN_ANY
     # a marker that names the row without restating the predicate it modifies
-    + r"|(?:as\s+well\s+as|likewise|along\s+with)\s+" + _H_14544_ROW_NOUN
+    + r"|(?:as\s+well\s+as|likewise|along\s+with)\s+" + _H_14544_ROW_NOUN_ANY
     # the ELLIPTICAL form: `X is exempt, and the row is too`. ⛔ `too` must END its clause: as an
     # INTENSIFIER it takes an adjective (`the row is too specific to summarise`), which is ordinary
     # English about a row and states no exemption — refusing it was the round-27 false block
     # returning through a new door (#14623 round 28). The clause-terminal requirement separates the
     # two readings: `…and the row is too.` ends its sentence, `…is too specific` does not.
-    + r"|" + _H_14544_ROW_NOUN + r"\s*(?:" + _H_14544_COPULA + r")?\s*,?\s*too(?=\s*(?:[,;:.!?)\]]|$))",
+    + r"|" + _H_14544_ROW_NOUN_ANY + r"\s*(?:" + _H_14544_COPULA + r")?\s*,?\s*too(?=\s*(?:[,;:.!?)\]]|$))",
     re.IGNORECASE)
 
 
@@ -10814,9 +10835,9 @@ _H_14544_ROW_PROVENANCE_RE = re.compile(
 #: NOTHING (#14623 round 29), i.e. four TRUE rewordings reding the arm inside structures 1-5 with a
 #: diagnostic asserting the paragraph named no scope at all. The plural forms (`are` / `were`) are
 #: unreachable for the singular `REGISTRATION` in TRUE prose; they are kept because one set for both
-#: arms cannot drift, and EVERY copula in it is driven POSITIVELY as a fixture below, with the two
-#: the PAST tense makes reachable (`was` / `were`) driven against the inverse as well — a negated
-#: claim and the plural half-swap — so the widening is graded in both directions, not just one.
+#: arms cannot drift, and EVERY copula in it is driven POSITIVELY as a fixture below, with `was` —
+#: the past form this block's subject matter makes reachable — driven against the NEGATED claim as
+#: well, so the widening is graded in both directions and not only positively.
 #: ⛔ ONE RESIDUAL SHAPE INSIDE THE STRUCTURES IS REFUSED, and it is named here because the sentence
 #: above would otherwise imply that anything built from these five skeletons passes: the exemption
 #: predicate may be spelled as a RELATIVE CLAUSE in the PREDICATE (`The REGISTRATION is the half
@@ -10978,7 +10999,22 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             # ⛔ ONE INSERTED WORD / ONE OTHER COPULA — the exact escapes measured at round 28.
             "The REGISTRATION alone is exempt, and so too is the row",
             "The REGISTRATION was exempt, and so was the row",
-            "The REGISTRATION remains exempt; so are the row's durations entries"):
+            "The REGISTRATION remains exempt; so are the row's durations entries",
+            # ⛔ THE REVERSE ORDER of the SAME noun phrase (#14623 round 30): the additive branches
+            # anchored the noun phrase at the marker, so moving `weight` in front of `row` emptied
+            # every one of them while the possessive order stayed caught. MEASURED against the
+            # pre-fix predicate, the FIVE additive spellings below were GREEN (each returned `None`)
+            # and the sentence shipped CLEAN end-to-end through `_h_14544_banned_claim`; the SUBJECT
+            # and ELLIPTICAL spellings were already caught, because `.search` finds `the row is
+            # exempt` / `the row is too` INSIDE `the weight of the row …` — they are kept as the
+            # controls that keep the two branches from drifting apart again.
+            "The REGISTRATION is exempt, as is the weight of the row",
+            "The REGISTRATION is exempt, likewise the weight of that row",
+            "The REGISTRATION is exempt, as well as the weight carried by the row",
+            "The REGISTRATION is exempt, along with the weight of the row",
+            "The REGISTRATION is exempt, and so is the weight on the row",
+            "The REGISTRATION is exempt; the weight of the row is exempt too",
+            "The REGISTRATION is exempt, and the weight of the row is too"):
         assert _h_14544_row_exempted(row_exemption) is not None, (
             f"the row-exemption predicate no longer reads {row_exemption!r}, so a paragraph that "
             "exempts the `durations` row as well as the REGISTRATION passes every pin above — "
@@ -11003,6 +11039,12 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             # below", "the rows above"). Round 27's noun had no trailing boundary, so this TRUE
             # sentence was REFUSED end-to-end (#14623 round 28, P1): a false block, the mirror
             # defect of the false pass this predicate exists to stop.
+            # ⛔ AND THE REVERSE ORDER MUST NOT HAVE BECOME A FALSE BLOCK: a sentence that names the
+            # weight and states NO exemption, or negates it, is TRUE prose about the row this block
+            # discusses — the shape the widening is allowed to READ but never to refuse.
+            "The weight of the row is 90.0 s.",
+            "The weight of the row is not exempt.",
+            "The weight of the row was re-read by the cut.",
             "The paragraph names the registrations as well as the rows.",
             "The paragraph lists the rows it describes.",
             "A marker naming the row is not a claim that it is exempt.",
