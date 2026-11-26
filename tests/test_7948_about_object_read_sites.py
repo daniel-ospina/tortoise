@@ -252,7 +252,8 @@ WHAT THIS PINS
    doors (304 pairs), while §13 states 23 cell OCCURRENCES. Collapsing those two into
    one number is how this paragraph came to cite 63 pairs of 340 with a floor of 29
    after the table grew. The
-   inputs are the TABLE's sixteen distinct doors, not the 99-tool registry, so adding a tool
+   inputs are the TABLE's sixteen distinct doors, not the tool REGISTRY — whose size
+   moves independently of the table — so adding a tool
    does not move them — which is what makes them pinnable without churn.
 23. `test_the_gate_walk_comment_pins_no_wall_clock_figure` +
    `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` +
@@ -3431,7 +3432,7 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
 #: and 17), and every other customer-callable row accepts exactly the doors its cell
 #: names — row 45 included, whose cell names BOTH of its doors and both attribute.
 #: Inputs are the TABLE (whose doors change only when the
-#: document does) rather than the 99-tool registry, so a new tool does not move
+#: document does) rather than the tool REGISTRY, whose size moves on its own, so a new tool does not move
 #: these — which is what makes them pinnable.
 #: Re-derived 2026-10-21 when rows 34-37 landed: 63 -> 69. The added
 #: pairs are NEW rows with their own doors (`TortoiseSDK.traverse`,
