@@ -10585,16 +10585,6 @@ _H_14544_INVERTED_RE = re.compile(
     # the row.`, `The row alone is the only half exempt.` and the conclusion's `forecloses|rules out|
     # excludes` shipping CLEAN — the very keep-the-true-sentence-add-its-inverse shape this ban is for.
     r"|exempt\s+half\s+is\s+the\s+row|row\s+alone\s+is\s+the\s+(?:only\s+)?half"
-    # ⛔ AND THE SHAPE THAT EXTENDS THE EXEMPTION WITHOUT RE-SPELLING `exempts the row` — found by
-    # driving the polarity mutation itself (`#14623` review round 25): rewrite the live sentence to
-    # `The REGISTRATION is exempt, and so is the row:` and the SCOPE pin above STILL matches (it
-    # reads the clause before the comma) while this ban matched NOTHING, so the arm stayed GREEN on
-    # the very reading `#14612` deletes. That is a FALSE PASS on the arm whose whole subject it is —
-    # the same one-spelling gap the round-15 note above records, in the BAN this time. Both halves
-    # of the predicate are now read: the `so is the row` continuation, and the row named as the
-    # exempt subject. `the row is NOT exempt` is deliberately NOT matched — that is TRUE prose, and
-    # a ban that reds it would be the false block this arm exists to refuse.
-    r"|so\s+is\s+the\s+row\b|the\s+row\s+(?:is|stays|remains)\s+(?:also\s+|still\s+|now\s+)?exempt\b"
     r"|paragraph\s+(?:forecloses|rules\s+out|excludes)\b"
     # ⛔ AND THE NEGATION AFTER THE PINNED SPAN: `_H_14544_SCOPE_RE` stops at `half`, so "the
     # REGISTRATION is the ONLY half that is NOT exempt" satisfied it while stating the inverse
@@ -10605,14 +10595,18 @@ _H_14544_INVERTED_RE = re.compile(
     r"|own\s+edit[^.;!?]{0,40}?(?:which\s+is\s+(?:false|untrue|wrong)|is\s+(?:false|untrue|wrong))"
     # ⛔ AND THE SECOND-NOUN FORMS THE WIDENED POSITIVE PIN ADMITS (#14623 round 25, P2). The
     # round-24 widening added `REGISTRATION(?:\s+half|\s+alone)?\s+is\s+exempt` to
-    # `_H_14544_SCOPE_RE` — a pattern that `search`es, so a sentence that starts with the scope
-    # claim and then HOWLS THE ROW IN satisfies it. "The REGISTRATION is exempt, and so is the
+    # `_H_14544_SCOPE_RE` — a pattern used with `.search`, so a sentence that STATES the scope claim
+    # and then grants the SECOND HALF satisfies it. "The REGISTRATION is exempt, and so is the
     # row" states the exact reading `#14612` deletes and matched no alternative here, so the arm
     # stayed GREEN over it — measured on this tree by substituting that sentence into the live
     # paragraph: GREEN, where the pre-round-24 pin RED'd it. Widening the pin without widening this
-    # ban is the round-15 defect repeated, so the three conjunctions that grant the SECOND half
-    # are banned here, and the non-vacuity loop below reads each of them.
-    r"|so\s+is\s+the\s+row\b|as\s+well\s+as\s+the\s+row\b|row\s+is\s+too\b",
+    # ban is the round-15 defect repeated, so EVERY shape that grants the second half is banned
+    # here — the continuation (`so is the row`, `as well as the row`, `row is too`) and the row
+    # named as the exempt SUBJECT — and the non-vacuity loops below read each of them. The subject
+    # half is deliberately NOT matched when it carries a negation (`the row is NOT exempt`): that is
+    # TRUE prose, and a ban that reds it would be the false block this arm exists to refuse.
+    r"|so\s+is\s+the\s+row\b|as\s+well\s+as\s+the\s+row\b|row\s+is\s+too\b"
+    r"|the\s+row\s+(?:is|stays|remains)\s+(?:also\s+|still\s+|now\s+)?exempt\b",
     re.IGNORECASE)
 
 
