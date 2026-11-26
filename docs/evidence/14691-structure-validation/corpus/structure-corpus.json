@@ -1,0 +1,209 @@
+{
+  "_about": "Fresh, synthetic BUSINESS-STRUCTURE corpus for #14691 T6. Five short MEETING TRANSCRIPTS about one software company (Lumen Grid, an energy-operations SaaS). Written for this test only — never derived from any existing graph. Each document is one meeting, fed to the product as ONE captured session (the extractor v4's only door is session capture: `mine_knowledge_from_session(conversation=...)`). ⛔ No decisions and no contradictions: this corpus is about what the business is MADE OF, which is the question #14606's decision corpus did not ask.",
+  "_declared_structure": {
+    "products": ["Lumen Core", "Lumen Field"],
+    "features": ["Grid Map", "Outage Alerts", "Load Forecast", "Crew Dispatch", "Asset Register"],
+    "teams": ["Platform team", "Product team", "Customer team"],
+    "roles": ["Staff Engineer", "Site Reliability Engineer", "Product Manager", "Account Executive"],
+    "people": ["Dana Whitlock", "Tomas Ferreira", "Amara Osei", "Jonas Bauer"],
+    "components": ["ingest-gateway", "event-bus", "fact-store", "signal-engine", "web-dashboard", "auth-service", "identity-db"],
+    "customers": ["Northwind Logistics", "Helio Health"],
+    "customerSegments": ["mid-market utilities"],
+    "containment": [
+      ["Lumen Core", "Grid Map"],
+      ["Lumen Core", "Outage Alerts"],
+      ["Lumen Core", "Load Forecast"],
+      ["Lumen Field", "Crew Dispatch"],
+      ["Lumen Field", "Asset Register"]
+    ],
+    "membership": [
+      ["Dana Whitlock", "Platform team"],
+      ["Tomas Ferreira", "Platform team"],
+      ["Amara Osei", "Product team"],
+      ["Jonas Bauer", "Customer team"]
+    ],
+    "ownership": [
+      ["Lumen Core", "Amara Osei"],
+      ["ingest-gateway", "Dana Whitlock"],
+      ["on-call rotation", "Tomas Ferreira"],
+      ["enterprise renewals", "Jonas Bauer"]
+    ],
+    "dependencies": [
+      ["ingest-gateway", "event-bus"],
+      ["event-bus", "fact-store"],
+      ["signal-engine", "event-bus"],
+      ["signal-engine", "fact-store"],
+      ["web-dashboard", "signal-engine"],
+      ["web-dashboard", "auth-service"],
+      ["auth-service", "identity-db"]
+    ],
+    "serves": [
+      ["Lumen Core", "Northwind Logistics"],
+      ["Lumen Field", "Helio Health"]
+    ]
+  },
+  "_elements": {
+    "doc-01": "product tree — 2 products, 5 features, and which product contains which feature",
+    "doc-02": "organisation — 3 teams, 4 roles, 4 people, membership and who owns what",
+    "doc-03": "architecture — 7 components and what depends on what",
+    "doc-04": "customers and market — 2 customers, one customer segment",
+    "doc-05": "cross-links — which team builds which component, which product each customer runs"
+  },
+  "documents": [
+    {
+      "doc_id": "doc-01",
+      "date": "2026-04-07",
+      "title": "Product line review",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Amara, walk me through the product line as it stands. What do we sell and what is inside each thing?"
+        },
+        {
+          "role": "assistant",
+          "content": "Amara Osei (Product Manager): We sell two products. The first is Lumen Core, our energy-operations platform. The second is Lumen Field, our mobile product for field crews."
+        },
+        {
+          "role": "user",
+          "content": "And the features of each?"
+        },
+        {
+          "role": "assistant",
+          "content": "Lumen Core contains three features: Grid Map, which is the network topology view; Outage Alerts, which notifies operators when a feeder trips; and Load Forecast, which predicts demand per substation. Lumen Field contains two features: Crew Dispatch, which assigns crews to open jobs, and Asset Register, which records pole and transformer inventory."
+        },
+        {
+          "role": "user",
+          "content": "Is anything shared between the two products?"
+        },
+        {
+          "role": "assistant",
+          "content": "Nothing is shared as a feature. Grid Map, Outage Alerts and Load Forecast belong to Lumen Core only, and Crew Dispatch and Asset Register belong to Lumen Field only. Lumen Core is the product our control-room customers run, and Lumen Field is the product their field crews run."
+        }
+      ]
+    },
+    {
+      "doc_id": "doc-02",
+      "date": "2026-04-14",
+      "title": "Team structure and ownership",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Let us put the team structure on the record. Which teams do we have and who is in them?"
+        },
+        {
+          "role": "assistant",
+          "content": "There are three teams. The Platform team is the engineering team. The Product team is the product management team. The Customer team is the commercial team."
+        },
+        {
+          "role": "user",
+          "content": "Name the roles and the people holding them."
+        },
+        {
+          "role": "assistant",
+          "content": "Dana Whitlock is the Staff Engineer and she is on the Platform team. Tomas Ferreira is the Site Reliability Engineer and he is also on the Platform team. Amara Osei is the Product Manager and she is on the Product team. Jonas Bauer is the Account Executive and he is on the Customer team."
+        },
+        {
+          "role": "user",
+          "content": "And who owns what?"
+        },
+        {
+          "role": "assistant",
+          "content": "Amara Osei owns Lumen Core, the product itself. Dana Whitlock owns the ingest-gateway component. Tomas Ferreira owns the on-call rotation. Jonas Bauer owns enterprise renewals. Ownership here means accountable for the thing, not merely working on it."
+        }
+      ]
+    },
+    {
+      "doc_id": "doc-03",
+      "date": "2026-04-21",
+      "title": "Architecture overview",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Describe the architecture for the record. What are the components and how do they connect?"
+        },
+        {
+          "role": "assistant",
+          "content": "There are seven components. The ingest-gateway receives meter telemetry. The event-bus carries internal events. The fact-store holds the time-series facts. The signal-engine computes outage signals. The web-dashboard is the operator user interface. The auth-service issues and checks access tokens. The identity-db stores user identities."
+        },
+        {
+          "role": "user",
+          "content": "Which components depend on which?"
+        },
+        {
+          "role": "assistant",
+          "content": "The ingest-gateway depends on the event-bus. The event-bus depends on the fact-store. The signal-engine depends on the event-bus and on the fact-store. The web-dashboard depends on the signal-engine and on the auth-service. The auth-service depends on the identity-db."
+        },
+        {
+          "role": "user",
+          "content": "So if the fact-store goes down, what breaks?"
+        },
+        {
+          "role": "assistant",
+          "content": "The event-bus depends on the fact-store, the signal-engine depends on the fact-store, and the ingest-gateway depends on the event-bus. So a fact-store outage propagates upward through the event-bus to the signal-engine and to the ingest-gateway."
+        }
+      ]
+    },
+    {
+      "doc_id": "doc-04",
+      "date": "2026-04-28",
+      "title": "Customers and the market we sell into",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Jonas, who do we actually sell to today?"
+        },
+        {
+          "role": "assistant",
+          "content": "Jonas Bauer (Account Executive): We have two named customers. Northwind Logistics is a customer, and Helio Health is a customer. Northwind Logistics runs Lumen Core in its control room. Helio Health runs Lumen Field with its field crews."
+        },
+        {
+          "role": "user",
+          "content": "And the market? Who are we really built for?"
+        },
+        {
+          "role": "assistant",
+          "content": "Our customer segment is mid-market utilities: regional electricity distributors with between fifty thousand and five hundred thousand metered customers. Both Northwind Logistics and Helio Health sit in that segment."
+        },
+        {
+          "role": "user",
+          "content": "Anything else about the commercial shape?"
+        },
+        {
+          "role": "assistant",
+          "content": "Only that the segment is the unit we plan against. Enterprise renewals, which Jonas Bauer owns, are negotiated per customer inside that segment."
+        }
+      ]
+    },
+    {
+      "doc_id": "doc-05",
+      "date": "2026-05-05",
+      "title": "Cross-team delivery sync",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Let us connect the structure: which team builds which component?"
+        },
+        {
+          "role": "assistant",
+          "content": "The Platform team builds the ingest-gateway, the event-bus, the fact-store and the signal-engine. The Platform team also builds the auth-service and the identity-db. The Product team builds the web-dashboard with the Platform team's support."
+        },
+        {
+          "role": "user",
+          "content": "And who reviews changes to the dashboard?"
+        },
+        {
+          "role": "assistant",
+          "content": "Amara Osei reviews dashboard changes because she owns Lumen Core, and Lumen Core contains Grid Map, Outage Alerts and Load Forecast, which are the screens the dashboard renders."
+        },
+        {
+          "role": "user",
+          "content": "Remind me how the products reach the customers."
+        },
+        {
+          "role": "assistant",
+          "content": "Northwind Logistics runs Lumen Core, and Helio Health runs Lumen Field. Both customers are in the mid-market utilities segment, and Jonas Bauer owns enterprise renewals for both."
+        }
+      ]
+    }
+  ]
+}
