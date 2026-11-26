@@ -9257,8 +9257,13 @@ _ROW_CLAIM_AFTER_FILE_RE = re.compile(
     #: `entry`/`entries` is the block's OWN definitional synonym ("A ROW is an entry in
     #: `durations`"), and `_ROW_CLAIM_CARRY_RE` already accepts it. Reading only `row` here made
     #: a truth-preserving rewrite of one enumeration item unread, and the reach arm told the
-    #: editor to undo it.
-    r"(?:rows?\b|entr(?:y|ies)(?:\s+in\s+`?durations`?)?)", re.IGNORECASE)
+    #: editor to undo it. ⛔ THE QUALIFIER IS NOT OPTIONAL: `entry` alone is the word the block
+    #: uses for the OPPOSITE claim ("A REGISTRATION is a `surfaces` entry on ANY `surfaces` key"),
+    #: so an optional `in `durations`` read `entry in `surfaces``, `entry in `durations_floors``
+    #: and a bare `entry` as `durations` row claims — measured, each returned the path, and the
+    #: reach arm then graded a TRUE registration statement as a false row claim and told the
+    #: editor to delete it. The qualifier is part of the synonym, so it is part of the match.
+    r"(?:rows?\b|entr(?:y|ies)\s+in\s+`?durations`?\b)", re.IGNORECASE)
 #: The name-list shape: `row (`A`, `B`, `core`)`. It captures the WHOLE parenthesised list and
 #: every `tests/…py` inside it, because the FIRST-NAME-ONLY form graded one name and left the rest
 #: read by nothing. Measured on `#14607`'s own spelling — "two new `core` rows
@@ -11379,6 +11384,17 @@ def test_the_row_list_alone_reaches_every_item_it_names():
         assert synonym == ["test_row_claim_synonym.py"], (
             f"the row-claim matcher does not read the block's own synonym ({spelling!r}), so a TRUE "
             f"rewrite of one list item reds the reach arm: {synonym!r}")
+    # ⛔ AND THE QUALIFIER IS PART OF THE SYNONYM. `entry` alone is the block's word for the
+    # OPPOSITE claim ("A REGISTRATION is a `surfaces` entry on ANY `surfaces` key"), so an optional
+    # `in `durations`` reads a true registration statement as a `durations` ROW claim — and the
+    # REACH assertion above then calls the block false about a row the map does not carry, telling
+    # the editor to delete a correct registration. MEASURED before this pin, each of these returned
+    # the path: `entry in `surfaces``, `entry in `durations_floors``, and a bare `entry`.
+    for not_a_row in ("entry in `surfaces`", "entry in `durations_floors`", "entry",
+                      "entries in `surfaces_floors`"):
+        assert _row_claims(f"`tests/test_row_claim_synonym.py` {not_a_row},") == [], (
+            f"the row-claim matcher reads a NON-row claim ({not_a_row!r}) as a `durations` row, so "
+            "the reach arm grades a true registration statement as a false row claim")
     rowless = sorted(named - rows)
     assert not rowless, (
         f"the row list calls {rowless} a `durations` row, but the map carries none: the weight "
