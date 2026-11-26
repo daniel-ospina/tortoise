@@ -818,7 +818,9 @@ def test_pi_install_disables_a_legacy_symlink_without_touching_its_target(home):
 
 def test_pi_install_disables_a_legacy_directory_non_destructively(home):
     """A real ``tortoise-capture/`` directory is RENAMED, never deleted — its
-    files must survive under the dot-prefixed name Pi's loader skips.
+    files must survive under the dot-prefixed name, and the ENTRY POINT inside
+    it is retired too (the dot prefix alone retires nothing: Pi's loader has no
+    dotfile filter, so ``.tortoise-capture.disabled/index.ts`` is still LOADED).
 
     Mutation: `shutil.rmtree(legacy)` (the user's files are gone)."""
     ext_dir = home / ".pi" / "agent" / "extensions"
