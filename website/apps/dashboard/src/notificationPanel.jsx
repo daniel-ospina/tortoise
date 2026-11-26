@@ -165,11 +165,11 @@ function actionName(action, entry) {
   // without it the name was NOT "exactly as discriminating as the render", which is
   // what the comment above claimed (#14694 review P3).
   const range = entry.rangeLabel ? ` (${entry.rangeLabel})` : ''
-  const stamp = entry.stamp
-    ? ` @ ${entry.stamp}`
-    : entry.ageLabel
-      ? ` — ${entry.ageLabel}`
-      : ''
+  // ⛔ NO `ageLabel` FALLBACK. `stamp` and `ageLabel` are derived from the SAME
+  // `at` parse in `entryOf` (`notificationLedger.js`), so they are empty together
+  // — a `stamp ? … : ageLabel ? …` arm could never run, and it read as a
+  // discriminator for a stampless row that does not exist (#14694 review P2).
+  const stamp = entry.stamp ? ` @ ${entry.stamp}` : ''
   return `${action}: ${label}${message}${count}${range}${stamp}`
 }
 
@@ -189,7 +189,8 @@ function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
         // two same-identity rows (`×9 … 1 min ago` vs `×3 … 9 min ago`), both read
         // "Details: Suspicious activity". An AT user could not tell which episode
         // they were opening, which is the failure this row key exists to prevent
-        // for sighted readers (review finding). The count and the age are what differ.
+        // for sighted readers (review finding). The stamp and the SPAN are what
+        // differ — `actionName` carries every field the row renders that can vary.
         aria-label={actionName(DETAIL_ACTION, entry)}
       >
         <span className="notif-line">
