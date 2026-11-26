@@ -3691,17 +3691,17 @@ def _defers_its_check_past_the_restart(clause: str) -> bool:
 # `_CUE_UNDER_INVERTING_SUBORDINATE_RE`). Their verdict is still correct; they are
 # simply not graded by form (a) at all, so there is nothing to exempt.
 _CONCESSION_OPENER_RE = re.compile(r"^(?:even\s+)?(?:if|when)\b", re.IGNORECASE)
-# ⛔ THE MARKER IS TWO ADVERBS, AND WIDENING IT TO A PAST-TENSE PREDICATE WAS
-# TRIED AND MEASURED INEFFECTIVE, so it is DECLARED here instead of shipped as
-# dead complexity: `If you checked the tools BEFORE …, restart …, then confirm …`
-# stays RED with `earlier`, `before`, `last time` all admitted, because the shape
-# fails at a LATER gate than this marker (the concession never reaches it), and
-# the only cut that moved those rows also re-reddened the present-tense deferral
-# `If you check the tools before restarting …` in the other direction. The three
-# shapes are pinned GREEN in the table's declared-residual block, so the boundary
-# is MEASURED and a future tightening shows up as a deliberate row flip
-# (#14679 review round 9).
-_PRIOR_COMPLETION_RE = re.compile(r"\b(?:already|previously)\b", re.IGNORECASE)
+# ⛔ THE MARKER IS NOT TWO ADVERBS: a PAST-TENSE PREDICATE marks prior completion
+# just as plainly, and the earlier claim that widening was "ineffective" was FALSE
+# — it was measured by a probe whose replacement never matched the source, so it
+# changed nothing and "proved" the widening dead. Re-measured properly (#14679
+# review round 10): admitting `checked|confirmed|verified` flips exactly the three
+# past-tense concessive shapes RED→GREEN, flips 0 declared rows, and leaves the
+# present-tense deferral `If you check the tools before restarting …` RED — so it
+# is a one-line fix with no counter-cost, not a wider change. Pinned by three rows
+# in the table's declared-residual block.
+_PRIOR_COMPLETION_RE = re.compile(
+    r"\b(?:already|previously|checked|confirmed|verified)\b", re.IGNORECASE)
 
 
 def _is_completed_concession(clause: str) -> bool:
@@ -6155,6 +6155,31 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "Restart your client.", False),
     ("You are to confirm the tools are actually there. Restart your client, "
      "then run a query.", False),
+    # (16) round-10: the prior-completion marker accepts a PAST-TENSE predicate, so
+    #      a concessive about an earlier session is GREEN instead of being graded
+    #      as a deferral (the over-block direction, #3429).
+    ("If you checked the tools before, restart your client, then confirm the "
+     "tools are actually there.", False),
+    ("If you checked the tools earlier, restart your client, then confirm the "
+     "tools are actually there.", False),
+    ("If you confirmed the tools last time, restart your client, then confirm "
+     "the tools are actually there.", False),
+    # …while a PRESENT-tense condition with the same adverbial is a real deferral
+    # and stays graded.
+    ("If you check the tools before restarting, restart your client.", True),
+    # ⛔ DECLARED RESIDUAL of this pin — #14738. A confirmation POSTPOSED behind a
+    # dangling subordinator ("… verify the tools once you restart") is graded RED
+    # even though the restart comes first in it. It is a known FALSE RED tracked
+    # in #14738, not a hole: the forms demand the confirmation sit in the
+    # connective's own clause. Pinned at its CURRENT measured verdict (RED = True)
+    # with the DESIRED verdict named in words, so fixing #14738 shows up as a
+    # deliberate row flip rather than as silence. EXPECTED AFTER #14738: False.
+    # (#14679 review round 10 — this boundary was declared only in the tracker,
+    # never in the file a reader inspects.)
+    ("You can verify the tools are actually there once you restart your "
+     "client.", True),
+    ("You can confirm the tools are actually there after you restart your "
+     "client.", True),
     # (8) a LEADING CONJUNCTION introduces a sentence exactly as `Now`/`Then` do.
     ("And confirm the tools are actually there. Restart your client, then run "
      "a query.", True),
