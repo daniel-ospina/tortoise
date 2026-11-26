@@ -27,9 +27,13 @@ WHAT IT READS (and why each shape is here):
     URL on a code line, not only the ones spellable inside a ``href=``
     attribute: ``href={COMPARE_PLANS_URL}`` takes its URL from a ``const``
     elsewhere in the module, so an href-only read cannot see the link that most
-    often moves. Comment lines are skipped, so a URL quoted in prose about a
-    past defect (the #4392 comment that quotes the dead
-    ``product.html#pricing`` link it removed) is not read back as live.
+    often moves. A line that BEGINS with a comment marker (``//``, ``*``,
+    ``/*``) is skipped, which is what keeps the #4392 comment — the one that
+    quotes the dead ``product.html#pricing`` link it removed — from being read
+    back as live. A JSX block-comment CONTINUATION line is not skipped (it
+    begins with the URL, not with a marker), and such a line is excluded today
+    only because a bare URL carries no quote for ``_JS_STR`` to read; a quoted
+    URL in that position would be read as live (false RED, declared below).
   * markdown under ``tortoise/`` and ``website/apps/dashboard/public/skills/``
     — ``[text](url#frag)`` links and ``<url#frag>`` autolinks, which are how
     the onboarding copies carry ``#chatgpt``.
@@ -69,6 +73,12 @@ than it is:
     ``<a name="…">``, and a raw regex matches inside a comment, a ``<script>``
     body or an inert ``<template>``. There is no ``<a name=`` under ``website/``
     today, so the arm is dead; when one appears it is the false-pass direction.
+  * a URL carrying a QUERY string (``…/docs?ref=x#appeal``) and a
+    protocol-relative one (``//premiselabs.co/docs#appeal``) ARE extracted — the
+    path group excludes ``?`` and the scheme is optional — but the query is
+    discarded rather than resolved, so the page is chosen from the path alone. A
+    query that CHANGES which page serves the path would be read against the
+    wrong page; no live site does that today.
 """
 from __future__ import annotations
 
@@ -100,7 +110,9 @@ TORTOISE_HOSTS = ("tortoise.premiselabs.co",)
 #: ``PRODUCT_PAGES`` is also served under the ``/tortoise`` prefix, so every page
 #: it names carries BOTH spellings here — a table holding only one would call the
 #: other unmapped, and `website/faq.html` already links
-#: ``/tortoise#pricing-section``.
+#: ``/tortoise#pricing-section``. The ``.html`` twins are added below rather than
+#: listed by hand: ``_redirects`` 301s every one of them onto the clean path, so
+#: they serve the SAME page and a hand list only invites a missing row.
 PATH_TO_PAGE = {
     "/": "index.html",
     "/tortoise": "product.html",
@@ -128,10 +140,41 @@ PATH_TO_PAGE = {
     "/dpa": "dpa.html",
 }
 
+#: The ``.html`` spelling of every row above, generated rather than enumerated.
+#: ``_redirects`` 301s each of them onto the clean path (fragment preserved), so
+#: they are the same page; listing them by hand only means one is forgotten and
+#: a working URL comes back `unmapped`.
+PATH_TO_PAGE.update(
+    {f"{path}.html": page for path, page in list(PATH_TO_PAGE.items()) if path != "/"}
+)
+
+#: Paths `_middleware.ts` serves under the ``/tortoise`` PREFIX for the retired
+#: host — and ONLY these, which is why `resolve()` moves the prefix for them and
+#: not for the legal/contact pages: those live at the company ROOT
+#: (`_middleware.ts:622`, `:626`) and the retired host 301s them there, not under
+#: the product.
+PRODUCT_PATHS = (
+    "/docs",
+    "/docs.html",
+    "/faq",
+    "/faq.html",
+    "/security",
+    "/security.html",
+    "/self-hosted",
+    "/self-hosted.html",
+    "/license",
+    "/license.html",
+    "/design-partners-intro",
+    "/design-partners-intro.html",
+    "/investors",
+    "/investors.html",
+)
+
 _OWN_HOSTS = "|".join(re.escape(h) for h in OWN_HOSTS)
 
 _OWN_URL = re.compile(
-    rf"https?://(?P<host>{_OWN_HOSTS})/(?P<path>[^\"'\s)>`?#]*)#(?P<frag>[^\"'\s)>`#]+)"
+    rf"(?:https?:)?//(?P<host>{_OWN_HOSTS})/(?P<path>[^\"'\s)>`?#]*)"
+    rf"(?:\?[^\"'\s)>`#]*)?#(?P<frag>[^\"'\s)>`#]+)"
 )
 _HREF_ATTR = re.compile(r"""href=(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')""")
 _JS_STR = re.compile(r"""["'`](?P<url>[^"'`]*#[^"'`]*)["'`]""")
@@ -160,8 +203,8 @@ def resolve(host: str, path: str) -> str | None:
     `tortoise.premiselabs.co/` 301s onto `/tortoise`, so a path-only table would
     pass `https://premiselabs.co/#pricing-section` against `product.html` — a
     page a browser never shows for that URL. `_middleware.ts` moves the retired
-    host onto the product prefix before the static rules run, so that is where
-    this maps it too.
+    host onto the product prefix for its ROOT and its `PRODUCT_PAGES` members,
+    and nowhere else; this mirrors that rather than prefixing every path.
 
     The table is the ONLY answer, deliberately. Derived fallbacks (`path +
     ".html"`, then the path's last segment) were removed: they answer a
@@ -172,7 +215,14 @@ def resolve(host: str, path: str) -> str | None:
     makes adding a page force this table to be taught.
     """
     if host in TORTOISE_HOSTS:
-        path = "/tortoise" + ("" if path == "/" else path)
+        # `_middleware.ts`: the retired host's ROOT lands on the product prefix, and
+        # so does every `PRODUCT_PAGES` member (`:593`, `:627`). The legal, contact
+        # and product-root paths are NOT prefixed there (`:622`, `:626`), so they
+        # are not prefixed here either.
+        if path == "/":
+            path = "/tortoise"
+        elif path in PRODUCT_PATHS:
+            path = "/tortoise" + path
     return PATH_TO_PAGE.get(path)
 
 

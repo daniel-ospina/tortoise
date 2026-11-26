@@ -16135,6 +16135,19 @@ durations:
   test_extractor_cost_measure.py: 18.2
   test_longmem_ingest_profile.py: 0.1
   test_tier_naming.py: 0.4
+  test_own_site_fragment_targets.py: 2.0  # new in #11939 (PR #14726). The ENTRY RULE's row "must
+  # EXIST, not merely default" — “a default is not a reading” (#3400/#4348) — and a file a PR ADDS
+  # can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it
+  # takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local measurement, which this map
+  # forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). `tools/ci_timing.py --refresh-durations`
+  # replaces it from the first push-to-main junit sweep that includes the file. What the weight
+  # covers, hermetic (files only — no DB, no graph, no network, no model call): every own-site
+  # fragment link our sources emit resolved to the page file that serves it and checked against the
+  # ids that page declares — Python string literals via an AST walk (docstrings excluded), quoted
+  # own-host URLs in the dashboard and `website/functions` sources, own-host `href`s in
+  # `website/*.html`, markdown links and autolinks — plus same-page `href="#frag"` in
+  # `website/*.html`. ⛔ No local seconds figure is quoted on purpose: one beside a weight re-stales
+  # against the run it came from.
 # ── THE NON-GATING LANE (`on_demand:`) ──
 #
 # A file listed here RUNS but does not GATE: it is excluded from every pre-merge
