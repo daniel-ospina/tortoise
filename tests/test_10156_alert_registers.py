@@ -135,11 +135,21 @@ class TestRegisterSplit:
     def test_only_facts_get_incident_framing(self):
         """The register is decided by THE FACT, not by how alarming the words
         sound: incident = something HAPPENED (state changed / a human acted / a
-        credential event), observation = a detector measured a rate."""
+        credential event), observation = a detector measured a rate.
+
+        #14687 (owner ruling, comment 7174797019) moved ``flag`` and
+        ``review_needed`` from the incident register to the activity register.
+        They were filed as incidents because the engine WRITES a ``flagged_at``
+        marker, but that marker is re-derived from a rolling window on every
+        evaluation and nothing punitive has ever followed it (``suspend`` = 0
+        rows across the table's whole history). The measured consequence of the
+        old classification: the incident arm of ``_episode_acknowledged``
+        re-opened a dismissed episode as soon as the next window fired.
+        """
         expected = {
             EVENT_SUSPEND: REGISTER_ALERT,
-            EVENT_FLAG: REGISTER_ALERT,
-            EVENT_REVIEW: REGISTER_ALERT,
+            EVENT_FLAG: REGISTER_ACTIVITY,
+            EVENT_REVIEW: REGISTER_ACTIVITY,
             EVENT_AUTH_IP: REGISTER_ALERT,
             EVENT_READ_VELOCITY: REGISTER_ACTIVITY,
             EVENT_SIGNUP_VELOCITY: REGISTER_ACTIVITY,
