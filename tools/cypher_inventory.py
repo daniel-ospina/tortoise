@@ -1236,18 +1236,33 @@ def _boundary_is_unaskable(boundary: Path) -> bool:
     `not a git repository` over a damaged `.git`, reached here for the case where git
     says nothing at all because it found a repository one level up.
 
-    ⛔ A BARE GITDIR IS EXEMPT ON PURPOSE: it has no `.git` pointer to resolve, its
-    metadata lives in place, and the GIT METADATA guard decides it. Over-blocking shapes
-    that are fine is the other failure mode this must not create, so every ordinary
-    boundary is verified against git rather than assumed: a normal checkout, a linked
-    worktree (whose `.git` is a gitfile), and a submodule all answer with their own path,
-    and `--render` keeps working in all three.
+    ⛔ BOTH BOUNDARY FORMS ARE VERIFIED, NOT ASSUMED — AND "A BARE GITDIR IS EXEMPT
+    BECAUSE THE GIT METADATA GUARD DECIDES IT" WAS FALSE (#14741 review, cycle 3, P2,
+    measured). That exemption skipped the askability test for a boundary with no `.git`
+    NAME (`_looks_like_git_metadata`: a bare gitdir, a `--separate-git-dir` git dir),
+    on the premise that git always still recognises it. The premise holds only while
+    git RECOGNISES the directory: once git disowns it, EVERY guard answers about the
+    enclosing repository — the tracked probe's `git -C <boundary> ls-files` walks up and
+    answers rc 1 (a permit), `_path_in_HEAD` agrees, and the metadata guard's own
+    `rev-parse --git-dir` also walks up, so the destination is not "inside metadata" to
+    it either. Measured on the real `main()`: a bare gitdir inside a repository whose
+    `HEAD` had been removed — `objects/`, `refs/`, `config/` and `index` all intact, the
+    index naming the destination — exited **0** with empty stderr and replaced the bytes
+    that index still holds, i.e. the LAST copy. So the metadata-in-place form is asked
+    the same question, spelled as the gitdir git resolved (`--absolute-git-dir`) rather
+    than the work tree's top level, and must name THIS directory.
+
+    Over-blocking shapes that are fine is the other failure mode this must not create,
+    so every ordinary boundary is verified against git rather than assumed: a normal
+    checkout, a linked worktree (whose `.git` is a gitfile), a submodule and a
+    `--separate-git-dir` checkout all answer with their own path, and `--render` keeps
+    working in all of them.
     """
-    if not os.path.lexists(boundary / ".git"):
-        return False
+    has_pointer = os.path.lexists(boundary / ".git")
     try:
         resolved = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
+            ["git", "rev-parse",
+             "--show-toplevel" if has_pointer else "--absolute-git-dir"],
             cwd=boundary, capture_output=True, text=True,
             encoding="utf-8", errors="surrogateescape",
             env=_git_env(), timeout=_GIT_PROBE_TIMEOUT_S,
@@ -1256,10 +1271,10 @@ def _boundary_is_unaskable(boundary: Path) -> bool:
         return True
     if resolved.returncode != 0:
         return True
-    toplevel = resolved.stdout.strip()
-    if not toplevel:
+    answer = resolved.stdout.strip()
+    if not answer:
         return True
-    return os.path.realpath(toplevel) != os.path.realpath(boundary)
+    return os.path.realpath(answer) != os.path.realpath(boundary)
 
 
 def _destination_probes(

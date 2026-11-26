@@ -2816,6 +2816,95 @@ def test_a_BOUNDARY_git_DISOWNS_is_asked_about_SOMEBODY_ELSE(tmp_path, monkeypat
         "wrong repository")
 
 
+def test_a_DAMAGED_bare_gitdir_boundary_cannot_permit_what_it_tracks(
+    tmp_path, monkeypatch, capsys
+):
+    """…and the METADATA-IN-PLACE form of the same damage, which the `.git` test skipped.
+
+    ⛔ THE BARE-GITDIR EXEMPTION WAS A DECLARED SHAPE WITH NO ARM (#14741 review,
+    cycle 3, P2, measured). `_boundary_is_unaskable` returned early for a boundary that
+    carries no `.git` NAME, justified by "its metadata lives in place, and the GIT
+    METADATA guard decides it". That premise holds only while git still RECOGNISES the
+    directory: once git disowns it, every guard answers about the ENCLOSING repository —
+    the tracked probe's `git -C <boundary> ls-files` walks up and answers rc 1 (a
+    permit), `_path_in_HEAD` agrees, and the metadata guard's own `rev-parse --git-dir`
+    also walks up, so the destination is not "inside metadata" to it either. Measured on
+    the real `main()`: `--render outer4x/bare.git/doc.md` exited **0** with empty stderr
+    and replaced the bytes that gitdir's INDEX still holds — its LAST copy, since the
+    damage that disowned it was the removed `HEAD`.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)  # ROOT: tracks nothing here
+    bare = repo / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    # PREMISE 1 — the bare gitdir's OWN INDEX names the destination. That is the content
+    # a permit would overwrite, and the reason a bare boundary is a provider at all.
+    blob = subprocess.run(
+        ["git", "--git-dir", str(bare), "hash-object", "-w", "--stdin"],
+        input="bare keeps me\n", capture_output=True, text=True,
+        env=census._git_env(), check=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "--git-dir", str(bare), "update-index", "--add", "--cacheinfo",
+         f"100644,{blob},doc.md"],
+        env={**census._git_env(), "GIT_INDEX_FILE": str(bare / "index")}, check=True,
+    )
+    keeper = bare / "doc.md"
+    keeper.write_text("bare keeps me\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # THE DAMAGE: `HEAD` is removed, so git no longer accepts the directory as a
+    # repository — while `objects/`, `refs/`, `config/` and `index` all survive, which is
+    # what `_looks_like_git_metadata` grades it on, so it is still a BOUNDARY.
+    (bare / "HEAD").unlink()
+    assert not (bare / ".git").exists(), (
+        "the premise: a bare gitdir carries no `.git` name, so the name-based test never "
+        "asks it — which is exactly why the exemption was a hole")
+    assert census._looks_like_git_metadata(bare), (
+        "the premise: the damaged bare gitdir must still be a BOUNDARY")
+    # PREMISE 2 — git DISOWNS it when named.
+    named = subprocess.run(
+        ["git", "--git-dir", str(bare), "ls-files"], cwd=bare,
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    assert named.returncode == 128, (
+        "the premise: git must DISOWN the damaged gitdir when it is named; got "
+        f"rc={named.returncode} stderr={named.stderr!r}")
+    # PREMISE 3 — and WALKS UP through cwd discovery, so every probe answers about the
+    # ENCLOSING repository: that is the mechanism, not an assumption.
+    discovered = subprocess.run(
+        ["git", "rev-parse", "--git-dir"], cwd=bare,
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    assert Path(discovered.stdout.strip()).resolve() == (repo / ".git").resolve(), (
+        "the premise: cwd discovery must land on the ENCLOSING repository; got "
+        f"{discovered.stdout!r}")
+    # PREMISE 4 — and that walking-up answer is a PERMIT for this path, which is what
+    # made the write possible rather than merely misreported.
+    permitting = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", ":(literal)doc.md"], cwd=bare,
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    assert permitting.returncode == 1, (
+        "the premise: the ENCLOSING repository must NOT track it, so the walked-up probe "
+        f"permits; got rc={permitting.returncode}")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", "bare.git/doc.md"])
+    assert rc == 2, (
+        f"a metadata-in-place boundary git disowns must not permit the write, got {rc} — "
+        "git walked up and answered from the repository above, which does not hold this "
+        f"path (the damaged gitdir's index still holds {blob})")
+    err = capsys.readouterr().err
+    assert "could not probe" in err and "does not resolve" in err, (
+        f"the refusal must name the unanswerable boundary; stderr:\n{err}")
+    assert keeper.read_bytes() == before, (
+        "tracked content was overwritten through a bare boundary git answered from the "
+        "wrong repository")
+
+
 def test_the_tracking_probe_still_PERMITS_both_honest_answers(tmp_path, monkeypatch):
     """…and the fail-closed arm above does not over-block either honest permit.
 
@@ -5134,6 +5223,12 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # at ROOT, so a repository ABOVE it was never asked and the same fail-open
         # exit 0. This is the only arm that pins the walk past ROOT.
         "test_a_repository_ABOVE_ROOT_cannot_permit_what_it_tracks",
+        # ⛔ AND THE METADATA-IN-PLACE BOUNDARY (#14741 review, cycle 3, P2): the bare/
+        # `--separate-git-dir` form has no `.git` NAME, so `_boundary_is_unaskable`
+        # exempted it and a disowned bare gitdir was never asked — every probe answered
+        # from the enclosing repository and `--render` replaced its indexed bytes at
+        # rc 0. This is the only arm that pins the non-`.git` form.
+        "test_a_DAMAGED_bare_gitdir_boundary_cannot_permit_what_it_tracks",
     }
     # ⛔ AND THE SET'S OWN SIZE — the direction `missing` structurally cannot see.
     # `missing` reds for a NAME that no longer resolves; it stays GREEN for a member
@@ -5148,8 +5243,11 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # the one declared shape with no arm, and the same round reported it.
     # ⛔ AND ROOT-IS-NOT-A-FENCE TAKES IT 57 -> 58: a repository ABOVE ROOT was one more
     # provider the stop silently dropped, and the same round measured it.
-    assert len(split_arms) == 58, (
-        f"expected EXACTLY 58 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
+    # ⛔ AND THE METADATA-IN-PLACE BOUNDARY TAKES IT 58 -> 59: the bare-gitdir form had no
+    # `.git` name, so the askability test skipped it and a DISOWNED bare gitdir was asked
+    # about the repository above it — a permit (#14741 review, cycle 3, P2, measured).
+    assert len(split_arms) == 59, (
+        f"expected EXACTLY 59 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
     missing = sorted(split_arms - defined)
@@ -5158,7 +5256,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 56` reds a name PRUNED from the literal and `missing` reds a    # name that no longer resolves; neither can red for an arm that was never named at
+    # `len(split_arms) == 59` reds a name PRUNED from the literal and `missing` reds a
+    # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
     # left the whole suite GREEN (100 passed, 15 skipped), so the sentence above — that
@@ -5221,7 +5320,11 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # ⛔ AND WALKING PAST ROOT TAKES IT 116 -> 117 (`split_arms` 57 -> 58): a repository
     # ABOVE ROOT was never asked, measured as a fail-open at rc 0 (#14625 review,
     # round 12, P2 — the same round that falsified the stop's own justification).
-    assert len(test_functions) == 117, (
+    # ⛔ AND THE METADATA-IN-PLACE BOUNDARY TAKES IT 117 -> 118 (`split_arms` 58 -> 59):
+    # a bare gitdir has no `.git` name, so the exemption skipped the askability test and
+    # a DISOWNED one was asked about the repository above it at rc 0 (#14741 review,
+    # cycle 3, P2 — measured against the real `main()`).
+    assert len(test_functions) == 118, (
         f"expected EXACTLY 117 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
