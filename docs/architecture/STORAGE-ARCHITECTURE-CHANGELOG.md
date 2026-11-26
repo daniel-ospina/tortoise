@@ -2778,8 +2778,13 @@ many of the NINETEEN sites reach it` and `carries FIVE of the NINETEEN sites` �
 included. The cell-occurrence figure IS graded, though not where the paragraph above says: its own
 regex `\b(\d+) cell occurrences?\b` sits in `test_the_stated_door_count_matches_the_table` and is
 asserted EQUAL to the table's door instances (measured: `23` -> `24` reds it), while the separate
-DERIVATION floors are `attributed >= 23` and `total >= 23` — two different measurements of the same
-fact, which is why a prose edit CAN red here and why this sentence no longer claims otherwise.
+DERIVATION floors are `attributed >= 23` and `total >= _ACCEPTED_PAIRS_AT_THIS_HEAD` (28) — the
+OCCURRENCE count and the accepted-PAIR count, two different measurements, which is why a prose edit
+CAN red here and why this sentence no longer claims otherwise. ⛔ The pair floor was `total >= 23` in
+this branch's own cut of the arm; the reconcile onto `origin/main` took main's formulation, which
+names the ceiling's own constant so the arm is exact in both directions instead of carrying five
+pairs of slack — this branch's contribution (row 45's second door) is a CELL-OCCURRENCE move that
+changes no accepted pair, so the stronger floor costs nothing here.
 `tests/test_7948_about_object_read_sites.py` derives them from the table rather than trusting prose:
 read sites `FORTY-THREE` → `FORTY-FOUR`, customer-callable `EIGHTEEN` → `NINETEEN`, distinct doors
 `FIFTEEN` → `SIXTEEN` (nine MCP tools, TWO SDK methods, five REST routes — the new door is
@@ -2809,3 +2814,24 @@ the rot the paragraph before this one is about.
 `test_substrate_map`, `test_7949_capstone_measure`, `test_13098_cypher_inventory` (`TORTOISE_CYPHER_DOC_PIN=1`) and
 `test_ci_selection` 948 passed, 0 skipped (measured at this head) · `tools/cypher_inventory.py --check` 25 pins ·
 `tools/hosted_api_cite_census.py --check` every stated figure · `tools/ci_selection.py --integrity` clean.
+
+**Reconciled onto `origin/main` (`2026-11-26`, `2341e3cb86`)** — two conflicts, resolved by measurement
+rather than by picking a side. `docs/architecture/STORAGE-ARCHITECTURE.md`: the `23 cell occurrences`
+figure is this branch's and is kept, and row 45's cell names both of its doors because the MCP door is
+a MEASURED reach (the scope is set inside `_tortoise_fts_query`, not passed by the handler), so main's
+"a FALSE door" reading of that cell is refuted rather than merged.
+`tests/test_7948_about_object_read_sites.py`: the `21 -> 22` occurrence rise and the `27 -> 28`
+accepted-pair rise belong to **row 46 arriving on `main`** (`#14682`'s fix, landed in `#14671` at
+`c1c8df1a3817`) and are attributed to it here; this branch's own moves are the `22 -> 23` occurrence
+bump and the row-45 correction. Both arms therefore now measure the SAME table — re-derived at the
+merged tree with `_rows()` / `_doors()` / `_door_reaches()`, not concatenated: `_rows()` 44, 19
+customer-callable, 16 distinct doors over **23 cells**, **28 accepted pairs**, worst rows 2, 17 and
+24 at 3 accepted doors each, and cell ≠ accepted on rows **1, 2 and 17** (three rows — row 45 agrees now that its cell names both
+doors). ⚠️ The merged comment on the arm-1 floor carried "§13's 22 is the OCCURRENCE count" and "they
+differ on exactly four rows … row 45 is the OVER-COUNT … do NOT add the door the cell forbids", which
+contradicted both the merged table and the sibling arm's own note; that is the stale reading this
+branch had already refuted, and it is corrected rather than carried.
+
+**Gates at the reconcile** (measured on the merged tree, not carried from either side):
+`tests/test_7948_about_object_read_sites.py tests/test_runner_tool_contract.py` — 116 passed;
+`tests/test_docs_citation_refs.py tests/test_12184_shifted_cites.py` — 23 passed.

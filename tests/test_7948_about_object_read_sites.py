@@ -3576,17 +3576,23 @@ def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     # ⛔ `total` IS THE ACCEPTED-PAIR COUNT, NOT §13's CELL-OCCURRENCE FIGURE, and
     # the comment this replaces said "this figure IS that count" for as long as it
     # stood. Measured at this head through this arm's own path: `total` = 28 accepted
-    # (row, table-door) pairs; §13's 22 is the OCCURRENCE count, which `expected` in
-    # the door arm below is what actually grades. They differ on exactly four rows,
-    # and in TWO different ways — do not read the second as the first:
-    #   rows 1, 2 and 17 accept MORE doors than their cell names (cell count ->
-    #     accepted count): row 1 adds `SDK search_knowledge` (1 -> 2), rows 2 and 17
-    #     add `MCP tortoise_search` AND `SDK search_knowledge` (1 -> 3 each);
-    #   row 45 is the OVER-COUNT, not a missing door: its cell DOES name
-    #     `MCP tortoise_search`, precisely to refuse it ("naming it would be a FALSE
-    #     door … existence is not attribution"), and the predicate attributes it anyway
-    #     because a reference chain runs from the tool to the reader. Do NOT "fix"
-    #     that by adding the door the cell forbids.
+    # (row, table-door) pairs; §13's 23 is the OCCURRENCE count, which `expected` in
+    # the door arm below is what actually grades. They differ on exactly three rows,
+    # and in ONE way — those rows accept MORE doors than their cell names (cell count
+    # -> accepted count): row 1 adds `SDK search_knowledge` (1 -> 2), rows 2 and 17 add
+    # `MCP tortoise_search` AND `SDK search_knowledge` (1 -> 3 each).
+    # ⛔ ROW 45 USED TO BE THE OVER-COUNT IN THE OTHER DIRECTION, and the earlier cut of
+    # this comment said so: its cell refused `MCP tortoise_search` ("naming it would be
+    # a FALSE door … existence is not attribution") while the predicate attributed it
+    # anyway. That reading was REFUTED by measurement (`#14592`, and the door arm's note
+    # below records it): `ended_scope` is not a parameter EITHER door accepts — the
+    # scope is set INSIDE the shared `_tortoise_fts_query` by
+    # `state_intent.detect_state_question` — so `handler -> tortoise_fts_query ->
+    # enumerate_ended -> build_cypher` runs for either handler and the flag need not be
+    # passed at all. §13's row 45 therefore names BOTH doors, the row agrees with the
+    # predicate, and the discrepancy is GONE rather than papered over; do NOT "fix" it
+    # back by deleting the door the old cell forbade — that would restore a false claim
+    # about a door that answers the query.
     # So the floor names the CEILING's own constant: the arm is then exact in both
     # directions with ONE numeral to move when the table changes, and neither
     # direction can drift from the other. At the `21` this line carried on `main`,
@@ -3735,12 +3741,19 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # carries no SDK door and the MCP tool is the same reader's door. Rows 37 and 45 KEEP
     # one, at its live spelling: `write_knowledge_batch` (measured to reach `_ingest`) and
     # `search_knowledge` (measured to reach `ended.py::build_cypher` via `ended_scope`).
-    # A table change moves this numeral with the table — 21 -> 22 at `#14592`'s head
-    # (`cy-14593`), where row 46 contributed ONE cell occurrence of its own — and
-    # 22 -> 23 where row 45's cell names its SECOND door (`MCP tortoise_search`; the
-    # note above records the measurement that refuted the "not a door" reading). Both
-    # moves are CELL-OCCURRENCE moves: the distinct door set is 16 either way and the
-    # accepted-PAIR pin is 28 either way.
+    # A table change moves this numeral with the table — 21 -> 22 where row 46
+    # (`entity_reads.py::entity_relations`) arrived naming ONE door, the REST route
+    # `GET /v1/entities/{entity_id}/relations` (`#14682`'s fix, landed on `main` in
+    # `#14671` at `c1c8df1a3817`: the route handler calls the reader directly, so it is
+    # one reference inside the default hop budget) — and 22 -> 23 where row 45's cell
+    # names its SECOND door (`MCP tortoise_search`; the note above records the
+    # measurement that refuted the "not a door" reading). Both moves are
+    # CELL-OCCURRENCE moves: the distinct door set is 16 either way and the
+    # accepted-PAIR pin is 28 either way. ⚠️ The `21 -> 22` move is NOT this branch's:
+    # the earlier cut of this note read "at `#14592`'s head (`cy-14593`)", but row 46
+    # reached this tree through the merge with `origin/main`, which took it from
+    # `#14671`. This branch's own moves are the `22 -> 23` bump above and the row-45
+    # correction.
     assert attributed >= 23, (
         f"only {attributed} door attributions were attempted across the "
         f"customer-callable rows, and this arm cross-checks against NO fewer than 23 "
