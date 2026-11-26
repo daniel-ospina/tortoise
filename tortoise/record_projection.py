@@ -9045,9 +9045,11 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
         # from the exception's CLASS: `RecordProjectionError` is the base of
         # exactly those execution failures (`RecordStatementError`) AND of
         # store/config refusals raised after the connection is up (the
-        # tenant-GUC read-back, the cutover guard, a schema that is not on
-        # disk), so a class test would fold a broken role or a missing migration
-        # into "check the producer".
+        # tenant-GUC read-back, a bypassing role, the cutover guard), so a class
+        # test would fold a broken role into "check the producer".
+        # ⚠️ A schema that is NOT ON DISK is the opposite case and is called out
+        # BELOW: `table_columns()` runs inside the plan build, so it is stamped
+        # like any other plan-build refusal and its remedy is a redeploy.
         #
         # The marker is an ATTRIBUTE rather than a re-raise, deliberately: the
         # concrete class carries meaning its own callers depend on
