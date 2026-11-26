@@ -4681,7 +4681,7 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Restart your client, confirm the tools are actually there first, and then "
      "run a query.", True),
     # ⛔ DECLARED RESIDUAL, in the OTHER direction, and it is the one this cut's
-    # boundary actually produces: a coordinated imperative that opens with no
+    # boundary leaves OPEN: a coordinated imperative that opens with no
     # forward sequencer (`and run a query`) and a forward adverb outside the
     # sequencer set (`and finally run a query`) still FOLD into the predecessor,
     # so the clause-final `first` form (d) anchors on is spliced away and the
