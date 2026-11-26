@@ -41,7 +41,9 @@ from fastapi.testclient import TestClient  # noqa: I001
 
 import tortoise.supabase_control as sc
 from tortoise import abuse
-from tortoise.abuse import ALERT_TYPES, SupabaseAbuseStore, _alert_dict
+from tortoise.abuse import (
+    ALERT_TYPES, AbuseEngine, SupabaseAbuseStore, _alert_dict,
+)
 from tortoise.auth import lookup_hash
 from tests._http_fixtures import patched_tortoise_sdk
 from tests._verdict import verdict_client, verdict_async_client
@@ -65,7 +67,15 @@ def _seed_team(fake: FakeControlPlane, *, suspended=None, flagged=None):
     fake.seed("organizations", [{
         "id": TEAM, "name": "abuse-team", "tier": "free",
         "email": "owner@abuse.test", "graph_name": f"org_{TEAM}",
-        "max_users": 1, "max_graphs": 1, "ops_allowance": 10000,
+        "max_users": 1, "max_graphs": 1,
+        # #14687: the R1 fire level is now max(TORTOISE_ABUSE_POINT_THRESHOLD,
+        # ratio × the org's OWN allowance), so the fixture's allowance and its
+        # threshold have to describe ONE tier. The `env` fixture sets the
+        # threshold to 5 to make a 6-point burst fire; a realistic 10 000
+        # allowance would put the level at 5 000 (half of it) and no small-burst
+        # test could ever fire again. 8 keeps the tier floor REAL and non-zero
+        # while leaving the configured 5 as the level that governs.
+        "ops_allowance": 8,
         "graph_size_cap": 100000, "suspended_at": suspended,
         "flagged_at": flagged,
     }])
@@ -85,6 +95,67 @@ def _seed_team(fake: FakeControlPlane, *, suspended=None, flagged=None):
 @pytest.fixture
 def fake():
     return _seed_team(FakeControlPlane())
+
+
+def test_the_tier_read_is_the_real_allowance_column_and_it_moves_the_level(
+        notified, monkeypatch):
+    """#14687's tier-relative R1 level: the ONE production read, pinned by VALUE.
+
+    `AbuseEngine.point_threshold` returns `max(configured, ratio × allowance)`
+    and gets the allowance from `store.org_allowance(org_id)`, which
+    `SupabaseAbuseStore` answers out of `organizations.ops_allowance` through
+    `_org_field` — the store's one-column read of that row.
+
+    ⛔ WHY THIS TEST EXISTS, and why it is HERE rather than in `test_abuse.py`.
+    Every calibration arm over there drives `_TierStore`, a `MemoryAbuseStore`
+    subclass that ANSWERS the allowance itself, so NOTHING read the real store's
+    spelling of the column. A wrong or moved column there answers `None`, and
+    `point_tier_floor` treats `None` as this contract's own word for "cannot
+    answer" — it degrades to the configured ABSOLUTE level (the shipped, more
+    sensitive rule) and the whole tier-relative clause of #14687 goes inert
+    while every assertion stays green. Measured before this test existed:
+    mutating the column to `"ops_allowance_TYPO"` left
+    `tests/test_abuse.py tests/test_abuse_integration.py
+    tests/test_10156_alert_registers.py` at **329 passed**. The fixture's own
+    allowance is 8 against a configured threshold of 5, so the tier term
+    (`floor = 4`) cannot bind and a wrong read was indistinguishable from a
+    right one — which is exactly why the assertion below moves the ALLOWANCE
+    rather than trusting the fixture.
+
+    Also pinned: `None` for a missing org, never 0 — a 0 that reads as a tier
+    would be a fabricated measurement, and `0` is a real answer for some orgs.
+    """
+    store = SupabaseAbuseStore(_seed_team(FakeControlPlane()))
+    assert store.org_allowance(TEAM) == 8, (
+        "the real store did not read `organizations.ops_allowance` — a wrong "
+        "column answers None, which the engine reads as 'unknown tier' and "
+        "silently falls back to the absolute level")
+    assert store.org_allowance("no-such-org") is None, (
+        "a missing org must answer None (unknown), never a number")
+
+    monkeypatch.setenv("TORTOISE_ABUSE_POINT_THRESHOLD", "5")
+    monkeypatch.setenv("TORTOISE_ABUSE_POINT_WINDOW_S", "3600")
+    monkeypatch.setenv("TORTOISE_ABUSE_TIER_FLOOR_RATIO", "0.5")
+    monkeypatch.setenv("TORTOISE_ABUSE_CLEAR_RATIO", "0.5")
+
+    # The shipped fixture: allowance 8 -> floor 4, so the configured 5 governs.
+    assert AbuseEngine(store).point_threshold(TEAM) == 5, (
+        "an 8-credit allowance at ratio 0.5 is a floor of 4, so `max(5, 4)` "
+        "must stay the configured 5 — a HIGHER level here means the floor was "
+        "derived from something other than the allowance")
+
+    # A tier whose half-allowance exceeds the configured level: the level MUST
+    # come from the column read above, or a 6-unit burst flags a pro org.
+    tiered = _seed_team(FakeControlPlane())
+    tiered.tables["organizations"][0]["ops_allowance"] = 10_000
+    eng = AbuseEngine(SupabaseAbuseStore(tiered))
+    assert eng.point_threshold(TEAM) == 5_000, (
+        "the tier floor did not reach the level — a 10 000 allowance at "
+        "ratio 0.5 is 5 000, and `max(5, 5 000)` is 5 000")
+    eng.record_point_create(TEAM, 6)
+    assert SupabaseAbuseStore(tiered).org_state(TEAM)["flagged_at"] is None, (
+        "6 units/hour is 0.12% of a 5 000 level: a tiered org was flagged "
+        "anyway, which is exactly the false positive #14687 removes")
 
 
 @pytest.fixture
@@ -1190,9 +1261,22 @@ class TestAlertRegistersAndAcks:
     #: it cannot drift from what actually ships.
     @staticmethod
     def _detail_variants() -> tuple[dict, ...]:
+        # #14687 round-3 review: the numeric R1/R2 shapes were pinned ONLY as a
+        # hand-typed literal in `must_accept`, which is the drift class the
+        # neighbouring `_row_variants` docstring warns about — the shipped
+        # message could change and the fixture would keep asserting the old one.
+        # Both real shapes now render through `_alert_dict` here, so the
+        # property assertions (no human claim, no whole-state claim, the
+        # "nothing was disabled" shape) run over what actually ships.
         return ({"scope": "key", "id": "k-1", "count": 3, "ip": "1.2.3.4",
                  "country": "ES"},
                 {"scope": "team", "id": "org-1", "count": 3},
+                {"rule": "point_create", "count": 2309, "threshold": 500,
+                 "window_s": 3600, "surface": "Memory writes"},
+                {"rule": "point_create", "count": 51000, "threshold": 25000,
+                 "window_s": 3600, "surface": "Memory writes",
+                 "tier_relative": True},
+                # no numbers at all — an OLD row (item 1's honesty case)
                 {})
 
     #: `auth_ip`'s country is a ROW COLUMN, not a `details` key (``recent_alerts``
@@ -1422,6 +1506,14 @@ class TestAlertRegistersAndAcks:
             "Manage your team in Settings.",
             "Ask your security team to revoke the key.",
             "Ask your own security desk to revoke the key.",
+            # #14687: the shipped R1/R2 copy. It states the measurement (units,
+            # window, level) and the route, and it names no human — the property
+            # this fixture exists to hold, checked against the string a customer
+            # will actually read.
+            "Memory writes reached 2,309 units in the last 1 hour, against an "
+            "alert level of 500 units. This is informational; it did not "
+            "disable anything. If this activity isn't yours, review your API "
+            "keys in Keys.",
             # …and the same phrase form where the whole phrase is
             # CUSTOMER-DETERMINED. Note the reason carefully: `engineering` is
             # outside the staff vocabulary but `team` and `security` are INSIDE
@@ -1430,7 +1522,6 @@ class TestAlertRegistersAndAcks:
             # reject them.
             "Your engineering team reviewed this.",
             "Your security team reviewed this.",
-            "Suspicious activity flagged on this Organization",
             "Access from a new location: ES",
             "Access from a new location",
         ]
@@ -1502,11 +1593,15 @@ class TestAlertRegistersAndAcks:
                                 "created_at": "2026-09-25T17:19:05+00:00"})
         assert "review your API keys" in velocity["message"], velocity["message"]
         assert not self._claims(velocity["message"])
-        # …and the review row still says what it CAN know: what THIS alert did.
+        # …and the review row still says what it CAN know: what THIS alert did,
+        # in the numbers it recorded. #14687 replaced "It did not disable
+        # anything" with the same narrow claim in one clause shared with stage 1
+        # (one phrase for one fact) and kept the route the tier-relative level
+        # makes true.
         msg = _alert_dict({"event_type": "review_needed", "details": {},
                            "created_at": "2026-09-25T17:19:05+00:00"})["message"]
-        assert "It did not disable anything" in msg, msg
-        assert "support@premiselabs.co" in msg, msg
+        assert "did not disable anything" in msg, msg
+
         # Every RATE detector shares ONE shape (round-14 finding: recovery_velocity
         # was the only one without the informational clause and read as an
         # incident). Pinning the SHAPE rather than one type's phrase is what makes
@@ -1521,10 +1616,25 @@ class TestAlertRegistersAndAcks:
                                     "created_at": "2026-09-25T17:19:05+00:00"}
                                    ).get("message") or "")
             # A rate is a measurement, so the LABEL must not be an incident word
-            # and the MESSAGE must say nothing changed and offer a route.
+            # and the MESSAGE must state that nothing was DISABLED and offer a
+            # route. #14687 narrowed the phrase for the two rate rules that DO
+            # write a state marker (`flagged_at` -> `GET /v1/team` status
+            # "flagged"): a whole-state "did not change anything" would be
+            # contradicted by another field of the same API, so the property the
+            # pin holds is the true one — "nothing was disabled" — and either
+            # wording passes.
             assert not re.search(r"(suspicious|incident|compromis|breach|"
                                  r"attack)", m, re.I), (etype, m)
-            assert "did not change anything" in body, (etype, body)
+            if etype in (abuse.EVENT_FLAG, abuse.EVENT_REVIEW):
+                # #14687: these DO write a state marker (`flagged_at`), so the
+                # whole-state "did not change anything" is false for them and
+                # must not be accepted here (round-3 review: the `or` let a
+                # rewrite back to it pass green).
+                assert "did not disable anything" in body.lower(), (etype, body)
+                assert "did not change anything" not in body.lower(), (etype, body)
+            else:
+                assert ("did not change anything" in body.lower()
+                        or "did not disable anything" in body.lower()), (etype, body)
             assert ("keys" in body.lower() or "support@" in body.lower()), (
                 etype, body)
         # No WHOLE-STATE claim anywhere: the same panel can carry a suspension
@@ -1538,6 +1648,167 @@ class TestAlertRegistersAndAcks:
                 assert "nothing has been disabled" not in m.lower(), (etype, m)
                 assert "nothing was changed" not in m.lower(), (etype, m)
                 assert "nothing has changed" not in m.lower(), (etype, m)
+                # #14687 round-2 review: the SCAN was spelling-based, and the
+                # first attempt at this copy used a fourth spelling of the same
+                # whole-state claim ("Nothing was disabled") which sailed
+                # through. Unscoped forms are forbidden; the alert-scoped form
+                # ("it did not disable anything") is what the messages use.
+                assert "nothing was disabled" not in m.lower(), (etype, m)
+                assert "nothing is disabled" not in m.lower(), (etype, m)
+
+    def test_the_higher_limit_route_is_offered_only_when_the_level_IS_a_limit(
+            self):
+        """#14687 round-2 review (P2). The sustained alert's "if you need a
+        higher limit, contact support" was justified as true BECAUSE the level is
+        a share of the org's allowance — but that only holds when the tier floor
+        actually contributed. On the absolute detector constant (selfhost, no tier
+        registry, a cold start, ratio 0) the same sentence would be the untruth
+        this change exists to remove, so the route follows the recorded fact.
+
+        #14687 round-4 review: the clause must name the PERIOD as well as the
+        share. The allowance behind the level is
+        `included_write_ops_per_month` while `count` is a one-hour weight sum, so
+        "a share of this Organization's allowance" told the customer the level was
+        a per-window allowance — the comparison's one dimension it does not have.
+        RED before this fix: the clause carried no period at all."""
+        tier = _alert_dict({"event_type": "review_needed", "details": {
+            "count": 51_000, "threshold": 25_000, "window_s": 3600,
+            "surface": "Memory writes", "tier_relative": True}})
+        # #14687 round-4 review F1: the clause names the ALLOWANCE's period
+        # (monthly) and the WINDOW the measurement covers, so the customer is
+        # not told a monthly comparison is a per-window one.
+        assert ("a share of this Organization's monthly write allowance"
+                in tier["message"]), tier
+        assert "measured against 1 hour of activity" in tier["message"], tier
+        assert "contact support@premiselabs.co" in tier["message"], tier
+        absolute = _alert_dict({"event_type": "review_needed", "details": {
+            "count": 900, "threshold": 500, "window_s": 3600,
+            "surface": "Memory writes"}})
+        assert "higher limit" not in absolute["message"], absolute
+        assert "review your API keys" in absolute["message"], absolute
+    # ── #14687: the alert says why, and Acknowledge sticks ────────────────
+
+    def _seed_flag(self, fake, *, at, count=2309, threshold=500, window_s=3600,
+                   row_id=1):
+        """One R1 row exactly as the engine writes it (#14687)."""
+        fake.seed("abuse_events", [{
+            "id": row_id, "org_id": TEAM, "event_type": "flag",
+            "rule": "point_create",
+            "details": {"rule": "point_create", "count": count,
+                        "threshold": threshold, "window_s": window_s,
+                        "surface": "Memory writes"},
+            "created_at": at}])
+
+    def test_the_rate_alert_carries_the_numbers_it_was_computed_from(
+            self, env):
+        """#14687 item 1, on the endpoint the dashboard reads.
+
+        The engine recorded `{rule, count, threshold, window_s}` on every row and
+        `_alert_dict` dropped all of it, so the customer could only ever see a
+        label. The response must carry the NUMBERS (not just a `details` key)
+        and the message must render them — an assertion that only checks the key
+        exists would pass on `{}`.
+        """
+        self._owner(env)
+        self._seed_flag(env["fake"], at="2026-11-22T13:54:00+00:00")
+        try:
+            with verdict_client(env["app"]) as tc:
+                r = tc.get(f"/v1/team/alerts?org_id={TEAM}")
+            assert r.status_code == 200, r.text
+            row = r.json()["alerts"][0]
+            assert row["details"] == {"count": 2309, "threshold": 500,
+                                      "window_s": 3600,
+                                      "surface": "Memory writes"}, row
+            msg = row["message"]
+            assert "2,309" in msg, msg
+            assert "500" in msg, msg
+            assert "1 hour" in msg, msg
+            # The internal rule token stays off the customer surface, in the
+            # payload AND in the prose.
+            assert "point_create" not in row["details"]
+            assert "point_create" not in msg
+            # …and the row is now an OBSERVATION, not an incident.
+            assert row["register"] == "activity", row
+        finally:
+            env["app"].dependency_overrides.clear()
+
+    def test_an_alert_with_no_recorded_numbers_says_so(self, env):
+        """Honesty, on the same seam: an OLD row predates the plumbing and a
+        rule that measures something else may carry no numbers. The message then
+        states that it does not know — it never renders a placeholder `0` or an
+        invented count."""
+        self._owner(env)
+        env["fake"].seed("abuse_events", [{
+            "id": 1, "org_id": TEAM, "event_type": "flag",
+            "rule": "point_create", "details": {},
+            "created_at": "2026-11-22T13:54:00+00:00"}])
+        try:
+            with verdict_client(env["app"]) as tc:
+                row = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()["alerts"][0]
+            assert row["details"] == {}, row
+            msg = row["message"]
+            assert "did not record" in msg, msg
+            assert "None" not in msg and "0 units" not in msg, msg
+        finally:
+            env["app"].dependency_overrides.clear()
+
+    def test_an_acknowledged_rate_alert_sticks_when_the_next_window_fires(
+            self, env):
+        """#14687 item 3 — the reason "Acknowledge" never worked for this rule.
+
+        `_episode_acknowledged` refuses to cover a row that arrived after the
+        dismissal when the episode is in the INCIDENT register. `flag` was filed
+        there because the engine writes a `flagged_at` marker — but the marker is
+        re-derived from a rolling window, so the next window that crossed the
+        level landed after the ack and the dismissed episode came straight back.
+        Measured on the live table: `alert_ack` = 0 rows, ever.
+        """
+        self._owner(env)
+        self._seed_flag(env["fake"], at="2026-11-22T13:54:00+00:00")
+        try:
+            with verdict_client(env["app"]) as tc:
+                episode = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()[
+                    "alerts"][0]["episode"]
+                ack = tc.post("/v1/team/alerts/ack",
+                              json={"org_id": TEAM, "episode": episode})
+                assert ack.status_code == 200, ack.text
+                # The NEXT window fires 20 minutes later (inside the 3h episode
+                # gap): the SAME episode, measured again — not a new event.
+                self._seed_flag(env["fake"], at="2026-11-22T14:14:00+00:00",
+                                count=2600, row_id=2)
+                feed = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()["alerts"]
+            assert len(feed) == 1, feed
+            assert feed[0]["count"] == 2, feed
+            assert feed[0]["acked"] is True, (
+                "a rate measurement re-opened a dismissal")
+        finally:
+            env["app"].dependency_overrides.clear()
+
+    def test_a_new_SUSPENSION_still_re_opens_a_dismissal(self, env):
+        """The punitive path is untouched: a suspension is a real state change,
+        so a dismissal that predates it must NOT cover it. Pins that the register
+        move above did not disable the incident gate — only stopped applying it to
+        a rate."""
+        self._owner(env)
+        env["fake"].seed("abuse_events", [{
+            "id": 1, "org_id": TEAM, "event_type": "suspend", "details": {},
+            "created_at": "2026-11-22T13:54:00+00:00"}])
+        try:
+            with verdict_client(env["app"]) as tc:
+                episode = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()[
+                    "alerts"][0]["episode"]
+                assert tc.post("/v1/team/alerts/ack",
+                               json={"org_id": TEAM,
+                                     "episode": episode}).status_code == 200
+                env["fake"].seed("abuse_events", [{
+                    "id": 2, "org_id": TEAM, "event_type": "suspend",
+                    "details": {},
+                    "created_at": "2026-11-22T14:14:00+00:00"}])
+                feed = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()["alerts"]
+            assert feed[0]["acked"] is False, (
+                "a second suspension was absorbed by a dismissal that never saw it")
+        finally:
+            env["app"].dependency_overrides.clear()
 
     def test_only_owner_or_admin_may_acknowledge(self, env):
         """An ack hides a security row from the whole org — that is a

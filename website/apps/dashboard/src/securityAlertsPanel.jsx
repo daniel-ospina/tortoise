@@ -11,15 +11,16 @@
 // WHAT IT MUST NOT DO, because the old inline block did: render an incident
 // heading over an observation. The incident register's heading and lead are
 // emitted ONLY when that register has rows; the activity register has its own
-// muted heading and states that nothing was changed. An empty feed renders
+// muted heading and states that nothing was DISABLED (a `flag` row does write
+// `flagged_at`, so "changed" is not the verb — see `ACTIVITY_LEAD`). An empty feed renders
 // nothing at all (the panel is unmounted by the caller), so a customer with no
 // history does not get an empty "Security alerts" box implying something.
 //
 // Copy for the register headings lives in `securityAlerts.js` (with the
 // decisions and their tests). The per-row sentence is the SERVER's
 // (`/v1/team/alerts` → `message`), and every customer-visible statement that
-// nothing was changed BY THIS ALERT is server-authored. The register leads carry
-// their own, SCOPED version ("nothing was disabled, changed or locked by them") —
+// THIS ALERT DISABLED NOTHING is server-authored. The register leads carry
+// their own, SCOPED version ("nothing was disabled, throttled or locked by them") —
 // a lead cannot quote the server's fact, because it describes a whole register
 // rather than one row, and an unscoped copy of that fact is false the moment a
 // `suspend` row renders beside it (round-23 review finding: this comment claimed

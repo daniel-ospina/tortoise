@@ -57,28 +57,24 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` merged in, plus THIS lane's own row
-# (`tests/test_13450_ep_position_axis_participation.py`, `core`, at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`), PLUS every row `main` carries at this base — the verb packs seven shards
-# at 827.2 s (a, b, c, d, i, j, k) and four at 827.3 s (e, f, g, h), so `ceil(827.3/60 x 2)` = 28 m
-# governs (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.3 = 2.0307), so the two agree
-# by construction rather than by a hand re-read.
-# ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
-# own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
-# figures stay on the commit that measured them. The delta is measurable and small: `fast_pool()`
-# holds 1339 files at this head against 1338 on `main`, read by running the verb on one manifest per
-# side (`origin/main`'s blob and this tree's), and the ONE addition this lane brings is
-# `tests/test_13450_ep_position_axis_participation.py` — the row that moved the partition off
-# `main`'s own — with nothing `main` carries missing from this tree. ⛔ Every OTHER row this tree
-# carries is `main`'s at this head, NOT this lane's (`#14597`'s expansion-fusion row, `#14548`'s
-# residue RATCHET — `tests/test_sdk_privatise_sweep.py`, the one `core` row here whose weight is
-# NOT the flat 2.0 s — `#14607`'s `tests/test_mcp_selfcheck.py` and
-# `tests/test_recall_neighborhood.py`, and the rest): each landed before this merge, and reading one
-# of them as this lane's delta would attribute a partition move to a row that did not cause it. The
-# name lists above are what the guard COMPARES against the live emission
-# (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
-# about THIS head — a fold re-derives them with the verb, it never carries them.
+# reader of the prose can see. On THIS tree — `origin/main` `c1c8df1a3817` folded in, plus THIS
+# lane's own row (`tests/test_14700_capture_in_flight_typed_refusal.py`, `api`, at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`) — the verb packs nine shards at 827.4 s (a, c, d, e, f, h, i, j, k) and
+# two at 827.5 s (b, g), so `ceil(827.5/60 x 2)` = 28 m governs (a shard's job-level wall clock is
+# the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
+# `watchdog_headroom: 2.03` (1680 / 827.5 = 2.0302), so the two agree by construction rather than
+# by a hand re-read.
+# ⛔ THAT PAIR IS THIS TREE'S ALONE, and the move is measurable: `fast_pool()` holds 1340 entries
+# here against 1339 on `origin/main` `c1c8df1a3817`, both read by loading each tree's OWN manifest
+# through the verb, and the set difference is exactly ONE entry —
+# `tests/test_14700_capture_in_flight_typed_refusal.py`, this PR's (`#14700`) own suite. `main`
+# carries nothing this tree lacks. ⛔ Every other row this tree carries is `main`'s at this head,
+# NOT this PR's; counting one as this PR's would contradict the 1340 − 1339 = 1 the two readings
+# give. The name lists above are what the guard COMPARES against the live emission
+# (`test_the_fast_shards_header_block_states_the_measured_emission`), and
+# `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
+# derivation, so they are a graded claim about THIS head — re-derived with the verb on every fold,
+# never carried.
 # ⛔ THIS BLOCK ARRIVED SPLICED AGAIN AT THE `origin/main` `4b2fba3e8a` MERGE, and the repair is
 # recorded rather than hidden: `config/ci-surfaces.yml` carries a `merge=union` driver, so the fold
 # applied BOTH parents' derivations — one naming `origin/main` `29bb16b5b6` with this branch's own
@@ -87,6 +83,10 @@ version: 1
 # describes this head. Neither side is picked: the sentence above is a fresh re-derivation with
 # `--emit-push-matrix` on this merged tree, and both parents' copies are deleted rather than
 # re-pointed.
+# ⛔ IT ARRIVED SPLICED ONCE MORE ON THIS LANE'S REBASE ONTO `origin/main` `c1c8df1a3817` — the same
+# driver, the same failure — and this time NEITHER copy described this tree: both stated the
+# 827.2/827.3 partition and a `fast_pool()` of 1339, against the 827.4/827.5 and 1340 the verb emits
+# here. Neither copy was picked either; the paragraph above is a third fresh re-derivation.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
@@ -1329,6 +1329,18 @@ surfaces:
   # matrix and selects this file regardless of any row (the same argument #10749 records
   # for `mcp_server.py`).
   - test_12992_capture_capacity_typed_refusal.py
+  # #14700: the SIBLING refusal on the same route — the in-flight 409 now carries a
+  # `code`/`message`/`retry_after` body and the shared `_is_capture_in_flight_refusal`
+  # carve-out key. `api` ONLY, on the measured reasoning #12992 records directly above:
+  # the only product module this suite exercises is `tortoise/hosted_api.py` (predicate,
+  # body builder, raise site, and the REST carve-out driven through a `TestClient`), an
+  # exact `api` SOURCE_PATTERN that REPLACES the `core` fallback. The MCP half it pins by
+  # source is `tortoise/mcp_server.py`, a `SHARED_MODULE` whose own diff forces the FULL
+  # matrix, so no `core` row is needed for it either. ⛔ This row is a MANIFEST GATE, not
+  # a convenience: an unregistered test file reds `--integrity` AND is selected by
+  # nothing, so this suite's guards would run nowhere in CI (measured on this PR's head:
+  # `❌ manifest drift: ['test_14700_capture_in_flight_typed_refusal.py']`).
+  - test_14700_capture_in_flight_typed_refusal.py
   # #10749: the health tail must fit INSIDE the transport wait bound. Dual-registered
   # for the same reason as #10602 directly above and #3834 before it: the publish sites
   # live on BOTH halves — `setup_timeout_clamped` / `setup_timeout_clamped_s` on the
@@ -16039,6 +16051,11 @@ durations:
   test_12184_state_ranker_routing.py: 0.1
   test_12941_read_your_writes.py: 0.2
   test_12992_capture_capacity_typed_refusal.py: 0.1
+  # #14700 (new file): a PR-added file takes the header's flat `DEFAULT_FAST_WEIGHT`,
+  # not a hand-picked reading — there is no junit census for a file that did not yet
+  # run in CI. `--integrity` cannot see a missing row, so this line is what records the
+  # weight; re-point it from a real junit reading once CI has measured the file.
+  test_14700_capture_in_flight_typed_refusal.py: 2.0
   test_13084_demand_census.py: 0.1
   test_13084_ram_cap.py: 2.4
   test_13084_ram_window_census.py: 0.1
