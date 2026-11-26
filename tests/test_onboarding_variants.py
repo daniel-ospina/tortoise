@@ -2361,6 +2361,20 @@ def _negated_observation_only(clause: str) -> bool:
     # PREDICATE was too narrow — form (e) ("only once the tools are actually
     # there and see no errors") carries no confirmation verb at all, so it
     # stayed GREEN (measured).
+    # ⛔ A CONFIRMATION PREDICATE AFTER THE NEGATED OBSERVATION IS STILL A
+    # CONFIRMATION. The prefix test asked only about what is LEFT of the match, so
+    # a clause that states the negated observation FIRST and the confirmation
+    # second was classified as observation-only and skipped: "Restart your client
+    # after seeing no errors and confirming the tools are actually there" was
+    # GREEN while its `after seeing the build output and confirming …` twin is RED
+    # (#14679 review cycle 36, measured). Deleting the span instead does not help
+    # — form (a) needs the predicate in the connective's own clause, so the
+    # sentence stays GREEN either way; the suffix must be asked directly. The
+    # observation VERB is what the skip is scoped to, so this is a predicate test,
+    # not a form match (a form would need an object that the deletion removed).
+    if re.search(r"\b(?:confirm|check|verif(?:y|ies|ied|ying)"
+                 r"|ensur(?:e|es|ed|ing))\w*\b", clause[neg.end():]):
+        return False
     remainder = clause[: neg.start()]
     return not any(pattern.search(remainder) for pattern in _INVERSION_FORMS)
 
@@ -2753,6 +2767,20 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
         pre_statements
         and not cue_opens_a_statement
         and _CUE_UNDER_INVERTING_SUBORDINATE_RE.search(pre_statements[-1]))
+    # ⛔ WHEN THE CUE IS GOVERNED AND A BREAK GLYPH SITS IMMEDIATELY AFTER IT, the
+    # post-cue clause list is EMPTY, so form (f) — which the pre-cue side only
+    # reaches through a post-cue clause — graded nothing and the confirmation the
+    # governor inverts was never read: every non-comma twin of the declared-RED
+    # "Before you restart your client, confirm the tools are actually there" was
+    # GREEN (`;`, `:`, spaced `-`, `—`, `Until …:`), and the colon's own
+    # rationale ("unambiguously forward") is falsified by exactly that shape
+    # (#14679 review cycle 36, measured). The governance is known here, so the
+    # statement after the break is graded in its place.
+    if cue_under_inverting_subordinate and not ",".join(post_clauses).strip():
+        _rest = _STATEMENT_BREAK_RE.split(after.lstrip(" \t,…"), maxsplit=1)
+        if len(_rest) > 1 and _rest[1].strip():
+            post_clauses = [c.strip().lstrip(_PRE_CUE_PREFIX).strip()
+                            for c in _rest[1].split(",")]
     for clause in post_clauses:
         # A clause led by a FORWARD sequencer continues the cue's own
         # predication in the forward direction: "then once the tools are listed
@@ -3997,6 +4025,32 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "there.", False),
     ("Before you continue… restart your client, confirm the tools are actually "
      "there.", False),
+    # ── CYCLE 36, second half (#14679's review at `4aa1fc78`): two more measured
+    # holes, both false PASSes.
+    # (1) the observation skip asked only what is LEFT of a negated observation,
+    # so a clause that states the observation FIRST and the confirmation SECOND
+    # was classified as observation-only and skipped:
+    ("Restart your client after seeing no errors and confirming the tools are "
+     "actually there.", True),
+    # (2) when a `before|until|by the time` governor is known AND a break glyph
+    # sits immediately after the cue, the post-cue list is empty, so form (f) —
+    # which only the post-cue side reaches — graded nothing. Every non-comma
+    # twin of the declared-RED governor row was GREEN, and the colon's own
+    # rationale ("unambiguously forward") is falsified by exactly that shape:
+    ("Before you restart your client; confirm the tools are actually there.",
+     True),
+    ("Before you restart your client: confirm the tools are actually there.",
+     True),
+    ("Before you restart your client -  confirm the tools are actually there.",
+     True),
+    ("Before you restart your client —  confirm the tools are actually there.",
+     True),
+    ("Until you restart your client: confirm the tools are actually there.",
+     True),
+    # …and the forward colon shapes stay GREEN (no governor, so the guard does
+    # not fire):
+    ("Restart your client: after confirming the tools are actually there, run "
+     "`tortoise mcp-status`.", False),
     # ⛔ THE WALK-BACK MUST NOT RED FORWARD COPY. A bare sequencer sequences
     # whatever precedes it, so the clause it defers to is graded — and when that
     # clause carries no tools-appear claim, it stays GREEN. These rows are what
