@@ -681,6 +681,71 @@ def test_a_shed_never_clears_an_admitted_latch(monkeypatch):
         "the queued worker must still file its incident")
 
 
+def test_a_pre_reset_worker_cannot_spend_a_later_admissions_reservation(monkeypatch):
+    """Pin the GENERATION guard on ``_RESERVED`` releases.
+
+    The autouse isolation resets this module between tests, and its teardown join
+    cannot speak for a worker whose handle was reaped past ``_INFLIGHT_STALE_S``
+    (the fixture documents that limit). That worker's release therefore lands
+    during a LATER test, and an unowned ``_RESERVED -= 1`` spends a reservation the
+    later test is holding — measured on PR #14645, shard ``test (b)``:
+    ``test_a_shed_never_clears_an_admitted_latch`` failed its own "the bound is
+    saturated" precondition with ``assert 4 == 5`` because the PREVIOUS test's
+    wedged worker released into it (teardown of that previous test observed
+    ``_RESERVED=1, _INFLIGHT=1`` — nothing ``join_operator_alerts`` can wait for).
+
+    The pin: a PRE-reset admission's release leaves a post-reset reservation intact.
+    Reverting the guard reds this arm with ``_RESERVED == 0`` — the shed bound would
+    then under-count and admit past what the pool carries.
+    """
+
+    class _BlockThenRecord:
+        def __init__(self, ev):
+            self.ev = ev
+            self.calls: list[tuple[str, str]] = []
+            self.entered = threading.Semaphore(0)
+
+        def open_incident_state(self, kind, org_id="", detail=None):
+            self.entered.release()
+            self.ev.wait(timeout=30)
+            self.calls.append((kind, org_id))
+            return OpenOutcome.FILED
+
+    old_gate, new_gate = threading.Event(), threading.Event()
+    old_store = _BlockThenRecord(old_gate)
+    new_store = _BlockThenRecord(new_gate)
+
+    monkeypatch.setattr(oa, "alert_store", lambda: old_store)
+    old_fut = oa.alert_operator(_KIND, "org-pre-reset", {})
+    assert old_fut is not None
+    assert old_store.entered.acquire(timeout=10), (
+        "precondition: the pre-reset worker is inside the store")
+
+    # Exactly what the autouse isolation does between two tests.
+    oa.reset_operator_alert_state_for_tests()
+
+    monkeypatch.setattr(oa, "alert_store", lambda: new_store)
+    assert oa.alert_operator(_KIND, "org-post-reset", {}) is not None
+    assert new_store.entered.acquire(timeout=10), (
+        "precondition: the post-reset worker is inside the store")
+    with oa._LOCK:
+        assert oa._RESERVED == 1, "precondition: exactly one live reservation"
+
+    try:
+        # Let the PRE-reset worker finish. `_run`'s `finally` releases before the
+        # future is marked done, so `result()` deterministically waits past that
+        # release — no sleep, no polling.
+        old_gate.set()
+        old_fut.result(timeout=10)
+        with oa._LOCK:
+            assert oa._RESERVED == 1, (
+                "a pre-reset worker's release must not spend a post-reset "
+                "admission's reservation")
+    finally:
+        new_gate.set()
+        oa.join_operator_alerts()
+
+
 def test_a_stalled_resolver_does_not_clear_a_successors_latch(monkeypatch):
     """Pin the token guard on the ``store is None`` path.
 
