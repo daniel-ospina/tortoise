@@ -86,10 +86,13 @@ version: 1
 # own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
 # figures stay on the commit that measured them. The delta is measurable and small: `fast_pool()`
 # holds 1340 files at this head against 1339 on `main`, read by running the verb on one manifest per
-# side (`origin/main`'s blob and this tree's), and the ONE addition this lane brings is
-# `tests/test_13450_ep_position_axis_participation.py` — the row that moved the partition off
-# `main`'s own — with nothing `main` carries missing from this tree. ⛔ Every OTHER row this tree
-# carries is `main`'s at this head, NOT this lane's (`#14597`'s expansion-fusion row, `#14548`'s
+# side (`origin/main`'s blob and this tree's), and the ONE addition this change brings is
+# `tests/test_own_site_fragment_targets.py` — registered under BOTH `core` and `onboarding`, at the
+# flat 2.0 s `DEFAULT_FAST_WEIGHT`, so the row that moved the partition off `main`'s own is the row
+# this diff actually added — with nothing `main` carries missing from this tree. ⛔ Every OTHER row
+# this tree carries is `main`'s at this head, NOT this change's (`#13450`'s
+# `tests/test_13450_ep_position_axis_participation.py` is on `origin/main` at this base and did NOT
+# move here; `#14597`'s expansion-fusion row, `#14548`'s
 # residue RATCHET — `tests/test_sdk_privatise_sweep.py`, the one `core` row here whose weight is
 # NOT the flat 2.0 s — `#14607`'s `tests/test_mcp_selfcheck.py` and
 # `tests/test_recall_neighborhood.py`, and the rest): each landed before this merge, and reading one
@@ -3015,7 +3018,14 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
-  - test_own_site_fragment_targets.py
+  - test_own_site_fragment_targets.py  # DUAL-REGISTERED with `onboarding` below, and BOTH rows
+  # are needed: a named-surface match REPLACES the `core` fallback (`.github/workflows`/this map's
+  # own `:2146`, `:10741`), and a website-only diff (`website/docs.html`, `website/faq.html`,
+  # `website/apps/dashboard/src/*`, `website/functions/*`, the pasted `SKILL.md` copies) selects
+  # `onboarding`, NOT `core`. Measured at this head: `--changed-files website/docs.html` →
+  # `surfaces: ['onboarding']` with this file ABSENT from `test_files`. Without this row the guard
+  # never ran on the diffs that own its inputs, so deleting `id="appeal"` from `docs.html` in a
+  # website-only PR would merge green and only `main`'s push matrix would red afterwards.
 
   # #14592 Phase A: the REST read parity suite (`/v1/objects`, `/v1/subjects`,
   # `/v1/sources`, `/v1/entities/{id}/relations`, `/v1/entities/{id}/belief`).
@@ -10571,6 +10581,10 @@ surfaces:
   # the `api` entry above).
   - test_9121_onboarding_residual_pins.py
   onboarding:
+  - test_own_site_fragment_targets.py  # the OTHER half of the dual registration above: every tree
+  # this guard reads on the website side selects `onboarding`, so this row is what makes the guard
+  # run on the diffs that can break it. `_html_links.extract_element_ids` and every `website/` read
+  # are hermetic (files only), which is why `core` is also safe.
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #9572 review P2-2 (round 9): MULTI-REGISTERED with `core` and `api`, for the
   # same reason as the `api` arm — `test_selfhost_seed_surface_does_not_fabricate_a_kind`

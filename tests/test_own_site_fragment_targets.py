@@ -33,23 +33,42 @@ WHAT IT READS (and why each shape is here):
   * markdown under ``tortoise/`` and ``website/apps/dashboard/public/skills/``
     — ``[text](url#frag)`` links and ``<url#frag>`` autolinks, which are how
     the onboarding copies carry ``#chatgpt``.
+  * ``website/functions/**/*.ts`` — every quoted own-host URL on a non-comment
+    line. The blog renderer emits the pricing link into every page it writes
+    (``blog/_lib.ts``), so a tree that skipped this one would miss a link with
+    as many served copies as the blog has posts.
 
 RESOLUTION. ``website/_redirects`` + ``website/functions/_middleware.ts`` decide
-which file serves a path (``/tortoise`` → ``product.html``, ``/docs`` and
-``/tortoise/docs`` → ``docs.html``, and so on), and a browser PRESERVES the
-fragment across a redirect whose target carries none — which is why
-``/product.html#pricing`` was still dead after that path 301'd to ``/``. The
-table below is that map, spelled out rather than derived: deriving it means
-parsing a TS middleware branch, and an unmapped path FAILS here (with the page
-and the path in the message) instead of passing quietly, so adding a page forces
-this table to be taught.
+which file serves a ``(host, path)`` PAIR — the host is half the answer, and a
+table keyed on the path alone is a false-green machine:
+``premiselabs.co/`` is the COMPANY page (``index.html``) while
+``tortoise.premiselabs.co/`` 301s onto ``/tortoise`` (``product.html``), so a
+host-blind ``/`` → ``product.html`` would pass a
+``https://premiselabs.co/#pricing-section`` that lands on a page declaring no
+such id. A browser PRESERVES the fragment across a redirect whose target carries
+none — which is why ``/product.html#pricing`` was still dead after that path 301'd
+away. The table below is that map, spelled out rather than derived: deriving it
+means parsing a TS middleware branch, and an UNMAPPED path FAILS here (with the
+page and the path in the message) instead of passing quietly, so adding a page
+forces this table to be taught.
 
-LIMIT, declared rather than discovered: an id rendered at runtime by a
-``setAttribute``/``id={…}`` expression is invisible to a static read. The
-dashboard's ``#settings-memory-heading`` is a literal ``id=`` in ``main.jsx``
-today, so it IS seen; the day a fragment is written only that way, this test
-goes quiet about it, and that is the same class one level in — do not read a
-green run as "no dynamic ids exist".
+RESIDUALS, declared rather than discovered — do not read a green run as more
+than it is:
+  * an id rendered at runtime by ``setAttribute``/``id={…}`` is invisible to a
+    static read;
+  * a fragment assembled at runtime is invisible too — ``f"{SITE}/docs#appeal"``
+    and ``BASE + "#appeal"`` leave a literal with no host, so ``_OWN_URL`` never
+    matches it. The ``abuse_url()`` default is a whole literal, which is why this
+    class is visible at all;
+  * a DASHBOARD same-page link is not read. The dashboard's anchors are built
+    from constants (``MEMORY_SOURCES_SECTION_ID = 'settings-memory-heading'`` in
+    ``overviewEmptyAction.js`` → ``id=`` in ``main.jsx``), and mapping a
+    single-page app's ``href`` to the id set of the module that renders it is a
+    different mechanism. Only ``website/*.html`` gets same-page resolution;
+  * ``page_ids()`` unions the parsed ids with a raw regex for legacy
+    ``<a name="…">``, and a raw regex matches inside a comment, a ``<script>``
+    body or an inert ``<template>``. There is no ``<a name=`` under ``website/``
+    today, so the arm is dead; when one appears it is the false-pass direction.
 """
 from __future__ import annotations
 
@@ -67,40 +86,54 @@ from _html_links import extract_element_ids  # noqa: E402
 
 OWN_HOSTS = ("premiselabs.co", "www.premiselabs.co", "tortoise.premiselabs.co")
 
-#: path (no fragment, no query) → the page file that serves it.
+#: The retired-but-permanent host. `_middleware.ts` 301s it onto the PRODUCT
+#: PREFIX, so its ROOT is `/tortoise` (`product.html`) — NOT the company page
+#: `premiselabs.co/` serves.
+TORTOISE_HOSTS = ("tortoise.premiselabs.co",)
+
+#: company host + path (no fragment, no query) → the page file that serves it.
 #:
-#: ``_middleware.ts``: the product document has ONE canonical address,
-#: ``premiselabs.co/tortoise``, served by a rewrite onto ``product.html``; the
-#: turtle host root and every ``/product``, ``/product.html`` spelling collapse
-#: onto it. ``/docs`` and ``/docs.html`` are the docs page (``_redirects`` 301s
-#: the ``.html`` spelling to the clean one), and ``/tortoise/docs`` is the same
-#: document under the product prefix.
+#: ``_middleware.ts``: ``premiselabs.co/`` is the COMPANY page (``index.html``);
+#: the product document has ONE canonical address, ``premiselabs.co/tortoise``,
+#: served by a rewrite onto ``product.html``; ``/docs`` and ``/docs.html`` are the
+#: docs page (``_redirects`` 301s the ``.html`` spelling to the clean one).
+#: ``PRODUCT_PAGES`` is also served under the ``/tortoise`` prefix, so every page
+#: it names carries BOTH spellings here — a table holding only one would call the
+#: other unmapped, and `website/faq.html` already links
+#: ``/tortoise#pricing-section``.
 PATH_TO_PAGE = {
-    "/": "product.html",
+    "/": "index.html",
     "/tortoise": "product.html",
     "/product": "product.html",
     "/product.html": "product.html",
     "/docs": "docs.html",
     "/docs.html": "docs.html",
     "/tortoise/docs": "docs.html",
+    "/tortoise/docs.html": "docs.html",
     "/tortoise/faq": "faq.html",
     "/faq": "faq.html",
     "/contact": "contact.html",
     "/tos": "tos.html",
     "/privacy": "privacy.html",
     "/license": "license.html",
+    "/tortoise/license": "license.html",
     "/security": "security.html",
+    "/tortoise/security": "security.html",
     "/self-hosted": "self-hosted.html",
+    "/tortoise/self-hosted": "self-hosted.html",
     "/investors": "investors.html",
+    "/tortoise/investors": "investors.html",
+    "/design-partners-intro": "design-partners-intro.html",
+    "/tortoise/design-partners-intro": "design-partners-intro.html",
     "/dpa": "dpa.html",
 }
 
 _OWN_HOSTS = "|".join(re.escape(h) for h in OWN_HOSTS)
 
 _OWN_URL = re.compile(
-    rf"https?://(?:{_OWN_HOSTS})/(?P<path>[^\"'\s)>`#]*)#(?P<frag>[^\"'\s)>`#]+)"
+    rf"https?://(?P<host>{_OWN_HOSTS})/(?P<path>[^\"'\s)>`?#]*)#(?P<frag>[^\"'\s)>`#]+)"
 )
-_HREF_ATTR = re.compile(r"""href=(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|\{(?P<expr>[^}]*)\})""")
+_HREF_ATTR = re.compile(r"""href=(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')""")
 _JS_STR = re.compile(r"""["'`](?P<url>[^"'`]*#[^"'`]*)["'`]""")
 _MD_LINK = re.compile(r"\]\((?P<url>https?://[^)\s#]+#[^)\s]+)\)")
 _MD_AUTOLINK = re.compile(r"<(?P<url>https?://[^>\s#]+#[^>\s]+)>")
@@ -120,8 +153,15 @@ def page_ids(name: str) -> set[str]:
     return _PAGE_ID_CACHE[name]
 
 
-def resolve(path: str) -> str | None:
-    """The page file serving ``path``, or None when the path is one we must learn.
+def resolve(host: str, path: str) -> str | None:
+    """The page file serving ``(host, path)``, or None when it is one we must learn.
+
+    The HOST is half the answer: `premiselabs.co/` is the company page while
+    `tortoise.premiselabs.co/` 301s onto `/tortoise`, so a path-only table would
+    pass `https://premiselabs.co/#pricing-section` against `product.html` — a
+    page a browser never shows for that URL. `_middleware.ts` moves the retired
+    host onto the product prefix before the static rules run, so that is where
+    this maps it too.
 
     The table is the ONLY answer, deliberately. Derived fallbacks (`path +
     ".html"`, then the path's last segment) were removed: they answer a
@@ -131,6 +171,8 @@ def resolve(path: str) -> str | None:
     An unmapped path is `None`, and the caller FAILS naming it, which is what
     makes adding a page force this table to be taught.
     """
+    if host in TORTOISE_HOSTS:
+        path = "/tortoise" + ("" if path == "/" else path)
     return PATH_TO_PAGE.get(path)
 
 
@@ -140,6 +182,12 @@ def own_site_targets() -> list[tuple[str, int, str, str]]:
 
     for py in sorted(REPO.glob("tortoise/**/*.py")):
         source = py.read_text(encoding="utf-8", errors="replace")
+        if not any(h in source for h in OWN_HOSTS):
+            # `ast.parse` over every module in the package costs ~18 s on its own
+            # (measured), and this file packs at the map's flat 2.0 s default.
+            # A file that cannot contain an own-host URL is not parsed at all, so
+            # the weight the map books is not a fiction.
+            continue
         tree = ast.parse(source, filename=str(py))
         docstrings = set()
         for node in ast.walk(tree):
@@ -182,6 +230,18 @@ def own_site_targets() -> list[tuple[str, int, str, str]]:
                 if match:
                     found.append((str(page.relative_to(REPO)), lineno, match.group(0), match.group("frag")))
 
+    for fn in sorted((WEBSITE / "functions").rglob("*.ts")):
+        if not fn.is_file():
+            continue
+        for lineno, line in enumerate(fn.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            stripped = line.lstrip()
+            if stripped.startswith(("//", "*", "/*")):
+                continue
+            for literal in _JS_STR.finditer(line):
+                match = _OWN_URL.search(literal.group("url"))
+                if match:
+                    found.append((str(fn.relative_to(REPO)), lineno, match.group(0), match.group("frag")))
+
     md_roots = [REPO / "tortoise", WEBSITE / "apps" / "dashboard" / "public" / "skills"]
     for root in md_roots:
         if not root.is_dir():
@@ -203,10 +263,11 @@ def test_emitted_own_site_fragments_resolve_to_a_declared_id():
     dead: list[str] = []
     unmapped: list[str] = []
     for site, lineno, url, frag in targets:
-        path = "/" + _OWN_URL.search(url).group("path")
-        page = resolve(path)
+        match = _OWN_URL.search(url)
+        path = "/" + match.group("path")
+        page = resolve(match.group("host"), path)
         if page is None:
-            unmapped.append(f"{site}:{lineno}  {url}  — path not in PATH_TO_PAGE")
+            unmapped.append(f"{site}:{lineno}  {url}  — no page serves {match.group('host')}{path}")
             continue
         if frag not in page_ids(page):
             dead.append(f"{site}:{lineno}  {url}  — {page} declares no id={frag!r}")

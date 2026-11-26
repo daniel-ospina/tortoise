@@ -23,7 +23,9 @@ So the assertions here are on the ARTIFACT (the invite email's own body, the
 The siblings named on #11767 are pinned too: the CORS allowlist that must KEEP
 the retired origin with a recorded removal trigger, the two Supabase edge
 functions whose public allowlists already carry both hosts, and the appeal URL
-whose host moved while its dead `#appeal` fragment did not (#11939).
+whose host moved while its `#appeal` fragment did not — the fragment has since
+been given a target by #11939 (`website/docs.html`), and
+`tests/test_own_site_fragment_targets.py` is the guard for that class.
 
 ⛔ #11767's items 4 and 5 are IN THIS FILE'S SURFACE: the dashboard landing
 pages, the blog origin, and the dashboard's docs links used to spell the retired
