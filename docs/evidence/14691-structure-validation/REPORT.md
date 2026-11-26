@@ -367,7 +367,7 @@ committed its own probe and write-up into this bundle:
 
 | path | what it is |
 |---|---|
-| `verify_independent.py` | its probe — depth-2 `tortoise_recall(mode="subgraph")` per declared name, endpoint types and edge directions read from the returned `{nodes, edges}`, every id in the ingest receipt resolved with `tortoise_get_entity` |
+| `verify_independent.py` | its probe — depth-2 `tortoise_recall(mode="subgraph")` per declared name, endpoint types and edge directions read from the returned `{nodes, edges}`, every id in the ingest receipt resolved with `tortoise_get_entity`. ⚠️ **A re-runnable RE-MEASUREMENT in its own report format — NOT the producer of the committed artifact** (that file's `measured_by` names the peer's `/tmp` probes; the two report shapes are disjoint beyond `graph`). §8 records the same split |
 | `out/t6-independent-verification.json` | its raw measurement |
 | `VERIFICATION-independent.md` | its write-up (**not** this report — the primary record) |
 | `out/t6-quote-audit.json` | its quote-fidelity audit |
@@ -412,7 +412,6 @@ measurement. It is also the process fact worth carrying back: the pre-dispatch c
 | `VERIFICATION-independent.md` | that lane's write-up — not the primary record | **not this bundle's producer** — §7 |
 | `out/t6-independent-verification.json` | its raw measurement | **not this bundle's producer** — §7 |
 | `out/t6-quote-audit.json` | its quote-fidelity audit (11 verbatim / 27 paraphrase / 12 not in corpus) | **not this bundle's producer** — §7 |
-| `out/t6-independent-verification.json` | a second lane's independent probe of the same graph (§7) | **not this bundle's producer** — see §7 |
 | `out/events.jsonl` (**not committed**) | the SDK event log, scratch, reproducible via `run.sh` | `run_ingest.py` |
 
 ---

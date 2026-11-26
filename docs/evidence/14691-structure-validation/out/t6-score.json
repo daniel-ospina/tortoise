@@ -1209,6 +1209,12 @@
       }
     ],
     "declared_structure_untraceable": [],
+    "structural_kind_untraceable": [],
+    "untraceable_counts": {
+      "all_entity_names": 2,
+      "structural_kinds": 0,
+      "declared_structure": 0
+    },
     "entity_names_checked": 35,
     "relations_not_co_stated": [],
     "relations_not_co_stated_at_SENTENCE_scope": 8,

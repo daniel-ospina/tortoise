@@ -183,11 +183,20 @@ def _same_name(got: str, want: str) -> str | None:
     reports a MISSING edge where the edge exists (and that is a scoring bug, not
     a finding) — so the prefix arm exists, and the variance it tolerates is
     reported separately as the naming observation it is.
+
+    ⛔ THE ARM IS ONE-DIRECTIONAL: the REPORTED name may be the LONGER one. The
+    reverse arm (`want.startswith(got)`) was removed because it bought nothing
+    the data needs and cost the only check that guards a COLLAPSE — measured, a
+    graph holding the declared products as ONE node named `Lumen` matched both
+    `Lumen Core` and `Lumen Field` under it, so A3 reported `passes: True` on the
+    exact failure A3 exists to catch (`_all_match({"lumen"}, {"lumen core",
+    "lumen field"})` -> True). A shorter reported name than the declared one is
+    not a weld to tolerate; it is the collapse, and it must MISS.
     """
     g, w = _norm(got), _norm(want)
     if g == w:
         return "exact"
-    if g.startswith(w) or w.startswith(g):
+    if g.startswith(w):
         return "prefix"
     return None
 
@@ -516,10 +525,12 @@ def a3_hierarchy() -> dict:
     def _all_match(got: set[str], want: set[str]) -> bool:
         """Every declared name is matched by some reported name and vice versa.
 
-        Prefix-tolerant on BOTH sides, because the extractor welds a collective
-        noun onto a name (`ingest-gateway component`), and a set-equality check
-        on the raw strings would report the hierarchy as collapsed over a naming
-        variance rather than over a missing parent edge.
+        Prefix-tolerant in ONE direction — the REPORTED name may be the longer
+        one, because the extractor welds a collective noun onto a name
+        (`ingest-gateway component`). The reverse direction is deliberately NOT
+        tolerated (`_same_name` is forward-only): a reported name SHORTER than a
+        declared one is a collapsed node, not a naming variance, and this is the
+        only term that can red for it.
         """
         return (all(any(_same_name(g, w) for g in got) for w in want)
                 and all(any(_same_name(g, w) for w in want) for g in got))
@@ -660,10 +671,41 @@ def a4_invention() -> dict:
         | set(DECL["teams"]) | set(DECL["roles"]) | set(DECL["people"]) \
         | set(DECL["components"]) | set(DECL["customers"]) \
         | set(DECL["customerSegments"])
+    # ⛔ THE VERDICT IS SCOPED BY KIND, NOT BY THE DECLARED NAME LIST (#14691 F5).
+    # Scoring `passes` over `declared_names` alone made the "nothing invented"
+    # verdict STRUCTURALLY UNABLE to fail on an invention: an invented node is by
+    # definition absent from the declared list, so `_same_name(u, d)` is false for
+    # every `d`, `structural_misses` stays `[]`, and A4 reported PASS on the exact
+    # population the assertion names. MEASURED on the pre-fix code: adding a
+    # fabricated `Lumen Cloud` (kind `product-strategy:product`) to the readback
+    # left `passes: True`.
+    # The population is therefore every untraceable entity whose KIND is one of
+    # the structure kinds — the mechanical definition of "structure" this file
+    # already scores A1 against — with the declared-name arm kept as a second
+    # net for a correctly-named row that arrived under an unexpected kind.
+    # ⛔ The narrowing this REPLACES is not widened away: a knowledge-layer object
+    # (`dev:architectureDoc`, `agent-ops:rule`) is not a structure element, and
+    # the claim layer above the structure is scored separately (see `quotes`), so
+    # this verdict still does not red for one. Both scopes are RECORDED below, so
+    # the number a reader sees is the one each scope covers.
+    structural_kinds = {k for kinds in _ROLE_KINDS.values() for k in kinds}
+    structural_kind_misses = [u for u in untraceable
+                              if u["kind"] in structural_kinds]
     structural_misses = [u for u in untraceable
-                         if any(_same_name(u["name"], d) for d in declared_names)]
+                         if u["kind"] in structural_kinds
+                         or any(_same_name(u["name"], d) for d in declared_names)]
     return {"untraceable_entities": untraceable,
-            "declared_structure_untraceable": structural_misses,
+            "declared_structure_untraceable": [
+                u for u in untraceable
+                if any(_same_name(u["name"], d) for d in declared_names)],
+            "structural_kind_untraceable": structural_kind_misses,
+            "untraceable_counts": {
+                "all_entity_names": len(untraceable),
+                "structural_kinds": len(structural_kind_misses),
+                "declared_structure": len([
+                    u for u in untraceable
+                    if any(_same_name(u["name"], d) for d in declared_names)]),
+            },
             "entity_names_checked": sum(len(v) for v in structural.values()),
             "relations_not_co_stated": invented_relations,
             "relations_not_co_stated_at_SENTENCE_scope": len(strict_relations),
