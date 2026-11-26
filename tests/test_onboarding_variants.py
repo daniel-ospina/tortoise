@@ -2020,14 +2020,40 @@ _INVERSION_FORMS = (
     #     it changed no row). Grading it would mean re-joining clause fragments
     #     around a comma, which is a different (and much wider) rewrite than
     #     this pin claims.
+    #     ⛔ A COMPLETIVE BETWEEN THE SUBJECT AND THE PREDICATE IS THE SAME SLOT,
+    #     and it was in NEITHER the adverb run nor the modal slot. `done` /
+    #     `finished` / `through` name the completion of the very confirmation the
+    #     connective defers to, so they order nothing — but they defeated the
+    #     whole form, which is the same one-inserted-word class every other slot
+    #     on this form was hardened against (#14679 review cycle 42, measured):
+    #
+    #       RED    Restart your client once you're confirming the tools are actually there.
+    #       RED    Restart your client after you have confirmed the tools are actually there.
+    #       GREEN  Restart your client once you're done confirming the tools are actually there.
+    #       GREEN  Restart your client after you have finished confirming the tools are actually there.
+    #       GREEN  Restart your client after you have already finished confirming the tools are actually there.
+    #
+    #     It sits AFTER the modal slot and not inside the adverb run, because the
+    #     completive follows the auxiliary (`… after you have finished confirming`,
+    #     never `… after you finished have confirming`). It is applied in BOTH the
+    #     `after|once` and the `if|when` arm — the two are separate alternatives
+    #     here, so an insertion in one only would leave the other arm open. It
+    #     binds only to a PREDICATE that follows immediately, so a completive over
+    #     an unrelated object stays out: `… after you have finished the config and
+    #     can confirm the tools …` and `… once you're through with setup and
+    #     confirm the tools …` are declared-GREEN rows below.
     _inversion_form(
         r"\b(?:(?:after|once)\s+"
         r"(?:you(?:'(?:ve|re)|\u2019(?:ve|re)|\s+have)\s+|you\s+|having\s+)?"
         r"(?:" + _ADVERBS + r"\s+)*"
         r"(?:" + _MODAL_TO_VERB + r"\s+(?:" + _ADVERBS + r"\s+)*)?"
+        # the completive slot — see the block above `_inversion_form(`
+        r"(?:(?:done|finished|through)\s+)?"
         r"|(?:if|when)\s+(?:you(?:'(?:ve|re)|\u2019(?:ve|re)|\s+have)\s+|you\s+|having\s+)?"
         r"(?:" + _ADVERBS + r"\s+)*"
         r"(?:" + _MODAL_TO_VERB + r"\s+(?:" + _ADVERBS + r"\s+)*)?"
+        # the completive slot — see the block above `_inversion_form(`
+        r"(?:(?:done|finished|through)\s+)?"
         # ⛔ THE OBSERVATION GATE CARRIES THE PROGRESSIVE, and it did not until the
         # `'re` subject arm made it REACHABLE: the spelling was `see(?:s)?|saw|seen`
         # — no `seeing` — while its siblings on this line do carry it
@@ -2255,8 +2281,32 @@ _INVERSION_FORMS = (
 # spelling (`.mcp.json`, `the .mcp.json file`, `~/.mcp.json`). Measured: the
 # `config` spelling of a sentence was exempted while the `.mcp.json` spelling of
 # the same sentence was graded — the false RED the arm exists to prevent.
+# ⛔ AND `file` IS THE SAME NOUN. This block's own first line calls the config “a
+# FILE”, and this repo's register uses that spelling — `tortoise/onboarding/
+# SKILL.md` and `docs/quickstart-cloud.md` both say “it names the file it read” —
+# but the set below did not admit it, so the plainest spelling of the SAME
+# file-side fact was graded as a session-presence inversion, with an assert
+# message claiming an inversion the copy does not contain. Minimal pair, one
+# word (#14679 review cycle 42, measured):
+#
+#   RED    Restart your client after confirming the tools appear in the file.
+#   GREEN  Restart your client after confirming the tools appear in the config file.
+#
+# The bare `file` spelling is admitted on the SAME terms as the other three
+# nouns (`config`, `settings`, `.mcp.json`) and through the same two arms, so it
+# inherits exactly the exclusion's existing width rather than widening it: a
+# clause that scopes itself to a FILE is file-side whatever the file is called
+# — `in the log file` matches `_CONFIG_PREP_RE` too, and is exempt for the same
+# reason reading `config` is (measured). ⛔ The honest boundary, measured and
+# not claimed away: `Restart your client after confirming the tools are actually
+# there in the config file.` is GREEN — the `_CONFIG_PREP_RE` path does not
+# consult `_SESSION_PRESENCE_RE`, so a session-presence phrase qualified by a
+# file scope is exempted. That is PRE-EXISTING behaviour shared by all four
+# nouns (it is identical for `config`, `settings` and `.mcp.json` at this head),
+# not a hole this arm opens; it is recorded here so the next reader measures it
+# rather than assuming the exclusion is narrower than it is.
 _CONFIG_NOUN_RE = re.compile(
-    r"(?:\b(?:configs?|settings|installer)\b|\.mcp\.json)", re.IGNORECASE)
+    r"(?:\b(?:configs?|settings|installer|file)\b|\.mcp\.json)", re.IGNORECASE)
 # …including one naming the scope AFTER the object ("… the tools are enabled in
 # your client settings"), and one pointing back at the file by PRONOUN ("… the
 # config file exists and the tools are enabled in it") — both are file-side, and
@@ -2280,7 +2330,7 @@ _CONFIG_PREP_RE = re.compile(
     # exists to prevent — was refused here while `config` was exempted.
     r"|\b(?:in|from|inside|per|under)\s+(?:your\s+|the\s+|its\s+)?"
     r"(?:(?:client|harness|mcp)\s+|[`*_]*[A-Z][\w.-]*(?:\s+Code)?[`*_]*(?:'s|\u2019s)?[`*_]*\s+)?"
-    r"(?:[`'\"]?)(?:config|settings|\.mcp\.json)\b",
+    r"(?:[`'\"]?)(?:config|settings|file|\.mcp\.json)\b",
     re.IGNORECASE)
 # ⛔ AN INSTALLATION-SIDE STATE IS A FILE-SIDE FACT, NOT A SESSION ONE. The
 # config-scope escape keys on NOUNS (`config|settings|installer`), so it could
@@ -2726,6 +2776,32 @@ def _cue_governing_clause(statements: list[str]) -> tuple[list[str], str]:
     `statements[-1]` (the literal `Then`) made `After restarting, check the
     tools are present. Then restart your client, …` a FALSE RED — one inserted
     `Then` over a declared-GREEN row (measured, #14679 review at `31554d1424af`).
+
+    ⛔ SCOPE, stated because it is PARTIAL and the consequence is not obvious: it
+    returns `clauses[-1:]` — ONLY the clause that governs the cue — so a pre-cue
+    confirmation followed by one ORDINARY imperative is never graded at all.
+    Measured (#14679 review cycle 42):
+
+        GREEN  Confirm the tools are actually there, then restart your client.   (the RED row)
+        GREEN  Confirm the tools are actually there, save the file, then restart your client.
+        GREEN  Confirm the tools are actually there, quit the editor, then restart your client.
+        GREEN  Confirm the tools are actually there. Save the file. Then restart your client.
+
+    The governing clause resolves to `save the file`, which no form matches, and
+    the confirmation clause is DISCARDED — so any wording that slips an ordinary
+    imperative between the check and the cue is out of this pin's reach. This is
+    declared rather than fixed because the `last clause only` scope is itself a
+    DECLARED choice with a measured false red behind it (`_is_completed_concession`
+    exists precisely because grading every earlier clause reddened ordinary
+    concessive copy), and because the obvious tightening — grade EVERY pre-cue
+    clause — does not rescue that example either: “Even if you confirmed the
+    tools in an earlier session” carries no `already|previously`, so it would be
+    re-reddened. Closing this needs the pre-cue side to distinguish a
+    confirmation clause from a concessive one structurally rather than by
+    position, which is a different (and much wider) change than this pin claims.
+    The three rows above are pinned as declared-GREEN so the residual is
+    MEASURED and visible rather than hidden, and so that a future tightening
+    shows up as a deliberate row flip instead of a surprise.
     """
     for statement in reversed(statements):
         clauses = [c.strip().lstrip(_PRE_CUE_PREFIX).strip()
@@ -3450,6 +3526,48 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Restart your client once the tools stop appearing.", False),
     ("Restart your client after upgrading then confirm the tools are actually "
      "there.", False),
+    # ── the COMPLETIVE slot (#14679 review cycle 42) ─────────────────────────
+    # `done` / `finished` / `through` name the completion of the confirmation the
+    # connective defers to, so they order nothing. Each of these was GREEN before
+    # the slot existed, and each drops to GREEN again if it is removed — the
+    # class is one inserted word, the same one every other slot here closes.
+    ("Restart your client once you're done confirming the tools are actually "
+     "there.", True),
+    ("Restart your client after you have finished confirming the tools are "
+     "actually there.", True),
+    ("Restart your client after you have already finished confirming the tools "
+     "are actually there.", True),
+    ("Restart your client once you're through confirming the tools are actually "
+     "there.", True),
+    # …and the slot must NOT reach a completive over an UNRELATED object: the
+    # predicate does not follow, so there is no deferred confirmation to grade.
+    # Both are GREEN, and both would be false REDs if the slot were a bare
+    # `\w+\s+` run.
+    ("Restart your client after you have finished the config and can confirm "
+     "the tools are actually there.", False),
+    ("Restart your client once you're through with setup and confirm the tools "
+     "are actually there.", False),
+    # ── the FILE spelling of the config noun (#14679 review cycle 42) ────────
+    # This block's own `_CONFIG_NOUN_RE` comment calls the config "a FILE" and
+    # this repo's register uses that spelling, so the plainest form of a
+    # file-side fact is forward copy — it was RED with a message claiming an
+    # inversion the sentence does not contain. Both go RED if `file` is removed
+    # from the noun arms.
+    ("Restart your client after confirming the tools appear in the file.",
+     False),
+    ("Restart your client after verifying the file lists the tools.", False),
+    # ── the DECLARED pre-cue residual (#14679 review cycle 42) ───────────────
+    # `_cue_governing_clause` returns ONLY the clause that governs the cue, so an
+    # ordinary imperative slipped between the confirmation and the cue discards
+    # the confirmation and the paragraph is never graded. These three are GREEN
+    # by that declared scope — pinned so the residual is measured rather than
+    # hidden, and so a future tightening shows up as a deliberate row flip.
+    ("Confirm the tools are actually there, save the file, then restart your "
+     "client.", False),
+    ("Confirm the tools are actually there, quit the editor, then restart your "
+     "client.", False),
+    ("Confirm the tools are actually there. Save the file. Then restart your "
+     "client.", False),
     # the shipped sentence with its comma turned into a full stop — form (f) must
     # NOT grade a confirmation that follows the cue, or the pin reds the very
     # order it requires (measured RED before form (f) was made pre-cue-only):
