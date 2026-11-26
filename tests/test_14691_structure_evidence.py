@@ -1189,6 +1189,29 @@ def test_the_D2_evidence_cell_cites_fields_that_EXIST():
         "A5's probes no longer carry `walk_root_is_entity`, so the cell's "
         "retrieval citation is stale")
 
+def test_the_A1_caveat_states_the_untraceable_figure_it_sits_beside():
+    """Reds if the A1 precision caveat re-claims total traceability (8th review, N1).
+
+    The sentence said the measured extras were "all traceable to text", while the
+    bundle's own artifact names **2 of 35** entity names as untraceable and
+    `VERIFICATION-independent.md:32` says "the two untraceable names" — two shipped
+    documents disagreeing, with the caveat reading as A4's support. Mutants that
+    flipped the clause stayed green.
+    """
+    a4 = _score()["A4_no_invention"]
+    untraceable = a4["untraceable_counts"]["all_entity_names"]
+    checked = a4["entity_names_checked"]
+    assert sorted(u["name"] for u in a4["untraceable_entities"]) == [
+        "ownership accountability convention",
+        "the seven-component dependency graph"], a4["untraceable_entities"]
+    flat = " ".join(_report().split())
+    assert f"**{untraceable} of {checked} entity names that are NOT**" in flat, (
+        f"the A1 caveat does not state A4's own count ({untraceable} of {checked})")
+    for name in ("the seven-component dependency graph",
+                 "ownership accountability convention"):
+        assert f"`{name}`" in flat, f"the caveat does not name {name!r}"
+
+
 def test_the_remaining_prose_figures_are_the_artifacts_figures():
     """Reds on the three figures that sat outside every pin (3rd review, P3).
 
@@ -1814,6 +1837,21 @@ def test_every_TABLE_ROW_in_the_report_is_derived_from_an_artifact():
         cells = [c.strip().rstrip("*") for c in row.split("|")[1:-1]]
         assert cells[1:4] == [str(block["declared"]), str(block["present"]),
                               str(block["right_kind"])], (role, cells)
+        # ⛔ THE FIFTH CELL TOO (8th fresh-context review, N2). This arm read
+        # `cells[1:4]`, so the "kind they arrive as" column — the whole A1 claim —
+        # was free: `| feature | 5 | 5 | 5 | \`product-strategy:product\` |` was
+        # measured GREEN. The named kind must be one the artifact ACCEPTS for that
+        # role and one it actually populated.
+        kind_cell = cells[4] if len(cells) > 4 else ""
+        named = re.findall(r"`([a-z][a-z-]*:[A-Za-z]+)`", kind_cell)
+        assert named, f"A1 row {role!r} names no kind they arrive as: {kind_cell!r}"
+        for kind in named:
+            assert kind in a1["accepted_kinds"][role], (
+                f"A1 row {role!r} says they arrive as {kind!r}, which the artifact "
+                f"does not accept for that role ({a1['accepted_kinds'][role]})")
+            assert any(kind in group for group in a1["kind_population"].values()), (
+                f"A1 row {role!r} names kind {kind!r}, which the artifact "
+                "populated nowhere")
 
     # ── A2: every class row, from `totals` + the receipt's own row counts
     receipt = _receipt()
