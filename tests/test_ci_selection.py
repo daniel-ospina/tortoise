@@ -11487,6 +11487,101 @@ def test_the_row_list_alone_reaches_every_item_it_names():
         f"over any spelling of it — got {_row_list_issue_shorthands(pre_fix)!r}")
 
 
+#: The DERIVATION paragraph — the fold's own item list, which opens "On THIS tree — `origin/main`"
+#: and closes at the block's `⛔ EVERY file named above` marker. It restates, item for item, the row
+#: list the arm above grades, and its SPELLING was graded by NOTHING: measured at `1a4fc4c2b2f0`,
+#: stripping `#14560`'s path so the item read only `` `#14560`'s row `` left EVERY arm in this
+#: family GREEN (three arms selected, `3 passed`). `_row_enumeration` bounds the list BELOW, so the
+#: reach half above never sees this copy — the same issue-only spelling the block says it no longer
+#: uses, one paragraph up. An item spelled this way is unreachable by `_row_claims`, so deleting the
+#: `durations` row it claims reds nothing either: the duplicate below still carries the file, which
+#: is exactly why the rot would be silent.
+_DERIVATION_OPEN_RE = re.compile(r"On THIS tree — `origin/main`")
+_DERIVATION_END = "⛔ EVERY file named above"
+#: ONE item of the derivation: an issue label, the span before its row NOUN, and the noun itself.
+#: The noun alternation is the block's own definitional synonym, the same one `_ROW_CLAIM_AFTER_FILE_RE`
+#: carries — a matcher bound to `row` alone would read a TRUE rewrite into `entry in `durations`` as
+#: no item at all, the one-spelling class `#14730` files. The span is LAZY and short: a label whose
+#: own item names no path but whose NEXT item does (`` `#14548`'s residue RATCHET, `#14552`'s
+#: `tests/…` row ``) must not be read as reached, and a lenient span keeps that from false-blocking
+#: true prose — the check is per-LABEL, not per-between-text.
+_DERIVATION_ROW_ITEM_RE = re.compile(
+    r"`#(?P<issue>\d+)`'s(?P<between>[^⛔]{0,400}?)"
+    r"(?:rows?\b|entr(?:y|ies)\s+in\s+`?durations`?\b)")
+_DERIVATION_PATH_RE = re.compile(r"`tests/(?P<file>[\w/.-]+\.py)`")
+
+
+def _derivation_list(header: str) -> str:
+    """The derivation paragraph, bounded by the block's own opening clause and closing marker."""
+    unquoted = _unquoted_block(header)
+    opening = _DERIVATION_OPEN_RE.search(unquoted)
+    assert opening is not None, (
+        "the block no longer opens its derivation with \"On THIS tree — `origin/main`\" — re-point "
+        "this arm at the sentence the block uses rather than letting it grade nothing")
+    end = unquoted.find(_DERIVATION_END, opening.end())
+    assert end != -1, (
+        "the derivation carries no `⛔ EVERY file named above` marker after its opening, so the "
+        "slice runs into the row list and this arm would grade a paragraph it was not written for")
+    return unquoted[opening.start():end]
+
+
+def _derivation_row_labels_without_path(derivation: str) -> tuple[list[str], int]:
+    """Issue labels whose row item names no file by path, and how many items were read."""
+    labels: set[str] = set()
+    items = 0
+    for match in _DERIVATION_ROW_ITEM_RE.finditer(derivation):
+        items += 1
+        if not _DERIVATION_PATH_RE.search(match.group("between")):
+            labels.add(match.group("issue"))
+    return sorted(labels), items
+
+
+def test_the_derivation_list_spells_a_path_beside_every_row_label():
+    """The derivation's items must be reachable, not only the row list's copy of them.
+
+    The block says every one of its row items is spelled with its path beside the word, and it says
+    WHY: an issue-only label (`` `#14415`'s batch rows ``) is a row claim no matcher reaches, so the
+    arm that grades the claim stays green over it. The arm above holds that for the LIST; the
+    derivation paragraph restates the same items and nothing held it there — measured on this head
+    by stripping `#14560`'s path from the derivation (`3 passed`, every arm in the family).
+
+    So the derivation's spelling is graded here, and a fold that drops a path from an item reds it
+    directly. ⛔ NOT a second lock on the same words: the label→noun span is read PER ITEM, a label
+    whose own item names no path is refused even when the item AFTER it names one, and the noun set
+    is the block's own `entry in `durations`` synonym so a TRUE rewrite does not red as an item that
+    vanished.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    derivation = _derivation_list(header)
+    ungraded, items = _derivation_row_labels_without_path(derivation)
+    assert items, (
+        "the derivation names no row item, so this arm grades nothing — re-point "
+        "`_derivation_list` at the paragraph the block actually writes")
+    assert not ungraded, (
+        f"the derivation spells {['#' + i for i in ungraded]} by ISSUE with no path beside the "
+        "row noun, so `_row_claims` cannot reach those files and the `durations` row the item "
+        "claims is graded by nothing on this copy — spell the path beside the word, as the list "
+        "below does")
+    # …and the checker REFUSES the shape it was written for, so the assertion above is not
+    # decoration: `1a4fc4c2b2f0`'s derivation with `#14560`'s path stripped, plus the neighbouring
+    # item that DOES name one (the lenient-span trap: a per-SPAN check would read `#14560` as
+    # reached off `#14565`'s path).
+    pre_fix = (
+        "On THIS tree — `origin/main` `bbef0b8840d7` folded in, carrying "
+        "`#14560`'s row, `#14565`'s `tests/test_14559_reaper_schedule.py` row. "
+        "⛔ EVERY file named above")
+    assert _derivation_row_labels_without_path(_derivation_list(pre_fix)) == (["14560"], 2), (
+        "the derivation checker no longer reads the shape it was written for, so a fold can drop a "
+        f"path from an item and stay green — got {_derivation_row_labels_without_path(_derivation_list(pre_fix))!r}")
+    # ⛔ AND THE SYNONYM: a TRUE rewrite of an item into the block's own definitional word must be
+    # read as an item (so its path is checked), not dropped out of the scan as no item at all.
+    synonym = ("On THIS tree — `origin/main` `bbef0b8840d7` folded in, carrying "
+               "`#14560`'s entry in `durations`. ⛔ EVERY file named above")
+    assert _derivation_row_labels_without_path(_derivation_list(synonym)) == (["14560"], 1), (
+        "the derivation checker reads only the noun `row`, so the block's own `entry in `durations` "
+        "synonym walks past it — a TRUE rewrite would be graded by nothing")
+
+
 def test_the_emission_block_guard_is_not_vacuous():
     """The guard must bite on a carried emission and stay quiet on this tree's.
 
