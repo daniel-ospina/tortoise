@@ -2700,6 +2700,90 @@ def test_retire_pi_entry_names_what_landed_when_a_later_rename_raises(
     assert not (producer / "index.ts").exists()
 
 
+def test_retire_pi_entry_does_not_call_an_untouched_directory_partly_retired(
+        home, monkeypatch):
+    """The FIRST rename can raise too, and then NOTHING was retired (#14695
+    review round 3).
+
+    The half-landed arm above was written for an OSError on the SECOND rename,
+    but the same ``except`` serves the first one — and a single-entry producer
+    (``index.ts`` only, no ``index.js``) has no second rename at all, so it
+    reaches an arm whose message still read "this directory is PARTLY retired;
+    move the rest aside by hand". MEASURED before the fix: ``landed == []``,
+    ``index.ts`` still present, and the install relayed "PARTLY retired" to the
+    user. A receipt may not describe a disk state it did not measure — the
+    rule the unreadable-manifest arms of this same function are written to keep.
+
+    Mutation: drop the ``if not landed_here`` arm (fall back to the shared
+    half-landed message) — the ``PARTLY``/``UNTOUCHED`` assertions below RED
+    over an unmodified disk.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "index.ts").write_text("// ts entry\n")
+
+    real_rename = Path.rename
+
+    def rename_fails_on_ts(self, target, *args, **kwargs):
+        if self.name == "index.ts":
+            raise PermissionError(1, "Operation not permitted", str(self))
+        return real_rename(self, target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rename", rename_fails_on_ts)
+
+    landed: list[Path] = []
+    error = capture_install._retire_pi_entry(producer, renamed=landed)
+
+    assert error and "PARTLY" not in error, error
+    assert "UNTOUCHED" in error, error
+    assert landed == [], landed
+    # Nothing moved: the entry is still the live one and no retired name exists.
+    assert (producer / "index.ts").read_text() == "// ts entry\n"
+    assert not (producer / "index.ts.disabled").exists()
+
+
+def test_install_does_not_report_a_partly_retired_producer_when_nothing_moved(
+        home, monkeypatch):
+    """The wrapper plane must not relay a state the disk is not in (#14695
+    review round 3).
+
+    ``_disable_pi_second_producer`` splices ``_retire_pi_entry``'s message into
+    the receipt the USER reads, so a wrong claim one function down reaches the
+    terminal verbatim. MEASURED before the fix: on a one-entry directory whose
+    rename raises, ``install_capture`` printed "this directory is PARTLY
+    retired; move the rest aside by hand" while ``index.ts`` was still in place
+    and no action named any retirement.
+
+    Mutation: drop the ``if not landed_here`` arm in ``_retire_pi_entry`` — the
+    ``PARTLY`` assertion REDs, because the wrapper relays the claim.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    producer = ext_dir / capture_install.PI_SECOND_PRODUCER_NAME
+    producer.mkdir(parents=True)
+    (producer / "index.ts").write_text("// ts entry\n")
+
+    real_rename = Path.rename
+
+    def rename_fails_on_ts(self, target, *args, **kwargs):
+        if self.name == "index.ts":
+            raise PermissionError(1, "Operation not permitted", str(self))
+        return real_rename(self, target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rename", rename_fails_on_ts)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, "the install certified a box with two live producers"
+    assert "PARTLY" not in (res.error or ""), res.error
+    assert "nothing was retired" in (res.error or ""), res.error
+    # No action may name a retirement: none happened.
+    assert not [a for a in res.actions if "retired" in a], res.actions
+    assert (producer / "index.ts").exists(), (
+        "the entry point moved despite the refusal")
+
+
 def test_legacy_obstacle_names_a_symlinked_directory_second_producer(home):
     """The hint must not stay silent on a shape the installer REFUSES and
     MUTATES (#14695 review round 2, finding 1).

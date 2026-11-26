@@ -2220,13 +2220,33 @@ def _retire_pi_entry(path: Path, *, dry_run: bool = False,
                         # reported `actions=()`. MEASURED with `Path.rename`
                         # failing on `index.js`: `index.ts.disabled` existed and
                         # the receipt named only the seam.
-                        landed_names = (
-                            ", ".join(p.name for p in landed_here)
-                            or "nothing")
+                        #
+                        # ⛔ AND NOTHING-LANDED IS NOT A PARTLY-RETIRED
+                        # DIRECTORY (#14695 review round 3). The FIRST rename
+                        # can raise on a PER-FILE condition too (an immutable
+                        # `index.ts`, EROFS mid-run), and a single-entry
+                        # producer has no second rename to reach the landed
+                        # arm at all — yet the shared message still said "this
+                        # directory is PARTLY retired; move the rest aside by
+                        # hand" over a disk nothing had touched, and the
+                        # caller relayed it verbatim. MEASURED before the fix:
+                        # `landed=[]`, `index.ts` still present, and the install
+                        # reported PARTLY retired. A receipt may not describe a
+                        # state it did not measure — the same rule the
+                        # unreadable-manifest arms above are written to keep.
+                        if not landed_here:
+                            return (f"{entry}: {e.__class__.__name__}: {e} — "
+                                    f"nothing was retired (files preserved, "
+                                    f"this directory is UNTOUCHED); move it "
+                                    f"out of the extensions directory by "
+                                    f"hand")
+                        landed_names = ", ".join(
+                            p.name for p in landed_here)
                         return (f"{entry}: {e.__class__.__name__}: {e} — but "
-                                f"{landed_names} was ALREADY retired (files "
-                                f"preserved), so this directory is PARTLY "
-                                f"retired; move the rest aside by hand")
+                                f"{landed_names} had ALREADY been renamed "
+                                f"aside (files preserved), so this directory "
+                                f"is PARTLY retired; move the rest aside by "
+                                f"hand")
                     landed_here.append(entry)
                     if renamed is not None:
                         renamed.append(entry)
