@@ -21,6 +21,8 @@ import {
   KIND_INCIDENT,
   KIND_UNCLASSIFIED,
   SNOOZE_PERIODS,
+  UNSNOOZE,
+  UNSNOOZE_GROUP,
   buildLedger,
   detailOf,
   dismiss,
@@ -202,9 +204,12 @@ test('a snoozed row is LISTED (with its deadline) so it can be un-snoozed', () =
   assert.equal(buildLedger({ alerts: [activity], state: undone, now: NOW }).unresolved, 1)
   // The anchor travels with the entry and is dropped with it — a leftover
   // `snoozedAt` under a released key would outlive the snooze it describes.
-  // It is a LIST (several rows can share a decision key), so one snooze is one
-  // element.
-  assert.deepEqual(state.snoozedAt[episode], [new Date(activity.at).getTime()])
+  // It is a LIST of `{at, until}` records (several rows can share a decision key,
+  // and each keeps its OWN period), so one snooze is one element.
+  assert.deepEqual(state.snoozedAt[episode], [{
+    at: new Date(activity.at).getTime(),
+    until: NOW.getTime() + periodMs('1w'),
+  }])
   assert.equal(undone.snoozedAt[episode], undefined)
 })
 
@@ -230,10 +235,14 @@ test('#14694 P2: snoozing a SECOND row on the same decision key does not cancel 
 
   let state = snooze(emptyState(), entryKeyOf(a), periodMs('1h'), NOW, a)
   state = snooze(state, entryKeyOf(b), periodMs('1h'), NOW, b)
-  // BOTH anchors are recorded, in click order — the second APPENDED to the first.
+  // BOTH anchors are recorded, in click order — the second APPENDED to the first —
+  // and each carries its OWN period, so neither click can move the other's.
   assert.deepEqual(
     state.snoozedAt[entryKeyOf(a)],
-    [new Date(a.at).getTime(), new Date(b.at).getTime()],
+    [
+      { at: new Date(a.at).getTime(), until: NOW.getTime() + periodMs('1h') },
+      { at: new Date(b.at).getTime(), until: NOW.getTime() + periodMs('1h') },
+    ],
   )
   const ledger = buildLedger({ alerts: [a, b], state, now: NOW })
   assert.equal(ledger.snoozed.length, 2, 'both snoozed rows stay in the Snoozed list')
@@ -280,7 +289,12 @@ test('#14694 P2: an anchor in the PRE-LIST shape (a bare number) is still honour
     }),
   })
   const { state } = readState(storage, 'k', NOW)
-  assert.deepEqual(state.snoozedAt[key], [new Date(old.at).getTime()])
+  // A bare number carries no deadline of its own, so it inherits the KEY's — the
+  // only period a pre-record store ever recorded.
+  assert.deepEqual(state.snoozedAt[key], [{
+    at: new Date(old.at).getTime(),
+    until: NOW.getTime() + DAY,
+  }])
   assert.equal(buildLedger({ alerts: [old], state, now: NOW }).unresolved, 0)
   // …and the bound still refuses a NEWER suspension on the same key.
   const newer = take(NOW.toISOString(), 'suspend||new')
@@ -311,7 +325,9 @@ test('#14694 P3: Unsnooze restores ONLY the row it is named for', () => {
 
   // Un-snooze row A only: B stays hidden, and the key still carries its deadline.
   const onlyB = unsnooze(state, key, a)
-  assert.deepEqual(onlyB.snoozedAt[key], [new Date(b.at).getTime()])
+  assert.deepEqual(onlyB.snoozedAt[key], [{
+    at: new Date(b.at).getTime(), until: NOW.getTime() + periodMs('1h'),
+  }])
   assert.ok(onlyB.snoozed[key] > NOW.getTime(), 'the key deadline survives while an anchor remains')
   const afterA = buildLedger({ alerts: [a, b], state: onlyB, now: NOW })
   assert.equal(afterA.unresolved, 1, 'A is back')
@@ -359,8 +375,9 @@ test('#14694 P2: an EXPIRED anchor is not revived by snoozing a sibling row', ()
 
   // …and snoozing B now must cover B ONLY. A is not re-hidden.
   const snoozedB = snooze(snoozedA, key, periodMs('1h'), later, b)
-  assert.deepEqual(snoozedB.snoozedAt[key], [new Date(b.at).getTime()],
-    'the elapsed anchor must be dropped, not appended to')
+  assert.deepEqual(snoozedB.snoozedAt[key], [{
+    at: new Date(b.at).getTime(), until: later.getTime() + periodMs('1h'),
+  }], 'the elapsed anchor must be dropped, not appended to')
   const after = buildLedger({ alerts: [a, b], state: snoozedB, now: later })
   assert.equal(after.snoozed.length, 1, 'only B is snoozed')
   assert.equal(after.snoozed[0].rowKey, rowKeyOf(b))
@@ -375,6 +392,94 @@ test('#14694 P2: an EXPIRED anchor is not revived by snoozing a sibling row', ()
       .unresolved,
     0,
   )
+})
+test('#14694 P2: a sibling snooze never SHORTENS a live longer one', () => {
+  // KEEPING the anchors stopped a second snooze from EVICTING the first row, but
+  // with one deadline per key it still governed that row's period: measured, A
+  // snoozed 1 week, B snoozed 1 hour ten minutes later, and A's week lasted 70
+  // minutes because the key deadline was overwritten. Each anchor now carries its
+  // OWN period, and the key deadline only ever GROWS (it is the identity-wide
+  // period an ACTIVITY row is hidden for).
+  const activityRow = (at, episode) => alert({
+    register: 'activity',
+    message: 'a rate measurement',
+    at,
+    first_at: at,
+    count: 2,
+    episode,
+  })
+  const a = activityRow(new Date(NOW.getTime() - 2 * HOUR).toISOString(), 'rv||a')
+  const b = activityRow(new Date(NOW.getTime() - 1 * HOUR).toISOString(), 'rv||b')
+  const key = entryKeyOf(a)
+  assert.equal(entryKeyOf(b), key, 'the collision is the premise')
+
+  const t2 = new Date(NOW.getTime() + 10 * MIN)
+  let state = snooze(emptyState(), key, periodMs('1w'), NOW, a)
+  state = snooze(state, key, periodMs('1h'), t2, b)
+  // The KEY deadline is the LONGEST period the reader chose, not the latest one.
+  assert.equal(state.snoozed[key], NOW.getTime() + periodMs('1w'))
+  // …and 90 minutes in, an hour after B's click, A's week still holds.
+  const at90 = new Date(NOW.getTime() + 90 * MIN)
+  assert.equal(buildLedger({ alerts: [a, b], state, now: at90 }).unresolved, 0,
+    'the 1 h sibling click must not cut the 1 w snooze')
+  // Each anchor keeps its OWN period.
+  const byAt = Object.fromEntries(state.snoozedAt[key].map((x) => [x.at, x.until]))
+  assert.equal(byAt[new Date(a.at).getTime()], NOW.getTime() + periodMs('1w'))
+  assert.equal(byAt[new Date(b.at).getTime()], t2.getTime() + periodMs('1h'))
+
+  // The same rule protects an INCIDENT from being hidden for LONGER than it was
+  // snoozed: a sibling's longer period must not extend it.
+  const take = (at, episode) => alert({
+    type: 'suspend',
+    label: 'Organization suspended',
+    message: 'Organization suspended by an operator',
+    at,
+    first_at: at,
+    episode,
+  })
+  const inc1 = take(new Date(NOW.getTime() - 2 * HOUR).toISOString(), 'suspend||i1')
+  const inc2 = take(new Date(NOW.getTime() - 1 * HOUR).toISOString(), 'suspend||i2')
+  const ikey = entryKeyOf(inc1)
+  let incState = snooze(emptyState(), ikey, periodMs('1h'), NOW, inc1)
+  incState = snooze(incState, ikey, periodMs('1w'), NOW, inc2)
+  const twoHours = new Date(NOW.getTime() + 2 * HOUR)
+  const incLedger = buildLedger({ alerts: [inc1, inc2], state: incState, now: twoHours })
+  assert.equal(incLedger.unresolved, 1, 'the 1 h incident is back; only the 1 w one is covered')
+  assert.equal(incLedger.snoozed.length, 1)
+  assert.equal(incLedger.snoozed[0].rowKey, rowKeyOf(inc2))
+})
+
+test('#14694 P2: Unsnooze on an ACTIVITY row releases the WHOLE key — and is named that way', () => {
+  // An ACTIVITY snooze is identity-wide by recorded decision, so its un-snooze must
+  // be too: a row-scoped release would remove one anchor and change nothing (the
+  // surviving key deadline covers every row of the key), i.e. a control that does
+  // nothing — the owner's "I can't clear them" complaint on the surface built to fix
+  // it. Measured pre-fix: two same-key activity bouts snoozed, `Unsnooze` on one,
+  // the row stayed listed and the badge unmoved.
+  const activityRow = (at, episode) => alert({
+    register: 'activity',
+    message: 'a rate measurement',
+    at,
+    first_at: at,
+    count: 2,
+    episode,
+  })
+  const a = activityRow(new Date(NOW.getTime() - 2 * HOUR).toISOString(), 'rv||a')
+  const b = activityRow(new Date(NOW.getTime() - 1 * HOUR).toISOString(), 'rv||b')
+  const key = entryKeyOf(a)
+  let state = snooze(emptyState(), key, periodMs('1h'), NOW, a)
+  state = snooze(state, key, periodMs('1h'), NOW, b)
+  assert.equal(buildLedger({ alerts: [a, b], state, now: NOW }).unresolved, 0)
+
+  const released = unsnooze(state, key, a)
+  assert.equal(released.snoozed[key], undefined, 'the KEY is released, not just one anchor')
+  assert.equal(released.snoozedAt[key], undefined)
+  assert.equal(buildLedger({ alerts: [a, b], state: released, now: NOW }).unresolved, 2)
+
+  // The control says what it does, so the name cannot claim a narrower scope.
+  assert.equal(UNSNOOZE, 'Unsnooze')
+  assert.match(UNSNOOZE_GROUP, /all of this kind/)
+  assert.notEqual(UNSNOOZE, UNSNOOZE_GROUP)
 })
 
 test('#14694 P1: a snooze on an INCIDENT does not cover a NEWER one', () => {

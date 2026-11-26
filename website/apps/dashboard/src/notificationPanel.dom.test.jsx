@@ -60,6 +60,7 @@ import {
   STORAGE_UNAVAILABLE,
   TRUNCATED_NOTE,
   UNSNOOZE,
+  UNSNOOZE_GROUP,
   EPISODE_GAP_MS,
   entryKeyOf,
   periodMs,
@@ -1835,6 +1836,32 @@ test('#14694: the reversible and detail actions are named too, not only the list
   assert.ok(detailDismiss, 'precondition: the detail view offers Dismiss')
   assert.match(detailDismiss.getAttribute('aria-label') || '', /^Dismiss: /)
   assert.match(detailDismiss.getAttribute('aria-label'), /open me/, 'named by ITS row')
+})
+
+test('#14694 P2: an ACTIVITY row\'s snooze control is named by its IDENTITY-WIDE scope', () => {
+  // An activity snooze covers every row of its decision key (identity-wide, by
+  // recorded decision), so its Unsnooze must release the key — and say so. A control
+  // that reads "Unsnooze: <this row>" while releasing every row of the key is a name
+  // that lies, and the row-scoped version was measured to do NOTHING at all here
+  // because the surviving key deadline re-covered the row it had just released.
+  const activity = alert({
+    register: 'activity',
+    message: 'a rate measurement',
+    episode: 'rv||a',
+    at: new Date(NOW.getTime() - 2 * HOUR).toISOString(),
+  })
+  const { container } = renderBell({ alerts: [activity] })
+  fireEvent.click(bell(container))
+  fireEvent.change(container.querySelector('.notif-snooze'), { target: { value: '1h' } })
+  fireEvent.click([...container.querySelectorAll('.notif-more')]
+    .find((b) => /Snoozed \(/.test(b.textContent)))
+  const control = [...container.querySelectorAll('button')]
+    .find((b) => b.textContent.trim() === UNSNOOZE_GROUP)
+  assert.ok(control, 'the activity row\'s control must say what it does')
+  assert.match(control.getAttribute('aria-label') || '', /^Unsnooze all of this kind: /)
+  // …and it does release the row in one click.
+  fireEvent.click(control)
+  assert.equal(bell(container).getAttribute('aria-label'), 'Notifications — 1 unresolved')
 })
 
 test('#14686: two same-identity rows have DISTINCT accessible names', () => {

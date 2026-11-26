@@ -264,7 +264,12 @@ export function readState(storage, key, now = new Date()) {
     isPlainObject(parsed.snoozedAt) ? parsed.snoozedAt : {},
   )) {
     if (!(episode in snoozed)) continue
+    // A bare number carries no deadline of its own, so it inherits the KEY's — the
+    // only period a pre-record store ever recorded (`anchorsOfValue`). Anchors whose
+    // OWN period has already ended are dropped here, and again on every `snooze`.
     const anchors = anchorsOfValue(raw)
+      .map((a) => ({ at: a.at, until: a.until || snoozed[episode] }))
+      .filter((a) => a.until > nowMs)
     if (anchors.length) snoozedAt[episode] = anchors
   }
   const dismissed = {}
@@ -346,45 +351,52 @@ export function snooze(state, episode, ms, now = new Date(), alert = null) {
   const duration = Number(ms)
   if (!episode || !Number.isFinite(duration) || duration <= 0) return base
   const nowMs = now instanceof Date ? now.getTime() : Date.parse(now)
+  const until = nowMs + duration
+  // ⛔ THE KEY DEADLINE IS NEVER SHORTENED. It is the period an ACTIVITY row is
+  // hidden for (identity-wide, per the recorded decision), so a sibling click with
+  // a SHORTER period used to end a longer, live snooze the reader had already
+  // chosen: measured, A snoozed 1 week, B snoozed 1 hour 10 minutes later, and A's
+  // week lasted 70 minutes. `Math.max` is the fix — a deadline only ever grows
+  // toward the longest period the reader asked for on this key (#14694 review P2).
+  const liveKey = snoozedUntil(base, episode, now)
   const next = {
     ...base,
-    snoozed: { ...base.snoozed, [episode]: nowMs + duration },
+    snoozed: { ...base.snoozed, [episode]: Math.max(liveKey, until) },
   }
   const atMs = atMsOf(alert)
-  if (atMs > 0) {
-    // ⛔ APPEND, never replace. A second row on the same decision key is a second
-    // row the READER snoozed; replacing the anchor evicted the first row's
-    // coverage, so it came back into `current` (badge incrementing) while the
-    // "Snoozed" list still showed a snooze — the reader's first snooze silently
-    // undone by their second (#14694 review P2).
-    //
-    // ⛔ AND THE LIST STARTS FRESH ONCE THE KEY'S DEADLINE HAS ELAPSED. Anchors
-    // describe the snooze that was LIVE when they were written, and expiry is
-    // pruned only by `readState` (on open) — not by the 30 s tick. A panel left
-    // open past a snooze therefore still holds the elapsed row's anchor, and
-    // appending to it made the NEXT click on a sibling row re-cover the row the
-    // reader had just watched come back (measured: two `suspend` rows, A snapped
-    // for 1 h, 65 min later A is in `current`, then snoozing B dropped the badge
-    // 2 -> 0 and put A back under "Snoozed"). A stale anchor must never be
-    // revived by a fresh deadline (#14694 review P2).
-    //
-    // The DEADLINE stays one per key (`snoozed` above, overwritten): that is what
-    // identity-wide snoozing means here — re-snoozing the key re-sets the period
-    // it is hidden for, and every row still anchored on a LIVE snooze stays
-    // covered until the new deadline, because a period the reader already chose
-    // for this key is the only thing that bound can ever mean.
-    const live = snoozedUntil(base, episode, now) > 0
-    const anchors = live
-      ? anchorsOfValue(base.snoozedAt && base.snoozedAt[episode])
-      : []
-    next.snoozedAt = {
-      ...(base.snoozedAt || {}),
-      [episode]: anchors.includes(atMs) ? anchors : [...anchors, atMs].slice(-MAX_SNOOZE_ANCHORS),
-    }
-    next.snoozedAt = {
-      ...(base.snoozedAt || {}),
-      [episode]: anchors.includes(atMs) ? anchors : [...anchors, atMs].slice(-MAX_SNOOZE_ANCHORS),
-    }
+  // ⛔ APPEND, never replace. A second row on the same decision key is a second
+  // row the READER snoozed; replacing the anchor evicted the first row's
+  // coverage, so it came back into `current` (badge incrementing) while the
+  // "Snoozed" list still showed a snooze — the reader's first snooze silently
+  // undone by their second (#14694 review P2).
+  //
+  // ⛔ AND THE LIST STARTS FRESH ONCE THE KEY'S DEADLINE HAS ELAPSED. Anchors
+  // describe the snooze that was LIVE when they were written, and expiry is pruned
+  // only by `readState` (on open) — not by the 30 s tick. A panel left open past a
+  // snooze therefore still holds the elapsed row's anchor, and appending to it made
+  // the NEXT click on a sibling row re-cover the row the reader had just watched
+  // come back (measured: two `suspend` rows, A snoozed 1 h, 65 min later A is in
+  // `current`, then snoozing B dropped the badge 2 -> 0 and put A back under
+  // "Snoozed"). A stale anchor must never be revived by a fresh deadline.
+  //
+  // ⛔ AND EACH ANCHOR CARRIES ITS OWN DEADLINE. Membership alone kept a row from
+  // being EVICTED but not from being SHORTENED: with one deadline per key, a
+  // sibling's period governed every row on it, so snoozing B for 1 h cut A's live
+  // week to 1 h (and a sibling's longer period could equivalently extend an
+  // incident's own — a hide). The period belongs to the ROW that was clicked; the
+  // key deadline exists only for the identity-wide ACTIVITY case.
+  const anchors = (liveKey
+    ? anchorsOfValue(base.snoozedAt && base.snoozedAt[episode])
+    : []
+  ).filter((a) => a.until > nowMs)
+  const existing = atMs > 0 ? anchors.find((a) => a.at === atMs) : null
+  const finalAnchors = atMs <= 0
+    ? anchors
+    : existing
+      ? anchors.map((a) => (a.at === atMs ? { at: a.at, until: Math.max(a.until, until) } : a))
+      : [...anchors, { at: atMs, until }].slice(-MAX_SNOOZE_ANCHORS)
+  if (finalAnchors.length) {
+    next.snoozedAt = { ...(base.snoozedAt || {}), [episode]: finalAnchors }
   }
   return next
 }
@@ -407,10 +419,19 @@ export function unsnooze(state, episode, alert = null) {
   const base = state || emptyState()
   if (!episode || !(episode in (base.snoozed || {}))) return base
   const atMs = atMsOf(alert)
-  const anchors = anchorsOf(base, episode)
-  if (atMs > 0 && anchors.includes(atMs)) {
-    const remaining = anchors.filter((a) => a !== atMs)
-    if (remaining.length) {
+  // ⛔ ROW-SCOPED ONLY FOR AN INCIDENT. An ACTIVITY snooze is identity-wide by
+  // recorded decision (`effectiveSnoozedUntil` covers every row of the key for the
+  // key's period), so removing one anchor there would change NOTHING: the sibling
+  // rows — and this one — stay covered by the surviving key deadline. Measured: two
+  // same-key activity bouts snoozed, then `Unsnooze` on one, and the row stayed in
+  // the list with the badge unmoved — the owner's original "I can't clear them"
+  // complaint reappearing on the surface built to fix it (#14694 review P2). An
+  // activity row's control therefore releases the KEY, and is NAMED that way
+  // (`UNSNOOZE_GROUP`); only an incident's is per row.
+  if (alert && registerOf(alert) === REGISTER_ALERT && atMs > 0) {
+    const anchors = anchorsOf(base, episode)
+    const remaining = anchors.filter((a) => a.at !== atMs)
+    if (remaining.length && remaining.length !== anchors.length) {
       return { ...base, snoozedAt: { ...(base.snoozedAt || {}), [episode]: remaining } }
     }
   }
@@ -547,41 +568,37 @@ export function snoozedUntil(state, episode, now = new Date()) {
 export function effectiveSnoozedUntil(state, entry, now = new Date()) {
   if (!entry) return 0
   const until = snoozedUntil(state, entry.key, now)
-  if (!until || !entry.isIncident) return until
+  if (!until) return 0
   const nowMs = now instanceof Date ? now.getTime() : Date.parse(now)
   const atMs = Number(entry.atMs) || 0
-  // EVERY row the reader snoozed on this key — a list, because two rows can share
-  // one decision key and both were snoozed by a separate click (#14694 review P2).
+  // ⛔ AN ACTIVITY ROW IS IDENTITY-WIDE, and that is the recorded decision: its key
+  // is the identity, so one snooze hides a separate bout of the same identity for
+  // the period chosen (measured: a 1w snooze hides a new flag bout 5 days later).
+  // The period is the KEY deadline, which `snooze` now only ever LENGTHENS, so a
+  // sibling click can never shorten a period the reader already chose.
+  if (!entry.isIncident) return until
   const anchors = anchorsOf(state, entry.key)
   if (anchors.length) {
     if (!atMs) return until
-    // ⛔ BOTH HALVES, as `isDismissed` applies them — not the gate alone. The
+    // ⛔ THE TWO HALVES PINCH TO EQUALITY, as `isDismissed` applies them. The
     // server requires a WINDOW match and then the gate
     // (`abuse.py::_episode_acknowledged`: `matched = overlap or (0 <= delta <=
-    // gap_s)`, then `if e_last > acked_through: continue`), and the gap arm is
-    // forward-only there on purpose, because "an unbounded delta also matched
-    // every EARLIER bout". Applying only `atMs <= anchor` therefore covered every
-    // earlier episode sharing the decision key: measured, a never-acknowledged
-    // suspension 5 days BEFORE the snoozed one moved into "Snoozed" and out of
-    // the badge while `/v1/team/alerts` still reported it current. With both
-    // halves intersected — the gate cuts everything that happened AFTER the
-    // snoozed instant, and the `anchor <= atMs` half cuts every EARLIER row — so
-    // the two pinch to `entry.atMs === anchor`: the ONLY covered row is the one
-    // whose `at` IS the instant the reader snoozed. `episodeStart <= anchor`
-    // encodes the window overlap the server requires, but once `atMs === anchor`
-    // it cannot admit or reject anything on its own — do not read this as "a bout
-    // that merely SPANS the snooze is covered": its newer window re-opens it
-    // (the gate) and its older rows never matched the window half.
-    const episodeStart = firstMsOf(entry.alert) || atMs
-    // The same pinch, applied per anchor: a covered row is one whose `at` IS one
-    // of the instants the reader snoozed. A row that merely SPANS a snoozed
-    // instant is still not covered (its newer window re-opens it — the gate — and
-    // a row older than every anchor never matched), so widening the slot from one
-    // anchor to several does not widen WHAT is covered.
-    const covered = anchors.some(
-      (anchor) => anchor <= atMs && episodeStart <= anchor && atMs <= anchor,
-    )
-    return covered ? until : 0
+    // gap_s)`, then `if e_last > acked_through: continue`); the gap arm is
+    // forward-only there on purpose, because "an unbounded delta also matched every
+    // EARLIER bout". Applying only `at <= atMs` therefore covered every earlier
+    // episode sharing the decision key (measured: a never-acknowledged suspension 5
+    // days BEFORE the snoozed one moved into "Snoozed" while `/v1/team/alerts`
+    // still reported it current). Intersecting `anchor <= atMs` (cuts earlier rows)
+    // with `atMs <= anchor` (the gate: cuts anything after) leaves exactly
+    // `entry.atMs === anchor` — so the ONLY covered row is one whose `at` IS an
+    // instant the reader snoozed. `episodeStart <= anchor` is then vacuous: a bout
+    // that merely SPANS a snoozed instant is re-opened by its newer window.
+    const match = anchors.find((a) => a.at === atMs)
+    if (!match) return 0
+    // …and it is covered until ITS OWN period ends — never a sibling's longer one,
+    // which would be a hide, and never a sibling's shorter one, which would cut the
+    // period the reader chose for THIS row.
+    return match.until > nowMs ? Math.min(until, match.until) : 0
   }
   // No anchor: nothing on the server side says which row the reader snoozed, so
   // fall back to the gap after this row's own measurement.
@@ -590,24 +607,34 @@ export function effectiveSnoozedUntil(state, entry, now = new Date()) {
   return cap > nowMs ? Math.min(until, cap) : 0
 }
 
-/** Normalise a stored anchor value into a list of positive ms instants.
+/** Normalise a stored anchor value into `{ at, until }` records.
  *
  *  Accepts BOTH shapes on purpose: a bare number — the shape this module shipped
- *  first — and the list it writes now. Dropping the number would silently discard
- *  the anchor of every store written by that build, which is exactly the
- *  incident-bound P1 `snoozedAt` exists to close.
+ *  first, which carries no deadline of its own — and the records it writes now.
+ *  Dropping the number would silently discard the anchor of every store written by
+ *  that build, reviving the incident-bound P1 `snoozedAt` exists to close; the
+ *  caller supplies the KEY deadline for such an entry, which is the only period a
+ *  pre-list store ever recorded.
  */
 function anchorsOfValue(raw) {
   const list = Array.isArray(raw) ? raw : [raw]
   const out = []
   for (const item of list) {
-    const ms = Number(item)
-    if (Number.isFinite(ms) && ms > 0 && !out.includes(ms)) out.push(ms)
+    const isRecord = Boolean(item) && typeof item === 'object'
+    const at = Number(isRecord ? item.at : item)
+    if (!Number.isFinite(at) || at <= 0) continue
+    const until = Number(isRecord ? item.until : 0)
+    const known = Number.isFinite(until) && until > 0 ? until : 0
+    const existing = out.find((a) => a.at === at)
+    // The same row twice keeps the LONGER deadline: an anchor's period is a choice
+    // the reader made, and it must never be silently shortened.
+    if (existing) existing.until = Math.max(existing.until, known)
+    else out.push({ at, until: known })
   }
   return out.length > MAX_SNOOZE_ANCHORS ? out.slice(-MAX_SNOOZE_ANCHORS) : out
 }
 
-/** The anchors stored for one decision key, in the list shape. */
+/** The anchors stored for one decision key, in the record shape. */
 function anchorsOf(state, key) {
   if (!state || !state.snoozedAt) return []
   return anchorsOfValue(state.snoozedAt[key])
@@ -1309,6 +1336,11 @@ export const SNOOZED_HIDE = 'Hide snoozed'
 export const SNOOZE_SELECT_LABEL = 'Snooze for'
 export const SNOOZE_PLACEHOLDER = 'Snooze…'
 export const UNSNOOZE = 'Unsnooze'
+//: The ACTIVITY row's control releases the WHOLE decision key, because an
+//: identity-wide snooze has an identity-wide un-snooze. Named differently on
+//: purpose: a control that says "Unsnooze: <this row>" while releasing every row
+//: of the key is a name that lies (#14694 review P2).
+export const UNSNOOZE_GROUP = 'Unsnooze all of this kind'
 export const DISMISS = 'Dismiss'
 export const RESTORE = 'Restore'
 export const DISMISSED_TOGGLE = (n) => `Dismissed (${n})`

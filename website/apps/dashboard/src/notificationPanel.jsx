@@ -76,6 +76,7 @@ import {
   STORAGE_UNAVAILABLE,
   TRUNCATED_NOTE,
   UNSNOOZE,
+  UNSNOOZE_GROUP,
   EPISODE_GAP_MS,
   buildLedger,
   detailOf,
@@ -148,9 +149,9 @@ function Badge({ count, warn }) {
  * 3 distinct names of 6. The absolute stamp is what the row itself renders, so it
  * is the discriminator to carry.
  *
- * The bound, stated rather than implied: two rows that share a label, a message, a
- * count AND a second are indistinguishable to a sighted reader too, so no name can
- * separate them — this makes the name exactly as discriminating as the render.
+ * The bound, stated rather than implied: the name carries every discriminator the
+ * row's own line renders — label, message, count, episode window and the absolute
+ * stamp — so two rows that still collide are indistinguishable on screen too.
  */
 function actionName(action, entry) {
   if (!entry) return action
@@ -159,12 +160,17 @@ function actionName(action, entry) {
   // (two `flag` rows of different rules share `label` 'Suspicious activity').
   const message = entry.message && entry.message !== label ? ` — ${entry.message}` : ''
   const count = entry.countLabel ? ` ${entry.countLabel}` : ''
+  // The episode WINDOW is rendered on the row too (and two bouts can share a newest
+  // second while spanning different windows), so it is part of the discriminator —
+  // without it the name was NOT "exactly as discriminating as the render", which is
+  // what the comment above claimed (#14694 review P3).
+  const range = entry.rangeLabel ? ` (${entry.rangeLabel})` : ''
   const stamp = entry.stamp
     ? ` @ ${entry.stamp}`
     : entry.ageLabel
       ? ` — ${entry.ageLabel}`
       : ''
-  return `${action}: ${label}${message}${count}${stamp}`
+  return `${action}: ${label}${message}${count}${range}${stamp}`
 }
 
 function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
@@ -985,10 +991,17 @@ export function NotificationBell({
                           <button
                             type="button"
                             className="ghost small"
-                            aria-label={actionName(UNSNOOZE, entry)}
+                            // An INCIDENT's control is row-scoped; an ACTIVITY
+                            // row's releases the whole decision key (its snooze is
+                            // identity-wide), so it is NAMED that way — a control
+                            // named for one row that releases every row of the key
+                            // is a name that lies (#14694 review P2).
+                            aria-label={actionName(
+                              entry.isIncident ? UNSNOOZE : UNSNOOZE_GROUP, entry,
+                            )}
                             onClick={() => handleUnsnooze(entry.key, entry)}
                           >
-                            {UNSNOOZE}
+                            {entry.isIncident ? UNSNOOZE : UNSNOOZE_GROUP}
                           </button>
                         </li>
                       ))}
