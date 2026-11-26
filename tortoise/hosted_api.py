@@ -1907,11 +1907,10 @@ def _capture_intake_enabled() -> bool:
     """The rollback seam. Default ON; `TORTOISE_CAPTURE_INTAKE=0` restores the
     pre-#14342 refusal exactly, which is what a deploy needs if the drain is
     ever found to misbehave in production."""
-    # ⛔ `env_flag`, not a hand-rolled falsy tuple: this was the SEVENTH spelling of
-    # the resolution `tortoise/env_truthy.py` exists to collapse — a local literal
-    # drifts from `FALSY` silently, and `tests/test_env_truthy.py` catches it only
-    # after the fact (`#4097`). Default-ON, so an unset/blank/garbage value keeps
-    # the intake enabled.
+    # ⛔ `env_flag`, not a hand-rolled falsy tuple: one more spelling of the
+    # resolution `tortoise/env_truthy.py` exists to collapse, which is what
+    # `tests/test_env_truthy.py` reds (#4097 — it caught this one). Default-ON,
+    # so an unset/blank/garbage value keeps the intake enabled, as the tuple did.
     return env_flag("TORTOISE_CAPTURE_INTAKE", True)
 
 
