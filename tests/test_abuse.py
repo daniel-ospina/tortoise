@@ -1016,7 +1016,16 @@ class TestR1Calibration:
                                                                  monkeypatch):
         """#14687 round-3 review: the CONSUMER of `tier_relative` was pinned and
         the PRODUCER was not — and the producer is what decides whether the
-        customer is told a limit exists. Pinned on the row the engine writes."""
+        customer is told a limit exists. Pinned on the row the engine writes,
+        and on the message that row renders as.
+
+        #14687 round-4 review F3: until this row, the recording had NO assertion
+        (the only `tier_relative` hit in the suite was a hand-built
+        `_alert_dict` fixture that can drift from the engine), so both engine
+        mutants — `tier_relative=False` always, and dropping the
+        `details["tier_relative"] = True` write — survived the whole suite. The
+        chain asserted here is engine → persisted row → rendered message.
+        """
         monkeypatch.setenv("TORTOISE_ABUSE_POINT_WINDOW_S", "60")
         # A tier floor that contributes: 100 000 -> 50 000.
         store = _TierStore(allowance=100_000)
@@ -1027,19 +1036,108 @@ class TestR1Calibration:
                     if r["event_type"] == abuse.EVENT_FLAG)
         assert flag["details"]["tier_relative"] is True, flag["details"]
         assert flag["details"]["threshold"] == 50_000
-        # …and it is ABSENT (not False) when the level is the absolute constant,
-        # so a selfhost deployment never advertises a plan limit it does not have.
-        store2 = MemoryAbuseStore()
+        # The rendered message follows the RECORDED fact, and names the period
+        # of the allowance the level is a share of (round-4 review F1): a bare
+        # "this Organization's allowance" would read as a per-window allowance.
+        rendered = abuse._alert_dict({"event_type": abuse.EVENT_FLAG,
+                                     "details": flag["details"]})
+        assert ("a share of this Organization's monthly write allowance"
+                in rendered["message"]), rendered["message"]
+        assert "measured against 1 minute of activity" in rendered["message"], (
+            rendered["message"])
+        assert rendered["details"]["tier_relative"] is True, rendered["details"]
+        # A FLAG offers the keys route (nothing is a limit YET); the SUPPORT route
+        # is the stage-2 row's, so drive the engine to stage 2 and read THAT row
+        # rather than hand-building one — the route and the recorded fact must
+        # come from the same evaluation. A small tier keeps the band reachable in
+        # two captures (level = 0.5 x 2 000 = 1 000, band (500, 1 000]).
+        store2 = _TierStore(allowance=2000)
         eng2 = AbuseEngine(store2)
+        assert eng2.point_threshold("t2") == 1000
+        eng2.record_point_create("t2", 1000, now=T0)
+        assert eng2.record_point_create("t2", 1000, now=T0) == "flag"
+        # Still inside the staging window (age < 60): a breach, not stage 2. This
+        # row is also the CONTINUITY evidence the escalation below needs, and it
+        # is placed half a second after the flag so it falls OUTSIDE the window
+        # measured 61 s later (continuity is (flag_at, now - window_s]).
+        assert eng2.record_point_create(
+            "t2", 1000, now=T0 + timedelta(milliseconds=500)) == "breach"
+        # A full window later, the only event inside the window lands INSIDE the
+        # band (500, 1 000], so the episode neither fires nor clears.
+        assert eng2.record_point_create("t2", 1000,
+                                        now=T0 + timedelta(seconds=61)) == "breach"
+        # …and crossing the level again ESCALATES the same sustained episode.
+        assert eng2.record_point_create("t2", 1000,
+                                        now=T0 + timedelta(seconds=120)) == "breach"
+        review = next(r for r in store2.rows
+                      if r["event_type"] == abuse.EVENT_REVIEW)
+        assert review["details"]["tier_relative"] is True, review["details"]
+        assert review["details"]["threshold"] == 1000, review["details"]
+        review_rendered = abuse._alert_dict({"event_type": abuse.EVENT_REVIEW,
+                                            "details": review["details"]})
+        assert "monthly write allowance" in review_rendered["message"]
+        assert "contact support@premiselabs.co" in review_rendered["message"], (
+            review_rendered["message"])
+        # …and the flags stay ABSENT (not False) when the level is the absolute
+        # constant, so a selfhost deployment never advertises a plan limit it
+        # does not have.
+        store3 = MemoryAbuseStore()
+        eng3 = AbuseEngine(store3)
         monkeypatch.setenv("TORTOISE_ABUSE_POINT_THRESHOLD", "5")
-        assert eng2.record_point_create("t1", 6, now=T0) == "flag"
-        flag2 = next(r for r in store2.rows
+        assert eng3.record_point_create("t1", 6, now=T0) == "flag"
+        flag2 = next(r for r in store3.rows
                      if r["event_type"] == abuse.EVENT_FLAG)
         assert "tier_relative" not in flag2["details"], flag2["details"]
-        # The rendered payload/message follow the recorded fact.
         row = abuse._alert_dict({"event_type": "flag",
                                  "details": flag2["details"]})
-        assert "this Organization's allowance" not in row["message"], row["message"]
+        assert "allowance" not in row["message"].lower(), row["message"]
+        assert "review your API keys" in row["message"], row["message"]
+
+    def test_the_allowance_clause_follows_the_ratio_knob(self, notified,
+                                                        monkeypatch):
+        """#14687 round-4 review F2: the copy once hardcoded "half" while
+        `TORTOISE_ABUSE_TIER_FLOOR_RATIO` is a documented, supported knob, so at
+        0.8 a pro org's 40 000 level was described as *half* its allowance — a
+        false statement about the customer's own plan, on a security screen.
+
+        Nothing in the suite made that clause vary, which is why it shipped. The
+        two values below are the ones that falsify it: at 0.8 "half" is a lie,
+        and at 0 the tier term is OFF so no allowance clause may appear at all.
+        """
+        monkeypatch.setenv("TORTOISE_ABUSE_TIER_FLOOR_RATIO", "0.8")
+        store = _TierStore(allowance=50_000)
+        eng = AbuseEngine(store)
+        assert eng.point_threshold("t1") == 40_000
+        for _ in range(40):
+            eng.record_point_create("t1", 1000, now=T0)
+        assert eng.record_point_create("t1", 1, now=T0) == "flag"
+        flag = next(r for r in store.rows
+                    if r["event_type"] == abuse.EVENT_FLAG)
+        assert flag["details"]["threshold"] == 40_000, flag["details"]
+        assert flag["details"]["tier_relative"] is True, flag["details"]
+        rendered = abuse._alert_dict({"event_type": abuse.EVENT_FLAG,
+                                     "details": flag["details"]})
+        assert "half" not in rendered["message"].lower(), rendered["message"]
+        assert "monthly write allowance" in rendered["message"], (
+            rendered["message"])
+
+        # Ratio 0 disables the tier term: same store, same capture, absolute
+        # level — and therefore no `tier_relative`, no allowance clause, and the
+        # keys route.
+        monkeypatch.setenv("TORTOISE_ABUSE_TIER_FLOOR_RATIO", "0")
+        store0 = _TierStore(allowance=50_000)
+        eng0 = AbuseEngine(store0)
+        assert eng0.point_threshold("t1") == 500
+        assert eng0.record_point_create("t1", 501, now=T0) == "flag"
+        flag0 = next(r for r in store0.rows
+                     if r["event_type"] == abuse.EVENT_FLAG)
+        assert "tier_relative" not in flag0["details"], flag0["details"]
+        rendered0 = abuse._alert_dict({"event_type": abuse.EVENT_FLAG,
+                                      "details": flag0["details"]})
+        assert "allowance" not in rendered0["message"].lower(), (
+            rendered0["message"])
+        assert "review your API keys" in rendered0["message"], (
+            rendered0["message"])
 
     def test_a_band_dip_still_escalates_once(self, notified, monkeypatch):
         """#14687 round-2 review: the latch keeps the episode OPEN, so its age

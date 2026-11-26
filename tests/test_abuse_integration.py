@@ -1674,8 +1674,12 @@ class TestAlertRegistersAndAcks:
         tier = _alert_dict({"event_type": "review_needed", "details": {
             "count": 51_000, "threshold": 25_000, "window_s": 3600,
             "surface": "Memory writes", "tier_relative": True}})
-        assert ("a share of this Organization's monthly allowance"
+        # #14687 round-4 review F1: the clause names the ALLOWANCE's period
+        # (monthly) and the WINDOW the measurement covers, so the customer is
+        # not told a monthly comparison is a per-window one.
+        assert ("a share of this Organization's monthly write allowance"
                 in tier["message"]), tier
+        assert "measured against 1 hour of activity" in tier["message"], tier
         assert "contact support@premiselabs.co" in tier["message"], tier
         absolute = _alert_dict({"event_type": "review_needed", "details": {
             "count": 900, "threshold": 500, "window_s": 3600,

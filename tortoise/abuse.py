@@ -1591,16 +1591,22 @@ def _point_rate_message(details: dict, *, sustained: bool) -> str:
                 # NOT "half": the ratio is a knob (`TORTOISE_ABUSE_TIER_FLOOR_
                 # RATIO`), and hard-coding the default's word would misdescribe
                 # every deployment that changed it (round-3 review).
-                # #14687 round-4 review: the PERIOD is stated too. The allowance
-                # the level derives from is `included_write_ops_per_month`, while
-                # the number beside it is a one-hour weight sum, so a customer
-                # told only "a share of this Organization's allowance" reads it as
-                # a per-window allowance and the comparison silently asserts a
-                # dimension it does not have. Naming the period keeps the
-                # sentence true of the row it renders (the recorded `threshold`
-                # IS the share of the monthly number, and `.env.example` states
-                # the same mismatch on the operator surface).
-                measured += " (a share of this Organization's monthly allowance)"
+                #
+                # ⚠️ THE UNIT AND THE PERIOD ARE STATED, not left to the reader
+                # (round-4 review F1). `organizations.ops_allowance` is
+                # `included_write_ops_per_month`, and the quantity compared
+                # against it is a one-window POINT weight — so "this
+                # Organization's allowance" on its own reads as a per-window
+                # allowance, which is a claim the customer can check against
+                # their own plan and find false. The clause names the period of
+                # the ALLOWANCE (monthly) and the window the measurement covers,
+                # so the sentence describes the comparison the engine made. The
+                # unit mismatch itself is the owner's derivation, recorded on
+                # #14687 with an `OVERRIDES:` line and in
+                # `.env.example`/`point_threshold` — NOT corrected here.
+                measured += (
+                    " (a share of this Organization's monthly write allowance,"
+                    f" measured against {_human_window(window_s)} of activity)")
         measured += "."
     elif units is not None:
         measured = f"{surface} reached {units:,} units."
@@ -2319,10 +2325,13 @@ class AbuseEngine:
         exists for, which is why "just raise the number" was refused.
 
         So the level is TIER-RELATIVE: an org consuming a large share of its own
-        tier allowance is abnormal by its OWN plan, and the alert's existing
-        remedy ("if you need a higher limit, contact support") becomes a true
-        statement instead of a copy line on a 500-unit threshold that was never a
-        limit. ``TORTOISE_ABUSE_POINT_THRESHOLD`` remains the FLOOR of that
+        tier's MONTHLY write allowance within ONE window is abnormal by its OWN
+        plan, and the alert's existing remedy ("if you need a higher limit,
+        contact support") becomes a true statement instead of a copy line on a
+        500-unit threshold that was never a limit. The period of the allowance and
+        the window it is compared against are stated wherever the number surfaces
+        (the customer message, `.env.example`, and the ⚠️ paragraph below),
+        because the two are NOT the same scale. ``TORTOISE_ABUSE_POINT_THRESHOLD`` remains the FLOOR of that
         comparison, so a tier we cannot read (or a 0 allowance) keeps the shipped
         absolute level rather than disabling detection.
 
