@@ -826,11 +826,17 @@ class TestR1Calibration:
         assert store.window_sum("t1", abuse.EVENT_POINT_CREATE, 3600, T0) == cap
 
     def test_the_per_request_cap_is_the_turn_cap_twice(self):
-        """The bound is DERIVED, not picked: both terms of the weight formula
-        are limited by the session turn cap (one Point per stored turn, plus what
-        extraction mints from them), so 2 × `MAX_SESSION_TURNS` is the ceiling of
-        a legitimate single capture. Pinned so a future turn-cap change cannot
-        leave the abuse cap describing an older product."""
+        """The bound is DERIVED, and it is the ceiling of a TYPICAL capture — not a
+        provable one. `MAX_SESSION_TURNS` caps the stored-turn term; the
+        extracted term is capped PER TURN at `MAX_EXTRACTIONS_PER_TURN` (200),
+        not per capture, so one 500-turn session can legitimately weigh far more
+        than 1 000 and the cap deliberately clips it (``point_request_cap``'s
+        own note says "the ceiling of a typical -- not a provable -- single
+        capture", and `.env.example` says the same). ⛔ An earlier version of
+        this docstring claimed BOTH terms were turn-capped and the bound was
+        therefore the ceiling of a legitimate capture; only the conversation
+        term is. Pinned so a future turn-cap change cannot leave the abuse cap
+        describing an older product."""
         from tortoise.quota import MAX_SESSION_TURNS
         assert AbuseEngine(MemoryAbuseStore()).point_request_cap() == \
             2 * MAX_SESSION_TURNS
