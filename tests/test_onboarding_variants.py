@@ -2762,15 +2762,29 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     # while the dash was inside the window), exactly as the `;` twin is.
     post_sentence = _STATEMENT_BREAK_RE.split(after.lstrip(" \t,…"), maxsplit=1)[0]
     post_clauses = [c.strip() for c in post_sentence.split(",")]
-    # ⛔ AN `and`-LED CLAUSE CONTINUES THE PREVIOUS ONE. Splitting at the comma
-    # made the second half its own clause, which the forward-sequencer skip then
-    # dropped whole — so "after confirming the config is right, AND the tools are
-    # actually there" passed, while the no-comma twin is RED (measured). Merging
-    # first lets the config-conjunction rule see both halves.
+    # ⛔ AN `and`-LED CLAUSE CONTINUES THE PREVIOUS ONE — UNLESS IT OPENS ITS OWN
+    # FORWARD CLAUSE. Splitting at the comma made the second half its own clause,
+    # which the forward-sequencer skip then dropped whole — so "after confirming
+    # the config is right, AND the tools are actually there" passed, while the
+    # no-comma twin is RED (measured). Merging first lets the config-conjunction
+    # rule see both halves.
+    # ⛔ BUT `and once|and when|and then …` IS A SEPARATE FORWARD STATEMENT, and
+    # folding it into its predecessor DESTROYS the sequencer the skip anchors on:
+    # the merged clause no longer starts with `and`, so `_FORWARD_SEQUENCER_RE`
+    # cannot skip it, `_negated_observation_only` saw a spliced remainder and
+    # refused the skip, and forward copy went RED (#14679 review at
+    # `49ef237f4c5b`, measured):
+    #     GREEN  Restart your client (you should see no errors in the log), and
+    #            once the tools are listed run `tortoise mcp-status`.
+    #     RED    the same sentence, after the splice landed in `remainder`
+    # The merge therefore declines a clause whose post-`and` text opens a forward
+    # clause of its own.
+    _AND_CONTINUATION_RE = re.compile(
+        r"(?i)^and\b(?!\s+(?:then|once|when|after|next|afterwards?|now)\b)")
     merged: list[str] = []
     for clause in post_clauses:
-        if merged and re.match(r"(?i)^and\b",
-                               clause.lstrip(_PRE_CUE_PREFIX)):
+        if merged and _AND_CONTINUATION_RE.match(
+                clause.lstrip(_PRE_CUE_PREFIX)):
             merged[-1] = f"{merged[-1]}, {clause}"
         elif (merged
                 # ⛔ SEARCH A DECORATION-FREE COPY. The tail anchor is `$`, so a
@@ -4334,6 +4348,21 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "then confirm the tools are actually there.", False),
     ("Once the client restarts, check the tools are present. Then restart your "
      "client, then confirm the tools are actually there.", False),
+    # ── CYCLE 40 (#14679's review at `49ef237f4c5b`): the negated-observation
+    # SPLICE made an `and once|and when` continuation fold into its predecessor,
+    # which DESTROYS the sequencer `_FORWARD_SEQUENCER_RE` anchors on — so forward
+    # copy went RED with the "inverts its own restart cue" message (#3429, the
+    # class that gets a pin deleted). `_AND_CONTINUATION_RE` declines the merge for
+    # a clause that opens a forward clause of its own:
+    ("Restart your client (you should see no errors in the log), and once the "
+     "tools are listed run `tortoise mcp-status`.", False),
+    ("Restart your client seeing no errors in the log, and when the tools "
+     "appear run `tortoise mcp-status --live`.", False),
+    # ⛔ …while the CONFIG-CONJUNCTION the merge exists for still reds: its
+    # `and`-half is not a forward clause of its own, so it is still folded in and
+    # the config-scope rule still sees both halves.
+    ("Restart your client after confirming the config is right, and the tools "
+     "are actually there.", True),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
