@@ -1821,8 +1821,16 @@ _CONFIG_PREP_RE = re.compile(
 # A double hyphen needs no arm of its own: after the `lstrip` the only place a
 # `--` separator can sit is the start of the window, which the `^` alternative
 # already covers (measured — `client--once` stays GREEN without a mid-word arm).
+# ⛔ A SPACED `--flag` IS NOT A BREAK. `-{1,2}\s*` did break at " --cask", so
+# "Restart your client, run `brew install --cask x`, once the tools appear." was
+# GREEN while its `--` -free twin was RED — a false PASS that truncated the window
+# in front of the very clause that inverts the order (measured). The hyphen arm is
+# therefore explicit about its three shapes: a single hyphen that STARTS a break
+# (" - once"), a double hyphen that stands alone ("-- once"), and a leading one
+# ("-once"); a single hyphen followed by a non-space ("well-known", "-cask") and a
+# spaced long option ("--cask") are neither.
 _STATEMENT_BREAK_RE = re.compile(
-    r"(?:[;—–]\s*|(?:(?<=\s)|^)-{1,2}\s*"
+    r"(?:[;—–]\s*|(?:(?<=\s)-(?!-)\s*|(?<=\s)--\s+|^-\s*)"
     r"|\.\s+(?=[A-Z\"'`(\[]))")
 
 # A clause that opens with one of these continues the cue FORWARD ("restart,
@@ -2285,6 +2293,12 @@ def test_3232_generic_restart_lines_are_exact():
      False),
     ("Restart your client--once the tools are listed, run `tortoise "
      "mcp-status`.", False),
+    ("Restart your client -- once the tools are listed, run `tortoise "
+     "mcp-status`.", False),
+    # a spaced double hyphen MID-string needs its own arm (the leading one above is
+    # matched by `^-\s*`, so only this row exercises the standalone `--` arm):
+    ("Restart your client, re-run the bootstrap -- once the tools are "
+     "listed, run `tortoise mcp-status`.", False),
     ("Restart your client, then, once the tools are listed, run `tortoise "
      "mcp-status`.", False),
     ("Restart your client, and, once the tools are listed run `tortoise "
@@ -2293,6 +2307,13 @@ def test_3232_generic_restart_lines_are_exact():
      "mcp-status`.", False),
     ("Restart your client, afterwards, once the tools are listed run `tortoise "
      "mcp-status`.", False),
+    # a spaced `--flag` is NOT a break: the pre-fix arm split the window in front
+    # of the clause that inverts the order, so this pair was GREEN/RED the wrong
+    # way round (measured). Both twins are RED now, and both forward twins GREEN:
+    ("Restart your client, run `brew install --cask x`, once the tools are "
+     "actually there.", True),
+    ("Restart your client, run `brew install --cask x`, then confirm the tools "
+     "are there.", False),
     # the unspaced pre-cue dash twin, which was a false PASS before the break fix:
     ("Delete the old entry—but first confirm the tools are actually there. "
      "Restart your client, then confirm the tools are actually there.", True),
@@ -2344,9 +2365,13 @@ def test_3232_generic_restart_lines_are_exact():
      "tools are actually there.", True),
     # ── rows for the arms behind the shapes above; each one flips when the arm
     # it names is removed (measured per arm). A few alternatives in the regexes
-    # are live but carry no row of their own — spelling variants, and a few
-    # untested pronoun/synonym alternatives — and the comments claim the
-    # behaviour, not a row for every alternative ──────────────────────────────────
+    # are live but carry no row of their own: spelling variants, a few untested
+    # pronoun/synonym/preposition alternatives (form (e)'s `visible|load`, form
+    # (a)'s `when`, form (c)'s `yet`, `_CONFIG_PREP_RE`'s `that|those` and
+    # `from|inside|per|under`), and a handful that are REDUNDANT rather than
+    # untested (a `--` is caught by `^-\s*`, form (a)'s `having` by form (b), the
+    # predicate's `list` by form (f)'s own verb list). The comments claim the
+    # behaviour, not a row for every alternative ───────────────────────────────────
     ("Restart your client, and once the tools are listed run `tortoise "
      "mcp-status`.", False),
     ("Restart your client, next once the tools are listed run `tortoise "
