@@ -717,6 +717,13 @@ def a4_invention() -> dict:
               # ONE FLAG PER LIST (#14691 review, 5th cycle, NEW-4): a single
               # shared boolean cannot say WHICH list's cap bit, so a consumer
               # still cannot tell which of the two samples is complete.
+              # ⛔ A PERSISTED HISTOGRAM, because prose quoted a threshold the
+              # artifact did not carry (#14691, 10th review, finding 2). REPORT
+              # said "(11 below 0.5)" while the only band the scorer defined was
+              # 0.6 — so the figure was unbacked AND ambiguous, colliding with
+              # `claim_layer.verbatim` (a disjoint bucket that also happens to be
+              # 11). Any prose figure about the band now reads this.
+              "bands": {"below_0_5": 0, "from_0_5_to_0_6": 0, "at_or_above_0_6": 0},
               "paraphrase_examples_truncated": False,
               "invented_examples_truncated": False}
     for doc in RECEIPT.get("documents") or []:
@@ -733,6 +740,12 @@ def a4_invention() -> dict:
             entry = {"doc": doc.get("doc_id"), "quote": quote[:200],
                      "best_sentence_overlap": ov,
                      "point": str(point.get("text") or point.get("content"))[:140]}
+            if ov < 0.5:
+                quotes["bands"]["below_0_5"] += 1
+            elif ov < BAND:
+                quotes["bands"]["from_0_5_to_0_6"] += 1
+            else:
+                quotes["bands"]["at_or_above_0_6"] += 1
             if ov >= BAND:
                 quotes["paraphrase"] += 1
                 if len(quotes["paraphrase_examples"]) < CAP:
@@ -1088,6 +1101,7 @@ def _claim_layer() -> dict:
     return {"quotes_total": q["total"], "verbatim": q["verbatim"],
             "paraphrase": q["paraphrase"], "invented": q["invented"],
             "not_in_corpus": q["not_in_corpus"],
+            "bands": dict(q["bands"]),
             "invented_examples": q["invented_examples"][:6],
             "passes": q["invented"] == 0}
 
