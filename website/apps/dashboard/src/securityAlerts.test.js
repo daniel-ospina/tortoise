@@ -510,7 +510,15 @@ test('#14686: an in-flight alerts read cannot land on the wrong Organization', (
   // write ABOVE the guard followed by the guarded one — which writes the previous
   // Organization's rows exactly as the guard exists to prevent, every pin green
   // (measured). One occurrence is the property; adjacency alone is not.
-  assert.equal((body.match(/setAlerts\(feed\.alerts\)/g) || []).length, 1,
+  // ⛔ COUNT THE CALL, NOT ONE SPELLING. `setAlerts(feed.alerts)` is satisfied only by
+  // that literal; `setAlerts([...feed.alerts])`, `setAlerts (feed.alerts)` and a
+  // destructured alias all write the previous Organization's rows above the guard and
+  // stayed green (measured) — a defensive copy there is a routine reflex, and the
+  // row's own message claims a property the literal count does not enforce. The call
+  // form is spelling-agnostic; `setAlertsSaturated(`/`setAlertsUnavailable(` do not
+  // match `setAlerts\s*\(` because a letter follows, so a looser count is not
+  // false-positive-prone (whole-body `setAlerts(` occurrences at this head: 1).
+  assert.equal((body.match(/setAlerts\s*\(/g) || []).length, 1,
     'the success write must appear exactly once — a write above the guard defeats it')
 })
 
