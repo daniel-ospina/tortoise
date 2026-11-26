@@ -527,7 +527,7 @@ class RecordWrite:
     #: ``monitoring.metrics()["record_write_failures"]`` / ``["record_non_journal_skips"]``
     #: is counted under (``malformed_dsn``, ``no_durable_journal``, ``no_tenant``,
     #: ``no_tenant_carried``, ``circuit_open``, ``write_failed``,
-    #: ``journal_collision``), else ``None``.
+    #: ``projection_refused``, ``journal_collision``), else ``None``.
     #: The SAME vocabulary as the counters on purpose (#8447): a caller that
     #: reports the refusal and an operator reading the metric are naming one
     #: thing, and a second word list is a second thing to drift.
@@ -567,11 +567,13 @@ class RecordWrite:
     #: "nobody said whose turns these are", the other is "the caller said, and
     #: the answer was unusable" — and both count on the ``no_tenant`` COUNTER.
     #: So the closed list above is the refusal vocabulary, and the counter is a
-    #: DIFFERENT set OF THE SAME SIZE — seven labels, not the same seven. The
-    #: door folds `no_tenant_carried` onto `no_tenant` and counts
-    #: `no_durable_journal` on the skip counter, while the counter separately
-    #: carries the SDK-only `no_journal` and `seam_unimportable`; deriving one
-    #: set from the other is wrong in BOTH directions. Listing only the
+    #: DIFFERENT set: it folds `no_tenant_carried` onto `no_tenant`, it counts
+    #: `no_durable_journal` on the skip counter, and it separately carries the
+    #: SDK-only `no_journal`/`seam_unimportable` plus `projection_refused` — one
+    #: label MORE than this list since #11783 split the projection half out of
+    #: `write_failed` (that token is the attempt's own arm here and a counter
+    #: label there, so the two sets overlap without being derivable); deriving
+    #: one set from the other is wrong in BOTH directions. Listing only the
     #: counter words here is what made a consumer's closed list miss a value the
     #: door actually returns (:func:`write_live_record`'s ``LIVE_WRITE_REFUSALS``
     #: declares them together, and that set is authoritative).
@@ -584,13 +586,14 @@ class RecordWrite:
         The one check a caller needs. ``False`` means *nothing was written* —
         for ``NOT_ARMED`` it is not an error (an unarmed deployment is a
         supported state); a ``REFUSED`` call was armed and did not write, and
-        :attr:`refusal` says WHY, but the SEVEN refusal tokens are not one
+        :attr:`refusal` says WHY, but the EIGHT refusal tokens are not one
         severity: ``malformed_dsn`` / ``no_tenant`` / ``no_tenant_carried`` /
-        ``circuit_open`` / ``write_failed`` / ``journal_collision`` are
-        FAILURES, all six counted on ``record_write_failures`` (BOTH
-        ``no_tenant`` arms count — the nil tenant and the malformed CARRIED
-        pair, which is why the token list is one longer than the counter set),
-        while ``no_durable_journal`` is a
+        ``circuit_open`` / ``write_failed`` / ``projection_refused`` /
+        ``journal_collision`` are FAILURES, all SEVEN counted on
+        ``record_write_failures`` (BOTH ``no_tenant`` arms count — the nil tenant
+        and the malformed CARRIED pair, which is why the token list is one longer
+        than the counter set, and ``projection_refused`` (``#11783``) counts under
+        its own label there), while ``no_durable_journal`` is a
         healthy-armed DECLINE counted on ``record_non_journal_skips`` — that lane
         has no journal by design, so nothing a replay could restore is missing
         (#9231 review P2, and the vocabulary note in
@@ -614,10 +617,12 @@ class RecordWrite:
             return status_vocabulary.classify(configured=False, reached=False)
         if self.outcome is RecordWriteOutcome.REFUSED:
             # ARMED and nothing written. Only `circuit_open` is LITERALLY
-            # "configured, not reached" ⇒ `degraded`. The other six are near
+            # "configured, not reached" ⇒ `degraded`. The other seven are near
             # misses, and NOTHING here has its own term: `write_failed` covers an
-            # unreachable record AND a record that WAS reached and refused the
-            # projection; `journal_collision` (#9318) is a record that WAS reached
+            # unreachable record OR a failed statement; `projection_refused`
+            # (#11783) is a record the store WAS reached for and refused before
+            # writing it (a producer/schema shape, not an outage);
+            # `journal_collision` (#9318) is a record that WAS reached
             # and refused to file itself under a journal position it cannot index
             # (a different `event_type`, a different capture time, an identity the
             # surviving row contradicts, or — for a write with no `ts` to compare
@@ -628,7 +633,7 @@ class RecordWrite:
             # and `no_durable_journal` (the healthy M2 capture lane) never asks
             # the store at all. So `degraded` — which `status_vocabulary` defines
             # as "off by OUTAGE" — is the NEAREST of the four RECORDED terms for
-            # all seven, not a measured outage for the other six. There is
+            # all eight, not a measured outage for the other seven. There is
             # deliberately no fifth RECORDED term ("do not add a fifth term… a
             # condition the four do not cover is a contract change") — the count
             # above is the REFUSAL set, which is one longer than the recorded
@@ -657,7 +662,7 @@ class RecordWrite:
 def _refused(refusal: str, seq: int | None) -> RecordWrite:
     """The LIVE door's refusal report for an ARMED call that did not write.
 
-    ONE constructor for all seven refusal arms (#8447), for two reasons:
+    ONE constructor for all eight refusal arms (#8447), for two reasons:
 
     * the ARM decides the outcome, so no arm can drift back to ``return None``
       — the value this module reserves for NOT ARMED — by accident;
@@ -3223,6 +3228,59 @@ def _journal_collision_cause(
     return None
 
 
+def _projection_refusal_cause(
+        exc: BaseException | None,
+        depth: int = 4,
+) -> record_projection.RecordProjectionError | None:
+    """The PROJECTION refusal buried in a wrapped failure, or ``None`` (#11783).
+
+    `RecordWriter.write` wraps every projection failure in `RecordWriteError`
+    (``from exc``), so this door cannot tell *the record did not answer* from
+    *the record answered and REFUSED this record* by the exception it holds —
+    and it counted both on the same ``write_failed`` label. That is why the
+    production signal for a refused-by-shape write was indistinguishable from a
+    transport outage: 182 of them accumulated on the hosted app while every
+    database probe read healthy (2.5–3.6 ms), and the only thing that could
+    have said which was the log line nobody had a reason to read.
+
+    A SEPARATE TOKEN, the way ``journal_collision`` is separate (#9318): the
+    counter answers *what kind of failure is this* and an operator's next move
+    differs completely — a projection refusal means a RECORD the projector
+    cannot represent (fix the producer or the record shape; a replay of the
+    same record re-refuses), while ``write_failed`` means the store could not
+    be reached or a STATEMENT failed while executing.
+
+    ⛔ ``RecordStatementError`` IS DELIBERATELY EXCLUDED, and that exclusion is
+    the whole classification: it means one PLAN statement failed to EXECUTE —
+    the store was reached and the write was attempted — which is a STORE
+    failure however it is caused (a constraint the record's own data violates,
+    a driver error, a connection dropped mid-transaction). What this token
+    names is the strictly earlier fact: the plan could not be BUILT, so NO
+    statement ran (an undeclared/refused record type, a carrier that carries no
+    snapshot, a caller watermark the projector refuses). That keeps
+    ``test_9318_journal_collision.py::test_a_write_that_failed_for_another_
+    reason_is_still_write_failed`` true rather than re-labelling an execution
+    failure.
+
+    ``__cause__`` first, ``__context__`` second, bounded with a visited set —
+    the same walk, and the same reason, as :func:`_journal_collision_cause`
+    (this runs inside the failure path, where an exception would replace the
+    failure being reported). ``JournalPositionCollision`` is excluded too
+    because it has its own arm one step earlier.
+    """
+    seen: set[int] = set()
+    while exc is not None and depth > 0 and id(exc) not in seen:
+        if (isinstance(exc, record_projection.RecordProjectionError)
+                and not isinstance(
+                    exc, (record_projection.JournalPositionCollision,
+                          record_projection.RecordStatementError))):
+            return exc
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+        depth -= 1
+    return None
+
+
 def write_live_record(record: Mapping[str, Any], *,
                       durable: bool = True,
                       seq: int | None = None,
@@ -3878,6 +3936,32 @@ def write_live_record(record: Mapping[str, Any], *,
             # cost of the rest of the capture. A totality or statement failure
             # deliberately does NOT trip it — the connection was fine.
             _trip_live_breaker()
+        projection_cause = _projection_refusal_cause(exc)
+        if projection_cause is not None:
+            # ⛔ THE RECORD WAS REACHED AND REFUSED THIS RECORD (#11783) — not
+            # the same fact as `write_failed`, and counted apart since. Measured
+            # on the hosted app (2026-11-26): 182 refusals read as `write_failed`
+            # while every database probe was healthy, because a value SHAPE was
+            # taking whole records out of the store — a projection refusal is a
+            # producer/schema fact an operator fixes at its source, while
+            # `write_failed` is a store fact. Same counter, own label, own
+            # remedy; the specific column/statement attribution rides the
+            # exception text below (`RecordStatementError`'s), never this token.
+            _count_write_failure("projection_refused")
+            _logger.warning(
+                "the record write did not happen (projection_refused) — the "
+                "journal holds the record; the PROJECTION refused it and NO "
+                "statement ran (a record type it does not declare, a carrier "
+                "with no snapshot, a caller watermark it refuses). ⛔ This is "
+                "NOT `write_failed`: the store was never asked to apply it, so "
+                "there is no outage and no statement fault to look for — check "
+                "the cause, which is a producer or a record-shape fact. A "
+                "replay of the same record re-refuses until the cause is fixed: "
+                "record=%s %s: %s",
+                record.get("type"), _record_identity(record),
+                projection_cause,
+            )
+            return _refused("projection_refused", seq)
         _count_write_failure("write_failed")
         # ⛔ THE REMEDY MUST MATCH THE ARM (#12894 review). On the ALLOCATED arm
         # (`TORTOISE_RECORD_ALLOCATE=1`, which this change makes reachable in
