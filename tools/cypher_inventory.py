@@ -1185,17 +1185,83 @@ def _path_in_HEAD(probe_cwd: Path, probe_path: str) -> bool | None:
     return None
 
 
-def _tracked_destination_refusal(
-    target: Path, rel: str | None, _root_probe_done: bool = False
+def _destination_probes(target: Path, rel: str | None) -> tuple[tuple[Path, str, str], ...]:
+    """Every repository that could hold the destination, ROOT first.
+
+    ⛔ NOT THE TWO ENDPOINTS (#14625 review, round 10, P3, measured). Rounds 7 and 8
+    each fixed the endpoint they were shown — the destination's own repository, then
+    ROOT — and the shape they missed was the one BETWEEN them: `ROOT/inner` tracking
+    `deeper/docs/DOC.md` while `ROOT/inner/deeper` is a second repository whose commit
+    does not name it, and ROOT does not track it either. `--render` exited **0** with no
+    stderr and replaced 11 bytes of content `inner`'s index AND HEAD both hold. Probing
+    two named providers is an enumeration that keeps losing to the next nesting depth, so
+    the guard now asks every repository BOUNDARY on the path: ROOT, each ancestor
+    directory below it that holds a `.git` (a nested repo, a linked worktree's own
+    gitdir, a submodule's gitlink), and finally the destination's nearest existing
+    directory — which covers a checkout entirely outside ROOT.
+
+    Order matters only for the message: ROOT's refusal is the most legible.
+    """
+    probes: list[tuple[Path, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(cwd: Path, spec: str, label: str) -> None:
+        key = (str(cwd), spec)
+        if key in seen:
+            return
+        seen.add(key)
+        probes.append((cwd, spec, label))
+
+    if rel is not None:
+        add(ROOT, rel, rel)
+        # every boundary BELOW `ROOT` — `target.parent` upwards, stopping at ROOT. A
+        # boundary is decided the way `_looks_like_git_metadata` decides it elsewhere:
+        # a `.git` entry that is merely PRESENT (`lexists`, so a dangling symlink to an
+        # unmounted gitdir still counts) or a bare gitdir's own three markers.
+        chain: list[Path] = []
+        cursor = target.parent
+        while cursor != ROOT and cursor != cursor.parent:
+            chain.append(cursor)
+            cursor = cursor.parent
+        for boundary in reversed(chain):
+            if os.path.lexists(boundary / ".git") or _looks_like_git_metadata(boundary):
+                add(boundary, target.relative_to(boundary).as_posix(), str(target))
+    probe_dir = target.parent
+    while not probe_dir.is_dir() and probe_dir != probe_dir.parent:
+        probe_dir = probe_dir.parent
+    if rel is not None:
+        add(probe_dir, target.relative_to(probe_dir).as_posix(), str(target))
+    else:
+        add(probe_dir, target.name, str(target))
+    return tuple(probes)
+
+
+def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
+    """Refuse if ANY repository on the destination's path tracks it; `None` = free.
+
+    Every probe in `_destination_probes` is asked, and a refusal from any one of them is
+    the verdict — the composite is MONOTONE: adding a provider can only add refusals,
+    never remove one, which is the property that makes "ask one more repository" safe to
+    repeat instead of the sequence of fail-OPENS rounds 5, 7 and 8 each produced by
+    following whichever single provider they had been shown.
+    """
+    for cwd, spec, label in _destination_probes(target, rel):
+        verdict = _probe_one_repository(target, cwd, spec, label)
+        if verdict is not None:
+            return verdict
+    return None
+
+
+def _probe_one_repository(
+    target: Path, probe_cwd: Path, probe_path: str, label: str
 ) -> int | None:
     """Refuse a destination that git TRACKS; `None` means the path is free.
 
-    Answers the invariant `--render`'s output is never committed — the same one for a
-    destination inside `ROOT` and for one in another checkout, so the probe follows the
-    DESTINATION (`rel` when it is inside `ROOT`, otherwise the destination's own
-    directory and basename).
+    One provider's answer. The invariant is `_render`'s output is never committed, and
+    the caller asks EVERY repository on the destination's path — see
+    `_destination_probes` for why one provider is never enough.
 
-    ⛔ THREE ANSWERS PERMIT, AND "NON-ZERO" IS NOT ONE OF THEM. Git's own contract keeps
+    ⛔ TWO ANSWERS PERMIT, AND "NON-ZERO" IS NOT ONE OF THEM. Git's own contract keeps
     the ANSWER (`0` tracked / `1` not tracked — `ls-files --error-unmatch`'
     documented non-match) apart from COULD NOT ANSWER (`128`: a corrupt index, an
     unreadable index, an index that is a directory, a `.git` git disowns). Reading every
@@ -1220,58 +1286,6 @@ def _tracked_destination_refusal(
     `git` binary raises `FileNotFoundError`, and an uncaught one would exit 1, the
     DRIFT code this module reserves for `--check`.
     """
-    # `target.parent` can be a path that does not exist yet; `git -C` needs a
-    # directory, so walk up to the nearest one that does (the write itself creates the
-    # rest, and a directory that does not exist cannot hold a tracked file).
-    probe_dir = target.parent
-    while not probe_dir.is_dir() and probe_dir != probe_dir.parent:
-        probe_dir = probe_dir.parent
-    # ⛔ ASK BOTH REPOSITORIES AND PERMIT ONLY IF BOTH PERMIT (#14625 review, round 8,
-    # P0). Following the destination alone INVERTED two rows: a nested `git init` under
-    # ROOT (or a nested repo whose commit predates the file) answers "untracked" for a
-    # path ROOT's index AND HEAD both track, so the write went ahead at rc 0 over tracked
-    # content — measured, 12 bytes to 109 with empty stderr, and the pre-fix code refused
-    # both of those rows. Neither repository is authoritative: the destination's own repo
-    # knows about gitlinks and linked worktrees, and ROOT knows about the tree this tool
-    # writes into. So the ROOT-relative probe runs FIRST whenever the destination is
-    # inside ROOT and its own repository is not ROOT's, and a refusal from either side
-    # (tracked, or could-not-answer) is the verdict.
-    if rel is not None and not _root_probe_done:
-        root_verdict = _tracked_destination_refusal(
-            ROOT / rel, rel, _root_probe_done=True)
-        if root_verdict is not None:
-            return root_verdict
-    if _root_probe_done:
-        # ⛔ THE ROOT HALF MUST ASK *ROOT*, not the destination's nearest ancestor:
-        # `probe_dir` for a nested destination resolves to the NESTED repository, which
-        # is exactly the answer this half exists to cross-check (round 8 measured that
-        # shape permitting at rc 0 before this branch existed).
-        probe_cwd, probe_path, label = ROOT, rel, str(rel)
-    else:
-        probe_cwd, label = probe_dir, (rel if rel is not None else str(target))
-    # ⛔ THE FULL PATH FROM THE NEAREST EXISTING ANCESTOR, not `target.name`
-    # (#14625 review, round 5, P3): a destination whose parent directories do not
-    # exist yet asked about its BASENAME in a directory that is not its parent, so a
-    # peer repo tracking `sub/deep/x.md` answered "untracked" for `peer/sub/deep/x.md`
-    # after `sub/` was removed, and `--render` landed a generated document on a
-    # TRACKED path at rc 0. The invariant is about the path, so the probe names the
-    # whole remainder — `git ls-files` matches an index entry whose work-tree file is
-    # absent, which is exactly this case.
-    if not _root_probe_done:
-        probe_path = target.relative_to(probe_dir).as_posix()
-    # ⛔ AND THE PROBE ALWAYS FOLLOWS THE DESTINATION, `rel` OR NOT (#14625 review,
-    # round 7, P0): this used to ask `ROOT`'s repository for any destination INSIDE
-    # `ROOT` — `(ROOT, rel)` — which is the same repository only while the destination
-    # is in the toplevel work tree. Measured, with the REAL census: `--render
-    # .worktrees/<lane>/docs/LANE-DOC.md` from the main checkout answers `ls-files` rc 1
-    # and an empty `HEAD` listing at ROOT, and the file — committed in the LINKED
-    # WORKTREE's repository, which has its own index — was overwritten at rc 0, 21 bytes
-    # to 147,894, with no stderr. The same shape reaches a nested repository and a
-    # submodule's gitlink under `ROOT`, and `.worktrees/` is exactly how this fleet keeps
-    # live lanes, so the shortcut was a live fail-open, not a hypothetical one. The
-    # index that matters is the one the DESTINATION belongs to — which is what the
-    # comment above this function has said since the peer-checkout fix; the code now
-    # does it for both branches.
     # ⛔ A PROBE THAT CANNOT RUN IS "COULD NOT RUN" (2), never 1. An absent `git`
     # binary raises FileNotFoundError here, and nothing catches it: the interpreter
     # then exits 1, which this tool reserves for the DRIFT verdict — so a lane reads

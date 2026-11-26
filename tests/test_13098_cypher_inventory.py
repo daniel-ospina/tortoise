@@ -1463,6 +1463,91 @@ def test_a_git_that_never_answers_makes_could_not_run_not_drift(tmp_path, monkey
         f"each refusal must read as 'could not run'; stderr:\n{err}")
 
 
+def test_a_repository_BETWEEN_ROOT_and_the_destination_cannot_permit_what_it_tracks(
+    tmp_path, monkeypatch, capsys
+):
+    """…and two named providers are still an enumeration — ask every BOUNDARY.
+
+    ⛔ THE ROUNDS KEPT LOSING TO NESTING DEPTH (#14625 review, round 10, P3,
+    measured). Round 7 fixed the destination's own repository; round 8 added ROOT. The
+    shape both miss sits BETWEEN them: `ROOT/inner` tracks `deeper/docs/DOC.md`,
+    `ROOT/inner/deeper` is a second repository whose commit does not name it, and ROOT
+    does not track it either — so the destination half answers "untracked", the ROOT
+    half answers "untracked", and `--render` replaced 11 bytes of content `inner`'s index
+    AND HEAD both hold at **rc 0**, no stderr. Two named providers is an enumeration that
+    the next nesting level defeats, so the guard asks ROOT, every ancestor directory
+    below it that holds a `.git`, and the destination's own directory; a refusal from any
+    one is the verdict, which is MONOTONE (a provider can only add refusals).
+
+    This arm pins the intermediate boundary: drop it and it reds.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    inner = repo / "inner"
+    keeper = inner / "deeper" / "docs" / "DOC.md"
+    keeper.parent.mkdir(parents=True)
+    keeper.write_text("keep me\n", encoding="utf-8")
+    inner.mkdir(exist_ok=True)
+    subprocess.run(["git", "-C", str(inner), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(inner), "add", "--", "deeper/docs/DOC.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(inner), "-c", "user.email=a@b", "-c", "user.name=a",
+         "commit", "-qm", "inner tracks it"],
+        check=True,
+    )
+    deeper = inner / "deeper"
+    # ⛔ THE DEEPER REPOSITORY GETS A COMMIT THAT DOES NOT NAME THE KEEPER, and NOT via
+    # `git add -A`: that would put the keeper in the DEEPER index and the destination
+    # half would refuse for the wrong reason — the vacuous-fixture trap round 10's
+    # reviewer hit first and had to rebuild its row-2 fixture for.
+    config = ["-c", "user.email=a@b", "-c", "user.name=a"]
+    subprocess.run(["git", "-C", str(deeper), "init", "-q"], check=True)
+    (deeper / "placeholder.txt").write_text("unrelated\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(deeper), "add", "--", "placeholder.txt"], check=True)
+    subprocess.run(["git", "-C", str(deeper), *config, "commit", "-qm", "unrelated"],
+                   check=True)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # ALL THREE HALVES OF THE PREMISE MEASURED: only the INTERMEDIATE repository may
+    # know the path, or the arm would grade the ROOT or the destination half instead.
+    root_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "inner/deeper/docs/DOC.md"],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert root_answer.returncode == 1, (
+        "the premise: ROOT must NOT track the destination; got "
+        f"rc={root_answer.returncode}")
+    inner_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "deeper/docs/DOC.md"],
+        cwd=inner, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert inner_answer.returncode == 0, (
+        "the premise: the INTERMEDIATE repository must track it; got "
+        f"rc={inner_answer.returncode} — without that there is nothing for it to refuse")
+    dest_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "docs/DOC.md"],
+        cwd=deeper, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert dest_answer.returncode == 1, (
+        "the premise: the DESTINATION's own repository must NOT name it; got "
+        f"rc={dest_answer.returncode} — if it did, this arm would grade the "
+        "destination half rather than the boundary between")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", keeper.relative_to(repo).as_posix()])
+    assert rc == 2, (
+        f"an INTERMEDIATE repository must not permit what it tracks, got {rc} — "
+        "asking only ROOT and the destination misses every boundary between them")
+    err = capsys.readouterr().err
+    assert "TRACKED path" in err, f"the refusal must name the tracked path; stderr:\n{err}"
+    assert keeper.read_bytes() == before, (
+        "tracked content was overwritten: the guard asked two providers and the "
+        "repository that tracks the path was neither of them")
+
+
 def test_a_NESTED_repository_under_ROOT_cannot_permit_what_ROOT_tracks(
     tmp_path, monkeypatch, capsys
 ):
@@ -1542,7 +1627,8 @@ def test_EVERY_git_probe_carries_the_modules_own_timeout_bound():
     mutation — every one of the four `subprocess.run` sites reds when its kwarg goes.
     ⛔ NOT "a call site": the metadata probe's own arm records `passed_kwargs`, so
     deleting the kwarg THERE reds it (`the probe's bound must be the module's own`). The
-    two sites this arm exists for are the other two. The artifact claimed the bound was
+    three sites this arm exists for are the other three (round 10 counted them by
+    mutation: only the metadata probe is self-graded). The artifact claimed the bound was
     graded everywhere, which is the finding: an arm that grades a CONSEQUENCE is not an
     arm that grades the CAUSE, and `_GIT_PROBE_TIMEOUT_S` is the cause.
 
@@ -4428,6 +4514,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "test_a_tracking_probe_answers_about_the_INDEX_so_HEAD_is_asked_before_a_permit",
         "test_a_DANGLING_git_entry_is_NOT_a_permit_for_the_tracking_probe",
         "test_a_NESTED_repository_under_ROOT_cannot_permit_what_ROOT_tracks",
+        "test_a_repository_BETWEEN_ROOT_and_the_destination_cannot_permit_what_it_tracks",
         "test_the_tracking_probe_still_PERMITS_both_honest_answers",
         "test_the_renderer_reports_a_write_failure_as_could_not_run",
         # ⛔ THE OTHER THREE "COULD NOT RUN" SIBLINGS. The set named only the probe
@@ -4502,8 +4589,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 51, (
-        f"expected EXACTLY 51 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
+    assert len(split_arms) == 52, (
+        f"expected EXACTLY 52 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
     missing = sorted(split_arms - defined)
@@ -4512,7 +4599,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 51` reds a name PRUNED from the literal and `missing` reds a    # name that no longer resolves; neither can red for an arm that was never named at
+    # `len(split_arms) == 52` reds a name PRUNED from the literal and `missing` reds a    # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
     # left the whole suite GREEN (100 passed, 15 skipped), so the sentence above — that
@@ -4554,8 +4641,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `surface_files`'s `git ls-files` and `_tracked_destination_refusal`'s probe are
     # GREEN from the raise-only arms alone. The metadata probe's arm records
     # `passed_kwargs` and DOES see its own bound, so it is not one of the blind ones.
-    assert len(test_functions) == 110, (
-        f"expected EXACTLY 110 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
+    assert len(test_functions) == 111, (
+        f"expected EXACTLY 111 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
 
