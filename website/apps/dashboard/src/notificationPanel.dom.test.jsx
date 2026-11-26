@@ -1253,3 +1253,48 @@ test('#10156: a payload with a usable value RENDERS, and an unusable one SAYS so
     'it is not the same thing as "no detail was recorded"')
 })
 
+test('#14694: an acknowledgement landing while the reader is on another control does not STEAL focus', () => {
+  // The reclaim is gated on "focus was actually dropped", and that gate is what keeps
+  // the receipt from yanking a keyboard user off whatever they moved to during the
+  // round trip. Deleting the gate left every suite green (review finding), so the
+  // gate needs its own assertion: hold the write pending, move focus to Dismiss, then
+  // let the acknowledgement land.
+  const row = alert({ label: 'deferred ack' })
+  let confirm
+  function Harness() {
+    const [acked, setAcked] = React.useState(false)
+    const current = { ...row, acked }
+    return (
+      <NotificationBell
+        alerts={[current]}
+        userId={USER}
+        orgId={ORG}
+        canAcknowledge
+        onAcknowledge={() => { confirm = () => setAcked(true) }}
+        now={NOW}
+        storage={fakeStorage()}
+      />
+    )
+  }
+  const { container } = render(<Harness />)
+  fireEvent.click(bell(container))
+  fireEvent.click(container.querySelector('.notif-open'))
+  const ackBtn = [...container.querySelectorAll('.notif-detail-actions button')]
+    .find((b) => /Acknowledge for everyone/.test(b.textContent))
+  assert.ok(ackBtn, 'precondition: the acknowledge control exists')
+  fireEvent.click(ackBtn) // the write is now in flight; state has not moved
+  assert.ok(confirm, 'precondition: the harness holds the write')
+
+  // The reader moves to another control while the write is in flight.
+  const dismissBtn = [...container.querySelectorAll('.notif-detail-actions button')]
+    .find((b) => /Dismiss/.test(b.textContent))
+  assert.ok(dismissBtn, 'precondition: the Dismiss control is present')
+  dismissBtn.focus()
+  assert.equal(document.activeElement, dismissBtn, 'precondition: focus is where the reader put it')
+
+  act(() => { confirm() })
+  assert.doesNotMatch(container.textContent, /Acknowledge for everyone/,
+    'precondition: the control was replaced by its receipt')
+  assert.equal(document.activeElement, dismissBtn,
+    'the reclaim must not STEAL focus from a control the reader chose')
+})
