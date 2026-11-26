@@ -19,8 +19,10 @@ other is the failure mode this file exists to prevent.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -317,17 +319,144 @@ def test_bare_kind_full_scan_returns_nothing_while_namespaced_returns_rows():
     assert len(_rows(rb["subject_kinds"]["core:team"]["reply"])) == 3
 
 
+def _report_line(pattern: str) -> str:
+    """The first REPORT.md line matching `pattern`, or "" — so a pin can name the
+    LINE it grades instead of asking whether a token occurs anywhere in the file."""
+    for line in _report().splitlines():
+        if re.search(pattern, line):
+            return line
+    return ""
+
+
 def test_report_headline_numbers_are_the_artifacts_numbers():
-    """Reds if REPORT.md keeps a number the receipts no longer support."""
+    """Reds if REPORT.md keeps a number the receipts no longer support.
+
+    ⛔ THE PINS ARE LINE-SCOPED ON PURPOSE (#14691 review, 2nd cycle, P1). This
+    test used to assert `score["verdicts"][v] in report` and `"0/6" in report` —
+    bare TOKEN presence. Measured on the pre-fix version of this file: flipping
+    REPORT's A3 heading to `FAIL`, flipping the `produces` row to `7/7 — a clean
+    pass`, and changing the turn count all left **13 passed**, because `PASS`
+    occurs in four other headings and `7/7` is also `dependsOn`'s number. A pin
+    that cannot red on the drift it names is the class this bundle exists to
+    catch, so each assertion below now names the LINE (a heading for a verdict, a
+    table row for a count) and the artifact field it must equal.
+    """
     report = _report()
     score = _score()
     tk = score["extraction_tokens"]
     assert f"{tk['total_tokens']:,}" in report, "token total drifted from the receipt"
     assert f"{tk['amplification_x']}×" in report
-    for verdict in ("A1", "A2", "A3", "A4", "A5"):
-        assert score["verdicts"][verdict] in report
-    # the two headline counts A2/A3 turn on
-    assert "0/6" in report and "7/7" in report
-    # every door finding has a row in the report's table
+
+    # (a) each verdict, pinned to its OWN heading — the heading must carry this
+    # assertion's letter AND the artifact's verdict token after the em dash.
+    for assertion, verdict in score["verdicts"].items():
+        head = _report_line(rf"^#{{2,4}} {assertion} · ")
+        assert head, f"REPORT.md has no `{assertion} ·` heading"
+        assert f"**{verdict}" in head, (
+            f"REPORT.md's {assertion} heading does not state the artifact's "
+            f"verdict `{verdict}`: {head!r}")
+
+    # (b) the two counts the A2/A3 verdicts turn on, pinned to their OWN rows.
+    owned = _report_line(r"^\| thing → owner \(`ownedBy`\)")
+    assert owned, "REPORT.md has no ownedBy row"
+    assert "0/6" in owned and "INVERTED" in owned, owned
+    produces = _report_line(r"^\| team → component \(`produces`\)")
+    assert produces, "REPORT.md has no produces row"
+    assert "0/7" in produces and "INVERTED" in produces, produces
+    depends = _report_line(r"^\| dependent → dependency \(`dependsOn`\)")
+    assert depends, "REPORT.md has no dependsOn row"
+    assert "7/7" in depends, depends
+
+    # (c) the corpus's turn count — 30, which the fixture, the receipt and
+    # VERIFICATION-independent.md all state; the report said 32 once.
+    turns = sum(len(d["turns"]) for d in _corpus()["documents"])
+    assert f"(5 documents, {turns} turns)" in report, (
+        f"REPORT.md does not state the corpus's own turn count ({turns})")
+
+    # (d) every door finding is pinned to its ARTIFACT QUESTION, not to its id:
+    # ids D2/D4/D5 were once permuted against the artifact and a bare-token pin
+    # could not see it. The row's question text must match the artifact's, compared
+    # after stripping the markdown noise that differs legitimately (`src→dst` in the
+    # artifact, `` `src → dst` `` in the report).
+    def _norm_q(text: str) -> str:
+        return " ".join(re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split())
+
     for finding in score["door_findings"]:
-        assert finding["id"] in report, finding["id"]
+        row = _report_line(rf"^\| \*\*{finding['id']}\*\* \|")
+        assert row, f"REPORT.md has no row for door finding {finding['id']}"
+        row_q = _norm_q(row.split("|")[2])
+        art_q = _norm_q(finding["question"])
+        # compare on the artifact's own first clause, tolerant of the report's
+        # editorial rewording of the tail
+        head = art_q.split(" ", 6)
+        key = " ".join(head[:6])
+        assert key in row_q, (
+            f"door finding {finding['id']} in REPORT.md asks a different question "
+            f"than the artifact's: report row {row_q[:120]!r} vs artifact {art_q[:120]!r}")
+
+
+def test_readback_provenance_binds_to_its_producer_or_the_stated_exception():
+    """Reds if `out/readback.json` names a producer hash that is neither the
+    committed script's nor the documented producing commit's.
+
+    The artifact carries `provenance.probe_sha256` (written by
+    `run_readback.py`), so it is the one artifact in the bundle bound to the code
+    that made it. The `agent-infra-ci / lint` commit renamed an unused loop
+    variable in that script, which moved the hash without touching a byte of
+    behaviour — verified mechanically by renaming it back and diffing against
+    `d4fc8fe` (identical). Rather than regenerate a 784 KB receipt to fix a
+    comment-sized defect, the exception is STATED in REPORT.md §8 and pinned
+    here, so a future drift reds instead of going unnoticed.
+    """
+    claimed = (_readback().get("provenance") or {}).get("probe_sha256")
+    assert claimed, "readback.json carries no provenance binding at all"
+    actual = hashlib.sha256(
+        (BUNDLE / "run_readback.py").read_bytes()).hexdigest()
+    produced_by = (
+        "5a441859d7f953a91d493d9606b8c8404018a40eac35b658a75e4fbe6200f192")
+    assert claimed in (actual, produced_by), (
+        "readback.json's probe_sha256 is neither the committed script's hash nor "
+        f"the documented producing-commit hash: {claimed}")
+    assert produced_by in _report(), (
+        "REPORT.md §8 no longer states the producing-commit hash the artifact "
+        "actually carries")
+
+
+def test_a4_reds_for_an_invented_RELATION_too():
+    """F5b (#14691 review, 2nd cycle): A4's verdict must cover the relation axis.
+
+    THE MUTANT: `Asset Register --dependsOn--> Jonas Bauer`, a pair no corpus
+    document co-states (doc-01 names the component, doc-02 the person). Before
+    this fix the verdict was computed from ENTITIES only, so
+    `relations_not_co_stated` carried the row while `passes` stayed True — even
+    though the report states "0 of 46 relations are unstated" under the same PASS
+    heading, and #14691 names an invented edge the worse failure of the two.
+    """
+    module = _load_score_module()
+    assert module.a4_invention()["passes"] is True, "baseline is not clean"
+    module.EDGES.append({
+        "doc": "doc-01", "predicate": "dependsOn", "write_path": "test_mutant",
+        "src_id": "mutant-src", "dst_id": "mutant-dst",
+        "src": "Asset Register", "dst": "Jonas Bauer",
+        "src_kind": "dev:code", "dst_kind": "core:naturalPerson",
+    })
+    mutated = module.a4_invention()
+    assert mutated["relations_not_co_stated"], (
+        "the invented relation was not detected as un-co-stated at all")
+    assert mutated["passes_entities"] is True
+    assert mutated["passes_relations"] is False
+    assert mutated["passes"] is False, (
+        "A4 still PASSES on an invented relation — the verdict ignores the "
+        "relation axis its own prose asserts")
+
+
+def test_the_isolation_premise_is_recorded_as_an_EMPTY_graph():
+    """Reds if `empty_before` stops being an empty graph.
+
+    Every A1/A2/A3 number rests on the fresh-graph premise; the orchestrator now
+    REFUSES a populated graph (`run_ingest.py`), and this pins the receipt the
+    committed bundle carries rather than the producer's promise.
+    """
+    before = _receipt()["empty_before"]
+    assert {k: v for k, v in before["taxonomy"].items() if v} == {}, before["taxonomy"]
+    assert (before.get("structure") or {}).get("total") == 0, before.get("structure")

@@ -711,7 +711,18 @@ def a4_invention() -> dict:
             "relations_not_co_stated_at_SENTENCE_scope": len(strict_relations),
             "quotes": quotes, "warnings": warn,
             "relations_not_written": not_written,
-            "passes": not structural_misses}
+            # ⛔ BOTH AXES, because the assertion names both (#14691 review, 2nd cycle).
+            # The issue's target is "nothing inferred from naming alone", and the
+            # report states "0 of 46 relations are unstated" under this same PASS
+            # heading — so a verdict computed from ENTITIES only left the relation
+            # axis unreddable: measured, adding `Asset Register --dependsOn-->
+            # Jonas Bauer` (no document co-states the pair) left `passes: True`
+            # while `relations_not_co_stated` carried the row. An invented EDGE is
+            # the worse failure of the two, so it must be able to red the verdict
+            # that claims it did not happen.
+            "passes_entities": not structural_misses,
+            "passes_relations": not invented_relations,
+            "passes": not structural_misses and not invented_relations}
 
 
 # ── assertion 5: retrieval by structure ─────────────────────────────────

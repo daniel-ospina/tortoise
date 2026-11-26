@@ -76,11 +76,31 @@ def main() -> int:
         "documents": [],
     }
 
-    # ── Confirm empty BEFORE any write ───────────────────────────────
+    # ── Confirm empty BEFORE any write — and REFUSE if it is not ─────
+    # ⛔ RECORDING the premise is not ENFORCING it (#14691 review, 2nd cycle).
+    # An earlier revision assigned `receipt["empty_before"]` and returned, so a
+    # run against a POPULATED graph exited 0 and produced a bundle whose every
+    # A1/A2/A3 number silently describes a graph that was not fresh — the one
+    # premise the whole measurement rests on (REPORT.md §2 quotes
+    # `Point 0 Event 0 Subject 0 Object 0 Source 0`). Measured: replacing
+    # `empty_before` with a populated overview left the bundle's own test suite
+    # green and this script exit 0, because nothing read the field.
+    # The taxonomy counts are the total entity population; `structure.total`
+    # covers the operator/gate layer. Either being non-zero means this is not a
+    # fresh graph, so the run REFUSES rather than measuring the wrong thing.
     before = sdk.graph_overview()
     receipt["empty_before"] = before
     print("=== graph_overview BEFORE any write ===")
     print(json.dumps(before, indent=2, default=str)[:4000])
+    occupied = {k: v for k, v in (before.get("taxonomy") or {}).items() if v}
+    structure_total = (before.get("structure") or {}).get("total") or 0
+    if occupied or structure_total:
+        raise SystemExit(
+            "REFUSING TO MEASURE A GRAPH THAT IS NOT FRESH: "
+            f"{GRAPH} already holds {occupied or 'no taxonomy rows'} "
+            f"(structure.total={structure_total}). T6's isolation premise is an "
+            "empty graph; point TORTOISE_DB_URI/graph_name at a fresh one "
+            "rather than reporting a contaminated run.")
 
     # ── The graph's installed packs: the kind vocabulary this run may use ──
     # Recorded, not assumed: T6 assertion 1 asks whether each structure arrives
