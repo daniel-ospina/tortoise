@@ -9174,19 +9174,23 @@ _HISTORICAL_LETTERS_RE = re.compile(
 #: census figure lives OUTSIDE it.
 _HISTORICAL_POOL_CENSUS_RE = re.compile(
     r"\u26d4 HISTORICAL-POOL-CENSUS-BEGIN.*?\u26d4 HISTORICAL-POOL-CENSUS-END", re.DOTALL)
-#: A pool census stated as a LIVE claim. Anchored on the size word (`holds`/`held`/`carries`/
-#: `carried` + `N files|entries`), not on the phrase `fast_pool()`, because the block mentions
-#: `fast_pool()`
-#: many times to state RULES ("`fast_pool()` drops every carve-out member") — a pattern that flagged
-#: those would red on the block's own reasoning and get narrowed into silence, which is the
+#: A pool census stated as a LIVE claim: a bare `fast_pool()` followed by a size word
+#: (`holds`/`held`/`carries`/`carried`) and `N files|entries`. ⛔ The phrase alone is NOT enough —
+#: the block mentions `fast_pool()` many times to state RULES ("`fast_pool()` drops every carve-out
+#: member"), so the size word and unit are what tell a census from a rule statement; a pattern that
+#: flagged those would red on the block's own reasoning and get narrowed into silence, which is the
 #: no-op-gate class. The past tense is read on purpose: a fenced history is written in it ("held
 #: 1335 files"), so a pattern that read only the present would let the history's own spelling look
 #: unread and invite a re-spelling that drifts from the arm. ⛔ `entries` is read as well as
 #: `files` because the census that actually arrived at the `bbef0b88` fold was written with
 #: `entries` (`fast_pool()` holds 1340 entries …), so a `files`-only unit left the live claim
-#: invisible to this guard while it sat outside the fence (#14587 review P2, measured).
+#: invisible to this guard while it sat outside the fence (#14587 review P2, measured). ⛔ And the
+#: separator reads `#` as well as whitespace, because the LIVE census that arrived at the
+#: `c1c8df1a` fold put `fast_pool()` at the end of one comment line and `holds 1339 files` at the
+#: start of the next — a wrap that `\s+` cannot cross, so the guard was green over exactly the
+#: spelling it exists to red on (#14587 review P2, measured on that head's own blob).
 _POOL_CENSUS_RE = re.compile(
-    r"`fast_pool\(\)`\s+(?:holds|held|carries|carried)\s+\d+\s+(?:files|entries)")
+    r"`fast_pool\(\)`[\s#]*(?:holds|held|carries|carried)[\s#]*\d+[\s#]*(?:files|entries)")
 #: How far past an operand its stated minute may sit. The `rounds …/60 x 2.0 up to … m` prose
 #: form (the header's own history clause until #14415 folded it away, reproduced by the fixture
 #: below) puts it 14 characters after the operand.
@@ -10261,6 +10265,15 @@ def test_the_pool_census_guard_is_not_vacuous():
     assert _POOL_CENSUS_RE.findall(
         "`fast_pool()` held 1335 entries where `main` held 1334"), (
         "the past tense of the `entries` unit was not read")
+    # ⛔ THE WRAP IS THE SPELLING THAT ACTUALLY SHIPPED, and it is why this arm exists: at the
+    # `c1c8df1a` fold the live census read `… : `fast_pool()`` at the end of one comment line and
+    # `# holds 1339 files at this head against 1338 on `main`` at the start of the next. `\s+`
+    # cannot cross the `# `, so the guard was green over a live census — the false PASS this
+    # fixture pins.
+    assert _POOL_CENSUS_RE.findall(
+        "read from `fast_pool()`\n# holds 1339 files at this head against 1338 on `main`"), (
+        "a census wrapped across two comment lines was not read — the guard is a false PASS over "
+        "the exact spelling that shipped at the `c1c8df1a` fold")
     # …and the block's many RULE statements about `fast_pool()` must NOT read as a census: a guard
     # that reds on the block's own reasoning is a guard that gets deleted.
     for safe in (
