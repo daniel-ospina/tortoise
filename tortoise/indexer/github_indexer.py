@@ -331,7 +331,7 @@ def _row_is_frozen(status, outdated) -> bool:
     ⚠️ The invariant is "the CLOSING direction has no live holder", NOT "no
     writer can clear it" — the stronger claim is false. A coherent un-supersede
     (``update_entity(obj, status='live', supersededBy=None, supersededAt=None)``,
-    admitted at ``sdk.py:56598-56607`` — the NOT MONOTONE exception, documented
+    admitted at ``sdk.py:56654-56663`` — the NOT MONOTONE exception, documented
     at ``cache_projection.py:811``) DOES clear ``superseded``, and this read
     resumes the moment it does because the answer is derived from the stored row
     and never cached. What ``_upsert_object`` guarantees is narrower and is the
@@ -344,7 +344,7 @@ def _row_is_frozen(status, outdated) -> bool:
     deliberately not passed (position is the axis a diff CAN converge on, so it is
     read separately below). ⛔ It is NOT the shared ``live.is_terminal_status``,
     and the omission is deliberate: that helper spells its word half as
-    ``(status or "") in TERMINAL_EXCLUDED_STATUSES`` (``live.py:404``), a bare
+    ``(status or "") in TERMINAL_EXCLUDED_STATUSES`` (``live.py:229``, in `ending_axes`), a bare
     ``frozenset`` membership that HASHES the value and raises on a stored ARRAY
     ``status`` the fold tolerates (the hashing guard below states that row). The word
     test here is ``sdk._is_lifecycle_word`` instead — the repo's type-first one — and
@@ -363,7 +363,7 @@ def _row_is_frozen(status, outdated) -> bool:
     # refuse it at intake (`lifecycle_vocabulary.py:279-286`, reached from S0's
     # `_read_caller_status` on both the update and create paths). It is kept readable
     # because rows persist — `lifecycle_vocabulary.py:263-264` records the history
-    # ("`status=['live']` *used to be* STORED on an `:Object`") and `sdk.py:56446-56448`
+    # ("`status=['live']` *used to be* STORED on an `:Object`") and `sdk.py:56502-56504`
     # enumerates the routes from the other side (a pre-fix SDK, a raw Cypher producer, a
     # JSONL replay of either) — and this repo deliberately keeps readers wider than its
     # doors (`live.py:100-108`). ⛔ Deliberately NOT citing the individual `sdk.py` call
@@ -1353,7 +1353,7 @@ class GitHubIndexer:
         and `"closed"` where there is no position unless the word maps to `open`
         (`_row_is_frozen` — the close fold is unreachable for them, the reopen fold
         is not). "Written once and never cleared" was the earlier, WRONG summary:
-        a coherent un-supersede does clear `superseded` (`sdk.py:56598-56607`). Answering `"closed"` there was the fix's own regression:
+        a coherent un-supersede does clear `superseded` (`sdk.py:56654-56663`). Answering `"closed"` there was the fix's own regression:
         it is a SUPERSET of the fold's guard set, and a superset re-fires exactly
         as a subset does.
         """
@@ -1375,8 +1375,10 @@ class GitHubIndexer:
         # terminal (`terminal-guard`), so every poll minted another `-closed`
         # into the journal and the graph said open FOR EVER (measured:
         # poll1/2/3 each `events_minted=1`, row never moves).
-        # `is_position_ended` reads `isClosed` by `bool()` and strips the slot,
-        # matching `apply_stage_fold` and every other position read.
+        # `is_position_ended` reads `isClosed` by `bool()` and compares the slot
+        # EXACTLY (`stage_slot == 'terminal'`, no `.strip()`), matching
+        # `PipelineStage.is_terminal` (`pipeline.py:303-304`) and every other
+        # position read.
         #
         # `cancelled` is terminal too, so a cancelled item reads as closed —
         # which is right for THIS question: both mean "not open", and a later
@@ -1403,7 +1405,7 @@ class GitHubIndexer:
         # `deprecated`) on an issue that stays OPEN on GitHub: `[1, 1, 1]` before
         # this arm.
         # ⚠️ "While set", not "for ever": a coherent un-supersede DOES clear
-        # `superseded` (`sdk.py:56598-56607`; the NOT-MONOTONE bullet at
+        # `superseded` (`sdk.py:56654-56663`; the NOT-MONOTONE bullet at
         # `cache_projection.py:811`), so the earlier "permanent" wording was one claim
         # too strong. It does not weaken the answer: this read derives from the
         # STORED row, so it resumes on the write that clears the word, and until
@@ -1605,7 +1607,7 @@ class GitHubIndexer:
         # `:466`/`:990` were cited here and do not support the sentence),
         # and `_live_holders` uses the same
         # `coalesce(n.isClosed, false) = false` predicate that calls Integer `0`
-        # not-live (`live.py:209-213`). So a falsy-marked row sits in exactly the
+        # not-live (`live.py:325-329`). So a falsy-marked row sits in exactly the
         # predicate state a truthy-marked one does, and a `github.issue.reopened`
         # fold that REACHES it rewrites `isClosed` to a real boolean
         # (`pipeline.py:434`, `"isClosed": target.is_terminal`). What makes the
@@ -1649,8 +1651,8 @@ class GitHubIndexer:
         # Cost, stated: the shape the bug was measured on (a falsy marker on a LIVE
         # position, the row every props door can produce — `update_knowledge(id,
         # isClosed=0)` stores the integer verbatim: `update_knowledge`
-        # (`sdk.py:23110-23285`) relays through `_update_entity_any` to
-        # `_update_entity`, whose per-label `SET n += $props` (`sdk.py:57113`)
+        # (`sdk.py:23117-23292`) relays through `_update_entity_any` to
+        # `_update_entity`, whose per-label `SET n += $props` (`sdk.py:57169`)
         # applies the caller's props unchanged — `isClosed` is no reserved name, so
         # nothing coerces it) then records NO transition at all: `prev_state is None`
         # gates the mint off and nothing repairs the marker, so nothing re-fires.
