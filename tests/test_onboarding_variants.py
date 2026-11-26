@@ -1719,6 +1719,16 @@ _DOC_NOUN = (r"(?:section|reference|table|guide|docs?|documentation|page"
 _DOC_PARTICIPLE = r"(?:listed|shown|available|described|documented)"
 _DOC_PLACE = (r"(?:above|below|earlier|later|here|there|in\s+this\s+guide"
               r"|in\s+the\s+table|on\s+this\s+page)")
+# ⛔ `here|there` ARE NOT DOC-ONLY PLACES, so the COPULA arm gets its own set.
+# `here`/`there` also point at the RUNNING SESSION (`the tools are actually
+# there` is the pin's canonical RED row), and once a copula is admitted between
+# the object and the participle, `Confirm the tools are available there` — a
+# real pre-restart presence claim — was suppressed GREEN (#14679 review cycle 36,
+# measured: three shapes went RED→GREEN, and `_DOC_PLACE`'s other members are
+# unambiguously documentary). The participle-directly-after-object arm keeps the
+# full set: `the tools listed there` is still a pointer at a list on the page.
+_DOC_PLACE_STRICT = (r"(?:above|below|earlier|later|in\s+this\s+guide"
+                     r"|in\s+the\s+table|on\s+this\s+page)")
 # Appended immediately after the object in a form's pattern.
 # ⛔ A COPULA BETWEEN THE OBJECT AND THE DOC PARTICIPLE IS STILL A
 # CROSS-REFERENCE: `Check the tools are listed above. Then restart your client.`
@@ -1729,7 +1739,8 @@ _DOC_PLACE = (r"(?:above|below|earlier|later|here|there|in\s+this\s+guide"
 # pre-cue walk-back graded the clause a `. then` cue introduces).
 _NOT_A_DOC = (r"(?!\s+" + _DOC_NOUN + r"\b)"
               r"(?!\s+(?:(?:are|is|were|was|be|been)\s+)?"
-              + _DOC_PARTICIPLE + r"\s+" + _DOC_PLACE + r"\b)")
+              + _DOC_PARTICIPLE + r"\s+" + _DOC_PLACE_STRICT + r"\b)"
+              r"(?!\s+" + _DOC_PARTICIPLE + r"\s+" + _DOC_PLACE + r"\b)")
 
 # ⛔ THE ADVERB RUN IS DEFINED ONCE, BECAUSE THE ARM USES IT TWICE AND THE TWO
 # COPIES DIVERGED. It skips the adverbs that can sit between a predicate and the
@@ -2293,7 +2304,7 @@ _STATEMENT_BREAK_RE = re.compile(
     # DOTTED TOKEN FOLLOWED BY A SPACE still splits (`e.g.: quit and reopen`
     # splits at `e.g.`), which is the same window truncation the colon doctrine
     # already accepts, not extra protection.
-    r"(?:[;—–]\s*|:\s+|(?:(?<=\s)-(?!-)\s+|(?<=\s)--\s+|^-\s*)"
+    r"(?:[;—–…]\s*|:\s+|(?:(?<=\s)-(?!-)\s+|(?<=\s)--\s+|^-\s*)"
     r"|\.\s+(?=[A-Z\"'`(\[*_>])"
     r")")
 
@@ -3964,6 +3975,28 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Confirm the tools are actually there, next restart your client.", True),
     ("Confirm the tools are actually there, afterwards restart your client.",
      True),
+    # ── CYCLE 36 (#14679's review at `24f1ac50`): the copula arm admitted
+    # `here|there`, which are NOT doc-only places — they are the pin's canonical
+    # presence deixis ("the tools are actually there" is a declared RED row), so
+    # a real pre-restart presence claim went GREEN. The copula arm now uses a
+    # strict place set; the participle-directly-after-object arm keeps both.
+    ("Confirm the tools are available there. Restart your client.", True),
+    ("Restart your client, but first confirm the tools are available there.",
+     True),
+    ("Check the tools are listed there. Then restart your client.", True),
+    # …while the documentary places stay GREEN, with and without a copula:
+    ("Check the tools are listed above. Then restart your client.", False),
+    ("Check the tools are described in this guide. Then restart your client.",
+     False),
+    ("Check the tools listed there. Then restart your client.", False),
+    # …and `…` is the one break glyph the statement-break class was missing, so
+    # its twin of the three cycle-35 rows was a false RED (glyph variants are the
+    # same punctuation — the file's own doctrine, three times over in this
+    # section):
+    ("Before you start … restart your client, confirm the tools are actually "
+     "there.", False),
+    ("Before you continue… restart your client, confirm the tools are actually "
+     "there.", False),
     # ⛔ THE WALK-BACK MUST NOT RED FORWARD COPY. A bare sequencer sequences
     # whatever precedes it, so the clause it defers to is graded — and when that
     # clause carries no tools-appear claim, it stays GREEN. These rows are what
