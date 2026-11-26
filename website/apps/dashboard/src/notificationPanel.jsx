@@ -632,7 +632,10 @@ export function NotificationBell({
     // The row travels: the control is named by its own row's discriminators, so it
     // must restore only that row while others on the same decision key stay snoozed
     // (`unsnooze` is row-scoped when it can be — #14694 review P3).
-    persist(unsnooze(ledger.state, episodeKey, entry && entry.alert))
+    // `freshClock()` so an ANCHOR THAT HAS ALREADY EXPIRED cannot keep the key's
+    // deadline alive — that left a live key with no anchor, which gap-clamps every
+    // incident row of the key (#14694 review P2).
+    persist(unsnooze(ledger.state, episodeKey, entry && entry.alert, freshClock()))
     restoreListFocus()
   }
   const handleRestore = (entry) => {

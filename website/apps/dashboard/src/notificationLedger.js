@@ -164,6 +164,7 @@ export function storageKey({ userId, orgId } = {}) {
 export function emptyState() {
   return {
     v: 1, snoozed: {}, snoozedAt: {}, dismissed: {}, dismissedLast: {}, dismissedFirst: {},
+    dismissedWindows: {},
   }
 }
 
@@ -196,6 +197,18 @@ const MAX_DISMISSED = 400
  *  anchors is the fail-safe direction: an evicted anchor RE-SHOWS its row rather
  *  than keeping a hide alive. */
 const MAX_SNOOZE_ANCHORS = 64
+
+/** Upper bound on the acknowledged WINDOWS kept for ONE decision key.
+ *
+ *  ⛔ `dismissed`/`dismissedLast`/`dismissedFirst` hold ONE window per key, but the
+ *  server holds a LIST of acks (`abuse.py::_acks_from_rows` returns every
+ *  `alert_ack` row and `_episode_acknowledged` loops over all of them). Two rows of
+ *  one identity can both be dismissed, and with a single slot the SECOND dismissal
+ *  OVERWROTE the first's window — the first row came back, the badge never reached
+ *  0, and re-dismissing the other flipped it back, so a member with no org-wide
+ *  Acknowledge could never clear both (#14694 review P1). Dropping the OLDEST
+ *  window when capped re-SHOWS rows rather than hiding them. */
+const MAX_DISMISSED_WINDOWS = 8
 
 function isPlainObject(x) {
   return Boolean(x) && typeof x === 'object' && !Array.isArray(x)
@@ -316,8 +329,22 @@ export function readState(storage, key, now = new Date()) {
       dismissedFirst[episode] = firstMs
     }
   }
+  // The acknowledged WINDOWS, pruned to the keys that are still dismissed and
+  // capped exactly as `dismiss` caps them. ⛔ WITHOUT THIS every dismissal after
+  // the first would be lost on the next reload — the sibling-map-drop failure this
+  // file has already been bitten by twice (`dismissedLast`, then `dismissedFirst`).
+  const dismissedWindows = {}
+  for (const [episode, raw] of Object.entries(
+    isPlainObject(parsed.dismissedWindows) ? parsed.dismissedWindows : {},
+  )) {
+    if (!(episode in dismissed)) continue
+    const list = dismissedWindowsOf({ dismissedWindows: { [episode]: raw } }, episode)
+    if (list.length) dismissedWindows[episode] = list
+  }
   return {
-    state: { v: 1, snoozed, snoozedAt, dismissed, dismissedLast, dismissedFirst },
+    state: {
+      v: 1, snoozed, snoozedAt, dismissed, dismissedLast, dismissedFirst, dismissedWindows,
+    },
     persisted: true,
   }
 }
@@ -415,9 +442,10 @@ export function snooze(state, episode, ms, now = new Date(), alert = null) {
  *  has no anchor for (a pre-anchor store, or a row with no `at`) — there is then
  *  nothing to subtract, and key-wide is the honest reading of "un-snooze this".
  */
-export function unsnooze(state, episode, alert = null) {
+export function unsnooze(state, episode, alert = null, now = new Date()) {
   const base = state || emptyState()
   if (!episode || !(episode in (base.snoozed || {}))) return base
+  const nowMs = now instanceof Date ? now.getTime() : Date.parse(now)
   const atMs = atMsOf(alert)
   // ⛔ ROW-SCOPED ONLY FOR AN INCIDENT. An ACTIVITY snooze is identity-wide by
   // recorded decision (`effectiveSnoozedUntil` covers every row of the key for the
@@ -430,7 +458,15 @@ export function unsnooze(state, episode, alert = null) {
   // (`UNSNOOZE_GROUP`); only an incident's is per row.
   if (alert && registerOf(alert) === REGISTER_ALERT && atMs > 0) {
     const anchors = anchorsOf(base, episode)
-    const remaining = anchors.filter((a) => a.at !== atMs)
+    // ⛔ ONLY A LIVE ANCHOR MAY KEEP THE KEY ALIVE. `snooze` sets the key deadline to
+    // the LONGEST period on the key, so removing one row always leaves the
+    // SHORTEST-lived anchors behind — and `readState` then prunes those as expired,
+    // leaving `snoozed[key]` LIVE with no anchor at all. That state is read as "the
+    // reader snoozed something we cannot name" and gap-clamps EVERY incident row of
+    // the key, so a suspension the reader never snoozed was hidden for up to the
+    // stagger between two clicks (measured at this head). Invariant: `snoozed[key]`
+    // is never live while `snoozedAt[key]` holds no live anchor (#14694 review P2).
+    const remaining = anchors.filter((a) => a.at !== atMs && a.until > nowMs)
     if (remaining.length && remaining.length !== anchors.length) {
       return { ...base, snoozedAt: { ...(base.snoozedAt || {}), [episode]: remaining } }
     }
@@ -476,11 +512,38 @@ export function dismiss(state, episode, now = new Date(), alert = null) {
   // every EARLIER bout, which is how acking the newest bout used to acknowledge
   // older ones"). `first_at` is already in hand here.
   const firstMs = firstMsOf(alert)
+  // ⛔ A WINDOW IS ONLY RECORDED WHEN THE ROW IS IN HAND. A caller without one
+  // (`dismiss(state, episode, now)`) holds no acknowledged WINDOW — only "not before
+  // now" — and synthesising a point at `now` would UN-dismiss every row whose `at`
+  // precedes it. That case keeps the original watermark semantics, exactly as it did
+  // before this list existed. The panel always passes the row
+  // (`notificationPanel.jsx::handleDismiss`), so this arm exists for compatibility.
+  const win = lastMs > 0
+    ? { first: firstMs || lastMs, last: lastMs }
+    : null
+  // ⛔ THE WINDOWS ARE A LIST, because the server's are. A second dismissal on the
+  // same decision key is a second CLAIM about a second bout, not a replacement for
+  // the first: overwriting it un-dismissed the row the reader cleared moments
+  // earlier, in BOTH orders (measured — dismiss NEW then OLD, and NEW is back;
+  // dismiss OLD then NEW, and OLD is back). The badge could never reach 0.
+  const prevWindows = dismissedWindowsOf(base, episode)
+  const deduped = win
+    ? prevWindows.filter((w) => !(w.first === win.first && w.last === win.last))
+    : prevWindows
+  const windows = win ? [...deduped, win].slice(-MAX_DISMISSED_WINDOWS) : deduped
   return {
     ...base,
-    dismissed: { ...base.dismissed, [episode]: lastMs || nowMs },
+    // The watermark never moves BACKWARDS: the legacy fallback below reads it, and a
+    // later dismissal of an EARLIER row must not un-dismiss what came after it.
+    dismissed: {
+      ...base.dismissed,
+      [episode]: Math.max(Number((base.dismissed || {})[episode]) || 0, lastMs || nowMs),
+    },
     dismissedLast: { ...(base.dismissedLast || {}), [episode]: lastMs },
     dismissedFirst: { ...(base.dismissedFirst || {}), [episode]: firstMs },
+    dismissedWindows: windows.length
+      ? { ...(base.dismissedWindows || {}), [episode]: windows }
+      : { ...(base.dismissedWindows || {}) },
   }
 }
 
@@ -504,7 +567,9 @@ export function undismiss(state, episode) {
   delete dismissedLast[episode]
   const dismissedFirst = { ...(base.dismissedFirst || {}) }
   delete dismissedFirst[episode]
-  return { ...base, dismissed, dismissedLast, dismissedFirst }
+  const dismissedWindows = { ...(base.dismissedWindows || {}) }
+  delete dismissedWindows[episode]
+  return { ...base, dismissed, dismissedLast, dismissedFirst, dismissedWindows }
 }
 
 // ── Reading the state for one episode ──────────────────────────────────────
@@ -760,10 +825,15 @@ export function isDismissed(state, episode, alert = null) {
   // An unmeasurable row (no `at`/`first_at` on either side) still stays DISMISSED:
   // there is nothing to compare server-time against, and resurfacing a row the
   // reader already cleared on the strength of a missing field is the worse error.
+  // ⛔ EVERY window the reader dismissed on this key, tested independently — the
+  // server keeps a LIST of `alert_ack` rows and matches a row against any of them.
+  // One slot meant the second dismissal replaced the first and un-dismissed the row
+  // it had just cleared (#14694 review P1).
+  const windows = dismissedWindowsOf(state, episode)
+  if (windows.length) return windows.some((w) => windowCovers(w, alert))
   const ackedLast =
     Number((state.dismissedLast || {})[episode]) || dismissedThrough
   const episodeStart = firstMsOf(alert)
-  const episodeEnd = atMsOf(alert)
   if (!episodeStart || !ackedLast) return true
 
   // ── Half one: the window test, both registers.
@@ -777,7 +847,7 @@ export function isDismissed(state, episode, alert = null) {
   // own `at` precedes it, which is a mass resurface, not a correction.
   const recordedLast = Number((state.dismissedLast || {})[episode]) || 0
   if (!recordedLast) {
-    const happenedAt = episodeEnd || episodeStart
+    const happenedAt = atMsOf(alert) || episodeStart
     return !(happenedAt && happenedAt > dismissedThrough)
   }
 
@@ -785,23 +855,51 @@ export function isDismissed(state, episode, alert = null) {
   // window is reconstructed as that POINT: it intersects a continuing episode
   // (correctly) and does not intersect an earlier, separate one.
   const ackedFirst = Number((state.dismissedFirst || {})[episode]) || ackedLast
-  const overlaps =
-    Boolean(episodeEnd) && ackedFirst <= episodeEnd && episodeStart <= ackedLast
+  return windowCovers({ first: ackedFirst, last: ackedLast }, alert)
+}
+
+/** Does ONE acknowledged window cover this row?
+ *
+ *  ⛔ ONE implementation of the server's rule, used for every window and for the
+ *  legacy single-window reconstruction — `_episode_acknowledged` applies the window
+ *  test to BOTH registers and only then the incident `acked_through` gate. Two
+ *  copies of this rule is how the ACTIVITY arm and the INCIDENT arm drifted apart
+ *  once already.
+ */
+function windowCovers(win, alert) {
+  const episodeStart = firstMsOf(alert)
+  const episodeEnd = atMsOf(alert)
+  const ackedLast = Number(win && win.last) || 0
+  const ackedFirst = Number(win && win.first) || ackedLast
+  if (!episodeStart || !ackedLast) return true
+  // ── Half one: the window test, both registers.
+  const overlaps = Boolean(episodeEnd) && ackedFirst <= episodeEnd && episodeStart <= ackedLast
   if (!overlaps) {
     const delta = episodeStart - ackedLast
     if (!(delta >= 0 && delta <= EPISODE_GAP_MS)) return false
   }
-
-  // ── Half two: the INCIDENT gate. A row that HAPPENED after the dismissal is
-  // not covered, even when the window matched it. Each row is a new FACT, and
-  // folding it into the dismissed episode hides it. (An ACTIVITY row legitimately
-  // re-reports with a newer `at`, so it has no such gate — that asymmetry is the
-  // server's, not this file's.)
+  // ── Half two: the INCIDENT gate. A row that HAPPENED after THIS window is not
+  // covered, even when the window matched it. (An ACTIVITY row legitimately
+  // re-reports with a newer `at`, so it has no such gate — the server's asymmetry.)
   if (registerOf(alert) === REGISTER_ALERT) {
-    const happenedAt = atMsOf(alert)
-    return !(happenedAt && happenedAt > dismissedThrough)
+    return !(episodeEnd && episodeEnd > ackedLast)
   }
   return true
+}
+
+/** The acknowledged windows stored for one decision key, capped and normalised. */
+function dismissedWindowsOf(state, episode) {
+  const raw = state && state.dismissedWindows ? state.dismissedWindows[episode] : null
+  if (!Array.isArray(raw)) return []
+  const out = []
+  for (const w of raw) {
+    if (!isPlainObject(w)) continue
+    const last = Number(w.last)
+    if (!Number.isFinite(last) || last <= 0) continue
+    const first = Number(w.first)
+    out.push({ first: Number.isFinite(first) && first > 0 ? first : last, last })
+  }
+  return out.length > MAX_DISMISSED_WINDOWS ? out.slice(-MAX_DISMISSED_WINDOWS) : out
 }
 
 /** The server's opaque episode key — the key the ack route takes. */

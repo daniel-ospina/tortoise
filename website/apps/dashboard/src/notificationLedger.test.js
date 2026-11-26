@@ -324,7 +324,7 @@ test('#14694 P3: Unsnooze restores ONLY the row it is named for', () => {
   assert.equal(buildLedger({ alerts: [a, b], state, now: NOW }).snoozed.length, 2)
 
   // Un-snooze row A only: B stays hidden, and the key still carries its deadline.
-  const onlyB = unsnooze(state, key, a)
+  const onlyB = unsnooze(state, key, a, NOW)
   assert.deepEqual(onlyB.snoozedAt[key], [{
     at: new Date(b.at).getTime(), until: NOW.getTime() + periodMs('1h'),
   }])
@@ -335,15 +335,17 @@ test('#14694 P3: Unsnooze restores ONLY the row it is named for', () => {
   assert.equal(afterA.snoozed[0].rowKey, rowKeyOf(b))
 
   // …and releasing the LAST row releases the key entirely.
-  const none = unsnooze(onlyB, key, b)
+  const none = unsnooze(onlyB, key, b, NOW)
   assert.equal(none.snoozed[key], undefined)
   assert.equal(none.snoozedAt[key], undefined)
   assert.equal(buildLedger({ alerts: [a, b], state: none, now: NOW }).unresolved, 2)
 
   // A caller that names no row (or one this store has no anchor for) still gets the
   // key-wide release — there is nothing to subtract.
-  assert.equal(unsnooze(state, key).snoozed[key], undefined)
-  assert.equal(unsnooze(state, key, take(NOW.toISOString(), 'suspend||zz')).snoozed[key], undefined)
+  assert.equal(unsnooze(state, key, null, NOW).snoozed[key], undefined)
+  assert.equal(
+    unsnooze(state, key, take(NOW.toISOString(), 'suspend||zz'), NOW).snoozed[key], undefined,
+  )
 })
 
 test('#14694 P2: an EXPIRED anchor is not revived by snoozing a sibling row', () => {
@@ -480,6 +482,114 @@ test('#14694 P2: Unsnooze on an ACTIVITY row releases the WHOLE key — and is n
   assert.equal(UNSNOOZE, 'Unsnooze')
   assert.match(UNSNOOZE_GROUP, /all of this kind/)
   assert.notEqual(UNSNOOZE, UNSNOOZE_GROUP)
+})
+test('#14694 P1: TWO dismissals on one decision key both hold — in BOTH orders', () => {
+  // The server keeps a LIST of acks (`abuse.py::_acks_from_rows`, and
+  // `_episode_acknowledged` loops over all of them). This module held ONE window per
+  // key, so the SECOND dismissal OVERWROTE the first's: the row cleared moments
+  // earlier came back, the badge never reached 0, and re-dismissing the other flipped
+  // it back — a member with no org-wide Acknowledge could never clear both. Measured
+  // pre-fix in both orders; the badge read 1 with two genuinely dismissed rows.
+  const row = (at, episode) => alert({
+    register: 'activity',
+    message: 'a rate measurement',
+    at: new Date(at).toISOString(),
+    first_at: new Date(at).toISOString(),
+    count: 2,
+    episode,
+  })
+  const NEWER = row(NOW.getTime() - HOUR, 'rv||new')
+  const OLDER = row(NOW.getTime() - 9 * HOUR, 'rv||old')
+  const key = entryKeyOf(NEWER)
+  assert.equal(entryKeyOf(OLDER), key, 'the collision is the premise')
+
+  // Newest first, the order the ledger presents them in.
+  let s1 = dismiss(emptyState(), key, NOW, NEWER)
+  s1 = dismiss(s1, key, NOW, OLDER)
+  assert.equal(isDismissed(s1, key, NEWER), true, 'the first dismissal must survive the second')
+  assert.equal(isDismissed(s1, key, OLDER), true)
+  const l1 = buildLedger({ alerts: [NEWER, OLDER], state: s1, now: NOW })
+  assert.equal(l1.unresolved, 0, 'the badge must reach 0 once both are dismissed')
+  assert.equal(l1.dismissed.length, 2)
+
+  // …and the other order, which used to lose the NEWER one instead.
+  let s2 = dismiss(emptyState(), key, NOW, OLDER)
+  s2 = dismiss(s2, key, NOW, NEWER)
+  assert.equal(isDismissed(s2, key, OLDER), true)
+  assert.equal(isDismissed(s2, key, NEWER), true)
+  assert.equal(buildLedger({ alerts: [NEWER, OLDER], state: s2, now: NOW }).unresolved, 0)
+
+  // Both windows survive a reload — the sibling-map-drop failure this file has hit
+  // twice (`dismissedLast`, then `dismissedFirst`).
+  const storage = fakeStorage()
+  assert.equal(writeState(storage, 'k', s1), true)
+  const { state: restored } = readState(storage, 'k', NOW)
+  assert.equal(restored.dismissedWindows[key].length, 2)
+  assert.equal(buildLedger({ alerts: [NEWER, OLDER], state: restored, now: NOW }).unresolved, 0)
+
+  // Restore releases the whole key, all windows with it.
+  const restoredAll = undismiss(restored, key)
+  assert.equal(restoredAll.dismissedWindows[key], undefined)
+  assert.equal(buildLedger({ alerts: [NEWER, OLDER], state: restoredAll, now: NOW }).unresolved, 2)
+
+  // The INCIDENT gate is unchanged and applies PER WINDOW: each row is covered by
+  // its OWN window, and neither window covers a suspension that happened later.
+  const take = (at, episode) => alert({
+    type: 'suspend',
+    label: 'Organization suspended',
+    message: 'Organization suspended by an operator',
+    at,
+    first_at: at,
+    episode,
+  })
+  const iNew = take(new Date(NOW.getTime() - HOUR).toISOString(), 'suspend||in')
+  const iOld = take(new Date(NOW.getTime() - 9 * HOUR).toISOString(), 'suspend||io')
+  const ikey = entryKeyOf(iNew)
+  let is = dismiss(emptyState(), ikey, NOW, iNew)
+  is = dismiss(is, ikey, NOW, iOld)
+  assert.equal(isDismissed(is, ikey, iNew), true, 'the incident dismissal is not undone either')
+  assert.equal(isDismissed(is, ikey, iOld), true)
+  // …and something that HAPPENS after every window still re-opens.
+  const iNewer = take(NOW.toISOString(), 'suspend||iz')
+  assert.equal(isDismissed(is, ikey, iNewer), false,
+    'a suspension after every acknowledged window must re-open')
+})
+
+test('#14694 P2: an expired anchor cannot keep the key deadline alive', () => {
+  // `snooze` sets the key deadline to the LONGEST period on the key, so releasing
+  // one row always leaves the SHORTEST-lived anchors behind; `readState` then prunes
+  // those as expired, leaving `snoozed[key]` LIVE with NO anchor. That state is read
+  // as "the reader snoozed something we cannot name" and gap-clamps EVERY incident
+  // row of the key — so a suspension nobody snoozed got hidden.
+  const take = (at, episode) => alert({
+    type: 'suspend',
+    label: 'Organization suspended',
+    message: 'Organization suspended by an operator',
+    at,
+    first_at: at,
+    episode,
+  })
+  const a = take(new Date(NOW.getTime() - 2 * DAY).toISOString(), 'suspend||ea')
+  const b = take(new Date(NOW.getTime() - HOUR).toISOString(), 'suspend||eb')
+  const key = entryKeyOf(a)
+  let state = snooze(emptyState(), key, periodMs('1h'), NOW, a)
+  const t2 = new Date(NOW.getTime() + 10 * MIN)
+  state = snooze(state, key, periodMs('1h'), t2, b)
+
+  // 65 minutes in, release B. A's anchor expired at +60, so NO live anchor remains
+  // and the key must be released with it.
+  const t65 = new Date(NOW.getTime() + 65 * MIN)
+  const released = unsnooze(state, key, b, t65)
+  assert.equal(released.snoozed[key], undefined,
+    'a key with no live anchor must not keep a deadline')
+  assert.equal(released.snoozedAt[key], undefined)
+
+  // …so a brand-new suspension is not hidden by the leftover deadline.
+  const fresh = take(new Date(NOW.getTime() + 67 * MIN).toISOString(), 'suspend||ec')
+  const ledger = buildLedger({ alerts: [a, b, fresh], state: released, now: new Date(NOW.getTime() + 68 * MIN) })
+  assert.equal(ledger.snoozed.length, 0)
+  assert.ok(ledger.current.concat(ledger.older).some((e) => e.rowKey === rowKeyOf(fresh)),
+    'the never-snoozed suspension must be countable')
 })
 
 test('#14694 P1: a snooze on an INCIDENT does not cover a NEWER one', () => {

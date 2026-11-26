@@ -1923,6 +1923,38 @@ test('#14694 P2: the ROW-ACTION discriminator survives an age-bucket collision',
     `same-bucket rows must not share an accessible name; got: ${JSON.stringify(flat)}`,
   )
 })
+test('#14694 P3: the episode WINDOW is a real discriminator, not decoration', () => {
+  // Two bouts can share a label, a message, a count AND a newest second while
+  // spanning DIFFERENT windows (`rangeLabel`), which the row renders — so without the
+  // window the name was not "as discriminating as the render", and two visibly
+  // different rows shared one accessible name. Every other name pin separates its
+  // rows by count or by stamp, so dropping `range` from `actionName` stayed green.
+  const at = new Date(NOW.getTime() - HOUR).toISOString()
+  const bout = (first, episode) => alert({
+    register: 'activity',
+    label: 'Unusual read rate',
+    message: 'read rate above the usual range',
+    at,
+    first_at: new Date(first).toISOString(),
+    count: 2,
+    episode,
+  })
+  const a = bout(NOW.getTime() - 8 * HOUR, 'rv||long')
+  const b = bout(NOW.getTime() - 2 * HOUR, 'rv||short')
+  const { container } = renderBell({ alerts: [a, b] })
+  fireEvent.click(bell(container))
+  assert.equal(rows(container).length, 2)
+  const flat = [...container.querySelectorAll('.notif-list .notif-row')].flatMap((row) => [
+    row.querySelector('.notif-open').getAttribute('aria-label'),
+    row.querySelector('.notif-snooze').getAttribute('aria-label'),
+    ...[...row.querySelectorAll('.notif-actions button')].map((x) => x.getAttribute('aria-label')),
+  ])
+  assert.equal(flat.length, 6)
+  assert.equal(
+    new Set(flat).size, flat.length,
+    `rows differing only in their episode WINDOW must not share a name; got: ${JSON.stringify(flat)}`,
+  )
+})
 
 test('#10156: a payload with a usable value RENDERS, and an unusable one SAYS so', () => {
   // `detailOf` has three states and the ledger suite covers all three — but the
