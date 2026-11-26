@@ -10617,8 +10617,10 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     `tests/test_dod_5090_probe.py` out of `fast_pool()`, because membership comes from the `eval`
     registration alone. It closed with "— neither of which `#14544` touched", binding the
     `durations` ROW as well — and that half is false. `git show e66997b81e76 -- config/ci-surfaces.yml`
-    rewrites that very row, in the commit whose subject is the cut, so the row at this head IS
-    `#14544`'s own edit; the weight it carries is what `fast_pool()`'s shard layout measures, so the
+    rewrites that very row's WEIGHT, in the commit whose subject is the cut, so the row's weight at
+    this head IS `#14544`'s own edit (the ROW itself predates it — `#10465` introduced it, and this
+    cut replaced its note with its own reading — which is what the block now states); the weight it
+    carries is what `fast_pool()`'s shard layout measures, so the
     clause invited the exact reading the paragraph exists to forbid (that `#14544` is not implicated
     in a packing change).
 

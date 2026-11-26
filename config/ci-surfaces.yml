@@ -68,9 +68,9 @@ version: 1
 # (`tests/test_fly_secret_declaration_report.py`), `#14592`'s
 # `tests/test_14592_operating_model_evidence.py` row and `tests/test_14592_read_parity.py` row
 # (`core` on BOTH, plus `eval` on the first and `api` on the second — and the first is also a
-# `tier1` member, so that ONE FILE reaches the pool through three registrations yet contributes a
-# SINGLE `fast_pool()` entry, because the pool is a SET — the two files are two members, packed into
-# different shards), `#14607`'s registrations
+# `tier1` member, so that ONE FILE reaches the pool through `core`, `eval` and `tier1` yet
+# contributes a SINGLE `fast_pool()` entry, because the pool is a SET — the two files are two
+# members, packed into different shards), `#14607`'s registrations
 # (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), and `#14671`'s
 # `tests/test_13450_ep_position_axis_participation.py` row in `durations` — `core`-registered —
 # the verb packs the pool into two est_seconds readings: seven shards at 827.2 s
