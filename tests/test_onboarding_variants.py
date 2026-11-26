@@ -1910,6 +1910,21 @@ _PRE_CUE_ONLY = _inversion_form(
 # Deliberately a SEPARATE set from the post-cue `lstrip`, which is pinned by rows
 # of its own — widening that one would move behaviour this fix has no reason to
 # touch.
+# ⛔ A MODAL BETWEEN THE SUBJECT AND THE PREDICATE IS THE SAME ONE-INSERTED-WORD
+# DEFECT this file already closed twice — in form (f) ("a MODAL SUBJECT is the
+# same one-inserted-word defect, one class over") and in the sequencer-fragment
+# test ("one inserted word re-opened the false PASS"). Form (a) never got it: its
+# slot went `you … adverbs*` straight into `_CONFIRM_PREDICATE`, so `can` /
+# `should` / `are able to` were in neither slot and the match never started
+# (#14679 review cycle 40, measured on the shipped pin: `Restart your client
+# once you can confirm the tools are actually there` was GREEN while its
+# modal-free twin `after you confirm …` is a declared RED row — the canonical
+# inversion, admitted one word over).
+_MODAL_TO_VERB = (
+    r"(?:can|could|will|would|should|shall|may|might|must"
+    r"|(?:is|are|am|be|was|were)\s+able\s+to)"
+)
+
 _PRE_CUE_PREFIX = " \t,.;:—–-…('\"`*>#_[]{}"
 
 
@@ -1987,8 +2002,10 @@ _INVERSION_FORMS = (
         r"\b(?:(?:after|once)\s+"
         r"(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
         r"(?:(?:\w+ly|very|so|too|quite|rather|first|already|just|also)\s+)*"
+        r"(?:" + _MODAL_TO_VERB + r"\s+)?"
         r"|(?:if|when)\s+(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
         r"(?:(?:\w+ly|very|so|too|quite|rather|first|already|just|also)\s+)*"
+        r"(?:" + _MODAL_TO_VERB + r"\s+)?"
         r"(?!(?:see(?:s)?|saw|seen|look(?:ing|s|ed)?|list(?:ing|s|ed)?)\b"
         r"(?!.*?\b(?:confirm|check|verif(?:y|ies|ied)|ensur(?:e|es|ed))\w*\b"
         # ⛔ THE GUARD READS THE GRADED OBJECT, not its own copy of it. It spelled
@@ -3102,6 +3119,19 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "there.", True),
     ("Restart your client, though you should confirm the tools are actually "
      "there beforehand.", True),
+    # a MODAL between the subject and the predicate is one inserted word, and it
+    # used to defeat form (a) end-to-end (measured GREEN before the slot added
+    # at `_MODAL_TO_VERB`). The modal-free twins above/below are the same
+    # sentences; only the modal differs.
+    ("Restart your client once you can confirm the tools are actually there.",
+     True),
+    ("Restart your client once you are able to confirm the tools are there.",
+     True),
+    ("Restart your client after you should confirm the tools are there.", True),
+    # …and the same slot closes the modal+OBSERVATION inconsistency: the
+    # modal-free twin `… after you see the tools in the list` is a declared RED
+    # row, so its `can see` spelling must be RED too (measured GREEN before).
+    ("Restart your client once you can see the tools in the list.", True),
     ("Restart your client only once the tools are actually there.", True),
     ("Restart your client, after confirming the tools are actually there.", True),
     # a pre-cue imperative that defers its OWN check past the restart is forward
