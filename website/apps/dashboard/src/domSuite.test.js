@@ -85,12 +85,32 @@ test('#4915: the DOM lane runs with the primary suite, and collects every DOM fi
     // killed the worker over a REAL regression, and this guard passed on
     // `57 passed + 0 failed` against `62 collected`, so the CI leg stayed green while
     // five rows were never attributed. `numTotalTests` alone cannot catch that (it
-    // still read 62); only the identity can.
-    assert.equal((report.numPassedTests ?? 0) + (report.numFailedTests ?? 0),
-      report.numTotalTests ?? 0,
-      `the DOM lane collected ${report.numTotalTests} test(s) but reported only `
-      + `${(report.numPassedTests ?? 0) + (report.numFailedTests ?? 0)} pass+fail — a `
-      + 'worker died mid-run and its rows were never attributed '
+    // still read 62); only the partition can.
+    //
+    // ⛔ …and the partition must count EVERY declared state, or it false-reds a
+    // legitimate run. `numTotalTests` counts declared skips and todos;
+    // `numPassedTests + numFailedTests` does NOT (measured: `test.skip` + `test.todo`
+    // in one file → total 3, passed 1, pending 1, todo 1). Summing only pass+fail
+    // therefore reds the gate on an all-green run with a parked `test.todo` and
+    // blames a dead worker for it. Skips and todos are DECLARED, so they belong in
+    // the identity.
+    //
+    // The `unruns` leg is what still catches a crash, and it does so PRECISELY: a
+    // killed worker leaves rows at status `pending` (declared skips report `skipped`,
+    // todos report `todo`), and MEASURED on the crash the top-level `numPendingTests`
+    // read 0 while five rows sat at `pending` — so the row statuses, not the counters,
+    // are what name them.
+    const unruns = (report.testResults ?? [])
+      .flatMap((r) => (r.assertionResults ?? []).filter((a) => a.status === 'pending')
+        .map((a) => `${basename(r.name)} › ${a.fullName ?? a.title}`))
+    assert.deepEqual(unruns, [],
+      `DOM rows that never ran — a worker died mid-run and these were never reported:\n`
+      + `${unruns.join('\n')}\n--- stdout tail ---\n${childOutput(run.stdout)}`)
+    const accounted = (report.numPassedTests ?? 0) + (report.numFailedTests ?? 0)
+      + (report.numPendingTests ?? 0) + (report.numTodoTests ?? 0)
+    assert.equal(accounted, report.numTotalTests ?? 0,
+      `the DOM lane collected ${report.numTotalTests} test(s) but accounted for only `
+      + `${accounted} (pass+fail+pending+todo) — rows vanished from the report `
       + `(stdout tail: ${childOutput(run.stdout)})`)
     assert.ok((report.numTotalTests ?? 0) >= domTestFiles.length,
       `only ${report.numTotalTests} DOM test(s) ran for ${domTestFiles.length} file(s) — `

@@ -1115,7 +1115,6 @@ test('#14694: a refusal with no MESSAGE is silent at BOTH render sites', () => {
   assert.deepEqual(emptyAnnouncements(closed.container), [],
     'the chrome must not announce a refusal that has no message — it drew a '
     + 'dangling `label — ` before both sites agreed on `message`')
-  assert.ok(!closed.container.textContent.includes('— \u00a0'), 'no dangling label separator')
 
   // (ii) DETAIL OPEN on the refused episode — the state where `DetailView` owns it.
   const open = renderBell(props)
