@@ -2883,8 +2883,36 @@ def _is_completed_concession(clause: str) -> bool:
 #   GREEN (want RED)  Confirm the tools are actually there first, and if so
 #                     restart your client.
 #
+# ⛔ THE SAME IS TRUE POST-CUE, and the block above would otherwise claim a
+# closure it does not have, so it is declared here: the fold is declined for an
+# `and`-half that opens `then|next|afterwards?`, or `once|when|whenever|after|
+# if|unless|until|while|before` followed by a verb from the CLOSED list. A
+# coordinated imperative with neither (`and run a query`, `and check the log`)
+# and a forward adverb outside that sequencer set (`and finally run a query`)
+# therefore still FOLD, so the clause-final `first` form (d) anchors on is gone
+# and the sentence measures GREEN even though it INVERTS the cue:
+#
+#   GREEN (want RED)  Restart your client, confirm the tools are actually there
+#                     first, and run a query.
+#   GREEN (want RED)  Restart your client, confirm the tools are actually there
+#                     first, and finally run a query.
+#
+# Both are pinned GREEN in the table below, so a future fix flips exactly those
+# rows. Measured, not asserted — and identical with the fold NEUTRALISED, so the
+# residual predates this cut and the cut does not make it worse.
+#
+# Closing it is not a one-word extension, and that is why it is declared rather
+# than fixed here: declining the fold for a bare imperative trades this false
+# PASS for one on the config-conjunction the fold exists for — `Restart your
+# client after confirming the config is right, and check the tools are actually
+# there.` measures RED today and GREEN under that extension (measured) — and
+# gating the decline on the PREDECESSOR's `first` is the shape three earlier cuts
+# of this mechanism shipped a seam for (`6239dd051795`). #14717 owns the
+# scope-the-pin-down-vs-parse-it decision that would settle it.
+#
 # Six such spellings were measured and are recorded with their verdicts on
-# #14717, which owns the "scope the pin down vs parse it" decision.
+# #14717, which owns the "scope the pin down vs parse it" decision — and the two
+# post-cue spellings above are recorded there with them.
 _AND_FORWARD_SEQUENCER_RE = re.compile(
     r"(?i)^and\s+(?:then|next|afterwards?)\b")
 _AND_SUBORDINATE_HALF_RE = re.compile(
@@ -4652,6 +4680,22 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     # main clause of its own: it is folded in and graded (§`_AND_HALF…`).
     ("Restart your client, confirm the tools are actually there first, and then "
      "run a query.", True),
+    # ⛔ DECLARED RESIDUAL, in the OTHER direction, and it is the one this cut's
+    # boundary actually produces: a coordinated imperative that opens with no
+    # forward sequencer (`and run a query`) and a forward adverb outside the
+    # sequencer set (`and finally run a query`) still FOLD into the predecessor,
+    # so the clause-final `first` form (d) anchors on is spliced away and the
+    # sentence measures GREEN although it INVERTS the cue. Measured at this head,
+    # and identical with `_and_half_opens_its_own_clause` neutralised — so it
+    # PREDATES this cut and is not made worse by it. Not fixed here because the
+    # extension that closes it opens a false PASS on the config-conjunction
+    # (`… after confirming the config is right, and check the tools are actually
+    # there.` RED→GREEN, measured) — #14717 owns that call. Pinned GREEN so the
+    # boundary is visible and a future fix flips exactly these rows.
+    ("Restart your client, confirm the tools are actually there first, and run "
+     "a query.", False),
+    ("Restart your client, confirm the tools are actually there first, and "
+     "finally run a query.", False),
     # ⛔ …while the CONFIG-CONJUNCTION the merge exists for still reds: its
     # `and`-half is not a forward clause of its own, so it is still folded in and
     # the config-scope rule still sees both halves.
@@ -4696,7 +4740,8 @@ def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
             f"this inversion must be graded and was not: {line!r}")
     else:
         assert violation is None, (
-            f"false red on forward copy ({violation!r}): {line!r}")
+            f"pinned GREEN and was graded ({violation!r}) — forward copy, or a "
+            f"DECLARED residual, per this row's own comment: {line!r}")
 
 
 def test_3232_the_and_then_half_reds_for_the_first_anchor_not_by_accident():
