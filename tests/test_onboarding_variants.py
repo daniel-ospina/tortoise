@@ -1705,9 +1705,45 @@ def _inversion_form(pattern: str) -> re.Pattern[str]:
 #     form at that position made "Restart your client. Confirm the tools are
 #     actually there." RED again and no table row noticed).
 _PRE_CUE_ONLY = _inversion_form(
-    r"^(?:please\s+)?(?:confirm|check|verify|see|look|ensure|list)\w*\b"
+    # ⛔ `first`/`also`/`just` may sit between the courtesy and the verb, and one
+    # of them is the MOST natural English phrasing of the instruction this form
+    # exists to catch: "First confirm the tools are actually there. Restart …"
+    # was GREEN (measured) while its unadorned twin was RED, and so was
+    # "Please first confirm …" — one inserted word defeated the whole form.
+    r"^(?:please\s+)?(?:(?:first|also|just)\s*,?\s+)?"
+    r"(?:confirm|check|verify|see|look|ensure|list)\w*\b"
     r"[^\n]*?\btools\b"
+    # ⛔ A DOC CROSS-REFERENCE IS NOT A PRESENCE CHECK. Without this, ordinary
+    # forward copy was REFUSED with a message asserting an inversion it does not
+    # contain — "See the tools section below for the full list. Restart …" (and
+    # its `reference` / `table` / `guide` / `page` twins) was RED (measured), and
+    # a rule that reds correct copy is how a pin gets deleted (#3429). The noun
+    # must name the RUNNING SESSION's tools, so a following documentation noun
+    # disqualifies it. ⛔ `list` is deliberately NOT in this set: "the tools
+    # list" is the session's own list ("Confirm the tools list is complete …"
+    # stays an inversion), and excluding it would swallow this form's `list`-verb
+    # arm — "Please list the tools you see" is a declared-RED row.
+    r"(?!\s+(?:section|reference|table|guide|docs?|page)\b)"
 )
+
+# Prefixes that decorate a CLAUSE without being part of it: separators, brackets
+# and MARKDOWN emphasis / quote / list markers. ⛔ The pre-cue side stripped only
+# whitespace, so a bolded, italicised, code-spanned or blockquoted imperative
+# never reached `_PRE_CUE_ONLY`'s `^` anchor and shipped GREEN —
+# `**Confirm the tools are actually there.** Restart your client, …` is the exact
+# defect #14676 exists to stop, and it was a FALSE PASS until this set existed
+# (measured, with its `*` / backtick / `>` / `-` twins).
+#
+# ⛔ APPLIED TO EACH CLAUSE, NOT TO THE STATEMENT — and that is a MEASURED choice,
+# not a preference. The same strip on `pre_statement` was tried first and is DEAD
+# CODE: removing it left every row green (measured: 120 passed, 0 failed), because
+# only the LAST clause is graded and the clause strip already reaches its leading
+# decoration. An unpinned second mechanism for one behaviour is how a reader ends
+# up believing two arms are load-bearing when only one is, so it is not here.
+# Deliberately a SEPARATE set from the post-cue `lstrip`, which is pinned by rows
+# of its own — widening that one would move behaviour this fix has no reason to
+# touch.
+_PRE_CUE_PREFIX = " \t,.;:—–-('\"`*>#_"
 
 
 _INVERSION_FORMS = (
@@ -1841,7 +1877,8 @@ _CONFIG_PREP_RE = re.compile(
 # `--cask` row stayed GREEN at the pin level while its `--cask` twin was caught).
 _STATEMENT_BREAK_RE = re.compile(
     r"(?:[;—–]\s*|(?:(?<=\s)-(?!-)\s+|(?<=\s)--\s+|^-\s*)"
-    r"|\.\s+(?=[A-Z\"'`(\[]))")
+    r"|\.\s+(?=[A-Z\"'`(\[*_>])"
+    r")")
 
 # A clause that opens with one of these continues the cue FORWARD ("restart,
 # then …"), so a subordinator later in it is not a deferral of the restart.
@@ -1963,7 +2000,12 @@ def _restart_cue_order_violation(quick: str) -> str | None:
     # confirm the tools are actually there") while the comma twin was RED.
     pre_statement = _STATEMENT_BREAK_RE.split(
         before.lstrip(" \t,.;:—–-"))[-1]
-    pre_clauses = [c.strip() for c in re.split(r"[,;]", pre_statement)
+    # ⛔ AND EACH CLAUSE, not just the statement: the LAST clause is what form (f)
+    # anchors on, so a decoration sitting after a comma (`Delete the old entry,
+    # **confirm the tools are actually there**. Restart …`) hides the imperative
+    # exactly as a leading one does (measured).
+    pre_clauses = [c.strip().lstrip(_PRE_CUE_PREFIX).strip()
+                   for c in re.split(r"[,;]", pre_statement)
                    if c.strip()][-1:]
     # The cue's OWN sentence, on the same reasoning: a `.` OR a `;` ends the
     # window (both begin a new statement — grading past them read a subordinate
@@ -2364,6 +2406,67 @@ def test_3232_generic_restart_lines_are_exact():
      "confirm the tools are actually there.", True),
     ("Please list the tools you see. Restart your client, then confirm the "
      "tools are actually there.", True),
+    # ── form (f)'s LEADING-ADVERB arm, and the decorations that hide a pre-cue
+    # imperative from the `^` anchor. Every row above was GREEN before the cut
+    # that made it RED (measured), and each mechanism below flips its own rows
+    # when removed:
+    #   – the adverb slot: `First …` / `Please first …` (one inserted word);
+    #   – `_PRE_CUE_PREFIX`: bold / italic / code / blockquote / list-marker
+    #     forms, which is how the quickstart actually writes an instruction the
+    #     reader must act on — including the same decoration after a COMMA, which
+    #     is why the strip is per-CLAUSE;
+    #   – the statement-break lookahead (below, RED side): a full stop that ends
+    #     one sentence INSIDE emphasis was not a break at all.
+    ("First confirm the tools are actually there. Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("Please first confirm the tools are actually there. Restart your client, "
+     "then confirm the tools are actually there.", True),
+    ("**Confirm the tools are actually there.** Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("*Confirm the tools are actually there.* Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("`Confirm the tools are actually there.` Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("> Confirm the tools are actually there. Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("- **Confirm the tools are actually there.** Restart your client, then "
+     "confirm the tools are actually there.", True),
+    ("Delete the old entry, **confirm the tools are actually there**. Restart "
+     "your client, then confirm the tools are actually there.", True),
+    # ── the statement-break lookahead's EMPHASIS arm, RED side: without `*` in
+    # the lookahead the two sentences never split, so the last pre-cue statement
+    # began at `Delete` and the inversion shipped GREEN (measured):
+    ("Delete the old entry. **Confirm the tools are actually there.** Restart "
+     "your client, then confirm the tools are actually there.", True),
+    # ── form (f)'s DOC-CROSS-REFERENCE exclusion: forward copy that points at a
+    # documentation artifact rather than at the running session's tool list.
+    # Each was RED (a false red asserting an inversion the copy does not
+    # contain) before the lookahead existed — the failure mode that gets a pin
+    # deleted (#3429):
+    ("See the tools section below for the full list. Restart your client, then "
+     "confirm the tools are actually there.", False),
+    ("Check the tools reference for the full tool list. Restart your client, "
+     "then confirm the tools are actually there.", False),
+    ("Ensure the tools table is up to date. Restart your client, then confirm "
+     "the tools are actually there.", False),
+    ("See the tools guide on MCP. Restart your client, then confirm the tools "
+     "are actually there.", False),
+    ("See the tools docs for the full list. Restart your client, then confirm "
+     "the tools are actually there.", False),
+    ("See the tools page on the wiki. Restart your client, then confirm the "
+     "tools are actually there.", False),
+    # ⛔ …but `list` is NOT a reference noun: "the tools list" is the SESSION's
+    # list, so this stays an inversion. Without this row, adding `list` to the
+    # exclusion set above would be an unmeasured regression — it is also what
+    # keeps form (f)'s `list`-verb arm reachable.
+    ("Confirm the tools list is complete. Restart your client, then confirm "
+     "the tools are actually there.", True),
+    # ── the statement-break lookahead's EMPHASIS arm, GREEN side: a full stop
+    # inside `**…**` now ends the cue's sentence, so this FORWARD copy is no
+    # longer refused (it was RED — measured — while the lookahead admitted only
+    # `[A-Z"'`(\[]`):
+    ("Restart your client. **Once the tools are listed**, run `tortoise "
+     "mcp-status`.", False),
     # form (a)'s `having` subject, and the predicate's `saw`/`seen`/`look`:
     ("Restart your client after having verified the tools are actually there.",
      True),
