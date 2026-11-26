@@ -202,8 +202,89 @@ test('a snoozed row is LISTED (with its deadline) so it can be un-snoozed', () =
   assert.equal(buildLedger({ alerts: [activity], state: undone, now: NOW }).unresolved, 1)
   // The anchor travels with the entry and is dropped with it — a leftover
   // `snoozedAt` under a released key would outlive the snooze it describes.
-  assert.equal(state.snoozedAt[episode], new Date(activity.at).getTime())
+  // It is a LIST (several rows can share a decision key), so one snooze is one
+  // element.
+  assert.deepEqual(state.snoozedAt[episode], [new Date(activity.at).getTime()])
   assert.equal(undone.snoozedAt[episode], undefined)
+})
+
+test('#14694 P2: snoozing a SECOND row on the same decision key does not cancel the first', () => {
+  // Two `suspend` rows share one `entryKeyOf` (the customer message is a
+  // constant), so they are two ROWS on ONE decision key. While `snoozedAt` held a
+  // single instant per key, the second snooze EVICTED the first row's anchor: that
+  // row returned to `current` (badge incrementing) while the "Snoozed" list still
+  // showed a snooze, so the reader's first snooze was silently undone by their
+  // second. Measured on the pre-fix tree: after snoozing A then B, `unresolved`
+  // was 1 and A was in `current`.
+  const take = (at, episode) => alert({
+    type: 'suspend',
+    label: 'Organization suspended',
+    message: 'Organization suspended by an operator',
+    at,
+    first_at: at,
+    episode,
+  })
+  const a = take(new Date(NOW.getTime() - 2 * DAY).toISOString(), 'suspend||a')
+  const b = take(new Date(NOW.getTime() - 1 * HOUR).toISOString(), 'suspend||b')
+  assert.equal(entryKeyOf(a), entryKeyOf(b), 'the collision is the premise')
+
+  let state = snooze(emptyState(), entryKeyOf(a), periodMs('1h'), NOW, a)
+  state = snooze(state, entryKeyOf(b), periodMs('1h'), NOW, b)
+  // BOTH anchors are recorded, in click order — the second APPENDED to the first.
+  assert.deepEqual(
+    state.snoozedAt[entryKeyOf(a)],
+    [new Date(a.at).getTime(), new Date(b.at).getTime()],
+  )
+  const ledger = buildLedger({ alerts: [a, b], state, now: NOW })
+  assert.equal(ledger.snoozed.length, 2, 'both snoozed rows stay in the Snoozed list')
+  assert.equal(ledger.current.length, 0, 'and neither returns to the current list')
+  assert.equal(ledger.unresolved, 0)
+
+  // …and the anchors survive a reload: written by `snooze`, restored by
+  // `readState`, still covering both rows.
+  const storage = fakeStorage()
+  assert.equal(writeState(storage, 'k', state), true)
+  const { state: restored } = readState(storage, 'k', NOW)
+  assert.deepEqual(restored.snoozedAt[entryKeyOf(a)], state.snoozedAt[entryKeyOf(a)])
+  assert.equal(buildLedger({ alerts: [a, b], state: restored, now: NOW }).unresolved, 0)
+
+  // A row the reader did NOT snooze is still not covered by the widened slot: the
+  // incident gate is unchanged, so widening one anchor to several cannot widen
+  // WHAT is covered.
+  const c = take(NOW.toISOString(), 'suspend||c')
+  const withNew = buildLedger({ alerts: [a, b, c], state, now: NOW })
+  assert.equal(withNew.unresolved, 1, 'a newer, un-snoozed suspension still counts')
+  assert.equal(withNew.snoozed.length, 2)
+})
+
+test('#14694 P2: an anchor in the PRE-LIST shape (a bare number) is still honoured', () => {
+  // `snoozedAt` now holds a list per decision key. A store written by an
+  // intermediate build carries a single number, and dropping it would discard the
+  // anchor — re-opening the incident P1 for exactly those readers. `readState`
+  // normalises BOTH shapes, so this pins the migration rather than assuming it.
+  const key = 'suspend|Organization suspended by an operator'
+  const take = (at, episode) => alert({
+    type: 'suspend',
+    label: 'Organization suspended',
+    message: 'Organization suspended by an operator',
+    at,
+    first_at: at,
+    episode,
+  })
+  const old = take(new Date(NOW.getTime() - HOUR).toISOString(), 'suspend||old')
+  const storage = fakeStorage({
+    k: JSON.stringify({
+      ...emptyState(),
+      snoozed: { [key]: NOW.getTime() + DAY },
+      snoozedAt: { [key]: new Date(old.at).getTime() },
+    }),
+  })
+  const { state } = readState(storage, 'k', NOW)
+  assert.deepEqual(state.snoozedAt[key], [new Date(old.at).getTime()])
+  assert.equal(buildLedger({ alerts: [old], state, now: NOW }).unresolved, 0)
+  // …and the bound still refuses a NEWER suspension on the same key.
+  const newer = take(NOW.toISOString(), 'suspend||new')
+  assert.equal(buildLedger({ alerts: [newer], state, now: NOW }).unresolved, 1)
 })
 
 test('#14694 P1: a snooze on an INCIDENT does not cover a NEWER one', () => {

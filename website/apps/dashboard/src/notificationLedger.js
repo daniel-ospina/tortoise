@@ -188,6 +188,15 @@ export const EPISODE_GAP_MS = 3 * 3600 * 1000
  *  while the blob cannot grow without bound. */
 const MAX_DISMISSED = 400
 
+/** Upper bound on the anchors kept for ONE decision key.
+ *
+ *  `snoozedAt` holds a LIST per key (several rows can share a decision key —
+ *  `suspend`'s customer message is a constant), so a long session on one key
+ *  could otherwise grow it without bound in `localStorage`. Dropping the OLDEST
+ *  anchors is the fail-safe direction: an evicted anchor RE-SHOWS its row rather
+ *  than keeping a hide alive. */
+const MAX_SNOOZE_ANCHORS = 64
+
 function isPlainObject(x) {
   return Boolean(x) && typeof x === 'object' && !Array.isArray(x)
 }
@@ -242,12 +251,21 @@ export function readState(storage, key, now = new Date()) {
   // and falls back to a gap-sized clamp — which still bounds the damage, but
   // cannot tell "the row the reader snoozed" from "a different suspension that
   // shares its constant customer message".
+  //
+  // ⛔ A LIST per decision key, not a single instant. Two rows can share a
+  // decision key (`suspend`'s customer message is a constant), and while this was
+  // one slot the second snooze EVICTED the first row's anchor — the first row
+  // returned to `current` while still listed under "Snoozed", i.e. the reader's
+  // first snooze silently undone by their second (#14694 review P2).
+  // `anchorsOfValue` accepts the older bare-number shape too, so a store written
+  // by an intermediate build does not lose its anchor on the next reload.
   const snoozedAt = {}
-  for (const [episode, at] of Object.entries(
+  for (const [episode, raw] of Object.entries(
     isPlainObject(parsed.snoozedAt) ? parsed.snoozedAt : {},
   )) {
-    const atMs = Number(at)
-    if (episode in snoozed && Number.isFinite(atMs) && atMs > 0) snoozedAt[episode] = atMs
+    if (!(episode in snoozed)) continue
+    const anchors = anchorsOfValue(raw)
+    if (anchors.length) snoozedAt[episode] = anchors
   }
   const dismissed = {}
   const dismissedEntries = Object.entries(
@@ -314,8 +332,9 @@ export function writeState(storage, key, state) {
 
 /** Snooze one episode for `ms`. A non-positive duration is a no-op.
  *
- *  `alert` is the row the reader actually snoozed, and it is stored as
- *  `snoozedAt` exactly as `dismiss` stores the row's own `at` as its watermark.
+ *  `alert` is the row the reader actually snoozed, and its `at` is APPENDED to
+ *  `snoozedAt[episode]` exactly as `dismiss` stores the row's own `at` as its
+ *  watermark.
  *  It is what lets `effectiveSnoozedUntil` answer "is this the row the reader
  *  snoozed, or a DIFFERENT fact that shares its constant message?" — the same
  *  question `_episode_acknowledged` answers server-side. Omitting it is not an
@@ -332,7 +351,25 @@ export function snooze(state, episode, ms, now = new Date(), alert = null) {
     snoozed: { ...base.snoozed, [episode]: nowMs + duration },
   }
   const atMs = atMsOf(alert)
-  if (atMs > 0) next.snoozedAt = { ...(base.snoozedAt || {}), [episode]: atMs }
+  if (atMs > 0) {
+    // ⛔ APPEND, never replace. A second row on the same decision key is a second
+    // row the READER snoozed; replacing the anchor evicted the first row's
+    // coverage, so it came back into `current` (badge incrementing) while the
+    // "Snoozed" list still showed a snooze — the reader's first snooze silently
+    // undone by their second (#14694 review P2).
+    //
+    // The DEADLINE stays one per key (`snoozed` above, overwritten): that is what
+    // identity-wide snoozing means here — re-snoozing the key re-sets the period
+    // it is hidden for, and every row already anchored on that key stays covered
+    // until the new deadline. Never write a deadline LONGER than the reader just
+    // chose at this click, and never let an anchor outlive its key's snooze (the
+    // `readState` prune keeps that true across a reload).
+    const anchors = anchorsOfValue(base.snoozedAt && base.snoozedAt[episode])
+    next.snoozedAt = {
+      ...(base.snoozedAt || {}),
+      [episode]: anchors.includes(atMs) ? anchors : [...anchors, atMs].slice(-MAX_SNOOZE_ANCHORS),
+    }
+  }
   return next
 }
 
@@ -436,9 +473,11 @@ export function snoozedUntil(state, episode, now = new Date()) {
  *  re-opens. It is NOT the window test's forward gap: testing `delta <= gap` here
  *  instead kept a suspension that fired 40 minutes after the snooze hidden, which
  *  is the exact direction that docstring calls the worse failure. The snooze
- *  therefore covers ONLY the row whose `at` IS the snoozed instant — never a
- *  suspension that fires afterwards (the gate), and never an EARLIER bout that
- *  shares the decision key (the window half is what cuts those).
+ *  therefore covers ONLY the rows whose `at` IS an instant the reader snoozed —
+ *  never a suspension that fires afterwards (the gate), and never an EARLIER bout
+ *  that shares the decision key (the window half is what cuts those). Every such
+ *  row is kept in `snoozedAt` as a LIST, so snoozing a second row on the same key
+ *  adds to the covered set instead of evicting the first.
  *
  *  An ACTIVITY row keeps the whole period, and its RESIDUAL is stated rather than
  *  denied. Its key is the identity too (`type|surface:…`), so a snooze taken on
@@ -464,8 +503,10 @@ export function effectiveSnoozedUntil(state, entry, now = new Date()) {
   if (!until || !entry.isIncident) return until
   const nowMs = now instanceof Date ? now.getTime() : Date.parse(now)
   const atMs = Number(entry.atMs) || 0
-  const anchor = Number(state && state.snoozedAt ? state.snoozedAt[entry.key] : 0) || 0
-  if (anchor > 0) {
+  // EVERY row the reader snoozed on this key — a list, because two rows can share
+  // one decision key and both were snoozed by a separate click (#14694 review P2).
+  const anchors = anchorsOf(state, entry.key)
+  if (anchors.length) {
     if (!atMs) return until
     // ⛔ BOTH HALVES, as `isDismissed` applies them — not the gate alone. The
     // server requires a WINDOW match and then the gate
@@ -485,14 +526,44 @@ export function effectiveSnoozedUntil(state, entry, now = new Date()) {
     // that merely SPANS the snooze is covered": its newer window re-opens it
     // (the gate) and its older rows never matched the window half.
     const episodeStart = firstMsOf(entry.alert) || atMs
-    const overlaps = anchor <= atMs && episodeStart <= anchor
-    return overlaps && atMs <= anchor ? until : 0
+    // The same pinch, applied per anchor: a covered row is one whose `at` IS one
+    // of the instants the reader snoozed. A row that merely SPANS a snoozed
+    // instant is still not covered (its newer window re-opens it — the gate — and
+    // a row older than every anchor never matched), so widening the slot from one
+    // anchor to several does not widen WHAT is covered.
+    const covered = anchors.some(
+      (anchor) => anchor <= atMs && episodeStart <= anchor && atMs <= anchor,
+    )
+    return covered ? until : 0
   }
   // No anchor: nothing on the server side says which row the reader snoozed, so
   // fall back to the gap after this row's own measurement.
   if (!atMs) return until
   const cap = atMs + EPISODE_GAP_MS
   return cap > nowMs ? Math.min(until, cap) : 0
+}
+
+/** Normalise a stored anchor value into a list of positive ms instants.
+ *
+ *  Accepts BOTH shapes on purpose: a bare number — the shape this module shipped
+ *  first — and the list it writes now. Dropping the number would silently discard
+ *  the anchor of every store written by that build, which is exactly the
+ *  incident-bound P1 `snoozedAt` exists to close.
+ */
+function anchorsOfValue(raw) {
+  const list = Array.isArray(raw) ? raw : [raw]
+  const out = []
+  for (const item of list) {
+    const ms = Number(item)
+    if (Number.isFinite(ms) && ms > 0 && !out.includes(ms)) out.push(ms)
+  }
+  return out.length > MAX_SNOOZE_ANCHORS ? out.slice(-MAX_SNOOZE_ANCHORS) : out
+}
+
+/** The anchors stored for one decision key, in the list shape. */
+function anchorsOf(state, key) {
+  if (!state || !state.snoozedAt) return []
+  return anchorsOfValue(state.snoozedAt[key])
 }
 
 /** The server timestamp of a row (ms), or 0 when it carries none. */

@@ -5536,11 +5536,19 @@ function claimIntentInFlight() {
         //
         // Capturing the org at call time and comparing after the awaits gets both
         // right: the guard means "did the Organization change under this read,
-        // and is this read not for the one that is current now?" — so logout
-        // (A -> null) discards, a switch (A -> B) discards, a first-org read
-        // (null -> null) is allowed, and a first-org read that lands after the
-        // org was pinned to ITS OWN target is allowed too (`stale()`'s second
-        // half).
+        // and is this read not for the one that is current now?" — so a switch
+        // (A -> B) discards, a first-org read (null -> null) is allowed, and a
+        // first-org read that lands after the org was pinned to ITS OWN target is
+        // allowed too (`stale()`'s second half).
+        //
+        // ⛔ Logout is `A -> null` when the read was for a KNOWN Organization: that
+        // discards. It does NOT discard the FIRST-Organization read, and this
+        // comment used to claim it did — with `orgAtCall` null, logout leaves
+        // `orgIdRef.current = null`, so `null !== null` is false and the response
+        // is ACCEPTED after logout. Harmless in practice (logout navigates away
+        // through `bounceToAuth()`), but the guard's stated contract was wrong
+        // about the one window that is also `completeLogin`'s common path — state
+        // the real behaviour rather than a rule the code does not implement.
         if (stale()) return
         setAlerts(feed.alerts)
         setAlertsSaturated(feed.saturated)

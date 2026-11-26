@@ -783,15 +783,29 @@ export function NotificationBell({
   // A read that failed must be visible on the CLOSED bell too: the sentences that
   // say so live inside the panel, so without this the surface was pixel-identical
   // to an all-clear one while claiming nothing about a feed it could not read.
+  // The same is true of a feed nothing has READ yet (`feedNotRead` below) — see the
+  // note there.
   const feedUnknown = Boolean(unavailable && alerts.length === 0)
   const feedCut = Boolean(scanSaturated && alerts.length === 0)
+  // ⛔ A feed NOTHING HAS TRIED TO READ is the third way the closed bell can lie,
+  // and the one with no end: `loadAlerts` returns above its own `fetch` when the
+  // session token or Organization id is falsy, and nothing re-runs it (not polled,
+  // not in the `[currentOrgId]` effect). With `alerts=[]` the badge was absent and
+  // the label bare — pixel-identical to a measured, empty Organization, for the
+  // rest of the session, while the OPEN panel said "not checked yet". Gated on
+  // `!feedRequested` so it cannot claim a state over a read that IS running: an
+  // in-flight read is transient and its own sentence (`LEDGER_PENDING`) is
+  // truthful, so the bell does not flash a `!` for it.
+  const feedNotRead = Boolean(!feedLoaded && !feedRequested && alerts.length === 0)
   const bellLabel = feedUnknown
     ? `${BELL_LABEL} — the alerts could not be loaded`
     : feedCut
       ? `${BELL_LABEL} — the alert scan was cut, so some may be missing`
-      : count
-        ? `${BELL_LABEL} — ${count} unresolved`
-        : BELL_LABEL
+      : feedNotRead
+        ? `${BELL_LABEL} — not checked yet`
+        : count
+          ? `${BELL_LABEL} — ${count} unresolved`
+          : BELL_LABEL
 
   return (
     <div className="notif-root" ref={rootRef}>
@@ -818,7 +832,7 @@ export function NotificationBell({
         title={bellLabel}
       >
         <span className="notif-glyph" aria-hidden="true">🔔</span>
-        <Badge count={count} warn={feedUnknown || feedCut} />
+        <Badge count={count} warn={feedUnknown || feedCut || feedNotRead} />
       </button>
 
       {open ? (

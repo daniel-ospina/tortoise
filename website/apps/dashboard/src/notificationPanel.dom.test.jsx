@@ -1607,6 +1607,32 @@ test('#14686: a failed read is visible on the CLOSED bell, not only inside the p
   assert.equal(bell(rowsPresent.container).getAttribute('aria-label'), 'Notifications — 1 unresolved')
 })
 
+test('#14694 P2: a feed nothing has READ is visible on the CLOSED bell, not an all-clear', () => {
+  // The third way the closed bell could lie, and the one with no end: `loadAlerts`
+  // returns above its own `fetch` when the session token or Organization id is
+  // falsy, and nothing re-runs it. With `alerts=[]` the pre-fix bell had no badge
+  // and a bare label — pixel-identical to a measured, empty Organization, for the
+  // rest of the session, while the OPEN panel correctly said "not checked yet".
+  const never = renderBell({ alerts: [], feedLoaded: false, feedRequested: false })
+  assert.match(bell(never.container).getAttribute('aria-label'), /not checked yet/)
+  assert.equal(
+    never.container.querySelector('.notif-badge').textContent, '!',
+    'an unread feed must not render like an all-clear one on the closed bell',
+  )
+
+  // A read that IS running is transient and must NOT flash the `!`: its own
+  // sentence inside the panel (`LEDGER_PENDING`, "Checking…") is the truthful one,
+  // and the badge-warn would claim a bad state over a healthy in-flight read.
+  const pending = renderBell({ alerts: [], feedLoaded: false, feedRequested: true })
+  assert.equal(bell(pending.container).getAttribute('aria-label'), 'Notifications')
+  assert.equal(pending.container.querySelector('.notif-badge'), null)
+
+  // Once settled, an empty feed is a SUPPORTED all-clear claim again.
+  const settled = renderBell({ alerts: [], feedLoaded: true })
+  assert.equal(bell(settled.container).getAttribute('aria-label'), 'Notifications')
+  assert.equal(settled.container.querySelector('.notif-badge'), null)
+})
+
 // ── 7. Nothing is hidden by CSS (the evasion no source scan can see) ────────
 
 test('#14686: a ledger row and its badge are VISIBLE with the real stylesheet', () => {
