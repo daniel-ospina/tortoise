@@ -4034,7 +4034,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 29` reds a name PRUNED from the literal and `missing` reds a
+    # `len(split_arms) == 44` reds a name PRUNED from the literal and `missing` reds a
     # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
@@ -4046,7 +4046,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # deliberately — a red a reviewer reads rather than slack that a silently-added arm
     # rides. Counted over `defined`, so the 9 decorated arms are inside it too.
     # 99 -> 103, in two landings that each ADDED arms rather than pruned a name: the
-    # round-6 timeout bound took it to 101 (with `split_arms` 41 -> 42), and this
+    # round-6 timeout bound took it to 101 (with `split_arms` 40 -> 42), and this
     # hardlink pair takes it to 103 (`test_a_render_through_a_HARDLINK_to_git_metadata_is_refused`
     # and `test_a_second_name_for_a_PLAIN_destination_is_refused_too`, also named in
     # `split_arms`, which moved 42 -> 44 with them).
