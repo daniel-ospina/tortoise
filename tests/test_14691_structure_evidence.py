@@ -891,11 +891,17 @@ def test_each_door_finding_answer_states_the_artifacts_ANSWER():
     POLARITY only, so the exact contradiction the finding is about —
     `**No — a bare kind returns exactly the same rows as the namespaced spelling,
     so every declared spelling works.**`, led by "No" — stayed GREEN (measured).
-    The cell must now state the artifact's answer: its normalised words PREFIX the
-    cell, so the prose may add colour after the machine's answer but may not
-    reverse it. The five cells that paraphrased were aligned to the artifact's own
-    wording for this reason — the answer is a machine output, and prose about a
-    machine output should be the machine's words.
+    The 5th-cycle fix then required the artifact's answer to PREFIX the cell, and
+    the 8th cycle measured the hole that leaves: both arms are SUPERSETS, so a
+    cell can state the finding AND its negation. Appending
+    `The direction is in fact fully visible and correct on every edge read.`
+    INSIDE D1's answer cell left `61 passed` (measured at `bf7c610a`), and D2/D4
+    share both arms by construction, so every door row was exposed.
+
+    The cell must now be the artifact's answer EXACTLY (normalised words), which is
+    what §8.3's last line already claimed. Prose about the machine's answer goes
+    in the evidence column — D2's "walked names are 32, not the 28 declared"
+    qualifier moved there when this arm became exact, so no claim was dropped.
     """
     for finding in _score()["door_findings"]:
         row = _report_line(rf"^\| \*\*{finding['id']}\*\* \|")
@@ -903,9 +909,12 @@ def test_each_door_finding_answer_states_the_artifacts_ANSWER():
         cell = _norm_words(row.split("|")[3])
         answer = _norm_words(finding["answer_over_mcp"])
         assert answer, f"{finding['id']} carries no answer in the artifact"
-        assert cell.startswith(answer), (
-            f"REPORT.md's {finding['id']} answer does not state the artifact's: "
-            f"expected the cell to begin {answer!r}, got {cell!r}")
+        assert cell == answer, (
+            f"REPORT.md's {finding['id']} answer cell is not the artifact's answer, "
+            f"word for word: expected {answer!r}, got {cell!r} — a prefix test "
+            "would accept the finding and its negation in one cell, so the cell "
+            "carries the machine's answer and nothing else; qualify it in the "
+            "evidence column")
 
 
 def test_report_headline_counts_are_the_artifacts_counts():
@@ -2037,6 +2046,97 @@ def test_every_TABLE_ROW_in_the_report_is_derived_from_an_artifact():
         assert shown == ranks, (
             f"A5 row for {probe['element']!r} states ranks {shown} while the "
             f"artifact recorded {ranks}: {row}")
+
+
+def test_the_figures_the_8th_review_measured_as_FREE_are_now_pinned():
+    r"""Reds if a figure that only UNION MEMBERSHIP supported moves to another line.
+
+    ⛔ #14691 review (8th cycle, P1 — "no prose figure is free" is a union test).
+    The net arm below asserts `norm(token) in supported`, and `supported` is the
+    union of every scalar, every list length and every file size across
+    `out/*.json` — 233 values, 50 of them ≤ 200. A RIGHT-LOOKING FIGURE IN THE
+    WRONG PLACE is therefore satisfied by a number that belongs somewhere else,
+    which is the class the 7th cycle actually reported: the net reds "a number no
+    artifact carries", never "the right number on the wrong line".
+
+    Measured at `bf7c610a`, each mutant applied ALONE — `61 passed` on all six:
+
+    * §1 `(1.4 min)` → `(16.3 min)` — 16.3 is the MEAN ack, a supported number;
+    * §3 `` `managedBy` is inverted too** (2 rows) `` → `(6 rows)` — 6 is supported;
+    * §8 `32 element walks` → `39` — 39 is the tool-surface count;
+    * §3 doc-03 `7 components and 7 dependencies` → `9 components` — 9 is supported;
+    * VERIFICATION `because 6 `ownedBy` rows are only 4 pairs` → `4 … 6 pairs`;
+    * §1 `Five short **meeting transcripts**` → `Six` — prose counts are outside the
+      net's `\b\d` reach entirely.
+
+    Each figure is now read from the field that produces it, and each read is
+    LINE-SCOPED, so a sibling line that quotes the same figure (the §8.3 record of
+    the mutant does) cannot satisfy the claim.
+    """
+    receipt = _receipt()
+    module = _load_score_module()
+
+    # ── §1: the capture count and the ack TOTAL, in seconds AND minutes. The mean
+    # ack is a different artifact value and must not be able to take this line.
+    docs = receipt["documents"]
+    total_ack = sum(d["ack_seconds"] for d in docs)
+    run = _report_line(r"^\| Run \|")
+    assert run, "REPORT.md has no §1 Run row"
+    assert (f"{len(docs)} captures, {total_ack:.1f} s of capture ack time "
+            f"({total_ack / 60:.1f} min)") in run, (
+        "§1's capture/ack sentence is not the receipt's own totals — the "
+        f"per-document acks sum to {total_ack:.1f} s = {total_ack / 60:.1f} min "
+        f"over {len(docs)} captures; the row is {run!r}")
+
+    # ── §1: the corpus size, spelled in prose (outside the net's tokenizer)
+    transcripts = len(_corpus()["documents"])
+    count_word = {2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six",
+                  7: "Seven"}.get(transcripts, str(transcripts))
+    corpus_line = _report_line(r"short \*\*meeting transcripts\*\*")
+    assert corpus_line, "REPORT.md has no §1 corpus-size sentence"
+    assert corpus_line.startswith(
+        f"{count_word} short **meeting transcripts**"), (
+        f"§1 opens with {corpus_line[:40]!r} while the corpus holds "
+        f"{transcripts} documents")
+
+    # ── §3: the `managedBy` row count, and doc-03's component/dependency pair
+    managed = [e for e in module.EDGES if e["predicate"] == "managedBy"]
+    managed_row = _report_line(r"^\d+\. \*\*`managedBy` is inverted too\*\*")
+    assert managed_row, "REPORT.md §3 has no `managedBy` inversion row"
+    assert f"**`managedBy` is inverted too** ({len(managed)} rows)" in managed_row, (
+        f"§3's managedBy row states a count the receipt's {len(managed)} "
+        f"managedBy edges do not: {managed_row!r}")
+
+    declared = _corpus()["_declared_structure"]
+    doc03 = _report_line(r"^\| `doc-03` \|")
+    assert doc03, "REPORT.md has no doc-03 inventory row"
+    assert (f"**architecture** — {len(declared['components'])} components and "
+            f"{len(declared['dependencies'])} dependencies") in doc03, (
+        "doc-03's inventory row is not the declaration's: "
+        f"{len(declared['components'])} components / "
+        f"{len(declared['dependencies'])} dependencies — row {doc03!r}")
+
+    # ── §8: the element-walk count on the readback row itself, not wherever else
+    # the same figure is quoted (§8.3's mutant record quotes it too)
+    walks = len(_readback()["elements"])
+    rb_row = _report_line(r"^\| `out/readback\.json` \|")
+    assert rb_row, "REPORT.md §8 has no readback row"
+    assert f"{walks} element walks" in rb_row, (
+        f"§8's readback row does not state the artifact's {walks} element walks: "
+        f"{rb_row!r}")
+
+    # ── VERIFICATION: the ownedBy ROWS and the distinct PAIRS behind them
+    owned = [e for e in module.EDGES if e["predicate"] == "ownedBy"]
+    pairs = {(str(e["src"]).lower(), str(e["dst"]).lower()) for e in owned}
+    ver_lines = [line for line in
+                 (BUNDLE / "VERIFICATION-independent.md").read_text().splitlines()
+                 if "`ownedBy` rows are only" in line]
+    assert ver_lines, (
+        "VERIFICATION-independent.md no longer states the ownedBy row/pair split")
+    assert (f"because {len(owned)} `ownedBy` rows are only {len(pairs)} pairs"
+            in " ".join(ver_lines)), (
+        "VERIFICATION's ownedBy row/pair split is not the receipt's: "
+        f"{len(owned)} rows / {len(pairs)} pairs — got {ver_lines!r}")
 
 
 def test_the_after_ingest_block_cost_table_and_remaining_figures_are_derived():
