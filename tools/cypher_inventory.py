@@ -945,7 +945,28 @@ def check(doc: Path, result: dict) -> int:
         )
         # 1, deliberately: a committed appendix is a RED, not "could not run".
         return 1
-    pinned = {k: int(v) for k, v in PINNED.findall(text)}
+    # ⛔ A DUPLICATED PIN IS "COULD NOT RUN" (2), NOT A LAST-WINS (#14625 review, round
+    # 3, P3). `{k: int(v) for k, v in PINNED.findall(text)}` keeps the LAST occurrence
+    # of a repeated key silently, so a source that declares `sites` twice — the first
+    # one edited by an author who believes it is the live pin — still printed
+    # "check: 25 pinned counts match" and exited 0 (measured: `sites` pinned 1339 then
+    # 1332, 26 pin comments, rc 0). That is a FALSE PASS in the one verb whose whole
+    # job is to refuse a wrong number, and it is invisible: 25 `PINNED` matches still
+    # count as 25 pins. A source is hand-authored, so a duplicate is a mistake to
+    # report rather than a value to pick — 2, because the doc cannot be graded at all.
+    pin_pairs = PINNED.findall(text)
+    repeated = sorted(
+        key for key, count in Counter(k for k, _ in pin_pairs).items() if count > 1
+    )
+    if repeated:
+        print(
+            f"check: {doc} declares {', '.join(repeated)} more than once —\n"
+            "`--check` would keep only the LAST occurrence silently, so a duplicate "
+            "pin is\na pin nobody grades. Delete the extra declaration(s) and re-run.",
+            file=sys.stderr,
+        )
+        return 2
+    pinned = {k: int(v) for k, v in pin_pairs}
     sites: list[Site] = result["sites"]
     actual = {
         "sites": len(sites),
