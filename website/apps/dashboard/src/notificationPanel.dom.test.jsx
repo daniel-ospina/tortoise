@@ -503,6 +503,16 @@ test('#14694: UNSNOOZE keeps focus inside the panel, not on <body>', () => {
   assert.notEqual(document.activeElement, document.body,
     'a removed active element must not drop focus to <body>')
   assert.equal(document.activeElement, container.querySelector('.notif-panel'))
+  // ⛔ THE FOCUS ASSERTION ALONE PINS NOTHING ABOUT THE CONTROL (review finding):
+  // a NO-OP `handleUnsnooze` still restores focus, so wiring it to the wrong key
+  // (measured: `entry.rowKey` instead of `entry.key`) left this test GREEN while
+  // Unsnooze stopped un-snoozing. The row must come BACK — the sibling Restore
+  // test asserts the same thing for `undismiss`, which is why its mutant is
+  // caught and this one was not.
+  assert.equal(bell(container).getAttribute('aria-label'), 'Notifications — 1 unresolved',
+    'Unsnooze must return the row to the unresolved count')
+  assert.ok(!container.textContent.includes(UNSNOOZE),
+    'and the Snoozed group must be empty of it')
 })
 
 test('#14694: RESTORE keeps focus inside the panel, not on <body>', () => {
@@ -548,6 +558,44 @@ test('#14694: a key change collapses the ACKED group with its three siblings', (
     assert.ok(block.includes(setter),
       `the key-change reset must re-initialise ${setter} — one disclosure left `
       + 'set would open the new Organization\'s group without a click')
+  }
+})
+
+test('#14694: a TICK that expires the focused row hands focus back to the panel', () => {
+  // The one unmount path no handler covers (review finding): a snooze expires on
+  // the 30 s tick and the row leaves the Snoozed group, taking the focused
+  // "Unsnooze" button with it. Reachable only if the reader is still focused
+  // there at expiry, but the panel's contract is stated absolutely elsewhere in
+  // this file ("a removed active element must not drop focus to <body>"), so it is
+  // closed and pinned rather than excused.
+  //
+  // ⛔ Rendered WITHOUT `now`: `renderBell` always injects it, and an injected
+  // clock deliberately disables the tick ("a test that injects `now` gets no
+  // timer"), so exercising this path needs the real timer machinery faked.
+  vi.useFakeTimers()
+  vi.setSystemTime(NOW)
+  try {
+    const { container } = render(
+      <NotificationBell alerts={[alert({ message: 'expires under focus' })]}
+        userId={USER} orgId={ORG} storage={fakeStorage()} />,
+    )
+    fireEvent.click(bell(container))
+    fireEvent.change(container.querySelector('.notif-snooze'), { target: { value: '1h' } })
+    fireEvent.click([...container.querySelectorAll('.notif-more')]
+      .find((b) => /Snoozed \(/.test(b.textContent)))
+    const unsnooze = [...container.querySelectorAll('button')]
+      .find((b) => b.textContent.trim() === UNSNOOZE)
+    assert.ok(unsnooze, 'precondition: the snoozed row is listed')
+    unsnooze.focus()
+    assert.equal(document.activeElement, unsnooze, 'precondition: focus is where the reader put it')
+    // Past the snooze deadline: the tick re-renders, the row returns to the
+    // current list, and the button holding focus unmounts.
+    act(() => { vi.advanceTimersByTime(61 * MIN) })
+    assert.notEqual(document.activeElement, document.body,
+      'a tick that expires the focused row must not drop focus to <body>')
+    assert.equal(document.activeElement, container.querySelector('.notif-panel'))
+  } finally {
+    vi.useRealTimers()
   }
 })
 

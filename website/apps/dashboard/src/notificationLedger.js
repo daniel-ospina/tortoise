@@ -162,7 +162,7 @@ export function storageKey({ userId, orgId } = {}) {
 
 /** A complete, empty store. */
 export function emptyState() {
-  return { v: 1, snoozed: {}, dismissed: {}, dismissedLast: {} }
+  return { v: 1, snoozed: {}, dismissed: {}, dismissedLast: {}, dismissedFirst: {} }
 }
 
 /** The server's episode gap, mirrored from `tortoise/abuse.py` `EPISODE_GAP_S`
@@ -261,7 +261,23 @@ export function readState(storage, key, now = new Date()) {
       dismissedLast[episode] = lastMs
     }
   }
-  return { state: { v: 1, snoozed, dismissed, dismissedLast }, persisted: true }
+  // The acknowledged window's START, the other half of the ACTIVITY arm's
+  // `overlap` clause. Same sibling-map discipline as `dismissedLast`, and the
+  // same fallback: a store written before this field existed simply has no entry
+  // and `isDismissed` reconstructs the window as the single point it does have.
+  // ⛔ WITHOUT THIS the field would be written by `dismiss` and then DROPPED on
+  // every reload — the reader's own dismissal would silently stop matching the
+  // bout it was taken on, which is the failure this clause exists to prevent.
+  const dismissedFirst = {}
+  for (const [episode, first] of Object.entries(
+    isPlainObject(parsed.dismissedFirst) ? parsed.dismissedFirst : {},
+  )) {
+    const firstMs = Number(first)
+    if (episode in dismissed && Number.isFinite(firstMs) && firstMs > 0) {
+      dismissedFirst[episode] = firstMs
+    }
+  }
+  return { state: { v: 1, snoozed, dismissed, dismissedLast, dismissedFirst }, persisted: true }
 }
 
 /** Write the store. Returns true only when the write is CONFIRMED. */
@@ -320,10 +336,21 @@ export function dismiss(state, episode, now = new Date(), alert = null) {
   // ACTIVITY gap test needs. Both come from the same server timestamp, so a
   // skewed browser clock cannot hide either register.
   const lastMs = atMsOf(alert)
+  // `dismissedFirst` is the dismissed window's START. It is what makes the
+  // ACTIVITY arm's `overlap` clause expressible: the client stores only the
+  // window END as the watermark, but the server's rule is
+  // `overlap or (0 <= delta <= gap_s)` (`abuse.py:1741-1744`), and `overlap`
+  // needs BOTH ends of the acknowledged window. Without it the whole arm collapses
+  // to the delta test, which accepts negative deltas — the direction the server's
+  // own docstring names as the bug it fixed ("an unbounded delta also matched
+  // every EARLIER bout, which is how acking the newest bout used to acknowledge
+  // older ones"). `first_at` is already in hand here.
+  const firstMs = firstMsOf(alert)
   return {
     ...base,
     dismissed: { ...base.dismissed, [episode]: lastMs || nowMs },
     dismissedLast: { ...(base.dismissedLast || {}), [episode]: lastMs },
+    dismissedFirst: { ...(base.dismissedFirst || {}), [episode]: firstMs },
   }
 }
 
@@ -335,7 +362,9 @@ export function undismiss(state, episode) {
   delete dismissed[episode]
   const dismissedLast = { ...(base.dismissedLast || {}) }
   delete dismissedLast[episode]
-  return { ...base, dismissed, dismissedLast }
+  const dismissedFirst = { ...(base.dismissedFirst || {}) }
+  delete dismissedFirst[episode]
+  return { ...base, dismissed, dismissedLast, dismissedFirst }
 }
 
 // ── Reading the state for one episode ──────────────────────────────────────
@@ -384,34 +413,42 @@ function firstMsOf(alert) {
  * hid a suspension that happened a week later.
  *
  * ⛔ BOTH registers are bounded, and the bounds are DIFFERENT — the same two
- * rules `_episode_acknowledged` applies, mirrored as far as the facts this
- * store persists allow (the narrowings are named below):
+ * rules `_episode_acknowledged` applies, mirrored exactly:
  *
  *   • INCIDENT (`alert` register) — the watermark test: an incident that
  *     HAPPENED after the dismissal is not covered. Each row is a new FACT, and
  *     folding it into the dismissed episode hides it.
  *
- *   • ACTIVITY (measurement) — the server's GAP test, applied FORWARD ONLY: a
- *     bout whose START is 0…`EPISODE_GAP_MS` after the dismissed window's END is
- *     the same ongoing measurement, so one dismissal covers it; a bout that
- *     starts LATER than that gap is a genuinely new bout and renders as CURRENT.
- *     There is no incident-style watermark here because a velocity row
- *     legitimately re-reports every five minutes with a newer `at`.
+ *   • ACTIVITY (measurement) — the server's `overlap or (0 <= delta <= gap_s)`,
+ *     both arms. A bout that INTERSECTS the acknowledged window is the same
+ *     ongoing measurement, so one dismissal covers it; a bout starting 0…
+ *     `EPISODE_GAP_MS` after the window's END is also the same bout; anything
+ *     else — later than the gap, or an episode that ENDED BEFORE the window
+ *     began — renders as CURRENT. There is no incident-style watermark here
+ *     because a velocity row legitimately re-reports every five minutes with a
+ *     newer `at`.
  *
- * ⚠️ THE TWO DELIBERATE NARROWINGS, stated so a reader does not assume an exact
- * mirror. The server matches `overlap or (0 <= delta <= gap_s)` because it holds
- * the acknowledged window's FIRST and LAST rows; this module persists only the
- * END (`dismissedLast`), so the overlap arm cannot be evaluated and the lower
- * bound of the gap arm is not applied — an episode whose START precedes the
- * dismissed window's end is covered (`delta < 0 ⇒ covered`) rather than resolved
- * by overlap. Both narrowings fire in exactly ONE situation: an episode that
- * ENDED before the acknowledged window BEGAN (server: CURRENT, here: covered).
- * Neither can ever hide a LATER bout, which is the direction `abuse.py`'s
- * docstring rejects. A `dismissedFirst` map would close it; a third persisted
- * map is not worth it to make an already-ended older episode of an identity the
- * reader has just dismissed re-appear as CURRENT. Pinned by
- * `notificationLedger.test.js` ("an episode that ENDED before the dismissed one
- * began is still covered"), so a future change has to argue with this choice.
+ * ⚠️ THIS WAS A DELIBERATE ONE-SIDED NARROWING FOR ONE COMMIT, AND THE REASON IT
+ * IS NOT ONE ANY MORE IS WORTH KEEPING. Applied forward only (`delta <= gap`, no
+ * lower bound, no overlap arm), the ACTIVITY rule covers an episode that ENDED
+ * before the acknowledged window BEGAN. That was justified — explicitly, in a
+ * commit and a pinned test — by this store persisting only the window's END
+ * (`dismissedLast`), which makes the overlap arm unevaluable, with the note that
+ * "a `dismissedFirst` map would close it; a third persisted map is not worth it".
+ *
+ * That trade was re-measured and refused, because the case is not the harmless
+ * one it looks like. Two `read_velocity` episodes of ONE identity 8 h apart are
+ * TWO rows (`group_alert_episodes`, beyond `EPISODE_GAP_S`) but ONE client key
+ * (`entryKeyOf` is `type|message`), so dismissing the NEWER filed the OLDER,
+ * never-dismissed bout under "dismissed for you" and dropped it from the count —
+ * a hidden row on the surface whose entire job is not to hide incidents, and the
+ * exact direction `abuse.py` records as the bug it fixed ("an unbounded delta
+ * also matched every EARLIER bout, which is how acking the newest bout used to
+ * acknowledge older ones"). The third map is therefore persisted, and the mirror
+ * is exact. A store predating it reconstructs the window as the single point it
+ * has, so the correction is backward-compatible (see `isDismissed`). Pinned by
+ * `notificationLedger.test.js` ("the ACTIVITY bound matches the server on BOTH
+ * sides").
  *
  * ⚠️ THIS FUNCTION USED TO RETURN `true` UNCONDITIONALLY FOR ACTIVITY, on the
  * stated grounds that "that asymmetry is the server's". It is not: the server
@@ -435,13 +472,33 @@ export function isDismissed(state, episode, alert = null) {
     const happenedAt = atMsOf(alert)
     return !(happenedAt && happenedAt > dismissedThrough)
   }
-  // ACTIVITY — the server's gap arm. A store written before `dismissedLast`
-  // existed falls back to the watermark, which is the same server instant.
+  // ACTIVITY — the server's gap arm, MIRRORED IN FULL. `abuse.py` matches
+  // `overlap or (0 <= delta <= gap_s)`; this file used to implement only the
+  // right-hand clause and, worse, without its `0 <=` floor — so it accepted every
+  // NEGATIVE delta and a dismissal of a NEWER bout also hid an EARLIER, never
+  // dismissed one. Two `read_velocity` episodes of one identity 8 h apart (beyond
+  // `EPISODE_GAP_S`, so `group_alert_episodes` keeps them as two rows) share one
+  // client key, and dismissing only the newer made the older report as dismissed:
+  // filed under "dismissed for you" and gone from the badge, never dismissed.
+  // That is the exact failure the per-row bucketing rewrite exists to remove.
+  //
+  // A store written before `dismissedLast` existed falls back to the watermark,
+  // which is the same server instant.
   const ackedLast =
     Number((state.dismissedLast || {})[episode]) || dismissedThrough
   const episodeStart = firstMsOf(alert)
+  const episodeEnd = atMsOf(alert)
   if (!episodeStart || !ackedLast) return true
-  return episodeStart - ackedLast <= EPISODE_GAP_MS
+  // `overlap` — the acknowledged window and this episode intersect. Needs both
+  // ends of the ack; a store written before `dismissedFirst` existed has only the
+  // END, so the ack window is reconstructed as that POINT. For a continuing bout
+  // the point falls inside the episode (still the same bout, correctly), and for
+  // an un-dismissed EARLIER bout it does not — so the fix holds for legacy stores
+  // too, instead of quietly preserving the bug until the next write.
+  const ackedFirst = Number((state.dismissedFirst || {})[episode]) || ackedLast
+  if (episodeEnd && ackedFirst <= episodeEnd && episodeStart <= ackedLast) return true
+  const delta = episodeStart - ackedLast
+  return delta >= 0 && delta <= EPISODE_GAP_MS
 }
 
 /** The server's opaque episode key — the key the ack route takes. */

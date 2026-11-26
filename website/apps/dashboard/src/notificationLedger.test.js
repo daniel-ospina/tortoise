@@ -474,18 +474,26 @@ test('the ACTIVITY bound: a bout that STARTS beyond the server gap is a NEW bout
   )
 })
 
-test('an episode that ENDED before the dismissed one began is still covered', () => {
-  // THE DOCUMENTED NARROWING, pinned so it is a decision and not an accident.
-  // The server resolves this case with its OVERLAP arm (`overlap or
-  // (0 <= delta <= gap_s)`), and it answers CURRENT: the older bout shares no
-  // instant with the acknowledged window. This store persists only the window's
-  // END (`dismissedLast`), never its START, so overlap cannot be evaluated and
-  // the gap arm is applied one-sided (`delta <= gap`) — the older bout reads as
-  // covered. The `isDismissed` docstring names this exactly; the test exists so
-  // that a future change to either the store or the rule has to confront it.
+test('the ACTIVITY bound matches the server on BOTH sides — the backward case too', () => {
+  // ⚠️ THIS TEST WAS A DELIBERATE, PINNED NARROWING UNTIL #14694's cycle-4 fix,
+  // and the reason it is no longer one is recorded here so it cannot be
+  // re-narrowed by accident.
   //
-  // What it can NEVER do is hide a LATER bout: that is the direction
-  // `abuse.py`'s docstring rejects, and the sibling test above pins it.
+  // The peak it replaces ("an episode that ENDED before the dismissed one began
+  // is still covered") set out the deviation in its own words: *"The server
+  // resolves this case with its OVERLAP arm (`overlap or (0 <= delta <= gap_s)`),
+  // and it answers CURRENT … This store persists only the window's END
+  // (`dismissedLast`), never its START, so overlap cannot be evaluated."*
+  //
+  // That premise is gone: `dismiss()` now persists `dismissedFirst` as well, so
+  // the overlap arm IS evaluable and the client applies the server's rule rather
+  // than half of it. The measured cost of the narrowing was not theoretical —
+  // two `read_velocity` episodes of one identity 8 h apart share one client key
+  // (`entryKeyOf` is `type|message`), so dismissing the NEWER filed the OLDER,
+  // never-dismissed bout under "dismissed for you" and dropped it from the badge.
+  // `abuse.py` names that direction as the bug it fixed: *"an unbounded delta
+  // also matched every EARLIER bout, which is how acking the newest bout used to
+  // acknowledge older ones."*
   const measured = alert({
     type: 'read_velocity',
     register: 'activity',
@@ -494,8 +502,8 @@ test('an episode that ENDED before the dismissed one began is still covered', ()
   const key = entryKeyOf(measured)
   const state = dismiss(emptyState(), key, NOW, measured)
 
-  // A bout that ENDED 9 days before the dismissed window BEGAN (dismissed
-  // window starts at NOW: `first_at` = `at` = NOW in the fixture above).
+  // A bout that ENDED 9 days before the dismissed window BEGAN. The server
+  // answers CURRENT (no overlap, negative delta), so this store must too.
   const endedEarlier = {
     ...measured,
     first_at: new Date(NOW.getTime() - 10 * DAY).toISOString(),
@@ -503,16 +511,17 @@ test('an episode that ENDED before the dismissed one began is still covered', ()
     episode: 'read_velocity||ended-earlier',
   }
   assert.equal(
-    isDismissed(state, key, endedEarlier), true,
-    'an already-ended older bout of a just-dismissed identity stays covered',
+    isDismissed(state, key, endedEarlier), false,
+    'an already-ended EARLIER bout shares no instant with the acknowledged window',
   )
   assert.equal(
     buildLedger({ alerts: [endedEarlier], state, now: NOW }).unresolved,
-    0,
+    1,
+    'and it stays countable — a hidden row on the security surface is the defect',
   )
 
   // The same-shaped bout on the OTHER side of the window is a genuinely later
-  // bout, so the one-sided bound must not reach it — the asymmetry is the point.
+  // bout, and must also stay current.
   const startedLater = {
     ...measured,
     first_at: new Date(NOW.getTime() + 9 * DAY).toISOString(),
@@ -521,8 +530,49 @@ test('an episode that ENDED before the dismissed one began is still covered', ()
   }
   assert.equal(
     isDismissed(state, key, startedLater), false,
-    'a later bout is never covered by the older dismissal',
+    'a bout starting beyond the gap is not covered',
   )
+
+  // And the case the bound exists FOR still holds: a bout still running when the
+  // dismissal was taken overlaps the acknowledged window and stays covered.
+  const sameBout = {
+    ...measured,
+    first_at: new Date(NOW.getTime() - 30 * MIN).toISOString(),
+    at: new Date(NOW.getTime() + 5 * MIN).toISOString(),
+    episode: 'read_velocity||same',
+  }
+  assert.equal(
+    isDismissed(state, key, sameBout), true,
+    'the bout the dismissal was taken on is still covered (the overlap arm)',
+  )
+})
+
+test('a store with only the window END still does not inherit a newer dismissal', () => {
+  // `dismissedFirst` is new. A store on a reader's disk has only the END, so the
+  // ack window is reconstructed as that POINT: it intersects a continuing bout
+  // (still the same bout) and does not intersect an earlier, separate one. That
+  // is what keeps the legacy path from quietly preserving the old bug until the
+  // next write — and it is why the fix did not have to choose between "correct
+  // for new stores" and "does not resurface every cleared row for old ones".
+  const measured = alert({
+    type: 'read_velocity',
+    register: 'activity',
+    message: 'Read volume crossed the threshold.',
+  })
+  const key = entryKeyOf(measured)
+  const at = (h) => new Date(NOW.getTime() + h * HOUR).toISOString()
+  const newer = { ...measured, first_at: at(13), at: at(15), episode: 'read_velocity||newer' }
+  const older = { ...measured, first_at: at(4), at: at(5), episode: 'read_velocity||older' }
+  // The shape a pre-`dismissedFirst` store has: watermark + window END only.
+  const legacy = {
+    v: 1, snoozed: {},
+    dismissed: { [key]: NOW.getTime() + 15 * HOUR },
+    dismissedLast: { [key]: NOW.getTime() + 15 * HOUR },
+  }
+  assert.equal(isDismissed(legacy, key, newer), true,
+    'the point reconstruction still covers the bout it was taken on')
+  assert.equal(isDismissed(legacy, key, older), false,
+    'and does not reach backward to a separate earlier bout')
 })
 
 test('a dismissal written before `dismissedLast` existed still works', () => {
@@ -535,7 +585,15 @@ test('a dismissal written before `dismissedLast` existed still works', () => {
     message: 'Read volume crossed the threshold.',
   })
   const key = entryKeyOf(measured)
-  const legacy = { v: 1, snoozed: {}, dismissed: { [key]: NOW.getTime() } }
+  // ⚠️ The watermark is the row's OWN `at`, because that is what `dismiss` writes
+  // (`lastMs || nowMs`). This fixture used to set it to `NOW` — five minutes
+  // LATER than the row it dismisses (`alert()` builds `at` as NOW - 5min) — a
+  // value `dismiss()` cannot produce, so it asserted a shape that exists on no
+  // reader's disk. Once the ACTIVITY arm mirrored the server's `overlap` clause
+  // — which is defined relative to the row the dismissal was taken on — that
+  // unrealistic watermark is what failed, not the legacy path. The realistic
+  // legacy shape is this one.
+  const legacy = { v: 1, snoozed: {}, dismissed: { [key]: new Date(measured.at).getTime() } }
   assert.equal(isDismissed(legacy, key, measured), true, 'the watermark stands in for the window end')
 
   // …and the reload path keeps it: `readState` must not drop the record.

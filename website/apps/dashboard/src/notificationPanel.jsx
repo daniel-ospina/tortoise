@@ -431,11 +431,37 @@ export function NotificationBell({
   // panel immediately showed the row. A badge that disagrees with the ledger it
   // summarises is the silent undercount this surface exists to avoid. One coarse
   // 30 s tick while mounted is free, and a test that injects `now` gets no timer.
+  // The tick can UNMOUNT the focused element: a snooze that expires while the
+  // reader has focus on that row's "Unsnooze" button moves the row back to the
+  // current list, and a removed active element drops focus to `<body>` — the one
+  // unmount path in the panel that no handler covers (review finding).
+  //
+  // ⛔ CAPTURE-THEN-RESTORE, because `setOpenedAt` re-renders ASYNCHRONOUSLY: a
+  // synchronous `document.activeElement` check inside the interval reads the state
+  // BEFORE the unmount, so it can never see the loss. The interval records whether
+  // focus was INSIDE the panel at tick time; the effect below runs after the
+  // resulting render and restores only if focus actually fell to `<body>`.
+  // Gated on "was inside" on purpose — reclaiming whenever focus is on `<body>`
+  // would steal it from a reader who put it there (clicked non-focusable panel
+  // background), which is the worse bug.
+  const tickFocusRef = React.useRef(false)
   React.useEffect(() => {
     if (nowProp) return undefined
-    const id = setInterval(() => setOpenedAt(new Date()), 30_000)
+    const id = setInterval(() => {
+      const active = typeof document !== 'undefined' ? document.activeElement : null
+      tickFocusRef.current = Boolean(rootRef.current && active && rootRef.current.contains(active))
+      setOpenedAt(new Date())
+    }, 30_000)
     return () => clearInterval(id)
   }, [nowProp])
+
+  React.useEffect(() => {
+    if (!tickFocusRef.current) return
+    tickFocusRef.current = false
+    if (!open || !panelRef.current) return
+    const active = typeof document !== 'undefined' ? document.activeElement : null
+    if (!active || active === document.body) panelRef.current.focus()
+  })
 
   const persist = (next) => {
     const ok = writeState(storage, key, next)
