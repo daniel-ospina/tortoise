@@ -35,7 +35,7 @@ on:
       - "supabase/migrations/**"
       - "tools/cypher_diff_harness.py"
       - "tools/cypher_inventory.py"
-      - "docs/architecture/CYPHER-INVENTORY.md"
+      - "docs/architecture/CYPHER-INVENTORY.src.md"
       - "tests/test_13098_cypher_inventory.py"
       - ".github/workflows/cypher-diff.yml"
   workflow_dispatch:
@@ -114,7 +114,8 @@ jobs:
       # and a census red masks whether the harness works at all. Ordered last, a
       # drifted pin still reds the job (it must — the doc's numbers are then
       # wrong) but it can no longer hide the differential evidence. The refresh
-      # procedure is §7 of `docs/architecture/CYPHER-INVENTORY.md`.
+      # procedure is §7 of `docs/architecture/CYPHER-INVENTORY.src.md` (the tracked SOURCE —
+      # `CYPHER-INVENTORY.md` itself is now `--render`'s gitignored output, #13098).
       - name: install postgresql-client (the `psql` that `--bootstrap-record` drives)
         # ⛔ INSTALLING THE METAPACKAGE IS NOT PROVING THE BINARY EXISTS (measured, run
         # 44158572832 at `aff4eaef81`): `apt-get install postgresql-client` reported
@@ -224,7 +225,7 @@ jobs:
           # env.CARVE_OUT }}`.
           TORTOISE_TEST_CARVE_OUT: "1"
         run: uv run python -m pytest tests/test_13098_cypher_inventory.py -q -p no:cacheprovider
-      - name: census pins match the doc (LAST of the checks — a base-drift pin must not mask the runs above)
+      - name: census pins match the SOURCE (LAST of the checks — a base-drift pin must not mask the runs above)
         run: uv run python tools/cypher_inventory.py --check
       # ⛔ BOTH TEARDOWNS ARE UNCONDITIONAL (`if: always()`), and they are the
       # LAST steps: a failed or cancelled job must not leave a container holding
