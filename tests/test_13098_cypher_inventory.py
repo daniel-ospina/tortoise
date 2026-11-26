@@ -2268,7 +2268,7 @@ def test_a_DANGLING_git_entry_is_NOT_a_permit_for_the_tracking_probe(
     real_git_dir = repo / ".git-real"
     (repo / ".git").rename(real_git_dir)
     os.symlink(str(tmp_path / "gitdir-on-an-unmounted-volume"), repo / ".git")
-    assert repr(repo / ".git") and (repo / ".git").exists() is False, (
+    assert (repo / ".git").exists() is False, (
         "the premise: a DANGLING symlink makes `exists()` False while the entry is "
         "present — without that, this arm would grade `lexists` on a name that is "
         "simply absent")
@@ -2340,6 +2340,87 @@ def test_the_tracking_probe_still_PERMITS_both_honest_answers(tmp_path, monkeypa
         f"a plain directory is a legitimate destination — an honest 'not a "
         f"repository' must not be refused; got rc={rc}")
     assert target.is_file(), "the document was not written outside any repository"
+
+
+def test_a_PATTERN_shaped_destination_is_asked_about_LITERALLY(tmp_path, monkeypatch, capsys):
+    """A destination is a PATH, so neither probe may hand it to git as a PATHSPEC.
+
+    ⛔ THE OVER-BLOCK THE ROUND-8 REVIEW FOUND, AND THE CONFLATION BEHIND IT (#14625
+    review, P3). `git ls-files --error-unmatch -- docs/*.md` is a GLOB, so an UNTRACKED
+    destination shaped like one was refused whenever some tracked file happened to
+    match it — `--render 'docs/*.md'` answered 2 over a clean write path, and the file
+    the caller never named is what decided it. The premise is measured here, not read:
+    the bare argument MATCHES the tracked `notes.md` (rc 0) while `:(literal)` finds
+    nothing at the destination itself (rc 1), so the two spellings really do answer
+    about different things on this git.
+
+    ⛔ AND THE SECOND HALF IS WHY THE FIX IS NOT "ESCAPE THE WILD CARDS": a TRACKED
+    destination whose own name carries pathspec magic must still be REFUSED. Git's
+    literal fallback happens to refuse that shape even with the bare argument, so this
+    half is a counterweight rather than a mutant target — it reds for a fix that reads
+    the magic characters out of the path instead of telling git not to interpret them.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    docs = repo / "docs"
+    docs.mkdir()
+    tracked = docs / "notes.md"
+    tracked.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", "docs/notes.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=a",
+         "commit", "-qm", "tracked"],
+        check=True,
+    )
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # ⛔ BOTH HALVES OF THE PREMISE, on the git this suite is running against: the GLOB
+    # reading matches the tracked file, the LITERAL reading does not. Without the first
+    # the over-block could not reproduce; without the second the permit would be lucky.
+    globbed = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "docs/*.md"],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert globbed.returncode == 0 and "docs/notes.md" in globbed.stdout, (
+        "the premise: git must read the BARE argument as a pattern that matches the "
+        f"tracked file; got rc={globbed.returncode} out={globbed.stdout!r}")
+    literal = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", ":(literal)docs/*.md"],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert literal.returncode == 1, (
+        "the premise: nothing is TRACKED at the literal destination, so the literal "
+        f"form must answer the documented non-match; got rc={literal.returncode}")
+    pattern = repo / "docs" / "*.md"
+    before = tracked.read_bytes()
+    rc = census.main(["--render", "docs/*.md"])
+    assert rc == 0, (
+        f"an untracked destination shaped like a pattern is writable, got {rc} — "
+        "a tracked file the caller never named must not decide it: "
+        f"{capsys.readouterr().err}")
+    assert pattern.is_file(), (
+        "the document must land at the LITERAL path, not be expanded onto a match")
+    assert tracked.read_bytes() == before, (
+        "the tracked file was written — the probe followed the pattern instead of "
+        "the destination")
+    # HALF 2 — a TRACKED destination that carries the magic itself is still refused.
+    magic = docs / "a[1].md"
+    magic.write_text("keep me too\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", "docs/a[1].md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=a",
+         "commit", "-qm", "tracked-magic"],
+        check=True,
+    )
+    magic_before = magic.read_bytes()
+    rc = census.main(["--render", "docs/a[1].md"])
+    assert rc == 2, (
+        f"a TRACKED destination whose name carries pathspec magic must be refused, "
+        f"got {rc} — the fix must not read the magic out of the path")
+    assert magic.read_bytes() == magic_before, "the tracked file was overwritten"
 
 
 def test_a_hand_authored_prose_row_is_not_read_as_a_census_row(tmp_path, capsys):
@@ -4428,6 +4509,14 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "test_a_tracking_probe_answers_about_the_INDEX_so_HEAD_is_asked_before_a_permit",
         "test_a_DANGLING_git_entry_is_NOT_a_permit_for_the_tracking_probe",
         "test_a_NESTED_repository_under_ROOT_cannot_permit_what_ROOT_tracks",
+        # ⛔ AND THE DESTINATION IS A PATH, NOT A PATHSPEC (#14625 review, round 8, P3):
+        # handing it to `git ls-files`/`git ls-tree` bare made an UNTRACKED destination
+        # shaped like a pattern refuse whenever a tracked file matched it (measured:
+        # `--render 'docs/*.md'` answered 2 over a clean write path), and the question
+        # both probes mean to ask is "is THIS path tracked". Nothing else in the tree
+        # asserts the literal form, so deleting `_literal` from either argv reds this
+        # arm alone.
+        "test_a_PATTERN_shaped_destination_is_asked_about_LITERALLY",
         "test_the_tracking_probe_still_PERMITS_both_honest_answers",
         "test_the_renderer_reports_a_write_failure_as_could_not_run",
         # ⛔ THE OTHER THREE "COULD NOT RUN" SIBLINGS. The set named only the probe
@@ -4502,8 +4591,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 51, (
-        f"expected EXACTLY 51 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
+    assert len(split_arms) == 52, (
+        f"expected EXACTLY 52 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
     missing = sorted(split_arms - defined)
@@ -4512,7 +4601,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 51` reds a name PRUNED from the literal and `missing` reds a    # name that no longer resolves; neither can red for an arm that was never named at
+    # `len(split_arms) == 52` reds a name PRUNED from the literal and `missing` reds a    # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
     # left the whole suite GREEN (100 passed, 15 skipped), so the sentence above — that
@@ -4544,6 +4633,11 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # 103 -> 106 (`split_arms` 44 -> 47 with them): the refusal arm, the structural-term
     # arm that keeps a git-disowned checkout out of the permit, and the over-block
     # counterweight. All three carry a #13098 split invariant and are named above.
+    # ⛔ AND THE ROUND-8 COSMETIC TAKES IT 110 -> 111 (`split_arms` 51 -> 52): both
+    # probes handed the DESTINATION to git as a bare argument, which git reads as a
+    # PATHSPEC — so an untracked destination shaped like a pattern was refused whenever
+    # a TRACKED file matched it (`--render 'docs/*.md'`, measured). `_literal` tells git
+    # not to interpret it; that arm is the only thing that reds if either argv loses it.
     # ⛔ AND THE ROUND-8 P0's COMPOSITE GUARD TAKES IT 109 -> 110 (`split_arms`
     # 50 -> 51): following the DESTINATION alone inverted two rows — a nested `git
     # init` under ROOT answers "untracked" for a path ROOT tracks, and `--render`
@@ -4554,8 +4648,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `surface_files`'s `git ls-files` and `_tracked_destination_refusal`'s probe are
     # GREEN from the raise-only arms alone. The metadata probe's arm records
     # `passed_kwargs` and DOES see its own bound, so it is not one of the blind ones.
-    assert len(test_functions) == 110, (
-        f"expected EXACTLY 110 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
+    assert len(test_functions) == 111, (
+        f"expected EXACTLY 111 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
 

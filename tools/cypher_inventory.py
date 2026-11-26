@@ -444,6 +444,26 @@ def _git_env() -> dict[str, str]:
 _GIT_PROBE_TIMEOUT_S = 30
 
 
+def _literal(pathspec: str) -> str:
+    """Name `pathspec` to git as the LITERAL path it is, never as a pattern.
+
+    ⛔ THE DESTINATION IS A PATH, AND GIT READS A BARE ARGUMENT AS A PATHSPEC (#14625
+    review, round 8, P3 — measured both ways). `git ls-files --error-unmatch -- '*.md'`
+    is a GLOB, so an untracked destination shaped like a pattern was REFUSED whenever any
+    tracked file happened to match it — `--render 'docs/*.md'` answered 2 with the write
+    path clean, a fail-closed over-block whose premise is a file the caller never named.
+    The over-block was the only symptom the review could report, but it is not the only
+    consequence of conflating the two: the probe's QUESTION is "is THIS path tracked",
+    and a pathspec answers about a SET, so `?:*` magic in a filename silently widens or
+    narrows what is asked. `:(literal)` makes the argument the path, which is what every
+    caller of both probes already believes it is passing. Git has supported the form
+    since 1.9, and for a path with no magic characters it is byte-equivalent — the two
+    predicates agree, measured — so this is not a behaviour change for the shapes that
+    already worked.
+    """
+    return f":(literal){pathspec}"
+
+
 def _looks_like_git_metadata(directory: Path) -> bool:
     """True when ``directory`` itself holds git metadata, resolvable or not.
 
@@ -1170,7 +1190,7 @@ def _path_in_HEAD(probe_cwd: Path, probe_path: str) -> bool | None:
     """
     try:
         listing = subprocess.run(
-            ["git", "ls-tree", "--name-only", "-z", "HEAD", "--", probe_path],
+            ["git", "ls-tree", "--name-only", "-z", "HEAD", "--", _literal(probe_path)],
             cwd=probe_cwd, capture_output=True, text=True,
             encoding="utf-8", errors="surrogateescape",
             env=_git_env(),
@@ -1195,7 +1215,7 @@ def _tracked_destination_refusal(
     DESTINATION (`rel` when it is inside `ROOT`, otherwise the destination's own
     directory and basename).
 
-    ⛔ THREE ANSWERS PERMIT, AND "NON-ZERO" IS NOT ONE OF THEM. Git's own contract keeps
+    ⛔ TWO ANSWERS PERMIT, AND "NON-ZERO" IS NOT ONE OF THEM. Git's own contract keeps
     the ANSWER (`0` tracked / `1` not tracked — `ls-files --error-unmatch`'
     documented non-match) apart from COULD NOT ANSWER (`128`: a corrupt index, an
     unreadable index, an index that is a directory, a `.git` git disowns). Reading every
@@ -1286,7 +1306,7 @@ def _tracked_destination_refusal(
         # exit 1 (measured with `quotePath false` and a `caf\xe9.md`). The payload is
         # unused, so decoding is pure overhead that must never fail.
         tracked = subprocess.run(
-            ["git", "ls-files", "--error-unmatch", "--", probe_path],
+            ["git", "ls-files", "--error-unmatch", "--", _literal(probe_path)],
             cwd=probe_cwd, capture_output=True, text=True,
             encoding="utf-8", errors="surrogateescape",
             # ⛔ SCRUBBED, OR THE ANSWER DESCRIBES ANOTHER REPOSITORY (#14625 review,
