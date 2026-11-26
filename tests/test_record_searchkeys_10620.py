@@ -1419,7 +1419,7 @@ def test_a_store_refusal_after_the_plan_was_built_stays_write_failed(monkeypatch
 
 def test_a_missing_schema_is_plan_refused_because_it_raises_IN_the_plan_build(
         monkeypatch, tmp_path):
-    """#11783 review round 4 — the PIN behind nine prose sites' claim.
+    """#11783 review round 4 — the PIN behind twelve prose sites' claim.
 
     `table_columns()` scans the migrations for `CREATE TABLE` and raises
     "the record schema is not on disk" from INSIDE `replay_plan`, so a missing
