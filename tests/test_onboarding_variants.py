@@ -2655,6 +2655,14 @@ def _restart_cue_order_violation(quick: str) -> str | None:
       defers the restart. Form (f) is what grades the sentence-before shape
       ("Confirm the tools are actually there. Restart your client …"), and it is
       PRE-CUE ONLY.
+      ⛔ THAT EXAMPLE IS TWO SENTENCES, and the HALF-SENTENCE spelling of the same
+      concessive is a separate hole: comma-joined, it DOES govern the cue, and
+      form (a) graded it as a deferral — "If you already checked the tools once,
+      restart your client, then confirm the tools are actually there." was a
+      FALSE RED (#14679 review at `49ef237f4c5b`, P1-2). Its own exemption is
+      `_is_completed_concession`, which keys on the clause being a CONDITION
+      whose check is marked PRIOR-COMPLETE — the temporal deferrals this side
+      must grade carry no such marker.
     * AFTER the cue, only the CUE'S OWN SENTENCE is graded. A later sentence is
       a separate statement the reader carries out AFTER the restart, so grading
       it redded correct copy — "Restart your client. Once the tools are listed,
@@ -2761,6 +2769,51 @@ _DEFERRED_CHECK_RE = re.compile(
 
 def _defers_its_check_past_the_restart(clause: str) -> bool:
     return _DEFERRED_CHECK_RE.search(clause) is not None
+
+
+# ⛔ A PRE-CUE CONDITION ON A CHECK MARKED AS ALREADY DONE IS A CONCESSION, NOT A
+# DEFERRAL — and grading it is a FALSE RED on ordinary copy (#14679 review at
+# `49ef237f4c5b`, P1-2). The pre-cue side grades the clause that GOVERNS the cue
+# for the DEFERRAL reading — "AFTER confirming the tools are actually there.
+# Restart your client …" — and that reading is TEMPORAL: the confirmation is
+# ordered BEFORE the restart. A conditional `if`/`when` clause whose check carries
+# a PRIOR-COMPLETION marker orders nothing; it states a state the reader may
+# already be in, and the sentence then tells them to restart and confirm in the
+# order the pin requires. Form (a) reaches it only by consuming `already` into
+# its adverb slot, so the fix is here and not in the form (which is load-bearing
+# post-cue, where `already` really does invert):
+#
+#     RED (false)  If you already checked the tools once, restart your client,
+#                  then confirm the tools are actually there.
+#                  -> graded clause: 'If you already checked the tools once'
+#     RED (false)  If you already confirmed the tools in an earlier session,
+#                  restart your client after a config change, then run a query.
+#     GREEN        the same sentence joined with `;` — the `;` makes the
+#                  concessive its OWN statement, so it never governed the cue.
+#
+# The prior-completion marker is what separates these from the DEFERRALS the
+# pre-cue side must still grade, and both sides of that line are pinned in the
+# table: `AFTER confirming the tools are actually there. Restart …` carries no
+# marker and stays RED (the ONE pre-cue row form (a) is load-bearing for), and
+# `If you confirm the tools are actually there, restart your client` — a check the
+# reader is still being told to perform — stays RED as well.
+# ⛔ THE OPENER IS RESTRICTED TO THE ARMS FORM (a) CAN REACH. `although`/`though`
+# are the same concession to a reader, but form (a)'s connective set is
+# `after|once|if|when`, so no row can make them load-bearing here — the rows for
+# them were GREEN with the exemption neutralised, i.e. vacuous pins, and this file
+# has deleted an arm for exactly that (see `prior to` at
+# `_CUE_UNDER_INVERTING_SUBORDINATE_RE`). Their verdict is still correct; they are
+# simply not graded by form (a) at all, so there is nothing to exempt.
+_CONCESSION_OPENER_RE = re.compile(r"^(?:even\s+)?(?:if|when)\b", re.IGNORECASE)
+_PRIOR_COMPLETION_RE = re.compile(r"\b(?:already|previously)\b", re.IGNORECASE)
+
+
+def _is_completed_concession(clause: str) -> bool:
+    """A pre-cue CONDITION whose check is marked PRIOR-COMPLETE — a concession
+    about a past session, not an instruction that defers the confirmation."""
+    bare = _DECORATION_RE.sub(" ", clause).lstrip(_PRE_CUE_PREFIX)
+    return bool(_CONCESSION_OPENER_RE.match(bare)
+                and _PRIOR_COMPLETION_RE.search(bare))
 
 
 def _paragraph_cue_order_violation(para: str) -> str | None:
@@ -2882,6 +2935,11 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     for clause in pre_clauses:
         if (_confirmation_scopes_the_config(clause)
                 or _negated_observation_only(clause)
+                # ⛔ A COMPLETED CONCESSION IS NOT A DEFERRAL — see
+                # `_is_completed_concession`. `If you already checked the tools
+                # once, restart your client, then confirm the tools …` was a
+                # false RED (measured, #14679 review at `49ef237f4c5b`).
+                or _is_completed_concession(clause)
                 # ⛔ THE DEFERRAL IS A PROPERTY OF THE CLAUSE'S STATEMENT, NOT OF
                 # ITS LAST FRAGMENT. "After restarting, check the tools are
                 # present." puts the deferral in an EARLIER clause of the same
@@ -3277,6 +3335,32 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "in an earlier session, a changed config is not picked up until the process "
      "reloads. Restart your client, then confirm the tools are actually there.",
      False),
+    # ⛔ AND THE CONCESSIVE'S HALF-SENTENCE SPELLING IS THE SAME CLASS — the row
+    # above is TWO sentences, so the concessive was its own statement and never
+    # became the cue's governing clause. Comma-joined it DOES govern the cue and
+    # was graded a DEFERRAL, which is a false RED (#14679 review at
+    # `49ef237f4c5b`, P1-2; see `_is_completed_concession`). Every alternative in
+    # `_CONCESSION_OPENER_RE` and `_PRIOR_COMPLETION_RE` carries a row, because an
+    # alternative nothing pins is an alternative nobody can remove safely.
+    ("If you already checked the tools once, restart your client, then confirm "
+     "the tools are actually there.", False),
+    ("Even if you already confirmed the tools in an earlier session, restart "
+     "your client, then confirm the tools are actually there.", False),
+    ("When you already checked the tools once, restart your client, then confirm "
+     "the tools are actually there.", False),
+    ("If you previously confirmed the tools are actually there, restart your "
+     "client, then confirm them in the new session.", False),
+    # ── the OTHER side of that line, which the exemption must not swallow ────
+    # A pre-cue condition with NO prior-completion marker is a check the reader is
+    # still being told to perform, so it is still ordered BEFORE the restart and
+    # stays RED (both measured RED with `_is_completed_concession` in place):
+    ("If you confirm the tools are actually there, restart your client, then "
+     "confirm them again.", True),
+    ("When you check the tools are actually there, restart your client, then "
+     "confirm them again.", True),
+    # …and the temporal deferral the exemption is scoped NOT to touch is already
+    # pinned above ("a case-insensitive connective BEFORE the cue"): `AFTER
+    # confirming the tools are actually there. Restart …` stays RED.
     # ── forward copy the SENTENCE-scoped post-cue window protects ──────────
     # a confirmation carried out in the sentence AFTER the cue is forward:
     ("Restart your client. Once the tools are listed, run `tortoise mcp-status "
