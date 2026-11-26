@@ -185,9 +185,11 @@ test('the three offered periods are the three the owner asked for', () => {
 
 test('a snoozed row is LISTED (with its deadline) so it can be un-snoozed', () => {
   // An ACTIVITY row: the week is a period the control actually offers on it. An
-  // INCIDENT is capped to the episode gap (#14694 review P1), which is pinned by
-  // its own test below — this one is about the LIST being reversible, and moving
-  // it to activity keeps both facts tested instead of weakening this one.
+  // INCIDENT is offered only short periods by the PANEL's filter
+  // (`notificationPanel.jsx`), not by anything in this module — the ledger's only
+  // incident rule is the read bound, which is pinned by its own test below. This
+  // one is about the LIST being reversible, and moving it to activity keeps both
+  // facts tested instead of weakening this one.
   const activity = alert({ register: 'activity', message: 'a rate measurement' })
   const episode = entryKeyOf(activity)
   const state = snooze(emptyState(), episode, periodMs('1w'), NOW, activity)
@@ -210,11 +212,15 @@ test('#14694 P1: a snooze on an INCIDENT does not cover a NEWER one', () => {
   // as long as the deadline ran. Measured on the pre-fix tree: after a 1w SNOOZE
   // the new suspension was unresolved 0, i.e. the bell read ZERO with an
   // unacknowledged suspension live.
-  const take = (over) => alert({
+  // `first_at` tracks `at` unless a caller sets it: a single-row episode whose
+  // start is LATER than its newest measurement is not a shape the server emits,
+  // and the window test reads the start (as `isDismissed` does).
+  const take = (over = {}) => alert({
     type: 'suspend',
     label: 'Organization suspended',
     message: 'Organization suspended by an operator',
     ...over,
+    first_at: over.first_at || over.at,
   })
   // The same constant sentence → the same decision identity, asserted so this
   // test cannot silently stop exercising the collision.
@@ -222,8 +228,11 @@ test('#14694 P1: a snooze on an INCIDENT does not cover a NEWER one', () => {
   const after = take({ at: NOW.toISOString(), episode: 'suspend||later' })
   assert.equal(entryKeyOf(before), entryKeyOf(after), 'the collision is the premise')
 
-  // The reader snoozes the OLD suspension for a week (the pre-fix control
-  // offered 1d/1w on an incident row, so this is a store that can already exist).
+  // The reader snoozes the OLD suspension for a week. (The PRE-FIX control
+  // offered 1d/1w on an incident row; the shipping one offers only 1 h. The
+  // period is irrelevant to the rule under test — the anchor, not the deadline,
+  // is what the bound compares — so a synthetic 1w store is the clearest way to
+  // show the bound is the anchor and not the period.)
   const state = snooze(emptyState(), entryKeyOf(before), periodMs('1w'), NOW, before)
   const ledger = buildLedger({ alerts: [after], state, now: NOW })
   assert.equal(ledger.unresolved, 1, 'a NEW suspension must not be hidden by an old snooze')
@@ -246,13 +255,31 @@ test('#14694 P1: a snooze on an INCIDENT does not cover a NEWER one', () => {
     buildLedger({ alerts: [sameBout], state, now: NOW }).unresolved, 1,
     'an incident that happened after the snooze re-opens, even inside the gap',
   )
+  // ⛔ …and the BACKWARD half is bound too: an EARLIER episode that shares the
+  // decision key is NOT what the reader snoozed, so it stays visible. The server
+  // requires a window match as well as the gate, and its gap arm is forward-only
+  // on purpose ("an unbounded delta also matched every EARLIER bout"); a rule of
+  // `atMs <= anchor` alone covered this row — measured: a never-acknowledged
+  // suspension 5 days earlier moved into "Snoozed" with the badge reading 0 while
+  // `/v1/team/alerts` still reported it current. `isDismissed` refuses the same
+  // shape for the dismissal path.
+  const earlier = take({
+    at: new Date(NOW.getTime() - 8 * DAY).toISOString(),
+    episode: 'suspend||earlier',
+  })
+  const earlierLedger = buildLedger({ alerts: [earlier], state, now: NOW })
+  assert.equal(earlierLedger.unresolved, 1,
+    'an EARLIER bout is not what the reader snoozed, so it must stay visible')
+  assert.equal(earlierLedger.snoozed.length, 0)
 })
 
 test('#14694 P1: a store written BEFORE the anchor existed is bounded, not trusted', () => {
-  // A blob from the pre-fix client has `snoozed` and no `snoozedAt`, so nothing
-  // says which row was snoozed. The safe bound is the gap after THIS row's own
-  // newest measurement: a week of hiding becomes at most one episode window, and
-  // the cap can only let a row come BACK, never hide one.
+  // A blob with `snoozed` and no `snoozedAt` has nothing saying which row was
+  // snoozed. The bound clamps to the gap after THIS row's own newest measurement.
+  // That is a HIDE, and it is stated rather than denied: a brand-new suspension
+  // can sit in "Snoozed" for up to one episode window, with the badge at 0, until
+  // the next snooze taken by this client re-anchors it. Bounded and reversible;
+  // and no shipping store carries it, because this module is added by #14686.
   const take = (at) => alert({
     type: 'suspend',
     label: 'Organization suspended',

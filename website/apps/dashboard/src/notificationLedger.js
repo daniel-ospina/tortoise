@@ -447,9 +447,13 @@ export function snoozedUntil(state, episode, now = new Date()) {
  *  dismissal makes a claim about ONE bout.
  *
  *  A store written before `snoozedAt` existed has no anchor. The bound then
- *  clamps to the gap after THIS row's own newest measurement: still never a week
- *  of hiding, just not exact about which row the reader had in hand. The cap runs
- *  in the safe direction — it can only let a row come BACK, never hide one.
+ *  clamps to the gap after THIS row's own newest measurement. That IS a hide, and
+ *  it is named rather than denied: a brand-new suspension can sit in "Snoozed"
+ *  for up to `EPISODE_GAP_MS` from its own `at`, with the badge reading 0. It is
+ *  bounded by the server's own same-bout window, the row stays listed and
+ *  reversible, and it self-heals on the next snooze taken by this client. No
+ *  shipping store can carry it either — this module is added by #14686, so the
+ *  arm only ever defends a store written by an intermediate build.
  */
 export function effectiveSnoozedUntil(state, entry, now = new Date()) {
   if (!entry) return 0
@@ -460,10 +464,21 @@ export function effectiveSnoozedUntil(state, entry, now = new Date()) {
   const anchor = Number(state && state.snoozedAt ? state.snoozedAt[entry.key] : 0) || 0
   if (anchor > 0) {
     if (!atMs) return until
-    // `_episode_acknowledged`: covered iff the row did not happen AFTER the
-    // acknowledged instant (`if e_last > acked_through: continue`). The forward
-    // gap is the ACTIVITY arm's test, not the incident gate's.
-    return atMs <= anchor ? until : 0
+    // ⛔ BOTH HALVES, as `isDismissed` applies them — not the gate alone. The
+    // server requires a WINDOW match and then the gate
+    // (`abuse.py::_episode_acknowledged`: `matched = overlap or (0 <= delta <=
+    // gap_s)`, then `if e_last > acked_through: continue`), and the gap arm is
+    // forward-only there on purpose, because "an unbounded delta also matched
+    // every EARLIER bout". Applying only `atMs <= anchor` therefore covered every
+    // earlier episode sharing the decision key: measured, a never-acknowledged
+    // suspension 5 days BEFORE the snoozed one moved into "Snoozed" and out of
+    // the badge while `/v1/team/alerts` still reported it current. With both
+    // halves intersected — the episode's window overlapping the snoozed row, AND
+    // nothing happening after it — the only covered rows are the one the reader
+    // snoozed and anything its own episode still spans.
+    const episodeStart = firstMsOf(entry.alert) || atMs
+    const overlaps = anchor <= atMs && episodeStart <= anchor
+    return overlaps && atMs <= anchor ? until : 0
   }
   // No anchor: nothing on the server side says which row the reader snoozed, so
   // fall back to the gap after this row's own measurement.

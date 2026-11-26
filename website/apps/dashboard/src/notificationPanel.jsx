@@ -191,16 +191,21 @@ function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
         >
           <option value="">{SNOOZE_PLACEHOLDER}</option>
           {SNOOZE_PERIODS
-            // ⛔ #14694 review P1: an INCIDENT may not be snoozed past the
-            // server's episode gap (`EPISODE_GAP_MS`, mirrored from
-            // `abuse.py::EPISODE_GAP_S`). Snooze is identity-wide by design —
-            // the reader chose the period and it is listed under "Snoozed (N)"
-            // with an Unsnooze — but an incident's customer message is a
-            // CONSTANT, so every `suspend` row shares one decision key: a
-            // one-week snooze on a suspension hid a genuinely NEW suspension
-            // behind a collapsed group with the badge reading ZERO. That is the
-            // failure `_episode_acknowledged` names, and the dismissal path
-            // already refuses it with the same window test.
+            // ⛔ THIS FILTER IS UX, NOT THE ENFORCEMENT. The gate is
+            // `effectiveSnoozedUntil` in `notificationLedger.js`: it is
+            // register-aware and applies the server's incident rule (a window
+            // match AND nothing happening after the snoozed row), so a snooze
+            // created by any other path is still bounded. Nothing here can make a
+            // row invisible — it only removes choices.
+            //
+            // It is narrower than the gate NEEDS to be. It exists because an
+            // incident's customer message is a CONSTANT, so every `suspend` row
+            // shares one decision key, and offering a week reads as an offer to
+            // silence that whole class; the honest offer is the short one. The
+            // "badge reads ZERO over a new suspension" failure that originally
+            // justified this filter is now prevented at ANY period by the gate,
+            // so this is a capability the UI declines rather than a bound it
+            // enforces — lift it freely if a longer incident snooze is wanted.
             //
             // ⛔ An ACTIVITY row keeps the full list, and its RESIDUAL is stated
             // rather than denied. It used to say the opposite — that a stable
