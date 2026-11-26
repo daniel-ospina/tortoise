@@ -9190,12 +9190,15 @@ _DERIVATION_LOOKAHEAD = 60
 #: Both ADJACENT shapes are read, because a matcher narrowed to one shape is how the same word
 #: rotted twice: `<file>` row — the shape the block uses at this head — and `row (<file>`, which is
 #: the shape `origin/main`'s copy of this sentence uses and therefore the shape a `merge=union`
-#: fold reverts this clause TO. ⛔ Measured 2026-11-25 on the graded block: `\brows? \(` occurs
-#: ONCE — at "`tests/test_14592_read_parity.py` row (`core` and `api` — ONE `fast_pool()` entry,
-#: two surfaces, …)" — and that parenthetical holds no `tests/…py`, so it contributes no name;
-#: the second pattern is therefore exercised by the fixture below and by that one live spelling,
-#: and NOT by a live `<file>` list; saying "the spellings the block uses" would be a false claim in
-#: a comment whose job is to be precise.
+#: fold reverts this clause TO. ⛔ The live block's `row (` spelling carries a SURFACES
+#: parenthetical with no `tests/…py` in it, so it contributes no name; the second pattern is
+#: therefore exercised by the fixture below rather than by a live `<file>` list, and saying "the
+#: spellings the block uses" would be a false claim in a comment whose job is to be precise.
+#: ⛔ NO COUNT AND NO QUOTATION IS RESTATED HERE, on purpose (#14623 round 23, P3): an earlier
+#: revision claimed `\brows? \(` occurs ONCE and quoted the parenthetical verbatim, and a later
+#: edit to that very sentence staled the quotation — the restated-figure class this block exists
+#: to remove, inside the sentence forbidding it. The parenthetical is re-derived by reading the
+#: block, and an absent name is what the assertion below grades.
 #: ⛔ THE POSSESSIVE SHAPE WAS GRADED BY NOTHING (#14612 review round 6, P2). The block described
 #: `tests/test_14407_alert_delivery.py`'s `core` row while the map carries NO `durations` row for
 #: that file, and this matcher required `row` ADJACENT to the path — so `'s `core` ` between them
@@ -9285,7 +9288,7 @@ _ROW_CLAIM_CARRY_RE = re.compile(
     r"\s+carry\s+"
     r"(?:(?:an?\s+)?explicit\s+`?(?P<value>\d+(?:\.\d+)?)`?\s+`?durations`?\s+"
     r"(?:rows?|entr(?:y|ies))"
-    r"|no\s+(?:rows?|entr(?:y|ies)))",
+    r"|no\s+(?:`?durations`?\s+)?(?:rows?|entr(?:y|ies)))",
     re.IGNORECASE,
 )
 
@@ -10797,8 +10800,13 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # cut-to-verb span as 482, which is the SHORTEST negation's case only): the ACTIVE arm allows 400
     # characters from the cut to the negation and 80 from the negation to the change verb, so its
     # cut-to-verb span is 482 with `not` and 486 with `did not`/`doesn't` — the span is NOT a constant,
-    # only the two gaps are. The PASSIVE arm allows 20 from the row to the negation and 40 to the
-    # verb, so 60 with `was not` and 69 with `was never`; it also needs the cut named in the
+    # only the two gaps are. The PASSIVE arm allows 20 from the row to the negation and 40 from the
+    # negation to the change verb, so its span is 20 + the negation + 40: 67 with `was not` and 69
+    # with `was never`. ⛔ An earlier revision wrote "60 with `was not`", which dropped the
+    # negation's own 7 characters and made the pair arithmetically impossible (two gaps of 20 and
+    # 40 cannot yield spans 9 apart when the negations differ by 2) — the same "a claimed span was
+    # wrong" class the sentence one line up records, so the arithmetic is spelled out rather than
+    # restated as a figure (#14623 round 23, P3). It also needs the cut named in the
     # sentence at all. The pronoun form is scoped by SUBJECT rather than by distance. Stating the two
     # gaps rather than one span is the point: a claimed span was wrong within one round.
     # Widening past those is NOT claimed — the residual is declared above, and a phrase guard that
@@ -11065,6 +11073,19 @@ def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
         "test_carry_planted_absent.py",
         "test_carry_planted_absent_two.py",
     }, f"the `carry NO row` half is no longer read: {planted_negative!r}"
+    # ⛔ THE NOUN-INSERTED NEGATIVE: the POSITIVE half already admits
+    # `carry an explicit `2.0` `durations` row`, so "carry no `durations` row" is the same claim's
+    # natural spelling — and the negative branch was `no\s+(?:rows?|entr(?:y|ies))`, which allowed
+    # NOTHING between `no` and the noun. MEASURED before the fix (#14623 round 23, P3): a true
+    # rewrite of the block's own clause into that spelling made THIS arm RED, with the non-vacuity
+    # diagnostic blaming the matcher — a false block on true prose, and the two halves of one regex
+    # disagreeing about which spellings of one claim are legal.
+    for spelling in ("carry no `durations` row", "carry no durations row"):
+        _, noun_negative = _carry_row_claims(f"`tests/test_carry_planted_absent.py` {spelling}")
+        assert noun_negative == {"test_carry_planted_absent.py"}, (
+            f"the `carry` matcher does not read the noun-inserted absence ({spelling!r}), so a TRUE "
+            "rewrite of the block reds this arm and the diagnostic blames the matcher — the "
+            f"asymmetry the round-23 review measured: {noun_negative!r}")
     # All three directions in one map: `second` carries the row at the wrong value, `subdir` has
     # no row at all, and `absent` DOES carry one while the sentence says it does not.
     planted_rows = {
