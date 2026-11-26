@@ -3087,6 +3087,58 @@ _FORWARD_SEQUENCER_RE = re.compile(r"^(?:then|and|next|afterwards?)\b", re.IGNOR
 # SAME LEAD", so the fragment test could not see a member the file names two
 # functions up. `probably|likely|maybe|perhaps|want|better|best|had|ought` and the
 # intensifiers are added on that authority, not as a new class.
+# ⛔ A CLAUSE THAT *OPENS WITH A SEQUENCER* HANDS THE READER TO THE NEXT ACTION, and
+# `_SEQUENCER_FRAGMENT_RE` above cannot express that: it is a CLOSED allow-list of
+# the filler words seen so far, so an unlisted one makes the clause look
+# substantive and STOPS the walk-back instead of continuing it — which leaves the
+# confirmation before it ungraded. One inserted word re-opened the whole pre-cue
+# half of the pin with the suite still green (measured at `f16e324514`):
+#
+#     RED    Confirm the tools are actually there, then restart your client.
+#     GREEN  Confirm the tools are actually there, then go restart your client.
+#     GREEN  … then go ahead and restart / proceed to restart / remember to
+#            restart / feel free to restart / all that's left is to restart
+#
+# The discriminator is NOT "matches no form" — an ordinary imperative that adds
+# an ACTION (`then save the file`) is `_cue_governing_clause`'s DECLARED residual
+# and must stay gradable. What separates the two is whether the sequencer's
+# clause names an object OF ITS OWN: `save the FILE`, `run A query` do; `go`,
+# `proceed to`, `remember to`, `all that's left is to` interpose no action at all
+# and are the same instruction with a filler lead. So the class is closed at the
+# FRONT ("begins with a sequencer") and the object test is the bound — not
+# another filler word in the list below.
+_SEQUENCER_LEAD_RE = re.compile(
+    r"^(?:(?:and|but|so|only)\s+)?"
+    r"(?:then|next|afterwards?|subsequently|finally|lastly"
+    r"|after\s+that|after\s+which|which)\b", re.IGNORECASE)
+
+#: A determiner/possessive: the clause names something, so it is an instruction.
+#: `that` is excluded when it is the `that is` contraction (`that's left …`,
+#: which is filler, not an object).
+_OWN_OBJECT_RE = re.compile(
+    r"\b(?:the|a|an|this|these|those|your|our|its|their|my|his|her|that(?!['\u2019]s))\b",
+    re.IGNORECASE)
+
+
+def _is_continuation_fragment(clause: str) -> bool:
+    """Is `clause` a sequencer continuation rather than an instruction of its own?
+
+    Two ways in: the whole clause is drawn from the filler/sequencer class
+    (`_SEQUENCER_FRAGMENT_RE`), or it OPENS with a sequencer and names no object
+    of its own (`then go`, `then all that's left is to`). The second arm is what
+    the closed filler list cannot cover, and it is bounded by the OBJECT test so
+    that `then save the file` — an ordinary imperative, the declared residual —
+    is still graded rather than discarded.
+    """
+    if _SEQUENCER_FRAGMENT_RE.match(clause):
+        return True
+    lead = _SEQUENCER_LEAD_RE.match(clause)
+    if lead is None:
+        return False
+    rest = clause[lead.end():].strip()
+    return not rest or _OWN_OBJECT_RE.search(rest) is None
+
+
 _SEQUENCER_FRAGMENT_RE = re.compile(
     r"^(?:\s*(?:then|next|afterwards?|which|only|just|also|and|but|so|please"
     r"|kindly|you|we|must|should|can|could|will|would|may|might|shall"
@@ -3236,7 +3288,25 @@ _NEGATED_CUE_LEAD_RE = re.compile(
     #     GREEN  Don't ever restart your client until you have confirmed …
     #
     # …and `You shouldn't ever/immediately/simply …`, `Don't just/now …` likewise.
-    r"(?:\s+(?:" + _CUE_LEAD_ADVERBS + r"))*\s*$", re.IGNORECASE)
+    # ⛔ AND THE SAME HOLE ONE CLASS OVER: A SEMI-MODAL BETWEEN THE NEGATION AND
+    # THE CUE. `_CUE_LEAD_ADVERBS` is an adverb run, so it admits `shouldn't EVER
+    # restart`, and it is silent on `shouldn't NEED TO restart` — the negation is
+    # then not adjacent to the cue and the whole negated-cue arm is unreachable.
+    # `need` is ALREADY a member of the alternation above; only its POSITION as a
+    # `to`-semi-modal was unhandled, and form (f) has carried that chain for the
+    # positive sibling all along (`need|have|want … to`, `be able to`, `be going
+    # to`). The file's own comment at :3191 cites "you shouldn't need to restart
+    # …" as ordinary doc prose — the phrasing it names was the ungraded one:
+    #
+    #     RED    You shouldn't restart your client until you have confirmed …   (row)
+    #     GREEN  You shouldn't need to restart your client until you have confirmed …
+    #     GREEN  You don't need to restart your client unless/before you have confirmed …
+    #
+    # Measured end-to-end at `f16e324514`: replacing the quickstart paragraph with
+    # the `don't need to … until` spelling left the suite at 724 passed.
+    r"(?:\s+(?:" + _CUE_LEAD_ADVERBS + r"|"
+    r"(?:need|needs|have|has|want|wants|be|going|able)(?:\s+to)?))*\s*$",
+    re.IGNORECASE)
 # ⛔ `unless` IS `until`, SPELLED DIFFERENTLY — and it was in NEITHER this set
 # nor form (a)'s or (e)'s, so the whole negated-cue arm was unreachable for the
 # most idiomatic English spelling of "not … until":
@@ -3547,7 +3617,7 @@ def _cue_governing_clause(statements: list[str]) -> tuple[list[str], str]:
         # GREEN while its bare twin is RED (measured — the verdict turns on a
         # markdown marker, which is the failure mode `_PRE_CUE_PREFIX` exists to
         # close).
-        while clauses and _SEQUENCER_FRAGMENT_RE.match(
+        while clauses and _is_continuation_fragment(
                 _DECORATION_RE.sub(" ", clauses[-1])):
             clauses.pop()
         if clauses:
@@ -4234,13 +4304,21 @@ def test_3232_generic_restart_lines_are_exact():
     # OWN clause ("changing" is not one) — NOT because of the COMMA split.
     # ⛔ THAT SECOND HALF WAS TRUE WHEN WRITTEN AND IS NOW FALSE, measured: on the
     # then-55-row table (cycle 8) removing the comma split changed no row, but on
-    # the current table it moved TWELVE rows (6 RED→GREEN and 6 GREEN→RED,
-    # measured at this head by replacing `[c.strip() for c in post_sentence.split(",")]`
-    # with `[post_sentence.strip()]` → 13 failed, 583 passed at `366635ccf`; the
-    # thirteenth failure is `test_3232_the_and_then_half_reds_for_the_first_anchor_
-    # not_by_accident`, a test over those rows, not a row). ⛔ It is
-    # load-bearing in BOTH directions, and the six RED rows are NOT all one shape:
-    # SIX declared-RED rows are LOST (a false PASS):
+    # the current table it moved FIFTEEN rows (7 RED→GREEN and 8 GREEN→RED),
+    # measured at cycle 54 by replacing
+    # `[c.strip() for c in post_sentence.split(",")]` with
+    # `[post_sentence.strip()]` → 16 failed, 719 passed on a 735-row table; the
+    # sixteenth failure is
+    # `test_3232_the_and_then_half_reds_for_the_first_anchor_not_by_accident`, a
+    # test over those rows, not a row. ⛔ The earlier revision of this comment
+    # said TWELVE rows / `13 failed, 583 passed` and attributed it to "this head"
+    # while naming a different sha — `583 + 13 = 596` is not a count any head of
+    # this file has collected, and the two GREEN→RED rows it was missing are the
+    # cycle-50 `but before that` / `but before doing so` residuals, which landed
+    # after that number was taken. A count is a measurement, so it is stated as
+    # the number a run actually reports (#14679 review cycle 54, P2). ⛔ It is
+    # load-bearing in BOTH directions, and the seven RED rows are NOT all one shape:
+    # SEVEN declared-RED rows are LOST (a false PASS):
     #   1. `… and then, but first confirm the tools are actually there, run …`
     #   2. `… after confirming the config is right, [but first confirm the tools
     #      are actually there].` — the config-conjunction row
@@ -4259,13 +4337,23 @@ def test_3232_generic_restart_lines_are_exact():
     #      "FIVE / all five are merged-introducer shapes", which was true at
     #      `7d9427b2db21` when it was written — row 6 arrived later in
     #      `fae45f844fb89` — and is stale at this head.
-    # ⛔ …AND SIX declared-GREEN rows are FALSELY REDDENED without it (the inverse
+    #   7. `Restart your client after confirming the config is right, IN THE CLIENT
+    #      SETTINGS, but first confirm the tools are actually there.` — row 2's
+    #      shape with an interposed locative, which row 2's own `[but first …]`
+    #      enumeration does not cover. Measured at cycle 54 and added to the count
+    #      above; it is the seventh, which is why "SIX / all one shape" was stale.
+    # ⛔ …AND EIGHT declared-GREEN rows are FALSELY REDDENED without it (the inverse
     # error, #3429's class — a rule that reds legitimate copy is how a pin gets
-    # deleted): `… after seeing no errors, then confirming …`, the
+    # deleted). The six whose SHAPE this comment enumerates:
+    # `… after seeing no errors, then confirming …`, the
     # `(you should see no errors in the log), and once the tools are listed …` row,
     # `… seeing no errors in the log, and when the tools appear …`,
     # `… after confirming the config is right, and once the tools are listed …`,
-    # `… after any upgrade, and once the tools appear …`, and its `**and**` twin.
+    # `… after any upgrade, and once the tools appear …`, and its `**and**` twin…
+    # …plus the two cycle-50 declared residuals (`:6442`):
+    # `Restart your client, but before that, confirm the tools are actually
+    # there.` and its `but before doing so` twin, which landed after the six were
+    # listed and are the other two the earlier count was missing.
     # So the split is what puts a later fragment in front of the forms AND what
     # keeps a cue from being read past its own clause. LOAD-BEARING; do not
     # delete it. A count is a measurement, so it is stated as the number a run
@@ -6532,6 +6620,47 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      True),
     ("Confirm the tools are actually there, then often restart your client.",
      True),
+    # ⛔ CYCLE 54 — ONE FILLER WORD BEFORE THE CUE RE-OPENED THE PRE-CUE HALF.
+    # `_SEQUENCER_FRAGMENT_RE` is a CLOSED list of filler words, so an unlisted
+    # one made `then go` look SUBSTANTIVE, the walk-back stopped there, and the
+    # confirmation before it was never graded — the suite stayed GREEN while
+    # `_restart_cue_order_violation` returned None on the declared-RED control's
+    # twin (measured at `f16e324514`, and end-to-end: the quickstart paragraph
+    # replaced with the `then go restart` spelling left 724 passed).
+    # `_is_continuation_fragment` now decides by the OBJECT the sequencer clause
+    # does or does not name, which is why the three rows the residual comment
+    # above declares GREEN stay GREEN (they name one: `the file`, `the editor`).
+    ("Confirm the tools are actually there, then go restart your client.", True),
+    ("Confirm the tools are actually there, then go ahead and restart your "
+     "client.", True),
+    ("Confirm the tools are actually there, then proceed to restart your "
+     "client.", True),
+    ("Confirm the tools are actually there, then remember to restart your "
+     "client.", True),
+    ("Confirm the tools are actually there, then feel free to restart your "
+     "client.", True),
+    ("Confirm the tools are actually there, then all that's left is to restart "
+     "your client.", True),
+    # …and the OBJECT bound that keeps the declared residual GREEN is pinned from
+    # the other side, so widening the fragment test to "matches no form" flips
+    # these two instead of shipping an over-block.
+    ("Confirm the tools are actually there, then save the file, then restart "
+     "your client.", False),
+    ("Confirm the tools are actually there, then run a query, then restart "
+     "your client.", False),
+    # ⛔ CYCLE 54 — A SEMI-MODAL BETWEEN THE NEGATION AND THE CUE. `_CUE_LEAD_ADVERBS`
+    # gave the negated-cue lead an adverb slot but no `to`-semi-modal slot, so the
+    # negation stopped abutting the cue and the whole negated arm was unreachable —
+    # `need` was already a member of the alternation; only its POSITION as
+    # `need to` was unhandled (form (f) has carried that chain for the positive
+    # sibling all along). The file's own comment cites "you shouldn't need to
+    # restart …" as ordinary prose; that phrasing was the ungraded one (measured).
+    ("You shouldn't need to restart your client until you have confirmed the "
+     "tools are actually there.", True),
+    ("You don't need to restart your client unless you have confirmed the "
+     "tools are actually there.", True),
+    ("You don't need to restart your client before you have confirmed the "
+     "tools are actually there.", True),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
