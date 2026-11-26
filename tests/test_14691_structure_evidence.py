@@ -1099,6 +1099,25 @@ def test_the_quote_breakdown_in_the_report_is_the_claim_layer():
         "§3's A4 table does not carry the summary bucket")
     assert cl["verbatim"] + cl["paraphrase"] + cl["summary_in_one_turn"] \
         + cl["invented"] == cl["quotes_total"]
+    # ⛔ THE AUDIT'S OWN TRIO MUST BE STATED, BY ITS OWN NAME (#14723 review, P1).
+    # §7 said "the same quote audit — **11 verbatim / 27 paraphrase / 9 unstated in
+    # any turn**", attributing the DECIDER's count to the audit, which measures
+    # 12. That trio does not even sum to the audit's own `quotes_total`
+    # (11 + 27 + 9 = 47, against 50), and §3/A4, §8 and the peer write-up all said
+    # 12 — while §7 sat inside "it reaches the same numbers from a different read".
+    # Both numbers are legitimate; the DEFECT is the attribution, so the audit's
+    # buckets are pinned next to their own label and can no longer be replaced by
+    # the decider's.
+    audit = json.loads((BUNDLE / "out" / "t6-quote-audit.json").read_text())
+    assert (f"{audit['verbatim']} verbatim / {audit['paraphrase']} paraphrase / "
+            f"{audit['not_in_corpus']} `not_in_corpus`") in flat, (
+        "§7 no longer states the PEER audit's own buckets (11/27/12) beside "
+        "their own label — with the decider's 9 then the only trio in sight, "
+        "the sentence reads as the audit's breakdown again")
+    assert audit["verbatim"] + audit["paraphrase"] + audit["not_in_corpus"] \
+        == audit["quotes_total"], (
+        "the audit's three buckets no longer sum to its own quotes_total, so "
+        "the trio §7 states is not a partition of what it audited")
 
 
 def test_the_orphan_second_measurement_agrees_with_the_primary():
@@ -2238,6 +2257,12 @@ def test_every_audited_quote_ROW_is_a_real_quote_of_a_real_document():
             if quote:
                 receipt_quotes.add(" ".join(quote.lower().split()))
     assert receipt_quotes, "the receipt carries no quotes to audit"
+    # ⛔ NON-VACUITY IS LOCAL, not borrowed from a sibling arm. With `audited: []`
+    # this loop asserted nothing and PASSED (measured) — three other tests redded,
+    # so the file was not a gate hole, but an arm that is green on an empty
+    # collection is exactly the shape a later refactor keeps while deleting the
+    # siblings that covered it.
+    assert audit["audited"], "the audit shipped no rows at all"
     for row in audit["audited"]:
         # the audit stores the quote TRUNCATED (the scorer caps the row at 200
         # chars), so the row must be a PREFIX of a recorded quote — a fabricated
@@ -3766,34 +3791,28 @@ def test_a_PROSE_door_finding_must_agree_with_its_own_evidence():
     assert "the_read_that_can" in d1["evidence"], (
         "D1's evidence no longer names the only read that can see direction")
 
-    with contextlib.ExitStack() as stack:
-        for filename, key in (("readback.json", "READBACK"),
-                              ("t6-score.json", None)):
-            path = BUNDLE / "out" / filename
-            original = path.read_text()
-            stack.callback(path.write_text, original)
-            if key is None:
-                continue
-            stack.enter_context(_readback_patch(original))
-        # flip D1's answer and re-derive: the finding must NOT survive
-        patched = json.loads((BUNDLE / "out" / "readback.json").read_text())
-        for finding in patched["door_findings"]:
-            if finding["id"] == "D1":
-                finding["answer_over_mcp"] = (
-                    "YES — the edge, its type and its direction are visible too")
-        (BUNDLE / "out" / "readback.json").write_text(
-            json.dumps(patched, indent=2) + "\n")
-        module = _load_score_module()
-        derived = [f["id"] for f in module._door_findings()]
-        assert "D1" not in derived, (
-            "the scorer still publishes D1 with its answer reversed — a finding "
-            "that contradicts its own evidence must be dropped")
-
-
-@contextlib.contextmanager
-def _readback_patch(_original: str):
-    """A no-op context so the ExitStack above reads as one guard block."""
-    yield
+    # ⛔ DERIVED IN MEMORY, NEVER BY WRITING THE COMMITTED ARTIFACT. This arm used
+    # to rewrite `out/readback.json` (and `out/t6-score.json`) in place and restore
+    # them from an `ExitStack` callback — against this file's own rule, 1,500 lines
+    # above, that "a test must never touch a committed artifact". `score_t6` reads
+    # `READBACK` as a module global at CALL time, so patching the loaded module is
+    # the seam and no file has to move. A `finally`/`ExitStack` cannot save a
+    # committed artifact from a SIGKILL inside CI's `timeout -s INT -k 10` window,
+    # and `git status` would not tell the next lane why the bundle was dirty.
+    assert "D1" in [f["id"] for f in module._door_findings()], (
+        "the committed readback no longer derives D1 at all — this arm is "
+        "vacuous, not green")
+    patched = json.loads(json.dumps(readback))
+    for finding in patched["door_findings"]:
+        if finding["id"] == "D1":
+            finding["answer_over_mcp"] = (
+                "YES — the edge, its type and its direction are visible too")
+    # flip D1's answer and re-derive: the finding must NOT survive
+    module.READBACK = patched
+    derived = [f["id"] for f in module._door_findings()]
+    assert "D1" not in derived, (
+        "the scorer still publishes D1 with its answer reversed — a finding "
+        "that contradicts its own evidence must be dropped")
 
 
 def test_D4_cannot_survive_its_witnesses_all_failing():
@@ -3867,25 +3886,25 @@ def test_D4_cannot_survive_its_witnesses_all_failing():
     assert (REPO / "tortoise" / "entity_reads.py").is_file(), (
         "D4's code_path names a file this tree does not have")
 
-    sibling = BUNDLE / "out" / "readback.json"
-    original = sibling.read_text()
-    try:
-        patched = json.loads(original)
-        for entry in patched["link_witness"].values():
-            entry["expand_relationships"] = {
-                "tool": "tortoise_expand_relationships",
-                "args": entry["expand_relationships"].get("args") or {},
-                "ok": True,
-                "reply": ["Error: timeout while expanding relationships"],
-            }
-        sibling.write_text(json.dumps(patched, indent=2) + "\n")
-        module = _load_score_module()
-        derived = [f["id"] for f in module._door_findings()]
-        assert "D4" not in derived, (
-            "D4 is still published although every witness call FAILED — a failed "
-            "call is not a silent door")
-    finally:
-        sibling.write_text(original)
+    # ⛔ IN MEMORY, for the reason the D1 arm above states: no committed artifact is
+    # written, so a killed run cannot leave `out/readback.json` mutated.
+    module = _load_score_module()
+    assert "D4" in [f["id"] for f in module._door_findings()], (
+        "the committed readback no longer derives D4 at all — this arm is "
+        "vacuous, not green")
+    patched = json.loads(json.dumps(_readback()))
+    for entry in patched["link_witness"].values():
+        entry["expand_relationships"] = {
+            "tool": "tortoise_expand_relationships",
+            "args": entry["expand_relationships"].get("args") or {},
+            "ok": True,
+            "reply": ["Error: timeout while expanding relationships"],
+        }
+    module.READBACK = patched
+    derived = [f["id"] for f in module._door_findings()]
+    assert "D4" not in derived, (
+        "D4 is still published although every witness call FAILED — a failed "
+        "call is not a silent door")
 
 
 def test_the_peer_witness_rows_are_the_scorers_witness_rows():

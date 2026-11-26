@@ -424,9 +424,14 @@ and the same **4** `ownedBy` pairs (the receipt's 6 write rows reduce to those 4
 the RECEIPT's row count, `4` is the pair count both reads land on); the same `dev:code` typing for all seven components; the same duplicate
 `mid-market utilities` / `mid-market utilities segment` nodes; the same `expand_relationships`
 silence on structural edges; `tortoise_list_topics` answering `Entity … not found` for nodes two
-other doors resolve; and the same quote audit — **11 verbatim / 27 paraphrase /
-9 unstated in any turn** — with the same **12** below the single-sentence band as its `not_in_corpus`
-(that 12 is the SENTENCE-scope population, not this report's invented count; see §3/A4). Its count of inverted pairs — **13** — is the number this report's A2 line derives independently.
+other doors resolve; and the same quote audit — whose own buckets are 11 verbatim / 27 paraphrase /
+12 `not_in_corpus`, i.e. the same **12** below the single-sentence band — which this report's
+TURN-scope decider then narrows to **11 verbatim / 27 paraphrase / 9 unstated in any turn**
+(`claim_layer`; see §3/A4). ⛔ **The 9 is THIS report's count, not a field of that audit**: the audit
+measures the SENTENCE-scope population (12), the decider measures the TURN, and `9` is what the turn
+leaves of the 12. The audit's buckets sum to its own `quotes_total` (11 + 27 + 12 = 50); a trio of
+11 / 27 / 9 does not, which is how this sentence read before it was corrected. Its count of inverted
+pairs — **13** — is the number this report's A2 line derives independently.
 
 **Its strongest finding was not in my first cut, and I re-measured it before adopting it**: the
 `type="governance"` ownership door returns `[]` for every owner (§3/A2, D6). That claim cited

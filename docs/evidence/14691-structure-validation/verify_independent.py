@@ -87,6 +87,17 @@ async def _call(client, tool, args):
         if out is None:
             out = [getattr(c, "text", str(c))
                    for c in (getattr(res, "content", None) or [])]
+        # ⛔ THE MCP ERROR FLAG LIVES ON THE RESULT — the same arm `run_readback.py`
+        # carries, and for the same measured reason. MCP reports a tool EXECUTION
+        # error inside a successful transport as `{"content": [...], "isError": true}`.
+        # Without this arm a FAILED call is indistinguishable from an ANSWERED-EMPTY
+        # one, so a re-run of this probe can publish a timeout as a silent door —
+        # which is exactly how D4 was first published from calls that never ran
+        # (`run_readback.py`'s own note). One predicate, not a second spelling.
+        if getattr(res, "isError", None) is True or getattr(res, "is_error",
+                                                            None) is True:
+            return {"tool": tool, "args": args, "ok": False,
+                    "error": f"MCP isError: {out!r}"[:400]}
         return {"tool": tool, "args": args, "ok": True, "reply": out}
     except Exception as exc:
         return {"tool": tool, "args": args, "ok": False,
