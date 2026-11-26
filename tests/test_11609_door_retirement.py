@@ -217,6 +217,38 @@ RETIRED_THIS_WAVE_BY_CONTAINER: dict[str, int] = {
     "delete": 2,
 }
 
+#: The nine doors **lane P11** (this batch) retires forward — the envelope category the
+#: module docstring calls NINE. Kept as its own tuple rather than more rows in
+#: `RETIRED_THIS_WAVE` because the two tables answer different questions and the 13-door
+#: count/histogram pins read the P1/P6 arithmetic (`3 + 6 + 4`); adding nine rows there
+#: would have re-based prose that records those waves, not this one.
+#:
+#: ⛔ WHY IT EXISTS (#14645 review P3, the addendum's sixth mutation row): those nine
+#: pointers were graded by NOTHING. Every pointer assertion in this file derives its
+#: population from `RETIRED_THIS_WAVE`, so a pointer naming an argument its container does
+#: not take was invisible for exactly the batch that added nine of them — the reviewer's
+#: mutation (drop one of the nine from the population) left the file green, i.e. the
+#: coverage was not merely partial, it could not red. `POINTER_GRADED` below is what the
+#: parametrizations read, and `test_lane_p11_names_the_nine_doors_the_prose_does` pins the
+#: nine so dropping one moves a count instead of silently un-grading it.
+RETIRED_IN_P11: tuple[str, ...] = (
+    "tortoise_search",
+    "tortoise_search_sessions",
+    "tortoise_suggest_entry_points",
+    "tortoise_list_batches",
+    "tortoise_list_namespaces",
+    "tortoise_diary_read",
+    "tortoise_expand_relationships",
+    "tortoise_check_structure",
+    "tortoise_calibrate_summary",
+)
+
+#: Every retired door whose POINTER is graded against a live signature: the P1/P6 wave's
+#: thirteen plus lane P11's nine. The union is derived, so a door added to either table is
+#: graded without a second edit to a hand-kept list.
+POINTER_GRADED: tuple[str, ...] = tuple(
+    sorted(set(RETIRED_THIS_WAVE) | set(RETIRED_IN_P11)))
+
 
 def _require_non_empty(what: str, kinds: tuple[str, ...]) -> tuple[str, ...]:
     """A derivation that produced NOTHING reds here rather than passing vacuously.
@@ -510,7 +542,38 @@ class TestThePointerIsCallableAtTheContainer:
         "tortoise_create_point": "pointKind",
     }
 
-    @pytest.mark.parametrize("name", sorted(RETIRED_THIS_WAVE))
+    def test_lane_p11_names_the_nine_doors_the_prose_does(self):
+        """The NINE is a count, not a sentence — and every one of them is GRADED.
+
+        ⛔ THE DEFECT THIS CLOSES (#14645 review P3, the addendum's sixth row). The
+        envelope category's retirement was recorded in the module docstring as nine
+        named doors, and each of their pointers was checked by hand against the
+        container signatures — but the pointer assertions derive their population from
+        `RETIRED_THIS_WAVE`, which holds the P1/P6 thirteen and none of the nine. So
+        deleting a name from the graded set left every row green: the coverage could not
+        red, which is the inert-enforcer shape, not a partial-coverage shape.
+
+        Non-vacuity: dropping one name from `RETIRED_IN_P11` fails the count below, and
+        removing it from `POINTER_GRADED` (the derivation) fails the subset assertion —
+        measured by reverting either edit.
+        """
+        assert len(RETIRED_IN_P11) == 9, (
+            f"lane P11's table holds {len(RETIRED_IN_P11)} doors, not the NINE the "
+            "module docstring enumerates (search, search_sessions, suggest_entry_points, "
+            "list_batches, list_namespaces, diary_read, expand_relationships, "
+            "check_structure, calibrate_summary) — a door added or dropped moves this "
+            "count in the same change, not silently")
+        ungraded = sorted(set(RETIRED_IN_P11) - set(POINTER_GRADED))
+        assert not ungraded, (
+            "these lane-P11 doors are not in POINTER_GRADED, so no assertion reads "
+            f"their pointer at all: {ungraded}")
+        not_retired = sorted(name for name in RETIRED_IN_P11
+                             if name not in RETIRED_USE_INSTEAD)
+        assert not not_retired, (
+            "these lane-P11 names carry no RETIRED_USE_INSTEAD row, so the nine-door "
+            f"claim is not the tree's: {not_retired}")
+
+    @pytest.mark.parametrize("name", POINTER_GRADED)
     def test_every_named_argument_is_one_the_container_accepts(self, name):
         """BIND the pointer's own call against the live tool's signature."""
         pointer = RETIRED_USE_INSTEAD[name]
