@@ -10234,6 +10234,14 @@ _H_14544_NEGATED_ROW_CHANGE_RE = re.compile(
 #: arm above: `<row|weight> … untouched / unchanged / left alone … `#14544``, and the transposed
 #: deleted sentence `` `#14544` touched neither that row nor its weight ``. Measured GREEN before
 #: this arm existed (#14623 review round 6, F4).
+#: …and a FOREIGN agent after the change verb — `by the reaper`, `by a retime` — which means the
+#: negation belongs to another clause's actor, not to the cut. Measured RED before this guard, on
+#: two TRUE sentences (#14623 review round 7): "`#14544`'s cut is separate, and the row was not
+#: touched by the reaper." and "The `durations` row was not touched by the reaper; that is separate
+#: from `#14544`'s cut." Sentence granularity merges the two clauses, and an actor-anywhere rule
+#: then reads the cut as the negated subject.
+_H_14544_FOREIGN_AGENT_RE = re.compile(
+    r"\bby\s+`?(?!#14544|that\s+cut|the\s+cut)\w", re.IGNORECASE)
 _H_14544_ROW_ADJECTIVAL_RE = re.compile(
     r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[\s\S]{0,80}?"
     r"(?:untouched|unchanged|left\s+alone)[\s\S]{0,80}?(?:#14544|that\s+cut|the\s+cut)"
@@ -10276,7 +10284,8 @@ def _h_14544_banned_claim(block: str) -> str | None:
         if _H_14544_NEGATED_ACTOR_CHANGE_RE.search(sentence):
             return sentence.strip()
         if (_H_14544_NEGATED_ROW_CHANGE_RE.search(sentence)
-                and _H_14544_ACTOR_RE.search(sentence)):
+                and _H_14544_ACTOR_RE.search(sentence)
+                and not _H_14544_FOREIGN_AGENT_RE.search(sentence)):
             return sentence.strip()
         if _H_14544_ROW_ADJECTIVAL_RE.search(sentence):
             return sentence.strip()
@@ -10551,6 +10560,11 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             # the object clause existed.
             "`#14544` did not touch that `eval` registration, so the file stays in the pool.",
             "`#14544`'s cut is separate, and the row does not touch the shard layout.",
+            # the round-7 composites: the negation's actor is ANOTHER clause's, so the cut is named
+            # in the sentence but is not the negated subject.
+            "`#14544`'s cut is separate, and the row was not touched by the reaper.",
+            "The `durations` row was not touched by the reaper; that is separate from "
+            "`#14544`'s cut.",
             "another row's weight was retimed; the retime does not touch the shard layout, and "
             "`#14544`'s cut is separate",
             "`#14544`'s removal of the file from the `core` surface cannot move a bin"):
