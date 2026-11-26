@@ -678,6 +678,63 @@ def test_a4_reds_for_an_invented_RELATION_too():
         "relation axis its own prose asserts")
 
 
+def test_the_name_variance_retry_drops_a_KIND_WORD_not_the_FIRST_word():
+    r"""Reds if the welded-name retry truncates every name to its first word.
+
+    ⛔ #14723 review, round 10, P2. The retry was
+    `_squash(str(e["src"]).split(" ")[0])`, so ANY invented relation whose
+    endpoints' FIRST WORDS co-occur in one document was graded *stated*.
+    MEASURED on the pre-fix code with
+    `Lumen Field --dependsOn--> Dana Whitlock` appended to `EDGES` (no corpus
+    document names both): `passes: True`, `relations_not_co_stated: []`. The
+    full-name arm misses (the pair is never co-stated); `lumen` and `dana` both
+    occur in doc-01, and the truncation is what let the row through.
+    Post-fix the retry drops ONE trailing kind word (`ingest-gateway component`)
+    and nothing else, so the same mutant reds A4.
+    """
+    module = _load_score_module()
+    assert module.a4_invention()["passes"] is True, "baseline is not clean"
+    # the retry is a NAME variance: it un-welds a declared KIND noun ONLY
+    assert module._unweld("ingest-gateway component") == "ingest-gateway"
+    assert module._unweld("Lumen Core product") == "Lumen Core"
+    assert module._unweld("Northwind Logistics") == "Northwind Logistics", (
+        "a name whose last word is not a declared kind word must be untouched — "
+        "dropping it is truncation, not un-welding")
+    assert module._unweld("Lumen Field") == "Lumen Field"
+    module.EDGES.append({
+        "doc": "doc-01", "predicate": "dependsOn", "write_path": "test_mutant",
+        "src_id": "mutant-src", "dst_id": "mutant-dst",
+        "src": "Lumen Field", "dst": "Dana Whitlock",
+        "src_kind": "dev:code", "dst_kind": "core:naturalPerson",
+    })
+    mutated = module.a4_invention()
+    assert mutated["relations_not_co_stated"], (
+        "an invented relation whose endpoints' FIRST WORDS co-occur in one "
+        "document is still graded stated — the retry is a truncation")
+    assert mutated["passes_relations"] is False
+    assert mutated["passes"] is False
+
+
+def test_the_name_variance_rows_are_RECORDED_and_LOAD_BEARING():
+    """Reds if the fallback's only committed user stops being recorded.
+
+    ⛔ #14723 review, round 10, P2: "the fallback is load-bearing too (1 of the 46
+    committed edges, `ingest-gateway component → event-bus`, passes only through
+    it)". A load-bearing allowance that leaves no row behind is invisible in the
+    artifact — so the rows that need it are emitted, and the one committed edge
+    that does is asserted by name rather than by count alone.
+    """
+    rows = _score()["A4_no_invention"]["relation_name_variance"]
+    assert rows, "the committed receipt needs the retry but the artifact records none"
+    assert [(r["src"], r["dst"]) for r in rows] == [
+        ("ingest-gateway component", "event-bus")], rows
+    # ...and it is still a fact the corpus states: un-welding resolves BOTH ends
+    corpus = json.loads((BUNDLE / "corpus" / "structure-corpus.json").read_text())
+    text = " ".join(t["content"] for d in corpus["documents"] for t in d["turns"])
+    flat = re.sub(r"[^a-z0-9 ]+", "", " ".join(text.lower().split()))
+    assert "ingestgateway" in flat and "eventbus" in flat
+
+
 def test_the_isolation_premise_is_recorded_as_an_EMPTY_graph():
     """Reds if `empty_before` stops being an empty graph.
 
