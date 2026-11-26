@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-11783-research-1795724227-p3930732-1a4a9e33",
+  "_sha": "e96df666dbf23eedb111faefdebcc6208195cbd9",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/11783-research.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/11783-record-write-drop"
+    },
+    {
+      "kind": "sha",
+      "value": "f3a8a82ccd716226bffa3d1c71b550527efd9157"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/11783-record"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 791,
+  "ended_at": 1795725018,
+  "exit_code": 0,
+  "heartbeat_at": 1795725018,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-11783-research-1795724227-p3930732-1a4a9e33",
+  "lease_until": 1795761618,
+  "pid": 3930732,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795724227,
+  "state": "DONE",
+  "tag": "11783-research",
+  "worktree": "/home/cmux/tortoise/.worktrees/11783-record"
+}
