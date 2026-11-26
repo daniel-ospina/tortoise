@@ -916,7 +916,10 @@ export const ACKED_NOTE = 'acknowledged for the Organization'
 export const ACKED_TOGGLE = (n) => `Acknowledged for everyone (${n})`
 export const ACKED_HIDE = 'Hide acknowledged'
 //: Says WHAT the stamp below it is: the episode's last DETECTION, not the
-//: acknowledgement. `ACKED_INSTEAD_OF` names the missing field without claiming it.
+//: acknowledgement. It labels what the row HAS rather than claiming a field the
+//: payload does not carry — an acknowledgement time would need the server to ship
+//: one (`_alert_feed` sends `acked` as a boolean and nothing else), and a label
+//: that merely looked like a decision time is the defect this constant closes.
 export const ACKED_DETECTED = (stamp) => `detected ${stamp}`
 export const SAVE_FAILED =
   'Your browser did not save that — it will be forgotten when this page '
