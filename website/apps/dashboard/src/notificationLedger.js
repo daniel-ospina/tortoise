@@ -428,15 +428,23 @@ export function snoozedUntil(state, episode, now = new Date()) {
  *  direction (letting an old acknowledgement cover whatever turns up next) would
  *  silently hide a genuinely new bout."*
  *
- *  The rule is the server's own window test: the snooze covers the row the reader
- *  snoozed (delta 0) and a measurement within `EPISODE_GAP_MS` of it, because two
- *  measurements inside that gap are the SAME bout. Anything after it is a new
- *  fact and re-opens.
+ *  The rule is the server's INCIDENT GATE — the one `_episode_acknowledged`
+ *  applies AFTER its window test: a row that happened after the acknowledged
+ *  instant is not covered (`if e_last > acked_through: continue`), so it
+ *  re-opens. It is NOT the window test's forward gap: testing `delta <= gap` here
+ *  instead kept a suspension that fired 40 minutes after the snooze hidden, which
+ *  is the exact direction that docstring calls the worse failure. The snooze
+ *  therefore covers the row the reader snoozed (same instant) and anything at or
+ *  before it — never a suspension that fires afterwards.
  *
- *  An ACTIVITY row keeps the whole period: its identity is a stable measurement
- *  (`type|surface:…`), so a long snooze cannot swallow a different bout — the
+ *  An ACTIVITY row keeps the whole period, and its RESIDUAL is stated rather than
+ *  denied. Its key is the identity too (`type|surface:…`), so a snooze taken on
+ *  one bout DOES hide a separate bout of that identity for the period chosen —
+ *  measured: a `1w` snooze hides a new flag bout 5 days later. That is the
  *  recorded decision ("Snooze stays identity-wide because it is bounded by the
- *  period the reader chose") is unchanged for it.
+ *  period the reader chose"), and it is NOT the claim that "a new bout cannot be
+ *  hidden", which is false. DISMISS is the path that re-opens, because a
+ *  dismissal makes a claim about ONE bout.
  *
  *  A store written before `snoozedAt` existed has no anchor. The bound then
  *  clamps to the gap after THIS row's own newest measurement: still never a week
@@ -452,8 +460,10 @@ export function effectiveSnoozedUntil(state, entry, now = new Date()) {
   const anchor = Number(state && state.snoozedAt ? state.snoozedAt[entry.key] : 0) || 0
   if (anchor > 0) {
     if (!atMs) return until
-    const delta = atMs - anchor
-    return delta >= 0 && delta <= EPISODE_GAP_MS ? until : 0
+    // `_episode_acknowledged`: covered iff the row did not happen AFTER the
+    // acknowledged instant (`if e_last > acked_through: continue`). The forward
+    // gap is the ACTIVITY arm's test, not the incident gate's.
+    return atMs <= anchor ? until : 0
   }
   // No anchor: nothing on the server side says which row the reader snoozed, so
   // fall back to the gap after this row's own measurement.

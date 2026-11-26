@@ -233,13 +233,19 @@ test('#14694 P1: a snooze on an INCIDENT does not cover a NEWER one', () => {
   // still suppressed, so this is a bound and not a blanket removal of snooze.
   assert.equal(buildLedger({ alerts: [before], state, now: NOW }).unresolved, 0)
   assert.equal(buildLedger({ alerts: [before], state, now: NOW }).snoozed.length, 1)
-  // …and a measurement within the server's gap OF THE SNOOZED ROW is the SAME
-  // bout, so it stays covered (the rule `_episode_acknowledged` applies).
+  // …and a suspension that HAPPENED after the snoozed instant is a new fact even
+  // inside the episode gap — that is the server's incident gate, which runs AFTER
+  // its window test (`abuse.py::_episode_acknowledged`: `if e_last >
+  // acked_through: continue`), and the direction it calls the worse failure. A
+  // forward-gap test here would have kept this row hidden for another 2 h.
   const sameBout = take({
     at: new Date(NOW.getTime() - 24 * HOUR).toISOString(),
     episode: 'suspend||next',
   })
-  assert.equal(buildLedger({ alerts: [sameBout], state, now: NOW }).unresolved, 0)
+  assert.equal(
+    buildLedger({ alerts: [sameBout], state, now: NOW }).unresolved, 1,
+    'an incident that happened after the snooze re-opens, even inside the gap',
+  )
 })
 
 test('#14694 P1: a store written BEFORE the anchor existed is bounded, not trusted', () => {

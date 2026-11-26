@@ -5468,8 +5468,10 @@ function claimIntentInFlight() {
     // switch lands during that POST, `orgAtCall` is the NEW Organization while
     // `tid` is the OLD one — the guard then compares B to B, passes, and writes
     // the OLD Organization's episodes under the NEW one's header, with the ledger
-    // key already switched, so a snooze taken there lands in the wrong key and
-    // `snoozedUntil` has no incident gate by design. The same stale read also
+    // key already switched, so a snooze taken there lands in the wrong key — and
+    // the card was written when `snoozedUntil` had no incident gate; it has one
+    // now (`effectiveSnoozedUntil`), which bounds the damage but does not make a
+    // stale read safe. The same stale read also
     // stamps `alertsUnavailable` on the new Organization in its failure arm.
     // A not-yet-known Organization (the first-organization read, `orgAtCall`
     // null) is still allowed — that is a real read for the org being selected.
