@@ -3885,6 +3885,15 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "the tools are actually there.", False),
     ("See the tools page on the wiki. Restart your client, then confirm the "
      "tools are actually there.", False),
+    # ⛔ `guide` IS A SEPARATE ALTERNATIVE of `_DOC_NOUN` too, and the four rows
+    # above are spared by OTHER nouns (`documentation`, `table`, `docs`, `page`)
+    # — so removing `guide` alone flipped 0 declared rows while still sparing
+    # real copy (#14679 review at `49ef237f4c5b`, P2). This row is that copy, and
+    # it goes RED the moment `guide` leaves `_DOC_NOUN` (measured). It is the
+    # post-cue spelling on purpose: the pre-cue `See the tools guide on MCP.` row
+    # above is spared by a different arm, which is exactly how `guide` went
+    # unpinned in the first place.
+    ("Restart your client after checking the tools guide.", False),
     # ⛔ …but `list` is NOT a reference noun: "the tools list" is the SESSION's
     # list, so this stays an inversion. Without this row, adding `list` to the
     # exclusion set above would be an unmeasured regression — it is also what
@@ -4481,6 +4490,13 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "then confirm the tools are actually there.", False),
     ("Once the client restarts, check the tools are present. Restart your "
      "client, then confirm the tools are actually there.", False),
+    # ⛔ AND `when` is a SEPARATE ALTERNATIVE of that same regex, which had no row
+    # of its own: it flipped 0 of the declared rows on removal while still being
+    # load-bearing on real copy (#14679 review at `49ef237f4c5b`, P2 — "deleting
+    # `when` … flips a real verdict"). This row is that verdict, and it goes RED
+    # the moment `when` leaves `_DEFERRED_CHECK_RE` (measured).
+    ("Check the tools when your client has restarted. Restart your client, "
+     "then confirm the tools are actually there.", False),
     # ⛔ …and the exemption must NOT reach back past a STATEMENT BREAK: an
     # unrelated earlier deferral does not make a later confirmation forward.
     ("Check the logs after restarting. Confirm the tools are actually there. "
