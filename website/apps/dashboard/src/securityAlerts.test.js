@@ -444,6 +444,28 @@ test('#14694: main.jsx WIRES the fourth feed fact — the component cannot close
     'all three settle arms (success, non-2xx, catch) must mark the feed settled; '
     + 'the `orgIdRef` staleness-guard returns must NOT — a discarded read is not '
     + 'evidence about the next Organization')
+
+  // ⛔ THE FIFTH FEED FACT (`feedUnstarted`) IS WIRED HERE, and for the same reason
+  // `feedLoaded` above needed this pin: every DOM test passes the prop ITSELF, so
+  // none of them can see the mount. `alertsRequested` starts `false` and is only
+  // set inside `loadAlerts`, which `completeLogin` calls after several awaits — so
+  // "not loaded yet" is ALSO the bootstrap window on every normal login. Inferring
+  // the terminal never-read state from that pair flashed an amber `!` over a feed
+  // about to be read (#14694 review P2). The terminal state must therefore be
+  // REPORTED by the caller, at the one guard nothing re-runs it from.
+  assert.match(mount, /feedUnstarted=\{alertsUnstarted\}/,
+    'the mount must pass the DECLINED-READ fact — without it the closed bell cannot '
+    + 'distinguish "no read will ever start" from "a read is about to start"')
+  // Raised exactly at the terminal precondition guard, and cleared when a read really
+  // starts. A presence check here would be satisfied by the reset alone (which sits
+  // on the success path, not the declined one), so both are counted.
+  assert.equal((loadBody.match(/setAlertsUnstarted\(true\)/g) || []).length, 1,
+    'exactly ONE site raises it: the `!sessionTokenRef.current || !tid` guard whose '
+    + 'return nothing re-runs. The `orgIdRef` staleness guard must NOT — that read is '
+    + 'replaced by a newer one, and warning there would fire on every team switch')
+  assert.match(loadBody, /setAlertsRequested\(true\)\n\s*setAlertsUnstarted\(false\)/,
+    'a read that really starts must CLEAR the declined fact — otherwise one earlier '
+    + 'decline leaves the bell warning for the rest of the session')
 })
 
 test('#14686: a team switch drops the previous Organization\'s alerts', () => {
@@ -797,7 +819,9 @@ test('#14694: main.jsx WIRES the \'a read started\' fact — and only once a rea
   // satisfied by a presence check while reintroducing the defect verbatim.
   const requestedAt = loadBody.indexOf('setAlertsRequested(true)')
   assert.ok(requestedAt !== -1, 'loadAlerts must record that a read started')
-  const sessionGuard = loadBody.indexOf('if (!sessionTokenRef.current || !tid) return')
+  // The session guard now also RAISES `feedUnstarted` (it is the only terminal
+  // decline), so this matches the condition, not the whole one-line body it had.
+  const sessionGuard = loadBody.indexOf('if (!sessionTokenRef.current || !tid)')
   const staleGuard = loadBody.indexOf('if (orgAtCall && orgAtCall !== tid) return')
   const fetchAt = loadBody.indexOf('/v1/team/alerts')
   assert.ok(sessionGuard !== -1 && staleGuard !== -1 && fetchAt !== -1,

@@ -426,6 +426,12 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
  *    checked" about a read that started), never assert a check that is not
  *    happening. Reachable because `loadAlerts` returns before its `fetch` when
  *    the session token or Organization id is falsy, and nothing re-runs it (F5).
+ *  * `feedUnstarted` — whether a read was ATTEMPTED AND DECLINED, which is the
+ *    only state in which "not checked yet" is terminal. Defaults to `false`, so
+ *    the bootstrap window (the chrome renders before `loadAlerts` is even called,
+ *    #1567) is silent instead of flashing a warning on every login. Required for
+ *    `feedNotRead` below: `!feedLoaded && !feedRequested` alone cannot tell "a
+ *    read is about to start" from "nothing will ever start one" (#14694 review).
  *  * `userId` / `orgId` — the identity the local ledger is keyed by;
  *  * `canAcknowledge` + `onAcknowledge` — the owner/admin org-wide dismissal;
  *  * `ackPending` (episode) / `ackError` ({episode, orgId, label, message}) —
@@ -446,6 +452,7 @@ export function NotificationBell({
   unavailable = false,
   feedLoaded = false,
   feedRequested = false,
+  feedUnstarted = false,
   userId = '',
   orgId = '',
   canAcknowledge = false,
@@ -615,8 +622,11 @@ export function NotificationBell({
   // they can undo something. Measured: focus landed on `<body>` on both paths
   // while the panel stayed open, and no existing test read focus here, so neither
   // the fix nor this gap was visible to the suite.
-  const handleUnsnooze = (episodeKey) => {
-    persist(unsnooze(ledger.state, episodeKey))
+  const handleUnsnooze = (episodeKey, entry) => {
+    // The row travels: the control is named by its own row's discriminators, so it
+    // must restore only that row while others on the same decision key stay snoozed
+    // (`unsnooze` is row-scoped when it can be — #14694 review P3).
+    persist(unsnooze(ledger.state, episodeKey, entry && entry.alert))
     restoreListFocus()
   }
   const handleRestore = (entry) => {
@@ -787,16 +797,23 @@ export function NotificationBell({
   // note there.
   const feedUnknown = Boolean(unavailable && alerts.length === 0)
   const feedCut = Boolean(scanSaturated && alerts.length === 0)
-  // ⛔ A feed NOTHING HAS TRIED TO READ is the third way the closed bell can lie,
-  // and the one with no end: `loadAlerts` returns above its own `fetch` when the
+  // ⛔ A feed NOTHING WILL EVER READ is the third way the closed bell can lie, and
+  // the one with no end: `loadAlerts` returns above its own `fetch` when the
   // session token or Organization id is falsy, and nothing re-runs it (not polled,
   // not in the `[currentOrgId]` effect). With `alerts=[]` the badge was absent and
   // the label bare — pixel-identical to a measured, empty Organization, for the
-  // rest of the session, while the OPEN panel said "not checked yet". Gated on
-  // `!feedRequested` so it cannot claim a state over a read that IS running: an
-  // in-flight read is transient and its own sentence (`LEDGER_PENDING`) is
-  // truthful, so the bell does not flash a `!` for it.
-  const feedNotRead = Boolean(!feedLoaded && !feedRequested && alerts.length === 0)
+  // rest of the session, while the OPEN panel said "not checked yet".
+  //
+  // ⛔ GATED ON `feedUnstarted`, NOT on `!feedRequested`. `alertsRequested` starts
+  // false and is only set INSIDE `loadAlerts`, which `completeLogin` calls after
+  // several awaits — so `!feedLoaded && !feedRequested` is ALSO true for the whole
+  // bootstrap window, and warning on that flashed an amber `!` on every normal
+  // login (#14694 review P2). `feedUnstarted` is raised only where a read DECLINED
+  // its own preconditions, which is the terminal case; a read in flight is neither
+  // and stays silent, because its own `LEDGER_PENDING` sentence is the truthful one.
+  const feedNotRead = Boolean(
+    feedUnstarted && !feedLoaded && !feedRequested && alerts.length === 0,
+  )
   const bellLabel = feedUnknown
     ? `${BELL_LABEL} — the alerts could not be loaded`
     : feedCut
@@ -969,7 +986,7 @@ export function NotificationBell({
                             type="button"
                             className="ghost small"
                             aria-label={actionName(UNSNOOZE, entry)}
-                            onClick={() => handleUnsnooze(entry.key)}
+                            onClick={() => handleUnsnooze(entry.key, entry)}
                           >
                             {UNSNOOZE}
                           </button>

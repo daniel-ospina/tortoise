@@ -373,10 +373,31 @@ export function snooze(state, episode, ms, now = new Date(), alert = null) {
   return next
 }
 
-/** End an episode's snooze early (the ledger's "Unsnooze"). */
-export function unsnooze(state, episode) {
+/** End an episode's snooze early (the ledger's "Unsnooze").
+ *
+ *  ⛔ ROW-SCOPED when the caller names the row (`alert`) and that row is one of
+ *  the recorded anchors. A decision key can carry SEVERAL snoozed rows (two
+ *  `suspend` episodes share one key), and the Snoozed group lists them as separate
+ *  rows named by their own discriminators — so a control named for one row that
+ *  silently restored BOTH would be a name that lies (#14694 review P3). The
+ *  deadline is kept while any anchor remains, because it belongs to the KEY: only
+ *  the last row leaving releases the key's snooze.
+ *
+ *  Falls back to key-wide when the caller names no row, or names one this store
+ *  has no anchor for (a pre-anchor store, or a row with no `at`) — there is then
+ *  nothing to subtract, and key-wide is the honest reading of "un-snooze this".
+ */
+export function unsnooze(state, episode, alert = null) {
   const base = state || emptyState()
   if (!episode || !(episode in (base.snoozed || {}))) return base
+  const atMs = atMsOf(alert)
+  const anchors = anchorsOf(base, episode)
+  if (atMs > 0 && anchors.includes(atMs)) {
+    const remaining = anchors.filter((a) => a !== atMs)
+    if (remaining.length) {
+      return { ...base, snoozedAt: { ...(base.snoozedAt || {}), [episode]: remaining } }
+    }
+  }
   const snoozed = { ...base.snoozed }
   delete snoozed[episode]
   const snoozedAt = { ...(base.snoozedAt || {}) }

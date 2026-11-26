@@ -287,6 +287,49 @@ test('#14694 P2: an anchor in the PRE-LIST shape (a bare number) is still honour
   assert.equal(buildLedger({ alerts: [newer], state, now: NOW }).unresolved, 1)
 })
 
+test('#14694 P3: Unsnooze restores ONLY the row it is named for', () => {
+  // Two snoozed rows on ONE decision key are now a first-class, LISTED state, and
+  // each carries an `Unsnooze` named by its own row's discriminators. A control
+  // named for one row that silently restored BOTH would be a name that lies — and
+  // this was the pre-fix behaviour (`unsnooze` deleted the key outright). Row-scoped
+  // when the caller names the row; the key's DEADLINE is kept while any anchor
+  // remains, because the deadline belongs to the key.
+  const take = (at, episode) => alert({
+    type: 'suspend',
+    label: 'Organization suspended',
+    message: 'Organization suspended by an operator',
+    at,
+    first_at: at,
+    episode,
+  })
+  const a = take(new Date(NOW.getTime() - 2 * DAY).toISOString(), 'suspend||a')
+  const b = take(new Date(NOW.getTime() - 1 * HOUR).toISOString(), 'suspend||b')
+  const key = entryKeyOf(a)
+  let state = snooze(emptyState(), key, periodMs('1h'), NOW, a)
+  state = snooze(state, key, periodMs('1h'), NOW, b)
+  assert.equal(buildLedger({ alerts: [a, b], state, now: NOW }).snoozed.length, 2)
+
+  // Un-snooze row A only: B stays hidden, and the key still carries its deadline.
+  const onlyB = unsnooze(state, key, a)
+  assert.deepEqual(onlyB.snoozedAt[key], [new Date(b.at).getTime()])
+  assert.ok(onlyB.snoozed[key] > NOW.getTime(), 'the key deadline survives while an anchor remains')
+  const afterA = buildLedger({ alerts: [a, b], state: onlyB, now: NOW })
+  assert.equal(afterA.unresolved, 1, 'A is back')
+  assert.equal(afterA.snoozed.length, 1, 'B is still snoozed')
+  assert.equal(afterA.snoozed[0].rowKey, rowKeyOf(b))
+
+  // …and releasing the LAST row releases the key entirely.
+  const none = unsnooze(onlyB, key, b)
+  assert.equal(none.snoozed[key], undefined)
+  assert.equal(none.snoozedAt[key], undefined)
+  assert.equal(buildLedger({ alerts: [a, b], state: none, now: NOW }).unresolved, 2)
+
+  // A caller that names no row (or one this store has no anchor for) still gets the
+  // key-wide release — there is nothing to subtract.
+  assert.equal(unsnooze(state, key).snoozed[key], undefined)
+  assert.equal(unsnooze(state, key, take(NOW.toISOString(), 'suspend||zz')).snoozed[key], undefined)
+})
+
 test('#14694 P1: a snooze on an INCIDENT does not cover a NEWER one', () => {
   // `suspend`'s customer message is a CONSTANT, so every suspension shares one
   // decision key — a bare deadline on that key hid a genuinely new suspension for

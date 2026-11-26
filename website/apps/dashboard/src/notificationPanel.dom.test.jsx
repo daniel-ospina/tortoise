@@ -65,7 +65,7 @@ import {
   periodMs,
   storageKey,
 } from './notificationLedger.js'
-import { ALERTS_UNAVAILABLE, OLD_AFTER_DAYS, SCAN_SATURATED_EMPTY } from './securityAlerts.js'
+import { ALERTS_UNAVAILABLE, OLD_AFTER_DAYS, SCAN_SATURATED_EMPTY, ageLabel } from './securityAlerts.js'
 
 afterEach(cleanup)
 
@@ -124,6 +124,10 @@ function renderBell(props = {}) {
         // saying `feedLoaded: false` and nothing else; the in-flight cases below
         // state `feedRequested: true` explicitly.
         feedRequested={'feedRequested' in props ? props.feedRequested : false}
+        // #14694 review P2: "a read was attempted and DECLINED", the only terminal
+        // never-read state. Defaults to `false` like the component, so a bootstrap
+        // window (chrome up, read not started yet) is silent.
+        feedUnstarted={'feedUnstarted' in props ? props.feedUnstarted : false}
         userId={USER}
         orgId={props.orgId || ORG}
         canAcknowledge={props.canAcknowledge || false}
@@ -1607,22 +1611,33 @@ test('#14686: a failed read is visible on the CLOSED bell, not only inside the p
   assert.equal(bell(rowsPresent.container).getAttribute('aria-label'), 'Notifications — 1 unresolved')
 })
 
-test('#14694 P2: a feed nothing has READ is visible on the CLOSED bell, not an all-clear', () => {
+test('#14694 P2: a feed nothing will EVER read is visible on the CLOSED bell, not an all-clear', () => {
   // The third way the closed bell could lie, and the one with no end: `loadAlerts`
   // returns above its own `fetch` when the session token or Organization id is
   // falsy, and nothing re-runs it. With `alerts=[]` the pre-fix bell had no badge
   // and a bare label — pixel-identical to a measured, empty Organization, for the
   // rest of the session, while the OPEN panel correctly said "not checked yet".
-  const never = renderBell({ alerts: [], feedLoaded: false, feedRequested: false })
+  const never = renderBell({
+    alerts: [], feedLoaded: false, feedRequested: false, feedUnstarted: true,
+  })
   assert.match(bell(never.container).getAttribute('aria-label'), /not checked yet/)
   assert.equal(
     never.container.querySelector('.notif-badge').textContent, '!',
-    'an unread feed must not render like an all-clear one on the closed bell',
+    'a feed nothing will read must not render like an all-clear one on the closed bell',
   )
 
-  // A read that IS running is transient and must NOT flash the `!`: its own
-  // sentence inside the panel (`LEDGER_PENDING`, "Checking…") is the truthful one,
-  // and the badge-warn would claim a bad state over a healthy in-flight read.
+  // ⛔ THE BOOTSTRAP WINDOW MUST STAY SILENT. `alertsRequested` starts false and is
+  // only set INSIDE `loadAlerts`, which `completeLogin` calls after several awaits
+  // — so `!feedLoaded && !feedRequested` is ALSO true for every normal login. Gating
+  // on that pair alone flashed an amber `!` over a feed that was about to be read
+  // (#14694 review P2): this is the state that must render as a plain bell.
+  const bootstrap = renderBell({ alerts: [], feedLoaded: false, feedRequested: false })
+  assert.equal(bell(bootstrap.container).getAttribute('aria-label'), 'Notifications')
+  assert.equal(bootstrap.container.querySelector('.notif-badge'), null,
+    'a read that has not STARTED yet is not a warning — every login renders here')
+
+  // A read that IS running is transient and must NOT flash the `!` either: its own
+  // sentence inside the panel (`LEDGER_PENDING`, "Checking…") is the truthful one.
   const pending = renderBell({ alerts: [], feedLoaded: false, feedRequested: true })
   assert.equal(bell(pending.container).getAttribute('aria-label'), 'Notifications')
   assert.equal(pending.container.querySelector('.notif-badge'), null)
@@ -1631,6 +1646,13 @@ test('#14694 P2: a feed nothing has READ is visible on the CLOSED bell, not an a
   const settled = renderBell({ alerts: [], feedLoaded: true })
   assert.equal(bell(settled.container).getAttribute('aria-label'), 'Notifications')
   assert.equal(settled.container.querySelector('.notif-badge'), null)
+
+  // …and a declined read that ALSO has rows in hand is still the rows: they are
+  // evidence, and the count keeps its meaning.
+  const rowsPresent = renderBell({
+    alerts: [alert()], feedLoaded: false, feedRequested: false, feedUnstarted: true,
+  })
+  assert.equal(bell(rowsPresent.container).getAttribute('aria-label'), 'Notifications — 1 unresolved')
 })
 
 // ── 7. Nothing is hidden by CSS (the evasion no source scan can see) ────────
@@ -1828,6 +1850,51 @@ test('#14686: two same-identity rows have DISTINCT accessible names', () => {
   assert.equal(names.length, 2)
   assert.notEqual(names[0], names[1], 'the discriminators must reach the accessible name')
   assert.equal(new Set(names).size, 2)
+})
+
+test('#14694 P2: the ROW-ACTION discriminator survives an age-bucket collision', () => {
+  // The sibling-actions fix named itself with `ageLabel`, which is a coarse
+  // BUCKET (`just now` / `N min ago` / `N h ago` / `N day(s) ago`), and `countLabel`
+  // is EMPTY for a single-window episode. Two rows that differ only INSIDE a bucket
+  // therefore collided: two `auth_ip` episodes 26 h and 40 h apart — both
+  // `New location`, both `1 day ago` — produced byte-identical names, which is the
+  // exact defect the builder claims to close (#14694 review P2). `sameWording()`
+  // above cannot see this: its two rows differ by count (9 vs 3), so it passes
+  // with a discriminator that does not actually discriminate.
+  // The rows share a label, a message and a count — only the ABSOLUTE STAMP can
+  // separate them — so a name built from label+count+age alone is identical here,
+  // which is the exact defect the builder claims to close.
+  const bucketRow = (hours) => alert({
+    type: 'auth_ip',
+    label: 'New location',
+    message: 'sign-in from a new location',
+    register: 'alert',
+    count: 1,
+    at: new Date(NOW.getTime() - hours * HOUR).toISOString(),
+    first_at: new Date(NOW.getTime() - hours * HOUR).toISOString(),
+    episode: `auth_ip||${hours}h`,
+  })
+  const a = bucketRow(26)
+  const b = bucketRow(40)
+  // The premise: the two rows are in the SAME coarse bucket, so the age cannot
+  // tell them apart — assert it, so this test cannot silently stop exercising it.
+  assert.equal(
+    ageLabel(a.at, NOW), ageLabel(b.at, NOW),
+    'the collision is the premise: both rows must read the same age bucket',
+  )
+  const { container } = renderBell({ alerts: [a, b] })
+  fireEvent.click(bell(container))
+  assert.equal(rows(container).length, 2)
+  const flat = [...container.querySelectorAll('.notif-list .notif-row')].flatMap((row) => [
+    row.querySelector('.notif-open').getAttribute('aria-label'),
+    row.querySelector('.notif-snooze').getAttribute('aria-label'),
+    ...[...row.querySelectorAll('.notif-actions button')].map((x) => x.getAttribute('aria-label')),
+  ])
+  assert.equal(flat.length, 6, 'two rows, three named actions each')
+  assert.equal(
+    new Set(flat).size, flat.length,
+    `same-bucket rows must not share an accessible name; got: ${JSON.stringify(flat)}`,
+  )
 })
 
 test('#10156: a payload with a usable value RENDERS, and an unusable one SAYS so', () => {

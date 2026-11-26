@@ -3199,6 +3199,18 @@ function claimIntentInFlight() {
   // id, stale `tid`) with nothing to re-run it — so the panel needs this fact to
   // say "not checked yet" instead of claiming a check is running forever.
   const [alertsRequested, setAlertsRequested] = React.useState(false)
+  // #14694 review P2: whether a read DECLINED its own preconditions, i.e. "nothing
+  // will ever read this feed". `!alertsLoaded && !alertsRequested` is ALSO true for
+  // the whole bootstrap window (`completeLogin` calls `loadAlerts` only after
+  // several awaits), so that pair cannot tell "a read is about to start" from "no
+  // read will ever start" — and warning on it flashed an amber `!` on the
+  // notifications bell on every normal login. This is raised ONLY where
+  // `loadAlerts` returns before its own `fetch` because the session token or
+  // Organization id is absent (nothing re-runs it — `loadAlerts` is not polled and
+  // not in the `[currentOrgId]` effect), and cleared the moment a read really
+  // starts. A stale-Organization discard does NOT raise it: that read is abandoned
+  // for a NEWER one that this selection's own flow will start.
+  const [alertsUnstarted, setAlertsUnstarted] = React.useState(false)
   // #10156: the pending episode + the per-episode error. ONE row is disabled at
   // a time via `ackPending`, but that is a UI convention, NOT a single-flight
   // lock: clicking two rows starts two writes, and the first to finish clears
@@ -5456,7 +5468,13 @@ function claimIntentInFlight() {
   async function loadAlerts(tid) {
     // #308 (R7): session-authed alert history — reachable even while the
     // team is suspended (API-key routes 403 by design).
-    if (!sessionTokenRef.current || !tid) return
+    // ⛔ A terminal decline: nothing re-runs `loadAlerts`, so a bell left on
+    // "never read" would be the all-clear lie forever (#14694 review P2). Raising
+    // `alertsUnstarted` is what lets the CLOSED bell say so — and raising it HERE,
+    // rather than inferring it from "not loaded yet", is what keeps the bootstrap
+    // window silent. The stale-Organization guard BELOW deliberately does not raise
+    // it: that read is replaced by a newer one.
+    if (!sessionTokenRef.current || !tid) { setAlertsUnstarted(true); return }
     // Captured BEFORE the first await — this is what makes the guard below a
     // question about THIS read rather than about the current selection.
     const orgAtCall = orgIdRef.current
@@ -5496,6 +5514,7 @@ function claimIntentInFlight() {
     // the feed honestly unrequested rather than claiming a check that never began
     // (#14694 F5).
     setAlertsRequested(true)
+    setAlertsUnstarted(false)
     try {
       // #3501: same-origin proxy; the `__Host-session` cookie authenticates.
       const res = await fetch(`${API_BASE}/v1/team/alerts?org_id=${encodeURIComponent(tid)}`)
@@ -10910,6 +10929,7 @@ function claimIntentInFlight() {
           unavailable={alertsUnavailable}
           feedLoaded={alertsLoaded}
           feedRequested={alertsRequested}
+          feedUnstarted={alertsUnstarted}
           userId={sessionMetaRef.current?.id || sessionMetaRef.current?.email || ''}
           orgId={currentOrgId || ''}
           canAcknowledge={isOwnerAdmin}
