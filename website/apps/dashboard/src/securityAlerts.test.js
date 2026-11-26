@@ -106,11 +106,14 @@ test('#10156: the activity lead carries no imperative and no incident claim', ()
     assert.doesNotMatch(ACTIVITY_LEAD, forbidden)
   }
   assert.match(ACTIVITY_LEAD, /nothing was [^.]*by them\./i,
-    'the activity register must state that nothing was changed — SCOPED to the '
-    + 'observations. The panel renders both registers on one screen, so an '
-    + 'absolute "nothing was changed, disabled or locked" sits beside a `suspend` '
-    + 'row on an Organization that IS suspended: the whole-org-state claim the '
-    + 'copy rule forbids (round-23 review finding).')
+    'the activity register must state that nothing was disabled, throttled or '
+    + 'locked — SCOPED to the observations. "changed" is deliberately NOT the '
+    + 'verb: a `flag` row DOES change state (`flagged_at`, which `/v1/team` '
+    + 'renders as status "flagged"), so only the ENFORCEMENT claim is true. The '
+    + 'panel renders both registers on one screen, so an absolute "nothing was '
+    + 'changed, disabled or locked" sits beside a `suspend` row on an '
+    + 'Organization that IS suspended: the whole-org-state claim the copy rule '
+    + 'forbids (round-23 review finding).')
   assert.doesNotMatch(ACTIVITY_LEAD, /nothing was (?:changed, disabled|disabled, changed) or locked\./i,
     'an UNSCOPED no-change clause is a whole-org-state claim')
   assert.match(ACTIVITY_HEADING, /activity/i)

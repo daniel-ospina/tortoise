@@ -295,14 +295,23 @@ def _int_env(name: str, default: int) -> int:
 def _ratio_env(name: str, default: float) -> float:
     """A fraction in ``[0, 1]`` from the environment (#14687).
 
-    ``1.0`` is ACCEPTED and is the documented OFF SWITCH: at ``1.0`` the clear
-    level equals the fire level, which is exactly the pre-#14687 behaviour. An
-    earlier version refused anything >= 1.0 "because it silently means no
-    hysteresis" — but that left the knob with no way to say "off" at all, so an
-    operator who wanted the old rule got ``0.5`` (a setting they never chose) and
-    no way to tell. Above ``1.0`` is refused: a clear level above the fire level
-    is impossible (the episode would clear only when it should fire), and out
-    of range falls back to the shipped default like every other reader here.
+    The range check is VALUE-AGNOSTIC; what ``0`` and ``1`` MEAN is each
+    caller's to document, and they do not agree:
+
+    * ``TORTOISE_ABUSE_CLEAR_RATIO``: ``1.0`` is the documented OFF SWITCH (the
+      clear level equals the fire level = the pre-#14687 rule) and ``0.0`` is the
+      stickiest latch. An earlier version refused anything >= 1.0 "because it
+      silently means no hysteresis" — but that left the knob with no way to say
+      "off" at all, so an operator who wanted the old rule got ``0.5`` (a setting
+      they never chose) and no way to tell.
+    * ``TORTOISE_ABUSE_TIER_FLOOR_RATIO``: the OPPOSITE — ``0.0`` disables the
+      tier term and ``1.0`` is the level that silences the detector most. A
+      reader who carried "1.0 = off" down to that caller would set the most
+      aggressive setting believing they had turned it off (round-4 review F3).
+
+    Above ``1.0`` is refused for both: a clear level above the fire level is
+    impossible (the episode would clear only when it should fire), and out of
+    range falls back to the shipped default like every other reader here.
     """
     raw = os.environ.get(name)
     if not raw or not raw.strip():
@@ -1517,8 +1526,15 @@ def _as_int(value) -> int | None:
 
 
 def _human_window(window_s: int) -> str:
-    """``3600`` → "60 minutes". The alert states the window in the customer's
-    units; a raw ``3600`` reads as an internal constant."""
+    """``3600`` → "1 hour", ``900`` → "15 minutes". The alert states the window
+    in the customer's units; a raw ``3600`` reads as an internal constant.
+
+    The HOURS branch runs first, so a whole hour renders as hours rather than as
+    ``"60 minutes"``; both are pinned by
+    ``test_the_higher_limit_route_is_offered_only_when_the_level_IS_a_limit``
+    and the rate-copy rows (round-4 review F2: this docstring described the
+    minutes branch's output for ``3600``, i.e. a rendering that does not exist).
+    """
     if window_s and window_s % 3600 == 0:
         hours = window_s // 3600
         return f"{hours} hour" + ("s" if hours != 1 else "")

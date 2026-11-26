@@ -19,7 +19,7 @@
 // decisions and their tests). The per-row sentence is the SERVER's
 // (`/v1/team/alerts` → `message`), and every customer-visible statement that
 // nothing was changed BY THIS ALERT is server-authored. The register leads carry
-// their own, SCOPED version ("nothing was disabled, changed or locked by them") —
+// their own, SCOPED version ("nothing was disabled, throttled or locked by them") —
 // a lead cannot quote the server's fact, because it describes a whole register
 // rather than one row, and an unscoped copy of that fact is false the moment a
 // `suspend` row renders beside it (round-23 review finding: this comment claimed

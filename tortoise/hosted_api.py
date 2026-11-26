@@ -19128,11 +19128,11 @@ async def org_alerts(org_id: str, user: dict = Depends(get_current_user)):  # no
     the appeal path (scoping delta 12).
 
     #10156: each entry carries `register` ("alert" = something happened, or
-    "activity" = a detector measured a rate and changed nothing), `count` and
+    "activity" = a detector measured a rate and disabled nothing), `count` and
     `first_at` (one row per sustained BOUT, not per detector window), `acked`,
     and the opaque `episode` key the acknowledgement route takes. The panel
-    renders the two registers separately and can say "nothing was changed"
-    only because the register travels with the row.
+    renders the two registers separately and can say "nothing was disabled,
+    throttled or locked by them" only because the register travels with the row.
 
     ``scan_saturated`` says the scan was cut. It is NOT a per-row flag (that is
     ``truncated``): it exists for the empty-feed case, where there is no row to
