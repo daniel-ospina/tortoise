@@ -1045,8 +1045,8 @@ capture already in flight for that `session_id` answers `{"detail": {"code":
 kept — it is a same-key **concurrent writer**, so waiting for the winner to finish and retrying is
 the correct client response. The route's OTHER `409` — `Session recording is disabled for this
 team/graph` — carries **no `code`** and no `retry_after`: it is an org policy that no retry clears.
-`detail.code` is what makes that branch decidable; before #14700 an operator could not tell the two
-apart from a log line (measured: `reflect-hook` retried the policy refusal 4× as if it were capacity).
+`detail.code` is what makes that branch decidable; before #14700 **neither `409` carried a code**, so
+no log line said which one it was — the client's `30s` is its own backoff, not the server's.
 
 ⛔ **The MCP tool `tortoise_session_capture` is NOT that surface and does not carry `code` or
 `retry_after`.** It reports a capacity refusal as `status: 429` plus the `message` sentence: its
