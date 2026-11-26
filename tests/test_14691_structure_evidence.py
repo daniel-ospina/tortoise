@@ -1043,11 +1043,9 @@ def test_the_isolation_refusal_is_enforced_on_the_whole_overview():
     assert ingest.occupancy(before) == {}, (
         "the receipt's own empty_before reads as populated, so the guard would "
         f"refuse a real run: {ingest.occupancy(before)}")
-    # ⛔ THE RAISE ITSELF IS DRIVEN, NOT JUST THE PREDICATE (#14691 review, 5th
-    # cycle, N7). With only `occupancy` exercised, `if contamination:` →
-    # `if False:` inside the refusal left the suite GREEN (measured): a guard whose
-    # enforcement can be deleted while its evidence stays measurable.
-    assert ingest.refuse_if_not_fresh(before) is None
+    # the PREDICATE's coverage only — the RAISE and the call site are pinned in
+    # `test_the_isolation_refusal_is_WIRED_into_the_ingest_runner`, so this file
+    # grades each half of the guard exactly once.
     for dotted, value in (("taxonomy.Point", 5),
                           ("structure.total", 2),
                           ("status.total_entities", 500),
@@ -1062,18 +1060,6 @@ def test_the_isolation_refusal_is_enforced_on_the_whole_overview():
         assert ingest.occupancy(mutant), (
             f"the fresh-graph guard cannot see content at `{dotted}` — a "
             "populated graph would be measured as fresh")
-        try:
-            ingest.refuse_if_not_fresh(mutant)
-        except SystemExit:
-            continue
-        raise AssertionError(
-            f"the fresh-graph guard MEASURES content at `{dotted}` but does not "
-            "refuse it — the premise is recorded, not enforced")
-    # the guard must be WIRED into the run, not merely importable
-    source = (BUNDLE / "run_ingest.py").read_text()
-    assert "refuse_if_not_fresh(before)" in source, (
-        "run_ingest.main() no longer calls the refusal — the guard is "
-        "measurable but inert")
     # ⛔ A DIAGNOSTIC CODE IS NOT CONTENT (#14691 review, 5th cycle, NEW-6).
     # `audit.exit_code` counts issues the audit check FOUND (as do `node_count`
     # and `summary.total_issues`, which stay counted); scoring it too refused a
@@ -1157,40 +1143,6 @@ def test_the_A4_count_TABLE_and_the_S8_artifact_row_are_the_claim_layer():
         f"{audit_row!r}")
 
 
-def test_the_isolation_refusal_is_WIRED_into_the_ingest_runner():
-    """Reds if `main()` stops CALLING the occupancy refuse it defines.
-
-    ⛔ A guard function is not a guard while nothing calls it. The review's
-    demonstrated mutant was this shape — replace the check with `if False:` —
-    and it was MEASURED GREEN AT HEAD 9ea2f606: flipping `if contamination:` to
-    `if False:` in `run_ingest.main()` left the whole suite green, because
-    `test_the_isolation_refusal_is_enforced_on_the_whole_overview` drives
-    `occupancy()` directly and never reaches the call site. (A textual pin alone
-    is still not enough — an inserted filter can make the branch inert with every
-    substring intact — so `test_the_refusal_FIRES_on_the_run_path` drives
-    `main()` and pins the EFFECT.)
-
-    The run path is pinned as source, so deleting the call reds even though the
-    function still works.
-    """
-    import inspect
-
-    spec = importlib.util.spec_from_file_location(
-        "t6_run_ingest", BUNDLE / "run_ingest.py")
-    ingest = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ingest)
-    source = inspect.getsource(ingest.main)
-    assert "contamination = occupancy(before)" in source, (
-        "run_ingest.main() no longer computes the occupancy of the overview, so "
-        "the isolation premise would be recorded and never enforced")
-    assert "if contamination:" in source, (
-        "run_ingest.main() computes a contamination verdict and does not branch "
-        "on it — the refusal cannot fire on the run path")
-    assert "raise SystemExit(" in source.split("if contamination:")[1][:400], (
-        "run_ingest.main() branches on the contamination verdict without raising "
-        "it, so a populated graph would be measured anyway")
-
-
 # ── the 6th review cycle: the artifact's EVIDENCE rows, and the prose ────
 def test_the_score_artifact_is_what_the_scorer_DERIVES_from_its_inputs():
     """Reds if `out/t6-score.json` stops being `score_t6.build_score()`'s output.
@@ -1256,12 +1208,17 @@ def test_the_example_BUCKETS_are_the_bands_their_names_claim():
                 assert over < 0.6, (bucket, over)
             else:
                 assert 0.6 <= over <= 1.0, (bucket, over)
-    # and the truncation is DECLARED, not implied by a silent cap
-    truncated = (quotes["invented"] > len(quotes["invented_examples"])
-                 or quotes["paraphrase"] > len(quotes["paraphrase_examples"]))
-    assert quotes["examples_truncated"] is truncated, (
-        quotes["examples_truncated"], truncated,
-        quotes["invented"], quotes["paraphrase"])
+    # and the truncation is DECLARED, not implied by a silent cap — PER LIST
+    # (#14691, merged lanes). This arm originally asserted ONE shared
+    # `examples_truncated` flag; a single boolean cannot say WHICH sample is
+    # incomplete, which is the same "a length is not a count" defect the counts
+    # above exist to close. Each bucket now states its own.
+    for bucket in ("invented", "paraphrase"):
+        examples = quotes[f"{bucket}_examples"]
+        expected = quotes[bucket] > len(examples)
+        assert quotes[f"{bucket}_examples_truncated"] is expected, (
+            bucket, quotes[f"{bucket}_examples_truncated"], expected,
+            quotes[bucket], len(examples))
 
 
 def test_each_door_finding_ANSWER_is_the_artifacts_answer_in_SUBSTANCE():
@@ -1269,7 +1226,7 @@ def test_each_door_finding_ANSWER_is_the_artifacts_answer_in_SUBSTANCE():
 
     ⛔ #14691 review, 6th cycle, finding 4 (P2). `_polarity` reads the FIRST word,
     so measured green on 43fbd256: D6's answer
-    `**No — \`[]\` for all four owners**, on a graph holding 6 \`ownedBy\` rows.`
+    `**No — `[]` for all four owners**, on a graph holding 6 `ownedBy` rows.`
     → `**No — it returns every owned row for all 4 owners**, on a graph holding 6
     …` — the bundle's headline mechanism finding inverted, with the leading "No"
     kept so the polarity arm stayed quiet.
@@ -1508,6 +1465,16 @@ def test_the_refusal_FIRES_on_the_run_path(monkeypatch, tmp_path):
 
     `main()` writes `out/ingest-receipt.json` at the end, so `ingest.OUT` is
     repointed at `tmp_path` — a test must never touch a committed artifact.
+
+    ⛔ THIS ARM SUBSUMES THE SOURCE-SUBSTRING WIRING PIN (#14691, merged lanes).
+    A parallel lane's `test_the_isolation_refusal_is_WIRED_into_the_ingest_runner`
+    asserted that `main()` contained the occupancy call, the branch and the raise.
+    It is retired rather than adapted, for two measured reasons: a substring pin
+    cannot see an inserted filter that makes the branch inert (this review's own
+    finding), and a substring pin that hard-codes one refactor's spelling is
+    friction on the next one — the guard now lives in `refuse_if_not_fresh()`, and
+    removing the CALL from `main()` reds HERE, because a populated overview would
+    then be measured instead of refused.
     """
     import importlib.util as _ilu
 
