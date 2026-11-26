@@ -2764,11 +2764,21 @@ root, `CALL { … } … SKIP/LIMIT` paging, the `id(m) <> id(n)` self-loop exclu
 and the `_RELATION_ENDPOINT_NAME` arm that never reaches a `:Source`'s denied `content` — it selects
 `m.url` for a `:Source`, and the preview is cut to `_ENDPOINT_NAME_MAX` with a `nameTruncated` flag).
 
-**Both documents re-derive every figure the row moves** — the section states the customer-callable
-figure TWICE, the distinct-door figure THREE times (the head sentence, the blast-radius sentence, and
-the `23 cell occurrences over the 16 distinct doors` parenthetical that carries it a third time), and
-the read-site total and the cell-occurrence figure ONCE
-(measured with the guard's own `_SITE_COUNT` / `_CALLABLE_SITE_COUNT` over `_section_13()`) — and
+**Both documents re-derive every figure the row moves** — measured over `_section_13()` rather than
+counted by eye, and the count that matters is how many statements exist versus how many an arm READS:
+the read-site total (`FORTY-FOUR`) is stated ONCE, the customer-callable figure (`NINETEEN`) FOUR
+times, the distinct-door figure (`SIXTEEN` twice spelled out, once as `16`) THREE times, and the
+cell-occurrence figure (`23`) ONCE. ⛔ Only some of those statements are graded, and the split is the
+disclosure: `_SITE_COUNT` reads the read-site total, `_CALLABLE_SITE_COUNT` reads TWO of the four
+customer-callable statements (the `NINETEEN of them are CUSTOMER-CALLABLE` head and the `at least
+NINETEEN customer-callable read sites` blast-radius line) while the other TWO — `counted ONCE however
+many of the NINETEEN sites reach it` and `carries FIVE of the NINETEEN sites` — are read by NO arm
+(measured: rewriting BOTH to `EIGHTEEN` leaves all 61 of the file's tests green), and
+`_STATED_DOOR_COUNT` reads all three door statements, the `over the 16 distinct doors` parenthetical
+included. The cell-occurrence figure is not regex-graded at all: what is graded is its DERIVATION
+(`_customer_callable_doors()` 16 over 23 cells, plus the `attributed >= 23` and `total >= 23` floors),
+so a prose edit that left the table alone would not red — said plainly here rather than implied away
+by quoting only the graded figures.
 `tests/test_7948_about_object_read_sites.py` derives them from the table rather than trusting prose:
 read sites `FORTY-THREE` → `FORTY-FOUR`, customer-callable `EIGHTEEN` → `NINETEEN`, distinct doors
 `FIFTEEN` → `SIXTEEN` (nine MCP tools, TWO SDK methods, five REST routes — the new door is

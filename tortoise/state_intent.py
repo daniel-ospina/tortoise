@@ -885,8 +885,17 @@ _ENDING_BASE = (
 #:   caller reaches the population the stated way instead — the unqualified
 #:   `which claims were withdrawn`. ⛔ NOT by passing ``ended_scope=True``: that
 #:   parameter is declared only on the PRIVATE ``_tortoise_fts_query``, and no
-#:   public door forwards it, so naming it as the caller's route sends a reader
-#:   after an argument no surface accepts (#13558).
+#:   public door FORWARDS it (#13558). Two doors do not fail loudly on it either,
+#:   which is why "no surface accepts it" would be wrong: ``search_knowledge``
+#:   declares ``**filters``, so the keyword BINDS there — the ``hybrid`` arm then
+#:   drops it (its forwarding call names every argument, none of them this one,
+#:   so the default population is served) and the ``full_text`` arm passes
+#:   ``**filters`` into ``list_knowledge``, where ``_property_filter_clause``
+#:   reinterprets it as an ``n.ended_scope`` property filter and the arm answers
+#:   ZERO ROWS (the same measurement `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 Q2
+#:   records). The MCP handlers take no ``**kwargs``, so ``tortoise_search`` DOES
+#:   refuse the keyword — but only there, and the question router above is what
+#:   makes the ended population reachable from every door without it.
 _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # "has anything we relied on been withdrawn?" / "have any claims been retired?"
     # An EXISTENCE question about an ending: the auxiliary + quantifier is the
