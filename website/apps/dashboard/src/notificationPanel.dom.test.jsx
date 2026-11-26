@@ -746,6 +746,37 @@ test('#14686: the org-wide Acknowledge is in the detail view, owner-only, and ca
   assert.doesNotMatch(member.container.textContent, /Acknowledge for everyone/)
 })
 
+test('#10156: a TRUNCATED episode IS acknowledgeable, and the ×N+ is information', () => {
+  // ⛔ THIS PIN CAME FROM THE DELETED PANEL (`securityAlertsPanel.dom.test.jsx:214`,
+  // a P1 from that review) and did NOT travel with the move — measured: re-gating
+  // the control on `!alert.truncated`, the exact historical regression, left both
+  // suites green. The gate it guards came from a 409 refusal the server no longer
+  // makes: acks match by identity + window OVERLAP, so a moving key cannot lose
+  // one. Leaving the gate in place made the OLDEST current episode undismissable
+  // for any org that saturates the scan — the live org. The truncation note stays
+  // as INFORMATION: it explains the `×N+` count, it does not withhold the control.
+  const truncated = alert({ message: 'saturated', count: 100, truncated: true })
+  const acked = []
+  const { container } = renderBell({
+    alerts: [truncated],
+    canAcknowledge: true,
+    onAcknowledge: (a) => acked.push(a),
+  })
+  fireEvent.click(bell(container))
+  // The count STOPPED, and the ROW says so — `×100+` is the ledger label…
+  assert.match(rows(container)[0].textContent, /×100\+/)
+  // …and the detail carries the reason the floor exists.
+  fireEvent.click(container.querySelector('.notif-open'))
+  assert.match(container.textContent, /older than the window we can identify/)
+  // …and the org-wide control is still offered (the truncation is not a gate).
+  const ackBtn = [...container.querySelectorAll('.notif-detail-actions button')]
+    .find((b) => /Acknowledge for everyone/.test(b.textContent))
+  assert.ok(ackBtn, 'a truncated episode must remain acknowledgeable — it is the one a live org has')
+  fireEvent.click(ackBtn)
+  assert.equal(acked.length, 1)
+  assert.equal(acked[0].episode, truncated.episode)
+})
+
 test('#14686: a recorded acknowledgement is SAID in the detail view, not silently dropped', () => {
   // The parent writes the acknowledgement and then re-reads the feed, so the row
   // the reader is looking at moves from `current` into the `acked` bucket. If the

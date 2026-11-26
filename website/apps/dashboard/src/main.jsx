@@ -5474,12 +5474,21 @@ function claimIntentInFlight() {
         setAlertsSaturated(feed.saturated)
         setAlertsUnavailable(feed.unavailable)
       } else {
-        // A non-2xx is a FAILED read, not an empty feed.
+        // A non-2xx is a FAILED read, not an empty feed. The SAME staleness guard
+        // applies here as on the success branch: stamping A's failed read onto B's
+        // state makes B's closed bell say "the alerts could not be loaded" about a
+        // read B never made — a claim about the wrong Organization (review finding).
+        // `orgIdRef.current &&` for the same reason as the success branch: a read
+        // that lands before an Organization is KNOWN (the login path) is the login's
+        // own, not a stale one.
+        if (orgIdRef.current && orgIdRef.current !== tid) return
         setAlertsUnavailable(true)
       }
     } catch {
       // Best-effort — alert history never blocks the dashboard — but the panel
-      // must be able to say it could not look.
+      // must be able to say it could not look. Guarded for the same reason as the
+      // arms above: the read may have started before an Organization switch.
+      if (orgIdRef.current && orgIdRef.current !== tid) return
       setAlertsUnavailable(true)
     }
   }
@@ -6572,6 +6581,14 @@ function claimIntentInFlight() {
     setAlertsSaturated(false)
     setAlertsUnavailable(false)
     loadAlerts(orgId)
+    // #14686 (review finding, P3): `ackError` is cleared only when the NEXT
+    // acknowledgement starts, and the panel renders it in the ledger branch
+    // whenever no detail is open — so a refusal about Organization A's episode
+    // would be announced as `role="alert"` inside Organization B's panel, with no
+    // row and no way to clear it but re-attempting the action. It is the write
+    // state of a feed this block is dropping, so it goes with the feed.
+    setAckError(null)
+    setAckPending(null)
     // #1893 (code-review P1): onboarding state is TEAM-scoped — the switch
     // must re-hydrate the NEW team's persisted scope, never the old team's.
     // The stale flag blocks the hydration effect until refreshOnboarding
@@ -6646,6 +6663,13 @@ function claimIntentInFlight() {
           // Round-3: reload ALL key-scoped data for the reverted team —
           // otherwise keys/sessions/backups stay wiped until reload.
           await Promise.all([loadAll(''), loadBackups('')]).catch(() => {})
+          // #14686 (review finding, P2): the switch reset above already CLEARED the
+          // feed, and the in-flight read of the failed Organization is discarded by
+          // `loadAlerts`' org guard — so without this read the restored Organization
+          // keeps an empty feed with both flags false: a stale all-clear ("You have
+          // no notifications.") for a team no read has asked about, and `loadAlerts`
+          // is not polled, so it would survive the whole session on a failure path.
+          loadAlerts(prevOrgId)
         }
         setError(e)
       }

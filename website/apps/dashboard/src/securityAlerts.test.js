@@ -386,6 +386,21 @@ test('#14686: a team switch drops the previous Organization\'s alerts', () => {
   assert.match(body, /setAlertsUnavailable\(false\)/, 'nor its failed-read flag')
   assert.match(body, /loadAlerts\(orgId\)/,
     'and the NEW Organization must be read — an empty bell is not a correct one')
+  // The WRITE state of the dropped feed goes with it: `ackError` is otherwise
+  // cleared only when the next acknowledgement starts, and the panel renders it in
+  // the ledger branch when no detail is open — so Organization A's refusal would be
+  // announced inside Organization B's panel, with no row and no way to clear it
+  // (review finding, P3).
+  assert.match(body, /setAckError\(null\)/,
+    'a refusal about the previous Organization\'s episode must not survive the switch')
+  // …and the FAILED-SWITCH REVERT re-reads the team it re-attaches. The reset above
+  // has already cleared the feed, and the failed org's in-flight read is discarded
+  // by the org guard, so without this the restored team keeps an empty feed with
+  // both flags false: a stale all-clear, for the rest of the session (no poll).
+  const revertAt = body.indexOf('if (prevOrgId) {')
+  assert.ok(revertAt !== -1, 'the failed-switch revert arm must still exist')
+  assert.match(body.slice(revertAt), /loadAlerts\(prevOrgId\)/,
+    'the reverted Organization must be RE-READ, or its bell reports a stale all-clear')
 })
 
 test('#14686: an in-flight alerts read cannot land on the wrong Organization', () => {
@@ -397,19 +412,36 @@ test('#14686: an in-flight alerts read cannot land on the wrong Organization', (
   assert.ok(start !== -1, 'loadAlerts must exist in main.jsx')
   const end = main.indexOf('\n  }', start)
   const body = main.slice(start, end)
-  // ⛔ The `orgIdRef.current &&` half is load-bearing. The guard must discard a
-  // KNOWN-but-different Organization — never a NOT-YET-KNOWN one. `completeLogin`
-  // calls `loadAlerts(t.org_id)` and does NOT call `setCurrentOrgId`, and it only
-  // bails above when `orgIdRef.current` is truthy AND differs, so on a fresh
-  // login `orgIdRef` is still null when this response lands. Written without the
-  // falsy allowance, `null !== tid` reads as "stale" and the SIGN-IN'S OWN feed
-  // load is dropped: an empty bell until the next team switch, which is the very
-  // defect this change removes. Asserted in both directions, because the
-  // falsy-blind form still "has a guard" and reads as correct.
+  // ⛔ BOTH HALVES ARE LOAD-BEARING, and they are different claims.
+  //
+  // (a) `orgIdRef.current &&` — the guard must discard a KNOWN-but-different
+  //     Organization, never a NOT-YET-KNOWN one. `completeLogin` calls
+  //     `loadAlerts(t.org_id)` and does NOT call `setCurrentOrgId`, and it only
+  //     bails above when `orgIdRef.current` is truthy AND differs, so on a fresh
+  //     login `orgIdRef` is still null when this response lands. Written without
+  //     the falsy allowance, `null !== tid` reads as "stale" and the SIGN-IN'S OWN
+  //     feed load is dropped: an empty bell until the next team switch, which is
+  //     the very defect this change removes. Asserted in both directions, because
+  //     the falsy-blind form still "has a guard" and reads as correct.
+  // (b) EVERY WRITE, not just the success one — a `match` anywhere in the function
+  //     is satisfied by a guard sitting in the success branch alone: that mutant
+  //     stayed GREEN while the failure arms stamped the previous Organization's
+  //     failed read onto the new one's state ("the alerts could not be loaded"
+  //     about a read the new org never made). So the guard is pinned where it has
+  //     to be — immediately before each write — and both failure arms are counted.
   assert.match(body, /if \(orgIdRef\.current && orgIdRef\.current !== tid\) return/,
     'a response for an Organization that is no longer current must be discarded')
+  // (b) …and where it has to be: before EACH write. A guard anywhere in the body
+  //     is satisfied by one in the success branch, which is the mutant that stayed
+  //     green.
+  assert.match(body, /if \(orgIdRef\.current && orgIdRef\.current !== tid\) return\s*\n\s+setAlerts\(feed\.alerts\)/,
+    'the success write must be discarded when the Organization changed mid-read')
+  const failureGuards = body.match(
+    /if \(orgIdRef\.current && orgIdRef\.current !== tid\) return\s*\n\s+setAlertsUnavailable\(true\)/g) || []
+  assert.equal(failureGuards.length, 2,
+    'BOTH failure arms (non-2xx and throw) must be guarded — not only the success branch')
   assert.doesNotMatch(body, /if \(orgIdRef\.current !== tid\) return/,
-    'the falsy-blind form drops the LOGIN path\'s own read — `orgIdRef` is null there')
+    "the falsy-blind form drops the LOGIN path's own read — `orgIdRef` is null there")
 })
 
 // ── The durable write path (main.jsx) ───────────────────────────────────────
