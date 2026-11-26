@@ -2165,11 +2165,13 @@ test('#14694: an acknowledgement landing must not STRAND the reader when the con
 })
 
 test('#14694: a MUTED row carries the payload\'s identifying half, not only the label', () => {
-  // ⛔ THE LABEL CANNOT IDENTIFY THE EPISODE. Labels are per-RULE and generic by
-  // design — `tortoise/abuse.py:1820` composes `"Access from a new location: " +
-  // country`, and a `flag` row's label is `High activity rate` whatever the rate
-  // was — so the three muted lists, each rendering `label · note`, showed two
-  // snoozed episodes from different COUNTRIES identically. For the acknowledged
+  // ⛔ THE LABEL CANNOT IDENTIFY THE EPISODE. Labels are per TYPE and generic by
+  // design — `tortoise/abuse.py`'s `labels` is keyed by the event `etype`, so a
+  // `flag` row's label is `High activity rate` whatever the rate was — while the
+  // per-row identity travels in the MESSAGE (`abuse.py`'s `messages` composes
+  // `"Access from a new location: " + country`). So the three muted lists, each
+  // rendering `label · note`, showed two snoozed episodes from different
+  // COUNTRIES identically. For the acknowledged
   // group that defeats the reason the group exists: it was added so an org-wide,
   // irreversible decision stays reviewable, and a mis-click could not be
   // inspected afterwards (#14694 review P2). Same payload, three lists, one fix.
