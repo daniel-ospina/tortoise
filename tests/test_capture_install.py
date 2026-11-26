@@ -2784,6 +2784,54 @@ def test_install_does_not_report_a_partly_retired_producer_when_nothing_moved(
         "the entry point moved despite the refusal")
 
 
+def test_legacy_plane_names_a_half_landed_retirement_in_its_receipt(
+        home, monkeypatch):
+    """The LEGACY plane's half of the same receipt rule (#14695 review round 3).
+
+    ``_install_pi``'s legacy arm gained an action for a rename that landed
+    before an OSError — and it had NO test at all: deleting the ``else`` branch
+    that appends it left 315 rows green, so the receipt this branch exists to
+    produce could regress silently. The second producer's plane gets its own row
+    (``test_retire_pi_entry_names_what_landed_when_a_later_rename_raises``);
+    this is the same fact on the plane the legacy extension is retired from,
+    and the failure it prevents is a user told only FAILED over a disk where an
+    entry point has already moved.
+
+    Mutation: drop the ``else: for moved in legacy_renamed`` arm in
+    ``_install_pi`` — the ``could not be fully retired`` assertion REDs while
+    ``index.ts.disabled`` is on disk and named by no action.
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    legacy_disabled = ext_dir / capture_install.PI_DISABLED_DIRNAME
+    legacy_disabled.mkdir(parents=True)
+    (legacy_disabled / "index.ts").write_text("// legacy ts entry\n")
+    (legacy_disabled / "index.js").write_text("// legacy js entry\n")
+
+    real_rename = Path.rename
+
+    def rename_fails_on_js(self, target, *args, **kwargs):
+        if self.name == "index.js":
+            raise PermissionError(1, "Operation not permitted", str(self))
+        return real_rename(self, target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rename", rename_fails_on_js)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, "the install certified a half-retired legacy extension"
+    # ⛔ The receipt must name what moved: the disk is modified, so a bare
+    # FAILED leaves the user to discover it by inspection.
+    named = [a for a in res.actions if "could not be fully retired" in a]
+    assert named, (
+        "a rename landed on disk and no action named it: "
+        f"actions={res.actions} error={res.error!r}")
+    assert "index.ts" in named[0], named[0]
+    assert str(legacy_disabled) in named[0], named[0]
+    assert (legacy_disabled / "index.ts.disabled").read_text() == (
+        "// legacy ts entry\n"), "the retired bytes were not preserved"
+    assert not (legacy_disabled / "index.ts").exists()
+
+
 def test_legacy_obstacle_names_a_symlinked_directory_second_producer(home):
     """The hint must not stay silent on a shape the installer REFUSES and
     MUTATES (#14695 review round 2, finding 1).
