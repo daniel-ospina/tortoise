@@ -115,15 +115,18 @@ version: 1
 # marker, the second copy opening mid-sentence at "INTO, never carried from the branch…", and it
 # carried TWO things this deletion does not silently drop — a `#13450` row attributed to a lane
 # rather than to `main`, which the tree refutes (#13450 landed on `main` in `c1c8df1a` itself), and
-# **a LIVE pool census** ("holds 1339 files at this head against 1338 on `main`"), which is exactly
+# **a LIVE pool census** (a `fast_pool()` file count stated as a live fact about that head, with
+# `main`'s count beside it as the comparison), which is exactly
 # what `test_the_fast_shards_header_states_no_live_pool_census` reds on and what the fenced HISTORY
 # above exists to hold instead. Deleting the copy is therefore the repair, not a loss: the census is
-# a measurement of ONE tree that goes stale on the next fold, so it is not restated anywhere.
+# a measurement of ONE tree that goes stale on the next fold, so it is not restated anywhere as a
+# live claim.
 # ⛔ IT ARRIVED SPLICED ONCE MORE ON THIS LANE'S REBASE ONTO `origin/main` `c1c8df1a3817` — the same
 # driver, the same failure — and there NEITHER copy described that tree: both stated the
-# 827.2/827.3 partition and a `fast_pool()` of 1339, against the 827.4/827.5 and 1340 the verb
-# emitted at that head. Neither copy was picked either; the sentence above was a third fresh
-# re-derivation, and it has since been re-derived again rather than re-pointed.
+# 827.2/827.3 partition, against the 827.4/827.5 the verb emitted at that head. Neither copy was
+# picked either; the sentence above was a third fresh re-derivation, and it has since been
+# re-derived again rather than re-pointed. ⛔ Neither copy's CENSUS is quoted here: a census figure
+# is history and belongs inside the fence, bound to the sha it was measured at.
 # ⛔ AND IT ARRIVED SPLICED A FIFTH TIME AT THE `origin/main` `bbef0b88` FOLD (this head), where the
 # `merge=union` driver applied BOTH parents' derivations once more: this branch's read nine shards
 # at 827.4 s and two at 827.5 s, `main`'s own paragraph — opening mid-sentence, the splice's usual
@@ -131,10 +134,10 @@ version: 1
 # branch's was already inside the fence above). Neither copy was kept: the partition is a fresh
 # `--emit-push-matrix` reading of THIS merged tree — which packs all eleven shards into one bin, so
 # both parents' two-bin readings describe trees that no longer exist — and the census is not
-# restated here at all, because it measures ONE tree and goes stale on the next fold, which is why
-# the fenced HISTORY above exists. ⛔ The 28 m minute did not move across that fold, which is why
-# nothing but the emission guard can catch this class: the arithmetic on the minute agrees either
-# way.
+# restated as a claim about THIS tree at all, because it measures ONE tree and goes stale on the
+# next fold, which is why the fenced HISTORY above exists. ⛔ The 28 m minute did not move across
+# that fold, which is why nothing but the emission guard can catch this class: the arithmetic on the
+# minute agrees either way.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
