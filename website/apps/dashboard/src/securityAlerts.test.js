@@ -105,6 +105,14 @@ test('#10156: the activity lead carries no imperative and no incident claim', ()
   ]) {
     assert.doesNotMatch(ACTIVITY_LEAD, forbidden)
   }
+  // #14702 review P2: the assertion BELOW cannot see the verb its own message
+  // argues for — `[^.]*` matches "changed" as readily as "disabled", so the
+  // word this commit is about has to be pinned positively. Measured: mutating
+  // ACTIVITY_LEAD back to "…nothing was changed, throttled or locked by them."
+  // left all 21 tests green before this line existed.
+  assert.match(ACTIVITY_LEAD, /nothing was disabled, throttled or locked by them\./i,
+    'the ENFORCEMENT claim is the only true one — "changed" is false for a `flag` '
+    + 'row, which writes `organizations.flagged_at`')
   assert.match(ACTIVITY_LEAD, /nothing was [^.]*by them\./i,
     'the activity register must state that nothing was disabled, throttled or '
     + 'locked — SCOPED to the observations. "changed" is deliberately NOT the '
