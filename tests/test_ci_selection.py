@@ -10205,14 +10205,25 @@ _H_14544_NEGATED_ACTOR_CHANGE_RE = re.compile(
     + r"[\s\S]{0,80}?" + _H_14544_CHANGE_VERB
     + r"[\s\S]{0,40}?(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)",
     re.IGNORECASE)
-#: PASSIVE order: the row or the weight FIRST, then a negation, then the change verb. Two guards —
-#: the caller also requires `_H_14544_ACTOR_RE` in the SENTENCE, and the negation here is restricted
-#: to the PAST/PERFECT/`BE` forms — so the two TRUE sentences the round-5 review measured as false
-#: blocks are NOT this claim: "the row was not touched by the reaper" (no cut in the sentence) and
-#: "the row does not touch the shard layout, and `#14544`'s cut is separate" (present ACTIVE: the
-#: row is the agent, not the thing said to be unchanged). Both are fixtures below.
+#: PASSIVE order: `row|row(s)|entry|entries|durations|weight` FIRST, then a negation, then the
+#: change verb. Two guards — the caller also requires `_H_14544_ACTOR_RE` in the SENTENCE, and the
+#: negation here is restricted to the PAST/PERFECT/`BE` forms — `was/were/is/are/has/had never`, the
+#: `… not` forms, and a bare `never` ONLY when the change verb is past (`never moved`, `never
+#: changed`, `never touched`) — so the TRUE sentences the reviews measured as false blocks are NOT
+#: this claim: "the row was not touched by the reaper" (no cut in the sentence), "the row does not
+#: touch the shard layout, and `#14544`'s cut is separate" (present ACTIVE: the row is the agent),
+#: and "the row never touches the shard layout, and `#14544`'s cut is separate" (present tense, not a
+#: past change). All three are fixtures, beside the claim fixture "The weight never moved when that
+#: cut landed." — which the TENSE rule keeps, and a BE-verb-only rule dropped (measured at
+#: `5741a56b`).
 _H_14544_ROW_NEGATION = (
-    r"(?:\bnever\b|did\s+not|didn['\u2019]?t|has\s+not|hasn['\u2019]?t|had\s+not"
+    r"(?:(?:was|were|is|are|has|had)\s+never\b"
+    # a BARE `never` is read only when the change verb is PAST — "the weight never MOVED when that
+    # cut landed" is the claim, while "the row never TOUCHES the shard layout" is honest prose (the
+    # row is the agent). The tense, not the adverb, is what separates them.
+    r"|\bnever\s+(?=(?:moved|changed|rewrote|rewritten|edited|altered|affected|modified|shifted"
+    r"|touched|re-read)\b)"
+    r"|did\s+not|didn['\u2019]?t|has\s+not|hasn['\u2019]?t|had\s+not"
     r"|was\s+not|wasn['\u2019]?t|is\s+not|isn['\u2019]?t|were\s+not|weren['\u2019]?t)")
 _H_14544_NEGATED_ROW_CHANGE_RE = re.compile(
     r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[\s\S]{0,20}?" + _H_14544_ROW_NEGATION
@@ -10247,8 +10258,14 @@ def _h_14544_banned_claim(block: str) -> str | None:
     read, and #14623 round 5 shipped a false sentence GREEN through the same gap).
     """
     for sentence in _H_14544_SENTENCES_RE.split(block):
+        # ⛔ AND THE ACTOR, not only the subject: `weight` is in the subject set because the row
+        # carries one, so requiring the subject alone refused a TRUE sentence about two shard
+        # figures — "the weight of shard a and the weight of shard b are 827.2 s and 827.3 s,
+        # neither of which moved" (measured, #14623 review). A `neither of which` is this claim only
+        # when the cut is named in the same sentence.
         if (_H_14544_ANAPHOR_RE.search(sentence)
-                and _H_14544_ROW_SUBJECT_RE.search(sentence)):
+                and _H_14544_ROW_SUBJECT_RE.search(sentence)
+                and _H_14544_ACTOR_RE.search(sentence)):
             return sentence.strip()
         if _H_14544_NEGATED_ACTOR_CHANGE_RE.search(sentence):
             return sentence.strip()
