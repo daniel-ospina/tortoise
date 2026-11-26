@@ -956,6 +956,62 @@ class TestR1Calibration:
         assert eng.record_point_create("t1", 700, now=T0) == "flag"
         assert store.window_sum("t1", abuse.EVENT_POINT_CREATE, 3600, T0) == 700
 
+    def test_the_band_releases_the_notification_claim(self, notified):
+        """#14687 round-2 review (P1): the band must also RELEASE the in-process
+        notification claim, like the clean window does.
+
+        Sequence that bit: episode flagged → cleared OUT OF BAND (the
+        `abuse_unsuspend` RPC, a manual `flag_clear`) → the next evaluation lands
+        in the band. The claim stayed armed, so a genuine re-breach inside the
+        remaining claim window wrote its row and NEVER notified ops — the same
+        mute #3631 fixed, reached through the new early return.
+
+        Staged on R2 (24h claim, 10 keys/24h, clears at 5): the band is the
+        steady state there, so the claim window is 24 hours wide rather than one,
+
+        and a re-breach inside it is the realistic case rather than a race.
+        """
+        key = abuse.EVENT_KEY_CREATE
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        for _ in range(11):
+            store.record_event("t1", key, created_at=T0)
+        assert eng.evaluate_key_creates("t1", now=T0) == "flag"
+        assert [c[0] for c in notified] == ["abuse_flag"]
+        # The episode is cleared OUT OF BAND (no in-process caller), then the
+        # next evaluation lands in the band: 8 keys, above the 5 clear level.
+        store.record_event("t1", abuse.EVENT_FLAG_CLEAR, rule=key, created_at=T0)
+        store.rows = [r for r in store.rows if r["event_type"] != key]
+        for _ in range(8):
+            store.record_event("t1", key, created_at=T0)
+        assert eng.evaluate_key_creates("t1", now=T0) is None
+        # A real re-breach INSIDE the same 24h claim window must page again.
+        store.rows = [r for r in store.rows if r["event_type"] != key]
+        for _ in range(11):
+            store.record_event("t1", key, created_at=T0)
+        assert eng.evaluate_key_creates("t1", now=T0) == "flag"
+        assert [c[0] for c in notified] == ["abuse_flag", "abuse_flag"], (
+            "the band left the notification claim armed and muted the re-breach")
+
+    def test_a_None_allowance_is_unknown_not_a_zero_tier(self, notified):
+        """#14687 round-2 review (P1): `None` is this contract's word for
+        "cannot answer" (a missing row, a NULL allowance, the selfhost lane).
+        It used to become a floor of 0 AND be cached as a successful read for the
+        full TTL, so a pro org that answered NULL once dropped to the absolute
+        500 level and STAYED there through recovery."""
+        store = _TierStore(allowance=50_000)
+        eng = AbuseEngine(store)
+        assert eng.point_threshold("t1") == 25_000
+        # An expired entry plus an "unknown" answer keeps the last KNOWN floor.
+        store._allowance = None
+        with eng._tier_lock:
+            eng._tier_floor_cache["t1"] = (time.monotonic() - 1, 25_000)
+        assert eng.point_threshold("t1") == 25_000, (
+            "a NULL allowance erased a known tier")
+        # A cold start with nothing known answers the configured absolute level.
+        store2 = _TierStore(allowance=None)
+        assert AbuseEngine(store2).point_threshold("t2") == 500
+
     def test_a_band_dip_still_escalates_once(self, notified, monkeypatch):
         """#14687 round-2 review: the latch keeps the episode OPEN, so its age
         keeps accumulating and stage 2 becomes reachable across a band dip —

@@ -1435,8 +1435,8 @@ class TestAlertRegistersAndAcks:
             # this fixture exists to hold, checked against the string a customer
             # will actually read.
             "Memory writes reached 2,309 units in the last 1 hour, against an "
-            "alert level of 500 units. Nothing was disabled; this is "
-            "informational. If this activity isn't yours, review your API "
+            "alert level of 500 units. This is informational; it did not "
+            "disable anything. If this activity isn't yours, review your API "
             "keys in Keys.",
             # …and the same phrase form where the whole phrase is
             # CUSTOMER-DETERMINED. Note the reason carefully: `engineering` is
@@ -1524,8 +1524,8 @@ class TestAlertRegistersAndAcks:
         # makes true.
         msg = _alert_dict({"event_type": "review_needed", "details": {},
                            "created_at": "2026-09-25T17:19:05+00:00"})["message"]
-        assert "Nothing was disabled" in msg, msg
-        assert "support@premiselabs.co" in msg, msg
+        assert "did not disable anything" in msg, msg
+
         # Every RATE detector shares ONE shape (round-14 finding: recovery_velocity
         # was the only one without the informational clause and read as an
         # incident). Pinning the SHAPE rather than one type's phrase is what makes
@@ -1550,7 +1550,7 @@ class TestAlertRegistersAndAcks:
             assert not re.search(r"(suspicious|incident|compromis|breach|"
                                  r"attack)", m, re.I), (etype, m)
             assert ("did not change anything" in body.lower()
-                    or "nothing was disabled" in body.lower()), (etype, body)
+                    or "did not disable anything" in body.lower()), (etype, body)
             assert ("keys" in body.lower() or "support@" in body.lower()), (
                 etype, body)
         # No WHOLE-STATE claim anywhere: the same panel can carry a suspension
@@ -1564,7 +1564,32 @@ class TestAlertRegistersAndAcks:
                 assert "nothing has been disabled" not in m.lower(), (etype, m)
                 assert "nothing was changed" not in m.lower(), (etype, m)
                 assert "nothing has changed" not in m.lower(), (etype, m)
+                # #14687 round-2 review: the SCAN was spelling-based, and the
+                # first attempt at this copy used a fourth spelling of the same
+                # whole-state claim ("Nothing was disabled") which sailed
+                # through. Unscoped forms are forbidden; the alert-scoped form
+                # ("it did not disable anything") is what the messages use.
+                assert "nothing was disabled" not in m.lower(), (etype, m)
+                assert "nothing is disabled" not in m.lower(), (etype, m)
 
+    def test_the_higher_limit_route_is_offered_only_when_the_level_IS_a_limit(
+            self):
+        """#14687 round-2 review (P2). The sustained alert's "if you need a
+        higher limit, contact support" was justified as true BECAUSE the level is
+        half the org's allowance — but that only holds when the tier floor
+        actually contributed. On the absolute detector constant (selfhost, no tier
+        registry, a cold start, ratio 0) the same sentence would be the untruth
+        this change exists to remove, so the route follows the recorded fact."""
+        tier = _alert_dict({"event_type": "review_needed", "details": {
+            "count": 51_000, "threshold": 25_000, "window_s": 3600,
+            "surface": "Memory writes", "tier_relative": True}})
+        assert "half this Organization's allowance" in tier["message"], tier
+        assert "contact support@premiselabs.co" in tier["message"], tier
+        absolute = _alert_dict({"event_type": "review_needed", "details": {
+            "count": 900, "threshold": 500, "window_s": 3600,
+            "surface": "Memory writes"}})
+        assert "higher limit" not in absolute["message"], absolute
+        assert "review your API keys" in absolute["message"], absolute
     # ── #14687: the alert says why, and Acknowledge sticks ────────────────
 
     def _seed_flag(self, fake, *, at, count=2309, threshold=500, window_s=3600,

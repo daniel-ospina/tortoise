@@ -1490,7 +1490,13 @@ _RULE_SURFACE = {
 #: #14687: the ``abuse_events.details`` keys a CUSTOMER may see. ``rule`` is
 #: deliberately absent — see the comment in ``_alert_dict``'s ``messages``: the
 #: customer is told what was measured, never which internal rule fired.
-_CUSTOMER_DETAIL_KEYS = ("count", "threshold", "window_s", "surface")
+#: ⚠️ STATED RESIDUAL: the ``episode`` identifier on the feed is
+#: ``_episode_key``, whose flag identity includes the rule token, so
+#: ``"flag|point_create|…"`` IS readable in that opaque client field. That leak
+#: predates this change (acks are keyed on it) and is out of scope here; what this
+#: whitelist guarantees is that no PROSE field carries it.
+_CUSTOMER_DETAIL_KEYS = ("count", "threshold", "window_s", "surface",
+                        "tier_relative")
 
 
 def _as_int(value) -> int | None:
@@ -1532,17 +1538,19 @@ def _point_rate_message(details: dict, *, sustained: bool) -> str:
     never a placeholder ``0``, never an assumed window. Old rows predate this
     plumbing and a rule that measures something else may carry none of it.
 
-    ⚠️ The claim is ``Nothing was disabled``, NOT ``did not change anything``.
-    The flag write sets the org's ``flagged_at``, which ``GET /v1/team`` renders
-    as ``status: "flagged"`` — so a whole-state "nothing changed" claim on this
-    row would be contradicted by another field of the same API (round-2 review
-    finding). What IS true, and is what the customer needs, is that no
-    enforcement followed: nothing was disabled, throttled or locked. That is also
-    the owner's own wording on the finding.
+    ⚠️ The claim is ``it did not disable anything`` — scoped by "it" to THIS
+    alert. Not ``did not change anything`` (false: the flag write sets the org's
+    ``flagged_at``, which ``GET /v1/team`` renders as ``status: "flagged"``) and
+    not ``Nothing was disabled`` (an unscoped WHOLE-STATE claim, false whenever
+    the same feed carries a suspension row — round-2 review, both directions).
+    What IS true, and is what the customer needs, is that no ENFORCEMENT followed
+    this measurement: nothing was disabled, throttled or locked by it. That is
+    also the shape the previous `EVENT_REVIEW` string used.
     """
     units = _as_int(details.get("count"))
     level = _as_int(details.get("threshold"))
     window_s = _as_int(details.get("window_s"))
+    tier_relative = bool(details.get("tier_relative"))
     surface = str(details.get("surface") or "").strip()
     if not surface:
         # A row written BEFORE this plumbing carries the rule but no surface.
@@ -1557,6 +1565,11 @@ def _point_rate_message(details: dict, *, sustained: bool) -> str:
                     f"{_human_window(window_s)}")
         if level is not None:
             measured += f", against an alert level of {level:,} units"
+            if tier_relative:
+                # The level is half the org's own allowance, and saying so is
+                # what makes the "higher limit" route below a true statement
+                # rather than a copy line about a detector constant.
+                measured += " (half this Organization's allowance)"
         measured += "."
     elif units is not None:
         measured = f"{surface} reached {units:,} units."
@@ -1565,10 +1578,16 @@ def _point_rate_message(details: dict, *, sustained: bool) -> str:
         # invented number on a security screen is worse than an absent one.
         measured = (f"{surface} crossed our alert level, and this alert did not "
                     "record how far over it the measurement was.")
-    route = ("If you need a higher limit, contact support@premiselabs.co."
-             if sustained else
-             "If this activity isn't yours, review your API keys in Keys.")
-    return (f"{measured} Nothing was disabled; this is informational. "
+    # ROUND 2 (review finding): the "higher limit" route is offered only when the
+    # level really IS a limit — i.e. when the tier floor contributed. On the
+    # absolute detector constant (selfhost, no tier registry, a cold start) that
+    # sentence would be the same untruth this change exists to remove, so those
+    # deployments get the route that is true for any level.
+    if sustained and tier_relative:
+        route = "If you need a higher limit, contact support@premiselabs.co."
+    else:
+        route = "If this activity isn't yours, review your API keys in Keys."
+    return (f"{measured} This is informational; it did not disable anything. "
             f"{route}")
 
 
@@ -2300,13 +2319,18 @@ class AbuseEngine:
         try:
             allowance = self.store.org_allowance(org_id)
         except Exception:  # an unreadable tier is not a verdict
-            with self._tier_lock:
-                stale = self._tier_floor_cache.get(org_id)
-                floor = stale[1] if stale is not None else 0
-                self._tier_floor_cache[org_id] = (
-                    now + _TIER_FLOOR_FAIL_TTL_S, floor)
-            return floor
-        allowance = _as_int(allowance) or 0
+            return self._tier_floor_unknown(org_id, now)
+        allowance = _as_int(allowance)
+        if allowance is None:
+            # #14687 round-2 review: `None` is this store contract's own word for
+            # "cannot answer" (a missing row, a NULL allowance, or the selfhost
+            # lane with no tier registry) — and the first version turned it into
+            # a floor of 0 and cached it as a SUCCESSFUL read for the full
+            # ``_TIER_FLOOR_TTL_S``. A pro org that answered NULL once dropped to
+            # the absolute 500 level and STAYED there through recovery: the same
+            # defect as the exception path, reached through the other spelling of
+            # "unknown". Treated as unknown here too.
+            return self._tier_floor_unknown(org_id, now)
         ratio = _ratio_env("TORTOISE_ABUSE_TIER_FLOOR_RATIO", 0.5)
         floor = int(allowance * ratio) if allowance > 0 else 0
         with self._tier_lock:
@@ -2315,6 +2339,26 @@ class AbuseEngine:
                 self._tier_floor_cache = {
                     k: v for k, v in self._tier_floor_cache.items()
                     if v[0] > now}
+        return floor
+
+    def _tier_floor_unknown(self, org_id: str, now: float) -> int:
+        """#14687: the answer when the tier cannot be read AT ALL.
+
+        Reuse the last KNOWN floor even past its TTL (a tier does not change
+        because a read failed), answer the configured absolute level when nothing
+        has ever been read (cold start — the shipped, more sensitive rule this org
+        had before the tier term existed), and remember the answer briefly so an
+        outage does not cost one blocking ``organizations`` read per capture.
+
+        Never 0-as-a-tier: lowering the level is the direction that CREATES
+        alerts, and this module's standing rule is that a store failure must
+        reduce alert volume, never increase it.
+        """
+        with self._tier_lock:
+            stale = self._tier_floor_cache.get(org_id)
+            floor = stale[1] if stale is not None else 0
+            self._tier_floor_cache[org_id] = (
+                now + _TIER_FLOOR_FAIL_TTL_S, floor)
         return floor
 
     def clear_ratio(self) -> float:
@@ -2397,7 +2441,15 @@ class AbuseEngine:
             logger.debug("abuse record_point_create failed for %s", org_id)
         r1 = self._evaluate(org_id, EVENT_POINT_CREATE,
                             self.point_threshold(org_id), self.point_window_s(),
-                            now)
+                            now,
+                            # #14687: whether the LEVEL is a real limit (the tier
+                            # floor contributed) is a fact the alert has to state,
+                            # because the "higher limit" route is only true when
+                            # it is.
+                            tier_relative=(self.point_threshold(org_id)
+                                           > _int_env(
+                                               "TORTOISE_ABUSE_POINT_THRESHOLD",
+                                               500)))
         r2 = self._evaluate(org_id, EVENT_KEY_CREATE,
                             self.key_threshold(), self.key_window_s(), now)
         # #5425: neither branch can return "suspend" any more — the engine has
@@ -2416,7 +2468,8 @@ class AbuseEngine:
                               _ensure_aware(_utcnow(now)))
 
     def _evaluate(self, org_id: str, rule: str, threshold: int,
-                  window_s: int, now: datetime) -> str | None:
+                  window_s: int, now: datetime,
+                  tier_relative: bool = False) -> str | None:
         try:
             total = self.store.window_sum(org_id, rule, window_s, now)
         except Exception as e:
@@ -2547,6 +2600,8 @@ class AbuseEngine:
             # measured. `_alert_dict` whitelists the customer-visible keys; the
             # rule token stays internal.
             details["surface"] = surface
+            if tier_relative:
+                details["tier_relative"] = True
         try:
             flagged_at = self.store.latest_flag_at(org_id, rule)
         except Exception as e:
@@ -2636,10 +2691,18 @@ class AbuseEngine:
         reachable ONLY from the clean window. The band's early return would
         otherwise postpone it for as long as the rate sits between the two levels
         — and an episode whose incident close failed stays OPEN forever otherwise
-        (the comment on that branch says so). The retry is gated exactly as it is
-        there: only when NO episode is active (otherwise it could close the
-        incident of a NEW episode — the false all-clear #5143 forbids) and only
-        when the store's own backoff pace says it is due.
+        (the comment on that branch says so). The retry is gated on NO EPISODE
+        BEING ACTIVE (otherwise it could close the incident of a NEW episode — the
+        false all-clear #5143 forbids) and on the store's own backoff pace.
+
+        ⚠️ NOT identical to the clean-window gate, and the difference is stated
+        rather than claimed away: that branch also requires ``ended``, which means
+        the ``flag_clear`` WRITE succeeded, while this one has only a READ. A
+        store whose ``flag_clear`` write failed while its read returns a stale
+        ``None`` can therefore close an incident on read evidence alone. The
+        exposure is the same read evidence ``_evaluate`` itself uses to decide the
+        episode ended, and the alternative (writing on the band path) would make
+        a rate measurement mutate state it has no reason to touch.
         """
         try:
             active = self.store.latest_flag_at(org_id, rule) is not None
@@ -2650,6 +2713,18 @@ class AbuseEngine:
                 and (org_id, rule) in self._pending_episode_resolves
                 and self._resolve_retry_due(org_id, rule)):
             self._end_alert_episode(org_id, rule)
+        if not active:
+            # ROUND 2 (review finding P1): the band must also RELEASE the
+            # in-process notification claim, exactly as the clean-window branch
+            # does whenever its read/write SUCCEEDED. Without it, an episode
+            # cleared OUT OF BAND (the `abuse_unsuspend` RPC, a manual
+            # `flag_clear`) left the claim armed, and a genuine re-breach inside
+            # the remaining claim window flagged durably but never notified ops —
+            # the same mute the comment on that branch records as fixed, reached
+            # through the new early return. Measured on R2 (24h claim) it is not a
+            # corner: the band is the steady state for 6–10 keys a day.
+            self._release_notify(org_id, rule, EVENT_FLAG)
+            self._release_notify(org_id, rule, EVENT_REVIEW)
         return "breach" if active else None
 
     def _flag(self, org_id: str, rule: str, details: dict, now: datetime,
