@@ -2830,15 +2830,28 @@ def _is_completed_concession(clause: str) -> bool:
 # after any upgrade, and once the tools appear run …` (#14679 reviews at
 # `ed87479fbb05`, `6239dd051795`, `4f33aad5ff2f`; all measured).
 #
-# SO THE TEST IS DELIBERATELY NEITHER GENERAL NOR SYMMETRIC — it is MONOTONE.
-# Declining the merge can only move a verdict RED→GREEN for the ONE shape whose
-# main clause is visible, and every shape it does not recognise keeps the graded
-# verdict it has today. Nothing here can turn a graded inflection GREEN:
+# SO THE TEST IS DELIBERATELY NEITHER GENERAL NOR SYMMETRIC — it is SCOPED, and
+# CLOSED over the two shapes it decides. ⛔ IT IS NOT MONOTONE IN DIRECTION: it
+# closes a false PASS (GREEN→RED) on the `first`-anchor inversion AND a false RED
+# (RED→GREEN) on ordinary forward copy, and BOTH are correct, each with its own
+# row below. What it DOES guarantee is the property that matters — every shape it
+# does not recognise keeps the graded verdict it has today, so the cut cannot ship
+# a fresh seam: neutralising `_and_half_opens_its_own_clause` flips exactly the 6
+# declared rows that pin these two forms and nothing else (measured).
+#
+# Every verdict in this block is MEASURED at this head, not asserted — the
+# previous cut of it claimed GREEN for row 2 while the row three thousand lines
+# below pinned it `True` (RED), i.e. the same "this function asserts both
+# verdicts" defect the review at `4f33aad5ff2f` closed as P2, reintroduced one
+# round later in the prose. The rows are the guard; this block must agree with
+# them.
 #
 #   GREEN  Restart your client (you should see no errors in the log), and once
 #          the tools are listed run `tortoise mcp-status`.   (its OWN main clause)
-#   GREEN  Restart your client, confirm the tools are actually there first, and
-#          then run a query.                      (a forward sequencer, own clause)
+#   RED    Restart your client, confirm the tools are actually there first, and
+#          then run a query.   (a forward sequencer, own clause — and RED is the
+#          WANTED verdict: with the fold declined, `first` stays clause-final, so
+#          the P1-A false PASS is closed here rather than widened)
 #   RED    Restart your client after confirming the config is right, and once the
 #          tools are actually there.  (a BARE condition — no main clause, so the
 #          half is the cue's second condition: folded in and graded)
@@ -4660,6 +4673,28 @@ def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     else:
         assert violation is None, (
             f"false red on forward copy ({violation!r}): {line!r}")
+
+
+def test_3232_the_and_then_half_reds_for_the_first_anchor_not_by_accident():
+    """⛔ RED FOR THE RIGHT REASON, and the reason is the mechanism's OWN.
+
+    The row that pins `… confirm the tools are actually there first, and then run
+    a query.` as inverted would also pass if some unrelated arm happened to grade
+    the sentence — and then the one shape this cut exists for (`first` stays
+    clause-final because the fold was declined) could regress silently while the
+    row stayed green. So pin the GRADED CLAUSE: the inversion form (d) reports is
+    the `first`-ordered confirmation, which is only clause-final AT ALL because
+    `_and_half_opens_its_own_clause` declined to splice `and then run …` onto it.
+
+    Removing that decline reds the parametrized row through its OWN assertion (the
+    verdict goes GREEN), so this test is not a substitute for non-vacuity — it is
+    what keeps that row meaningful if the verdict ever stays RED for a different
+    cause.
+    """
+    line = ("Restart your client, confirm the tools are actually there first, "
+            "and then run a query.")
+    assert _restart_cue_order_violation(line) == (
+        "confirm the tools are actually there first")
 
 
 def test_3232_every_cue_paragraph_is_graded():
