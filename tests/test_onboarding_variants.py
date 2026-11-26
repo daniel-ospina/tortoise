@@ -1865,7 +1865,7 @@ _INVERSION_FORMS = (
         r"(?:(?:\w+ly|first|already|just|also)\s+)*"
         r"|(?:if|when)\s+(?:you(?:'ve|\u2019ve|\s+have)\s+|you\s+|having\s+)?"
         r"(?:(?:\w+ly|first|already|just|also)\s+)*"
-        r"(?!(?:see|saw|seen|looking|look|list|listing)\b))"
+        r"(?!(?:see(?:s)?|saw|seen|look(?:ing|s|ed)?|list(?:ing|s|ed)?)\b))"
         r"(?:\w+-)?"
         + _CONFIRM_PREDICATE
         + r"[^\n]*?\btools\b" + _NOT_A_DOC
@@ -1971,7 +1971,7 @@ _CONFIG_PREP_RE = re.compile(
     # spelling `_CONFIG_NOUN_RE`'s own comment records as the false RED this arm
     # exists to prevent — was refused here while `config` was exempted.
     r"|\b(?:in|from|inside|per|under)\s+(?:your\s+|the\s+|its\s+)?"
-    r"(?:(?:client|harness|mcp)\s+|[`*_]*[A-Z][\w.-]*(?:'s|\u2019s)?[`*_]*(?:\s+Code)?[`*_]*\s+)?"
+    r"(?:(?:client|harness|mcp)\s+|[`*_]*[A-Z][\w.-]*(?:\s+Code)?(?:'s|\u2019s)?[`*_]*(?:\s+Code)?[`*_]*\s+)?"
     r"(?:[`'\"]?)(?:config|settings|\.mcp\.json)\b",
     re.IGNORECASE)
 # ⛔ AN INSTALLATION-SIDE STATE IS A FILE-SIDE FACT, NOT A SESSION ONE. The
@@ -2581,6 +2581,11 @@ def test_3232_generic_restart_lines_are_exact():
     # (both were RED while the un-quantified twin above is GREEN):
     ("Restart your client once the tools are all installed.", False),
     ("Restart your client once the tools are both configured.", False),
+    # ⛔ THE NEGATED-OBJECT ARM NEEDS AN `after|once` ROW TO BE OBSERVABLE. The
+    # `if|when` rows above are GREEN for the different reason the observation
+    # gate gives them, so deleting the arm left this suite fully green (measured
+    # by the reviewer) — this is the only shape on which the arm itself bites:
+    ("Restart your client after you have seen no tools in the list.", False),
     ("Restart your client once the tools are set up.", False),
     ("Restart your client once the tools are on the allowlist.", False),
     # ── a BARE config mention no longer excuses the clause: the free 40-char
@@ -2744,8 +2749,15 @@ def test_3232_generic_restart_lines_are_exact():
     ("Restart your client when you have rarely seen the tools appear at all.",
      False),
     # …and the gate is the VERB, not an adverb list: any adverb in a CONDITIONAL
-    # clause whose verb is an observation is the symptom, not an inversion:
+    # clause whose verb is an observation is the symptom, not an inversion. The
+    # forms below are the inflections `_CONFIRM_PREDICATE` itself admits — a gate
+    # listing only the base forms graded `rarely LOOKED for the tools` and
+    # `simply LISTED the tools` as confirmations (measured), which is the same
+    # one-word-substitution defect one inflection over:
     ("Restart your client if you see the tools from a previous session.", False),
+    ("Restart your client if you have rarely looked for the tools at all.",
+     False),
+    ("Restart your client if you simply listed the tools in the panel.", False),
     ("Restart your client when you frequently see the tools disappear.", False),
     ("Restart your client if you occasionally see the tools disappear from the "
      "list.", False),
@@ -2805,6 +2817,10 @@ def test_3232_generic_restart_lines_are_exact():
      "settings.", False),
     ("Restart your client after checking the tools are listed in Cursor's "
      "settings.", False),
+    # a TWO-TOKEN client name takes the possessive after `Code`, not before it
+    # (measured RED while its one-token twin above is GREEN):
+    ("Restart your client after checking the tools are listed in Claude "
+     "Code's settings.", False),
     # a quantifier between the object and its verb is the same claim, and form
     # (e)'s copula arm already admitted it (measured GREEN before):
     ("Restart your client once the tools all appear.", True),
