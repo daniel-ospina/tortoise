@@ -1983,7 +1983,7 @@ _PRE_CUE_ONLY = _inversion_form(
     # row this file pins (#14679 review round 6). English stacks them (Wikipedia
     # `English modal verbs` §11 "Modals at the head of chains", §8.7 "Need"), so
     # the chain is the unit, not the single member.
-    r"(?:(?:you(?:\s+|['\u2019](?:ll|d|re|ve)\s+))?"
+    r"(?:(?:(?:you|one)(?:\s+|['\u2019](?:ll|d|re|ve)\s+))?"
     # …and the adverb run REPEATS AFTER the subject too: `You first must confirm …`
     # places one between the pronoun and the modal, which the single pre-subject
     # run could not reach (#14679 review round 6).
@@ -2003,6 +2003,20 @@ _PRE_CUE_ONLY = _inversion_form(
     # its own run before `to`.
     r"(?:(?:need|have|want)\s+(?:(?:" + _ADVERBS + r")\s*,?\s+)*to"
     r"|be\s+able\s+to|be\s+going\s+to|going\s+to|must|should|can"
+    # \u26d4 THE PERIPHRASTIC MODALS ARE THE SAME INSTRUCTION, and the first cut of
+    # this slot carried only the auxiliaries. `You are required to confirm the
+    # tools are actually there` measured GREEN while `You must confirm \u2026` is a
+    # declared-RED row, and so did 14 more spellings a doc might plausibly use
+    # (`you've got to`, `you're supposed/expected/advised/meant/obligated to`,
+    # `you've to`, `one has to` \u2026) \u2014 #14679 review at `eeb42a4f`, measured:
+    # 15 of 18 constructed periphrastic spellings graded GREEN. `be <participle>
+    # to` is one construction, so it is graded as one arm rather than by
+    # enumerating the participles one review at a time; `have to` and
+    # `have got to` differ only by a filler `got`, which is the same
+    # ONE-INSERTED-WORD defect this file closes everywhere else.
+    r"|(?:(?:are|is|am|be|will|would|should|may|might|can|could|['\u2019]re)\s+)*"
+    r"(?:required|supposed|expected|advised|meant|obligated|allowed|asked)\s+to"
+    r"|(?:have|has|['\u2019]ve)\s+(?:got\s+)?to|got\s+to"
     # ⛔ `had better` IS THE SAME MODAL, AND THE FILE SAYS SO TWICE. This form
     # omitted it while `_NEGATED_CUE_LEAD_RE` admits `\b(?:had|'d|\u2019d)\s+better\s+not`
     # and its comment declares "`ought` AND `had better` ARE THE SAME LEAD" —
@@ -3781,6 +3795,45 @@ _ASIDE_RE = re.compile(
     r",\s*(?:in|on|under|from|per|within|inside|via|at)\b[^,]{1,80}?,\s*",
     re.IGNORECASE,
 )
+# ⛔ WHAT THE ASIDE IS REPLACED WITH DEPENDS ON WHAT FOLLOWS IT, and one
+# substitution cannot serve both shapes (#14679 review at `eeb42a4f`, measured):
+#
+#   WEDGE      predicate , aside , its OWN OBJECT      → remove WHOLE, no comma
+#              `after verifying, in the client's list, that the tools …`
+#              must become `after verifying that the tools …`; keeping a comma
+#              splits the predicate from its object again and the row goes GREEN.
+#   BOUNDARY   clause , aside , the NEXT CLAUSE         → keep ONE comma
+#              `… the config is right, in the client settings, but first confirm …`
+#              must become `… is right, but first confirm …`; removing the comma
+#              GLUES the two clauses (`right but first confirm`), so the `^`-
+#              anchored forms (c) and (f) can never reach an inversion that is
+#              still there. That was ONE substitution away from re-opening nine
+#              declared-RED rows at `eeb42a4f` (measured: 9 GREEN twins over the
+#              190 sweepable rows, 47 with both strips removed).
+#
+# The discriminator is the token AFTER the aside: an OBJECT continuation (a
+# determiner, a pronoun, `that`, a backticked token) means the aside sat inside
+# one clause; anything else begins a new clause. `*` is deliberately NOT an
+# object continuation: `,**confirm the tools**` is a DECORATED IMPERATIVE, which
+# is a new clause and must keep its comma.
+_ASIDE_OBJECT_TAIL_RE = re.compile(
+    r"(?:that|which|who|the|a|an|your|our|its|their|this|these|those"
+    r"|they|them|it|`)\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_asides(text: str) -> str:
+    """Remove comma-delimited prepositional asides, keeping the seam right.
+
+    See the block above: a WEDGE is removed whole (the predicate must reconnect
+    to its own object), a BOUNDARY keeps exactly one comma (the next clause must
+    stay clause-initial).
+    """
+    def _repl(match: re.Match[str]) -> str:
+        return " " if _ASIDE_OBJECT_TAIL_RE.match(text, match.end()) else ", "
+
+    return _ASIDE_RE.sub(_repl, text)
 
 
 def _paragraph_cue_order_violation(para: str) -> str | None:
@@ -3795,7 +3848,7 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     # ⛔ THE ASIDE IS STRIPPED ON THIS SIDE TOO — see `_ASIDE_RE`'s block. Without
     # it the aside becomes the clause that governs the cue and form (f) never
     # fires, which is a false PASS of the canonical inversion (measured).
-    before = _ASIDE_RE.sub(" ", before)
+    before = _strip_asides(before)
     pre_statements = [s for s in _STATEMENT_BREAK_RE.split(
         before.lstrip(" \t,.;:—–-")) if s.strip()]
     # ⛔ AND EACH CLAUSE, not just the statement: the LAST clause is what form (f)
@@ -3838,7 +3891,7 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     # so a trailing aside (no closing comma) and every `, then|and|but …` clause
     # are untouched — the declared rows are the guard on that (626 of them when
     # this arm landed at `8c96f5de`; the count names its sha because it rots).
-    post_sentence = _ASIDE_RE.sub(" ", post_sentence)
+    post_sentence = _strip_asides(post_sentence)
     post_clauses = [c.strip() for c in post_sentence.split(",")]
     # ⛔ AN `and`-LED CLAUSE CONTINUES THE PREVIOUS ONE — UNLESS IT OPENS ITS OWN
     # FORWARD CLAUSE. Splitting at the comma made the second half its own clause,
@@ -6236,6 +6289,46 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "restart your client.", False),
     ("Confirm the tools are actually there, the ones listed under MCP, then "
      "restart your client.", False),
+    # ── cycle 52 — the aside at a CLAUSE BOUNDARY, and the periphrastic modals ──
+    # ⛔ `_ASIDE_RE`'s match includes the aside's LEADING comma, so replacing it
+    # with a bare space GLUED two clauses together and the `^`-anchored forms (c)
+    # and (f) could never reach an inversion that was still there — the fix from
+    # cycle 50/50c was one substitution away from re-opening these (#14679 review
+    # at `eeb42a4f`, measured):
+    #
+    #     RED    … the config is right, but first confirm the tools are actually there.
+    #     GREEN  … the config is right, in the client settings, but first confirm …
+    #
+    # `_strip_asides` now keeps ONE comma when the token after the aside begins a
+    # new clause, and removes the aside whole when it continues the same clause
+    # (an object tail: a determiner, a pronoun, `that`, a backticked token).
+    ("Restart your client after confirming the config is right, in the client "
+     "settings, but first confirm the tools are actually there.", True),
+    ("Delete the old entry, in the client's MCP/tool list, but first confirm the "
+     "tools are actually there. Restart your client.", True),
+    ("Delete the old entry, in the client's MCP/tool list, **confirm the tools "
+     "are actually there**. Restart your client.", True),
+    ("Restart your client after saving the config, in the settings page, and "
+     "confirm the tools are actually there.", False),
+    # ⛔ THE PERIPHRASTIC MODALS ARE THE SAME INSTRUCTION. The modal slot carried
+    # only the auxiliaries, so 15 of 18 periphrastic spellings a doc might
+    # plausibly use graded GREEN while their `You must …` twin is declared RED
+    # (#14679 review at `eeb42a4f`, measured).
+    ("You are required to confirm the tools are actually there. Restart your "
+     "client, then run a query.", True),
+    ("You will be required to confirm the tools are actually there. Restart "
+     "your client, then run a query.", True),
+    ("You're supposed to confirm the tools are actually there. Restart your "
+     "client, then run a query.", True),
+    ("You've got to confirm the tools are actually there. Restart your client, "
+     "then run a query.", True),
+    ("One must confirm the tools are actually there. Restart your client, then "
+     "run a query.", True),
+    # ⛔ DECLARED RESIDUAL: the SUBJECTLESS-CONTRACTION spelling `You've to` \u2014
+    # non-standard English (the standard forms are `you have to` / `you've got
+    # to`, both graded RED), so it is declared rather than given its own arm.
+    ("You've to confirm the tools are actually there. Restart your client, then "
+     "run a query.", False),
     # ── cycle 50b — the ANAPHOR and the doc's own token are the object too ──
     # ⛔ `_TOOLS_OBJECT` graded only `tools` / `tool list` / `tools list`, so a
     # PRONOUN standing for the tools — and the token `docs/quickstart-cloud.md:135`
