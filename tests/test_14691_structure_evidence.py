@@ -3927,3 +3927,85 @@ def _producer_answered(reply, call=None):
     exec(compile(dedented, "run_readback.py:answers", "exec"), namespace)
     return namespace["_answered"](call if call is not None
                                   else {"ok": True, "reply": reply})
+
+
+def _cited_range(text: str):
+    """`(path, start, end, lines)` for the first `file.py:start-end` in `text`."""
+    span = re.search(r"((?:tortoise/)?[\w/]+\.py):(\d+)-(\d+)", text or "")
+    assert span, f"no citation to check: {text!r}"
+    path, start, end = span.group(1), int(span.group(2)), int(span.group(3))
+    target = REPO / path if (REPO / path).is_file() else REPO / "tortoise" / path
+    assert target.is_file(), f"cited file does not exist: {path}"
+    lines = target.read_text().splitlines()[start - 1:end]
+    assert lines, f"{path}:{start}-{end} is empty"
+    return path, start, end, "\n".join(lines)
+
+
+def test_every_DOOR_finding_citation_names_CODE_it_can_actually_be_about():
+    r"""Reds if any door finding's `code_path`/citation says it says — all six.
+
+    ⛔ #14691 review, round 10. The round-9 arm pinned D4's range; the reviewer then
+    measured the SAME defect on the other three findings — every one of these is
+    byte-neutral, keeps the artifact's size and re-derives cleanly:
+      D1: `hasPart` → `ownedBy` in `structural_edges_seen`; `551-559` → `533-541`;
+          `navigation.py:172-179` → `:166-173`
+      D3: `bare_returned` `0/0` → `2/3`, which contradicts its own "EMPTY list"
+      D6: `sdk.py:62739-62758` → `:61000-61019`, unrelated code
+    A citation is a claim about a LINE RANGE, so each range is read out of the
+    file and asked whether it is about the thing it is cited for.
+    """
+    score = _score()
+    readback = _readback()
+    findings = {f["id"]: f for f in readback["door_findings"]}
+    for finding in score["door_findings"]:
+        findings.setdefault(finding["id"], finding)
+
+    # ── D1: the predicate list, and both citations
+    d1 = findings["D1"]["evidence"]
+    epistemic = {"IMPL", "NAND"}
+    structural = {p for p in score["edges_by_predicate"] if p not in epistemic}
+    seen = set(d1["structural_edges_seen"])
+    # the four the door actually surfaced (the graph also carries `produces` and
+    # `related`, which this probe did not touch), each one a REAL predicate — so a
+    # member swapped for another (`hasPart` → `ownedBy`) is a lost predicate, and a
+    # member invented is not in the graph at all.
+    assert seen == {"dependsOn", "hasPart", "managedBy", "ownedBy"}, sorted(seen)
+    assert seen <= structural, sorted(seen - structural)
+    assert seen.isdisjoint(epistemic)
+    _, _, _, union_lines = _cited_range(d1["explore_connections"])
+    assert "UNION" in union_lines.upper(), (
+        f"D1 cites {d1['explore_connections']!r} for the undirected read; those "
+        f"lines carry no UNION: {union_lines[:120]!r}")
+    _, _, _, expand_lines = _cited_range(d1["expand_relationships"])
+    for predicate in ("IMPL", "NAND", "hasPart"):
+        assert predicate in expand_lines, (
+            f"D1's expand citation no longer covers {predicate}: "
+            f"{expand_lines[:120]!r}")
+
+    # ── D3: the counts must be the probes they name
+    d3 = findings["D3"]["evidence"]
+    probes = readback["bare_kind_probes"]
+    derived = {name: len(_rows(call.get("reply"))) for name, call in probes.items()}
+    assert d3["bare_returned"] == derived, (
+        f"D3 says the bare spelling returned {d3['bare_returned']}; the probes "
+        f"returned {derived} — a NON-empty bare answer would refute the finding")
+    assert d3["silent_zero_for"] == [n for n, n_rows in derived.items() if not n_rows]
+    assert all(call.get("ok") is not False for call in probes.values()), (
+        "a bare-kind probe FAILED; its emptiness is not a measurement")
+
+    # ── D6: the citation and the owners it says were asked
+    d6 = next(f for f in score["door_findings"] if f["id"] == "D6")["evidence"]
+    _, _, _, owned_lines = _cited_range(d6["code_path"])
+    assert "ownedBy" in owned_lines, (
+        f"D6 cites {d6['code_path']!r} for the ownership read; those lines never "
+        f"mention `ownedBy`: {owned_lines[:160]!r}")
+    asked = [n for n, w in readback["link_witness"].items()
+             if (w.get("governance_owned_by") or {}).get("reply") is not None
+             and _rows((w["governance_owned_by"] or {}).get("reply")) == []]
+    assert d6["owners_asked"] == sorted(n for n in asked
+                                        if n in set(d6["owners_asked"])), (
+        f"D6 says it asked {d6['owners_asked']}; the witnesses answered nothing "
+        f"for {sorted(asked)}")
+    assert set(d6["rows_returned"]) == set(d6["owners_asked"])
+    assert not any(d6["rows_returned"].values()), (
+        "D6 claims the ownership door returned rows; that refutes the finding")
