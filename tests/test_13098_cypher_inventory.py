@@ -1548,6 +1548,173 @@ def test_a_repository_BETWEEN_ROOT_and_the_destination_cannot_permit_what_it_tra
         "repository that tracks the path was neither of them")
 
 
+def test_a_LINKED_WORKTREE_boundary_cannot_permit_what_it_tracks(
+    tmp_path, monkeypatch, capsys
+):
+    """…and a boundary is a boundary whether its `.git` is a DIRECTORY or a FILE.
+
+    ⛔ A DECLARED SHAPE WITH NO ARM IS HOW ROUNDS 5, 7, 8, 10 AND 11 EACH SHIPPED A
+    FAIL-OPEN (#14625 review, round 12, P2, measured). `_destination_probes` decides a
+    boundary with `os.path.lexists(boundary / ".git")`, whose docstring names three
+    shapes: a nested repository (`.git` directory), a LINKED WORKTREE (a `.git` FILE
+    holding `gitdir:`), and a submodule's gitlink. BOTH boundary arms above build `.git`
+    DIRECTORIES, so a one-token refactor to `(boundary / ".git").is_dir()` deleted the
+    worktree boundary with the suite GREEN — measured: the shape below then answered
+    PERMIT and overwrote content the worktree's repository held in its index AND HEAD,
+    while every arm passed.
+
+    `.worktrees/` is this fleet's standard lane layout, so the shape is the PRODUCTION
+    one, not an exotic nesting: the intermediate boundary here is a real
+    `git worktree add` checkout, its `.git` is a FILE, and the repository it belongs to
+    tracks the destination.
+
+    This arm pins the FILE form: revert `lexists` to `is_dir` and it reds.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    config = ["-c", "user.email=a@b", "-c", "user.name=a"]
+    # The repository the intermediate boundary BELONGS to — a separate checkout, so the
+    # worktree's `.git` is a FILE that names this gitdir rather than a directory.
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    source_keeper = source / "inner" / "docs" / "DOC.md"
+    source_keeper.parent.mkdir(parents=True)
+    source_keeper.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "add", "--", "inner/docs/DOC.md"],
+                   check=True)
+    subprocess.run(["git", "-C", str(source), *config, "commit", "-qm", "source tracks it"],
+                   check=True)
+    wt = repo / "wt"
+    subprocess.run(["git", "-C", str(source), "worktree", "add", "-q", str(wt),
+                    "-b", "wt-branch"], check=True)
+    # ⛔ THE KEEPER IS THE WORKTREE'S OWN COPY, not the source's: the destination has to
+    # sit under ROOT for the in-ROOT branch to be graded, and the write must be able to
+    # reach the file the WORKTREE's repository tracks.
+    keeper = wt / "inner" / "docs" / "DOC.md"
+    # ⛔ THE PREMISE, ASSERTED WHERE IT IS CONSTRUCTED: this only grades the FILE form if
+    # the boundary's `.git` really is a file. A git that ever materialised a worktree as
+    # a directory would make this arm a duplicate of the two above rather than a new one.
+    assert (wt / ".git").is_file() and not (wt / ".git").is_dir(), (
+        "the premise: a linked worktree's `.git` must be a FILE; got "
+        f"is_file={(wt / '.git').is_file()} is_dir={(wt / '.git').is_dir()}")
+    # The nested repository BELOW the boundary, committed WITHOUT the keeper — the shape
+    # that makes the innermost provider answer "untracked", so only the worktree
+    # boundary can refuse. NOT via `git add -A`: that would put the keeper in the nested
+    # index and the destination half would refuse for the wrong reason (the vacuous
+    # fixture trap the round-10 reviewer hit).
+    inner = wt / "inner"
+    subprocess.run(["git", "-C", str(inner), "init", "-q"], check=True)
+    (inner / "placeholder.txt").write_text("unrelated\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(inner), "add", "--", "placeholder.txt"], check=True)
+    subprocess.run(["git", "-C", str(inner), *config, "commit", "-qm", "unrelated"],
+                   check=True)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    rel = keeper.relative_to(repo).as_posix()
+    # ALL THREE HALVES OF THE PREMISE MEASURED, so a refusal cannot come from the wrong
+    # provider: ROOT must not know the path, the WORKTREE must, the nested repo must not.
+    for what, cwd, spec, want in (
+        ("ROOT", repo, rel, 1),
+        ("the LINKED WORKTREE", wt, "inner/docs/DOC.md", 0),
+        ("the NESTED repository", inner, "docs/DOC.md", 1),
+    ):
+        answer = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", spec],
+            cwd=cwd, capture_output=True, text=True, env=census._git_env(),
+        )
+        assert answer.returncode == want, (
+            f"the premise: {what} must answer rc={want} about {spec}; got "
+            f"rc={answer.returncode} — without that this arm grades some other provider")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", rel])
+    assert rc == 2, (
+        f"a LINKED-WORKTREE boundary must not permit what its repository tracks, got "
+        f"{rc} — a `.git` FILE is a boundary exactly like a `.git` directory, and "
+        "`is_dir()` in place of `lexists` silently deletes it from the walk")
+    err = capsys.readouterr().err
+    assert "TRACKED path" in err, f"the refusal must name the tracked path; stderr:\n{err}"
+    assert keeper.read_bytes() == before, (
+        "tracked content was overwritten: the worktree's `.git` is a FILE and the walk "
+        "did not treat it as a repository boundary")
+
+
+def test_a_repository_ABOVE_ROOT_cannot_permit_what_it_tracks(
+    tmp_path, monkeypatch, capsys
+):
+    """…and ROOT is not a fence: a repository ABOVE it is a boundary too.
+
+    ⛔ THE WALK USED TO STOP AT ROOT (#14625 review, round 12, P2, measured). It was
+    justified by "a linked worktree's ancestors include the MAIN checkout, which tracks
+    the same relative paths" — and that justification is FALSE, measured: the main
+    checkout is asked with the WORKTREE-RELATIVE remainder (`.worktrees/<lane>/docs/…`),
+    which it does not track, so `ls-files --error-unmatch` answers rc 1 and permits. The
+    stop bought no protection and cost the outermost provider, leaving this shape open:
+    `outer` commits `inner/sub/docs/DOC.md`; `inner` is a repository created later whose
+    commit does not name it; ROOT is `inner/sub`. `--render docs/DOC.md` exited **0** and
+    replaced 8 bytes of content `outer`'s index AND HEAD both hold.
+
+    This arm pins the walk PAST ROOT: reinstate the stop and it reds.
+    """
+    config = ["-c", "user.email=a@b", "-c", "user.name=a"]
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    subprocess.run(["git", "init", "-q", str(outer)], check=True)
+    keeper = outer / "inner" / "sub" / "docs" / "DOC.md"
+    keeper.parent.mkdir(parents=True)
+    keeper.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(outer), "add", "--", "inner/sub/docs/DOC.md"],
+                   check=True)
+    subprocess.run(["git", "-C", str(outer), *config, "commit", "-qm", "outer tracks it"],
+                   check=True)
+    # The nested repository BETWEEN the above-ROOT repository and ROOT, committed WITHOUT
+    # the keeper — so the INNERMOST provider permits and only the repository ABOVE ROOT
+    # can refuse.
+    inner = outer / "inner"
+    subprocess.run(["git", "-C", str(inner), "init", "-q"], check=True)
+    (inner / "placeholder.txt").write_text("unrelated\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(inner), "add", "--", "placeholder.txt"], check=True)
+    subprocess.run(["git", "-C", str(inner), *config, "commit", "-qm", "unrelated"],
+                   check=True)
+    top = inner / "sub"
+    monkeypatch.setattr(census, "ROOT", top)
+    src = top / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", top / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # THE PREMISE, MEASURED: ROOT itself holds no repository (so its own probe answers
+    # from the INNERMOST enclosing one, a permit), that innermost repository permits, and
+    # the ONLY provider that tracks the path is the repository ABOVE ROOT.
+    assert not (top / ".git").exists(), (
+        "the premise: ROOT must not itself be a repository, or the walk would be "
+        "asking a provider inside it rather than one above")
+    for what, cwd, spec, want in (
+        ("the INNERMOST repository", inner, "sub/docs/DOC.md", 1),
+        ("the repository ABOVE ROOT", outer, "inner/sub/docs/DOC.md", 0),
+    ):
+        answer = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", spec],
+            cwd=cwd, capture_output=True, text=True, env=census._git_env(),
+        )
+        assert answer.returncode == want, (
+            f"the premise: {what} must answer rc={want} about {spec}; got "
+            f"rc={answer.returncode} — without that this arm grades some other provider")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", keeper.relative_to(top).as_posix()])
+    assert rc == 2, (
+        f"a repository ABOVE ROOT must not permit what it tracks, got {rc} — stopping "
+        "the walk at ROOT drops the outermost provider, and a worktree lane is asked "
+        "with a remainder its main checkout does not track, so the stop protects nothing")
+    err = capsys.readouterr().err
+    assert "TRACKED path" in err, f"the refusal must name the tracked path; stderr:\n{err}"
+    assert keeper.read_bytes() == before, (
+        "tracked content was overwritten: the repository above ROOT was never asked")
+
+
 def test_a_repository_ABOVE_an_OUT_of_ROOT_destination_cannot_permit_what_it_tracks(
     tmp_path, monkeypatch, capsys
 ):
@@ -4958,6 +5125,15 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # rc 0. Every in-ROOT arm stays green with the walk deleted from that branch, so
         # this is the only arm that pins it.
         "test_a_repository_ABOVE_an_OUT_of_ROOT_destination_cannot_permit_what_it_tracks",
+        # ⛔ AND THE BOUNDARY WHOSE `.git` IS A FILE (#14625 review, round 12, P2): the
+        # two arms above build `.git` DIRECTORIES, so `lexists` -> `is_dir()` in
+        # `_destination_probes` deleted the linked-worktree boundary and left the whole
+        # suite green. This is the only arm that pins the FILE form.
+        "test_a_LINKED_WORKTREE_boundary_cannot_permit_what_it_tracks",
+        # ⛔ AND THE PROVIDER ABOVE ROOT (#14625 review, round 12, P2): the walk stopped
+        # at ROOT, so a repository ABOVE it was never asked and the same fail-open
+        # exit 0. This is the only arm that pins the walk past ROOT.
+        "test_a_repository_ABOVE_ROOT_cannot_permit_what_it_tracks",
     }
     # ⛔ AND THE SET'S OWN SIZE — the direction `missing` structurally cannot see.
     # `missing` reds for a NAME that no longer resolves; it stays GREEN for a member
@@ -4968,8 +5144,12 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 56, (
-        f"expected EXACTLY 56 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
+    # ⛔ AND THE LINKED-WORKTREE BOUNDARY TAKES IT 56 -> 57: the FILE-form boundary was
+    # the one declared shape with no arm, and the same round reported it.
+    # ⛔ AND ROOT-IS-NOT-A-FENCE TAKES IT 57 -> 58: a repository ABOVE ROOT was one more
+    # provider the stop silently dropped, and the same round measured it.
+    assert len(split_arms) == 58, (
+        f"expected EXACTLY 58 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
     missing = sorted(split_arms - defined)
@@ -5034,13 +5214,15 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # the repository ABOVE it — so the probe returned the enclosing repository's permit
     # and the damaged repository's committed bytes were overwritten at rc 0 (#14741
     # review, P2, measured).
-    # ⛔ AND THE SHAPES `lexists` CANNOT SEE TAKE IT 114 -> 115 (`split_arms` 55 -> 56):
-    # a `.git` that is PRESENT and RESOLVABLE but disowned by git (HEAD removed,
-    # objects/ removed, a symlink to a non-gitdir) was probed, git walked up and answered
-    # as the ENCLOSING repository, and `--render` overwrote the damaged repository's
-    # committed bytes at rc 0 (#14741 review, cycle 2, P1, measured).
-    assert len(test_functions) == 115, (
-        f"expected EXACTLY 115 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
+    # ⛔ AND THE LINKED-WORKTREE BOUNDARY TAKES IT 115 -> 116 (`split_arms` 56 -> 57):
+    # the FILE-form boundary was a declared shape with no arm, and a one-token
+    # `lexists` -> `is_dir()` reopened the fail-open with the suite green (#14625
+    # review, round 12, P2).
+    # ⛔ AND WALKING PAST ROOT TAKES IT 116 -> 117 (`split_arms` 57 -> 58): a repository
+    # ABOVE ROOT was never asked, measured as a fail-open at rc 0 (#14625 review,
+    # round 12, P2 — the same round that falsified the stop's own justification).
+    assert len(test_functions) == 117, (
+        f"expected EXACTLY 117 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
 

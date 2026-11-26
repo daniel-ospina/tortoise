@@ -1318,15 +1318,23 @@ def _destination_probes(
     # unmounted gitdir still counts) or a bare gitdir's own three markers.
     chain: list[Path] = []
     cursor = target.parent
-    # ⛔ STOPPING AT ROOT FOR A DESTINATION UNDER IT IS LOAD-BEARING, and it is why this
-    # is `stop` rather than dropping the term: a linked worktree's ancestors include the
-    # MAIN checkout, which is a repository that tracks the same relative paths — walking
-    # past ROOT there would refuse `--render docs/...` in every worktree lane. `None`
-    # only where there is no ROOT below the destination, i.e. the destination is outside
-    # it, and there the walk must reach the filesystem root because the outermost
-    # repository is then a repository that is not ROOT.
-    stop = ROOT if rel is not None else None
-    while cursor != stop and cursor != cursor.parent:
+    # ⛔ THE WALK REACHES THE FILESYSTEM ROOT FOR **BOTH** BRANCHES, AND ROOT IS NOT A
+    # STOP (#14625 review, round 12, P2, measured). It used to stop at ROOT for a
+    # destination under it, justified by "a linked worktree's ancestors include the MAIN
+    # checkout, which is a repository that tracks the same relative paths". ⛔ THAT
+    # JUSTIFICATION IS FALSIFIED BY MEASUREMENT: a real `git worktree add` lane is asked
+    # by the main checkout with the WORKTREE-RELATIVE remainder
+    # (`.worktrees/<lane>/docs/…`), which the main checkout does NOT track — `ls-files
+    # --error-unmatch` answers **rc 1**, a permit — so the stop bought no protection and
+    # cost the outermost provider. The shape it left open is the round-10 one with the
+    # remaining repository ABOVE ROOT: `/outer` committing `inner/sub/docs/DOC.md`,
+    # `/outer/inner` a repository created later whose commit does not name it, and ROOT
+    # `/outer/inner/sub` — `--render docs/DOC.md` exits **0** and replaces content
+    # `/outer`'s index AND HEAD both hold. A repository above ROOT is exactly as entitled
+    # to refuse as one below it, and the loop already terminates at
+    # `cursor == cursor.parent`, so no stop is needed at all: dropping it can only add
+    # providers, which is the MONOTONE direction.
+    while cursor != cursor.parent:
         chain.append(cursor)
         cursor = cursor.parent
     for boundary in reversed(chain):
