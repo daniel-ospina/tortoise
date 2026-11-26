@@ -2812,53 +2812,33 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
     #     GREEN  Restart your client (you should see no errors in the log), and
     #            once the tools are listed run `tortoise mcp-status`.
     #     RED    the same sentence, after the splice landed in `remainder`
-    # The merge therefore declines a clause whose post-`and` text opens a forward
-    # clause of its own — BUT ONLY WHEN THE PREDECESSOR IS NOT ITSELF A DEFERRAL.
-    # ⛔ WHETHER AN `and <opener>` HALF IS A FRESH STATEMENT OR THE SECOND CONJUNCT
-    # OF A CONDITION IS A PROPERTY OF THE PREDECESSOR, NOT OF THE HALF. Deciding
-    # from the half alone shipped a FALSE PASS one inserted word from this very
-    # commit's own declared-RED row (#14679 review at `ed87479fbb05`, measured):
+    # ⛔ REVERTED: the `and <opener>` disambiguation was tried THREE TIMES in this
+    # branch (decline from the half's own opener; decline only when the half opens
+    # a forward clause; decline only when the predecessor is not a condition) and
+    # each cut shipped a fresh seam — a false PASS, then a markdown hole, then a
+    # FALSE RED on `Restart your client after any upgrade, and once the tools
+    # appear run …` because `_CONDITION_LEAD_RE` fired on a bare post-cue
+    # ADVERBIAL that governs nothing (all three measured by fresh reviewers at
+    # `ed87479fbb05` and `6239dd051795`). The mechanism is REMOVED rather than
+    # given a fourth arm: it is the one place in this function where "is this
+    # half a new statement or a second conjunct?" is a semantic judgement a regex
+    # cannot make, and the cost of guessing wrong here is a #3429 false red on
+    # ordinary copy. The residual it leaves is recorded on #14717:
     #
-    #     RED    Restart your client after confirming the config is right, and
-    #            the tools are actually there.
-    #     GREEN  Restart your client after confirming the config is right, and
-    #            ONCE the tools are actually there.        ← must be RED
+    #     GREEN (want RED)   Restart your client after confirming the config is
+    #                        right, and once the tools are actually there.
     #
-    # and it reds the un-conjoined twin (`Restart your client once the tools are
-    # actually there.`), so the two differ only by which side of the comma the
-    # same words sit on. `_CONDITION_LEAD_RE` therefore keeps the merge when the
-    # predecessor opened a deferral/condition — which is exactly the
-    # config-conjunction case the merge exists for (`:2521`'s recorded mechanism)
-    # — and declines it only for a plain predecessor, where the `and <opener>`
-    # really is a new forward statement.
-    # ⛔ AND THE TEST READS A DECORATION-FREE COPY. `lstrip(_PRE_CUE_PREFIX)`
-    # strips only LEADING decoration, so `**and**` became `and**`, `^and\b`
-    # passed and the lookahead's `\s+` did not — the clause merged and the false
-    # red this commit removes came straight back, byte-identical, on a one-markdown
-    # edit (measured). `_SEQUENCER_TAIL_RE` and form (f) already search a
-    # `_DECORATION_RE`-free copy for this reason; this was the one site that did
-    # not.
-    _AND_CONTINUATION_RE = re.compile(
-        r"(?i)^and\b(?!\s+(?:then|once|when|after|next|afterwards?|now)\b)")
-    _CONDITION_LEAD_RE = re.compile(
-        r"(?i)^[\s,.;:—–-…('\"`*>#_\[\]{}]*"
-        r"(?:after|before|once|when|whenever|if|unless|until|having|while)\b")
+    # — reachable only when the `and`-half carries its own forward opener AND the
+    # predecessor opened a condition, which is rare copy, and visible rather than
+    # silent because it is declared there.
     merged: list[str] = []
     for clause in post_clauses:
-        # ⛔ THE TWO CASES ARE NOT SYMMETRIC. A clause that opens a forward
-        # clause of its own is DECLINED only when its predecessor is a plain cue
-        # clause; when the predecessor ITSELF opened a condition (`after …`), the
-        # `and <opener>` half is the second conjunct of that condition and MUST be
-        # merged, or the forward-sequencer skip drops it and the config-conjunction
-        # row this file pins goes GREEN (measured — six rows flip).
-        bare_clause = _DECORATION_RE.sub(" ", clause).lstrip(_PRE_CUE_PREFIX)
-        opens_its_own_forward = not _AND_CONTINUATION_RE.match(bare_clause)
-        predecessor_is_a_condition = bool(
-            merged and _CONDITION_LEAD_RE.match(
-                _DECORATION_RE.sub(" ", merged[-1])))
-        if (merged and re.match(r"(?i)^and\b", bare_clause)
-                and (not opens_its_own_forward
-                     or predecessor_is_a_condition)):
+        # An `and`-led clause continues the previous ONE (below); whether it is
+        # instead a fresh forward statement is the semantic seam documented above,
+        # and it is NOT guessed here.
+        if (merged
+                and re.match(r"(?i)^and\b",
+                             _DECORATION_RE.sub(" ", clause).lstrip(_PRE_CUE_PREFIX))):
             merged[-1] = f"{merged[-1]}, {clause}"
         elif (merged
                 # ⛔ SEARCH A DECORATION-FREE COPY. The tail anchor is `$`, so a
@@ -4458,16 +4438,22 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
      "then confirm the tools are actually there.", False),
     ("Once the client restarts, check the tools are present. Then restart your "
      "client, then confirm the tools are actually there.", False),
-    # ── CYCLE 40 (#14679's review at `49ef237f4c5b`): the negated-observation
-    # SPLICE made an `and once|and when` continuation fold into its predecessor,
-    # which DESTROYS the sequencer `_FORWARD_SEQUENCER_RE` anchors on — so forward
-    # copy went RED with the "inverts its own restart cue" message (#3429, the
-    # class that gets a pin deleted). `_AND_CONTINUATION_RE` declines the merge for
-    # a clause that opens a forward clause of its own:
+    # ── CYCLE 40/41 DECLARED RESIDUALS: an `and once|and when` continuation folds
+    # into its predecessor, which DESTROYS the sequencer `_FORWARD_SEQUENCER_RE`
+    # anchors on — so this forward copy is graded RED with the "inverts its own
+    # restart cue" message (#3429's class). THREE cuts of a disambiguation were
+    # tried (decline from the half's own opener; decline only when the half opens
+    # a forward clause; decline only when the predecessor is not a condition) and
+    # all three shipped a fresh seam — a false PASS, a markdown hole, then a FALSE
+    # RED on `Restart your client after any upgrade, and once the tools appear …`
+    # because `_CONDITION_LEAD_RE` fired on a bare post-cue ADVERBIAL. The
+    # mechanism is REMOVED rather than given a fourth arm. PINNED AS RED so a
+    # reader sees the boundary and a future fix flips exactly these rows — the same
+    # convention as the `not just missing` residual above. Recorded on #14717.
     ("Restart your client (you should see no errors in the log), and once the "
-     "tools are listed run `tortoise mcp-status`.", False),
+     "tools are listed run `tortoise mcp-status`.", True),
     ("Restart your client seeing no errors in the log, and when the tools "
-     "appear run `tortoise mcp-status --live`.", False),
+     "appear run `tortoise mcp-status --live`.", True),
     # ⛔ …while the CONFIG-CONJUNCTION the merge exists for still reds: its
     # `and`-half is not a forward clause of its own, so it is still folded in and
     # the config-scope rule still sees both halves.
@@ -4485,7 +4471,7 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("Restart your client after confirming the config is right, **and** the "
      "tools are actually there.", True),
     ("Restart your client seeing no errors in the log, **and** once the tools "
-     "appear run `tortoise mcp-status --live`.", False),
+     "appear run `tortoise mcp-status --live`.", True),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
