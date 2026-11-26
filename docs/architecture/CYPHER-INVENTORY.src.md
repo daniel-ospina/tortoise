@@ -1017,8 +1017,8 @@ main-move cannot repeat it — the appendix half of the procedure above, enforce
 so a lane runs `--render` and pastes nothing back).
 
 ⛔ **And neither of those two carriers covers the numbers this file QUOTES, which is the third place
-the same cut can leave stale.** The pins are 25 scalars and the appendix is `file:line` rows; §0's
-`--all-surface` row (NOT a §0 row — §0 is the product census and carries none; the row lives in §1's mode table, and it is not a pin, deliberately), §1's `rg` cross-check and the prose that explains it
+the same cut can leave stale.** The pins are 25 scalars and the appendix is `file:line` rows; the
+`--all-surface` row (NOT a §0 row: §0 is the product census and carries none — the row lives in §1's mode table, and it is not a pin, deliberately), §1's `rg` cross-check and the prose that explains it
 are neither. Measured at `a218f8867b`, with `--check` printing `25 pinned counts match`: that row
 still said `8,908 / 805` against `8,939 / 810` on this tree, §1's bare case-sensitive count quoted the
 NO-TYPE-FILTER population (`2,060` at that head, where the row is about `.py` files), and its stated
