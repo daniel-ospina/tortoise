@@ -1,53 +1,174 @@
 {
-  "_about": "Fresh, synthetic BUSINESS-STRUCTURE corpus for #14691 T6. Five short MEETING TRANSCRIPTS about one software company (Lumen Grid, an energy-operations SaaS). Written for this test only — never derived from any existing graph. Each document is one meeting, fed to the product as ONE captured session (the extractor v4's only door is session capture: `mine_knowledge_from_session(conversation=...)`). ⛔ No decisions and no contradictions: this corpus is about what the business is MADE OF, which is the question #14606's decision corpus did not ask.",
+  "_about": "Fresh, synthetic BUSINESS-STRUCTURE corpus for #14691 T6. Five short MEETING TRANSCRIPTS about one software company (Lumen Grid, an energy-operations SaaS). Written for this test only \u2014 never derived from any existing graph. Each document is one meeting, fed to the product as ONE captured session (the extractor v4's only door is session capture: `mine_knowledge_from_session(conversation=...)`). \u26d4 No decisions and no contradictions: this corpus is about what the business is MADE OF, which is the question #14606's decision corpus did not ask.",
   "_declared_structure": {
-    "products": ["Lumen Core", "Lumen Field"],
-    "features": ["Grid Map", "Outage Alerts", "Load Forecast", "Crew Dispatch", "Asset Register"],
-    "teams": ["Platform team", "Product team", "Customer team"],
-    "roles": ["Staff Engineer", "Site Reliability Engineer", "Product Manager", "Account Executive"],
-    "people": ["Dana Whitlock", "Tomas Ferreira", "Amara Osei", "Jonas Bauer"],
-    "components": ["ingest-gateway", "event-bus", "fact-store", "signal-engine", "web-dashboard", "auth-service", "identity-db"],
-    "customers": ["Northwind Logistics", "Helio Health"],
-    "customerSegments": ["mid-market utilities"],
+    "products": [
+      "Lumen Core",
+      "Lumen Field"
+    ],
+    "features": [
+      "Grid Map",
+      "Outage Alerts",
+      "Load Forecast",
+      "Crew Dispatch",
+      "Asset Register"
+    ],
+    "teams": [
+      "Platform team",
+      "Product team",
+      "Customer team"
+    ],
+    "roles": [
+      "Staff Engineer",
+      "Site Reliability Engineer",
+      "Product Manager",
+      "Account Executive"
+    ],
+    "people": [
+      "Dana Whitlock",
+      "Tomas Ferreira",
+      "Amara Osei",
+      "Jonas Bauer"
+    ],
+    "components": [
+      "ingest-gateway",
+      "event-bus",
+      "fact-store",
+      "signal-engine",
+      "web-dashboard",
+      "auth-service",
+      "identity-db"
+    ],
+    "customers": [
+      "Northwind Logistics",
+      "Helio Health"
+    ],
+    "customerSegments": [
+      "mid-market utilities"
+    ],
     "containment": [
-      ["Lumen Core", "Grid Map"],
-      ["Lumen Core", "Outage Alerts"],
-      ["Lumen Core", "Load Forecast"],
-      ["Lumen Field", "Crew Dispatch"],
-      ["Lumen Field", "Asset Register"]
+      [
+        "Lumen Core",
+        "Grid Map"
+      ],
+      [
+        "Lumen Core",
+        "Outage Alerts"
+      ],
+      [
+        "Lumen Core",
+        "Load Forecast"
+      ],
+      [
+        "Lumen Field",
+        "Crew Dispatch"
+      ],
+      [
+        "Lumen Field",
+        "Asset Register"
+      ]
     ],
     "membership": [
-      ["Dana Whitlock", "Platform team"],
-      ["Tomas Ferreira", "Platform team"],
-      ["Amara Osei", "Product team"],
-      ["Jonas Bauer", "Customer team"]
+      [
+        "Dana Whitlock",
+        "Platform team"
+      ],
+      [
+        "Tomas Ferreira",
+        "Platform team"
+      ],
+      [
+        "Amara Osei",
+        "Product team"
+      ],
+      [
+        "Jonas Bauer",
+        "Customer team"
+      ]
     ],
     "ownership": [
-      ["Lumen Core", "Amara Osei"],
-      ["ingest-gateway", "Dana Whitlock"],
-      ["on-call rotation", "Tomas Ferreira"],
-      ["enterprise renewals", "Jonas Bauer"]
+      [
+        "Lumen Core",
+        "Amara Osei"
+      ],
+      [
+        "ingest-gateway",
+        "Dana Whitlock"
+      ],
+      [
+        "on-call rotation",
+        "Tomas Ferreira"
+      ],
+      [
+        "enterprise renewals",
+        "Jonas Bauer"
+      ]
     ],
     "dependencies": [
-      ["ingest-gateway", "event-bus"],
-      ["event-bus", "fact-store"],
-      ["signal-engine", "event-bus"],
-      ["signal-engine", "fact-store"],
-      ["web-dashboard", "signal-engine"],
-      ["web-dashboard", "auth-service"],
-      ["auth-service", "identity-db"]
+      [
+        "ingest-gateway",
+        "event-bus"
+      ],
+      [
+        "event-bus",
+        "fact-store"
+      ],
+      [
+        "signal-engine",
+        "event-bus"
+      ],
+      [
+        "signal-engine",
+        "fact-store"
+      ],
+      [
+        "web-dashboard",
+        "signal-engine"
+      ],
+      [
+        "web-dashboard",
+        "auth-service"
+      ],
+      [
+        "auth-service",
+        "identity-db"
+      ]
     ],
     "serves": [
-      ["Lumen Core", "Northwind Logistics"],
-      ["Lumen Field", "Helio Health"]
-    ]
+      [
+        "Lumen Core",
+        "Northwind Logistics"
+      ],
+      [
+        "Lumen Field",
+        "Helio Health"
+      ]
+    ],
+    "holdsRole": [
+      [
+        "Staff Engineer",
+        "Dana Whitlock"
+      ],
+      [
+        "Site Reliability Engineer",
+        "Tomas Ferreira"
+      ],
+      [
+        "Product Manager",
+        "Amara Osei"
+      ],
+      [
+        "Account Executive",
+        "Jonas Bauer"
+      ]
+    ],
+    "_note_holdsRole": "role \u2192 person, exactly as each doc-02 turn states it (\"<person> is the <role>\"). Declared as pairs so the scorer never infers them from list order."
   },
   "_elements": {
-    "doc-01": "product tree — 2 products, 5 features, and which product contains which feature",
-    "doc-02": "organisation — 3 teams, 4 roles, 4 people, membership and who owns what",
-    "doc-03": "architecture — 7 components and what depends on what",
-    "doc-04": "customers and market — 2 customers, one customer segment",
-    "doc-05": "cross-links — which team builds which component, which product each customer runs"
+    "doc-01": "product tree \u2014 2 products, 5 features, and which product contains which feature",
+    "doc-02": "organisation \u2014 3 teams, 4 roles, 4 people, membership and who owns what",
+    "doc-03": "architecture \u2014 7 components and what depends on what",
+    "doc-04": "customers and market \u2014 2 customers, one customer segment",
+    "doc-05": "cross-links \u2014 which team builds which component, which product each customer runs"
   },
   "documents": [
     {

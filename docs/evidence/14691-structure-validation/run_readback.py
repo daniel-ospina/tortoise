@@ -72,7 +72,7 @@ OBJECT_KINDS = (
     ("dev", "epic"), ("dev", "issue"), ("dev", "code"), ("dev", "api"),
     ("dev", "database"), ("dev", "software"), ("dev", "infrastructure"),
     ("dev", "indicator"), ("dev", "theme"), ("dev", "pullRequest"),
-    ("dev", "bug"), ("dev", "incident"),
+    ("dev", "bug"), ("dev", "incident"), ("dev", "architectureDoc"),
     ("marketing", "campaign"), ("marketing", "content"),
     ("marketing", "channel"), ("marketing", "audience"),
     ("pm", "issue"), ("pm", "sprint"), ("pm", "kanbanBoard"), ("pm", "card"),
@@ -118,8 +118,8 @@ STRUCTURE_PROBES = [
 WRITTEN_KEYS = (
     "graph_name", "db_uri", "ok", "tool_surface", "layers", "object_kinds",
     "subject_kinds", "bare_kind_probes", "elements", "edge_endpoints",
-    "retrieval", "structure_check", "door_findings", "unresolved_elements",
-    "provenance",
+    "link_witness", "retrieval", "structure_check", "door_findings",
+    "unresolved_elements", "provenance",
 )
 
 ROW_KEYS = ("result", "results", "relationships", "nodes", "items", "connected")
@@ -378,6 +378,42 @@ async def run() -> int:
             print(f"\n=== retrieval [{label}] {q!r} ===")
             print(json.dumps(r.get("reply", r), indent=1, default=str)[:3000])
 
+        # ── (d2) the "does this entity have any links at all" witness ────
+        # Two doors answer that question and they DISAGREE. `expand_relationships`
+        # is the one a caller reaches for, and it returns `[]` for a node whose
+        # structural edges exist — the edges are IMPL/NAND-only by construction
+        # (entity_reads.py:551-559), so a team with 6 `produces` edges reads as
+        # having none. `graph_overview(section="topics", entity_id=…)` is the
+        # other, and it answers "Entity … not found" for the same node. Both are
+        # recorded verbatim, per node, so the asymmetry is measured from THIS
+        # bundle rather than argued.
+        report["link_witness"] = {}
+        for element_kind, name in (("product", "Lumen Core"),
+                                   ("person", "Amara Osei"),
+                                   ("team", "Platform team"),
+                                   ("component", "event-bus")):
+            hit = resolved.get(_norm(name))
+            if not hit:
+                continue
+            eid = hit["id"]
+            expand_r = await _call(client, "tortoise_expand_relationships",
+                                   {"point_id": eid})
+            topics_r = await _call(client, "tortoise_graph_overview",
+                                   {"section": "topics", "entity_id": eid})
+            walk_r = await _call(client, "tortoise_explore_connections",
+                                 {"node_id": eid, "hops": 1})
+            report["link_witness"][name] = {
+                "id": eid, "kind": hit["kind"],
+                "expand_relationships": expand_r,
+                "graph_overview_topics": topics_r,
+                "explore_neighbour_count": len(
+                    connected_rows(walk_r.get("reply"))),
+            }
+            print(f"\n=== link witness {name}: expand="
+                  f"{len(rows(expand_r.get('reply')))} row(s), topics="
+                  f"{json.dumps(topics_r.get('reply'), default=str)[:120]}, "
+                  f"explore neighbours={report['link_witness'][name]['explore_neighbour_count']} ===")
+
         # ── (e) the product's own integrity view ────────────────────────
         report["structure_check"] = await _call(
             client, "tortoise_check_structure", {})
@@ -442,6 +478,24 @@ async def run() -> int:
                          "namespaced_returned": {k: v for k, v in ns_hits.items()
                                                  if v},
                          "silent_zero_for": silent},
+        })
+
+    silent = {name: w["explore_neighbour_count"]
+              for name, w in (report.get("link_witness") or {}).items()
+              if len(rows(w["expand_relationships"].get("reply"))) == 0
+              and w["explore_neighbour_count"] > 0}
+    if silent:
+        report["door_findings"].append({
+            "id": "D4",
+            "question": "does `expand_relationships` report the STRUCTURAL edges "
+                        "of an entity, the way it reports the epistemic ones?",
+            "answer_over_mcp": "NO — it returns [] for a node that has edges, so "
+                               "a structurally-connected entity reads as isolated",
+            "evidence": {"nodes_read_as_isolated_by_expand": silent,
+                         "same_nodes_seen_by_explore_connections": {
+                             k: v for k, v in silent.items()},
+                         "code_path": "tortoise/entity_reads.py:551-559 — the "
+                                      "read covers IMPL|NAND|hasPart only"},
         })
 
     code = 0 if all(r["ok"] for r in report["layers"].values()) else 1
