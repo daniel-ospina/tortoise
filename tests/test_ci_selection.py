@@ -10798,36 +10798,51 @@ _H_14544_ROW_PROVENANCE_RE = re.compile(
 #: can disagree with, so it re-creates the very defect this note exists to forbid — the pin is
 #: therefore WIDENED to make the alternation symmetric and the note is written as the ADMISSIONS the
 #: pattern actually carries, each one driven as a fixture beside the arm:
-#:   1. noun-first — `REGISTRATION [half|alone|side]… is|stays|remains (exempt | the [ONLY] half |
-#:      the [ONLY] exempt half)`;
-#:   2. `only`-first — `only the REGISTRATION [half|alone]… [is|stays|remains] exempt`;
-#:   3. the cleft — `it is only the REGISTRATION that [is|stays|remains] exempt`;
-#:   4. predicate-first — `the [ONLY] exempt half is|stays|remains [only] the REGISTRATION`;
-#:   5. the relative-clause subject — `the half that|which is|stays|remains exempt is|stays|remains
-#:      the REGISTRATION`.
-#: ⛔ WHAT THAT DOES NOT ADMIT, stated rather than implied (the convention the row-exemption note
-#: below already uses): a TRUE rewording that reuses NONE of those five structures is refused — e.g.
-#: `The exemption applies to the REGISTRATION alone.` That is a residual of reading English with an
-#: alternation, named here so a later round widens it knowingly instead of re-deriving it.
+#:   1. noun-first — `REGISTRATION [half|alone|side]… COPULA (exempt | the ONLY half | the [only]
+#:      exempt half)`;
+#:   2. `only`-first — `only the REGISTRATION [half|alone] [COPULA] exempt`;
+#:   3. the cleft — `it COPULA only the REGISTRATION that [COPULA] exempt`;
+#:   4. predicate-first — `the [only] exempt half COPULA [only] the REGISTRATION`;
+#:   5. the relative-clause subject — `the half that|which COPULA exempt COPULA the REGISTRATION`.
+#: ⛔ `COPULA` IS THE SHARED `_H_14544_COPULA` SET, deliberately, and NOT a private `is|stays|remains`
+#: run: a second hand-written copula list is how the two arms drift apart, and the drift is not
+#: cosmetic. Measured on this tree before the set was shared, the row half already graded the PAST
+#: tense this block's own subject matter makes natural (`this block describes a PAST commit`, see
+#: `_H_14544_COPULA`) while the scope pin refused every past-tense spelling of the SAME claim —
+#: `The REGISTRATION was exempt.`, `The exempt half was ONLY the REGISTRATION.`, `It was only the
+#: REGISTRATION that was exempt.` and `The half that was exempt was the REGISTRATION.` all matched
+#: NOTHING (#14623 round 29), i.e. four TRUE rewordings reding the arm inside structures 1-5 with a
+#: diagnostic asserting the paragraph named no scope at all. The plural forms (`are` / `were`) are
+#: unreachable for the singular `REGISTRATION` in TRUE prose; they are kept because one set for both
+#: arms cannot drift, and every copula in it is driven as a fixture below, in both directions.
+#: ⛔ ONE RESIDUAL SHAPE INSIDE THE STRUCTURES IS REFUSED, and it is named here because the sentence
+#: above would otherwise imply that anything built from these five skeletons passes: the exemption
+#: predicate may be spelled as a RELATIVE CLAUSE in the PREDICATE (`The REGISTRATION is the half
+#: that is exempt.`, structure 1 with structure 5's clause moved to the predicate), which matched
+#: NOTHING at `30972df4fffe`. A TRUE rewording that reuses NONE of those five structures is refused
+#: as well — e.g. `The exemption applies to the REGISTRATION alone.` Both are residuals of reading
+#: English with an alternation, named so a later round widens them knowingly instead of re-deriving.
 #: The POLARITY is NOT widened with any of them: every structure names the REGISTRATION on the
 #: exempt side and none tolerates a negation between noun and copula, so the half-swap mutation and
 #: "Both halves stay exempt" still red — see the fixtures in the arm.
 _H_14544_SCOPE_RE = re.compile(
     # 1. noun-first: the REGISTRATION as the SUBJECT of the exemption. `the [only] exempt half` is
     #    the same claim as bare `exempt` with the half named as a predicate instead of an adjective.
-    r"REGISTRATION(?:\s+(?:half|alone|side)){0,2}\s+(?:is|stays|remains)\s+"
-    r"(?:(?:the\s+)?ONLY\s+half|the\s+(?:only\s+)?exempt\s+half|exempt)"
+    r"REGISTRATION(?:\s+(?:half|alone|side)){0,2}\s+" + _H_14544_COPULA +
+    r"\s+(?:(?:the\s+)?ONLY\s+half|the\s+(?:only\s+)?exempt\s+half|exempt)"
     # 2. `only`-first
-    r"|only\s+the\s+REGISTRATION(?:\s+(?:half|alone))?\s+(?:(?:is|stays|remains)\s+)?exempt"
+    r"|only\s+the\s+REGISTRATION(?:\s+(?:half|alone))?\s+(?:" + _H_14544_COPULA + r"\s+)?exempt"
     # 3. the cleft
-    r"|it\s+is\s+only\s+the\s+REGISTRATION\s+that\s+(?:(?:is|stays|remains)\s+)?exempt"
+    r"|it\s+" + _H_14544_COPULA + r"\s+only\s+the\s+REGISTRATION\s+that\s+(?:" +
+    _H_14544_COPULA + r"\s+)?exempt"
     # 4. predicate-first, with `ONLY` admitted on EITHER side of the copula — it is one modifier of
     #    one noun phrase, and admitting only its leading position was the asymmetry that red a TRUE
     #    rewording (#14623 review of `bd8f854a3fcc`, P3).
-    r"|the\s+(?:only\s+)?exempt\s+half\s+(?:is|stays|remains)\s+(?:only\s+)?the\s+REGISTRATION"
+    r"|the\s+(?:only\s+)?exempt\s+half\s+" + _H_14544_COPULA +
+    r"\s+(?:only\s+)?the\s+REGISTRATION"
     # 5. the relative-clause subject, which is a STRUCTURE rather than another spelling of #4.
-    r"|the\s+half\s+(?:that|which)\s+(?:is|stays|remains)\s+exempt\s+"
-    r"(?:is|stays|remains)\s+the\s+REGISTRATION",
+    r"|the\s+half\s+(?:that|which)\s+" + _H_14544_COPULA + r"\s+exempt\s+" +
+    _H_14544_COPULA + r"\s+the\s+REGISTRATION",
     re.IGNORECASE)
 #: The CONCLUSION half: the paragraph's own payoff sentence — a packing change attributed to that row
 #: is a cause it does NOT exclude. Measured at `d1f14298`: flipping `NOT` -> nothing (i.e. “…is a
@@ -11197,7 +11212,21 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The ONLY exempt half is the REGISTRATION.",
             "The exempt half is ONLY the REGISTRATION.",
             "REGISTRATION is the exempt half.",
-            "The half that is exempt is the REGISTRATION."):
+            "The half that is exempt is the REGISTRATION.",
+            # …and EVERY copula in the SHARED set the note now points at, in structure 1, then one
+            # spelling of each of structures 2-5 with a PAST copula. ⛔ THIS IS THE ROUND-29 FINDING:
+            # the pin carried a private `is|stays|remains` run while the row half of this same arm
+            # graded the past tense this block's subject matter makes natural, so four TRUE
+            # rewordings red the arm with a diagnostic asserting the paragraph named no scope at
+            # all (#14623 round 29 — each of these past-tense fixtures matched NOTHING before).
+            # `are`/`were` are unreachable for the singular `REGISTRATION` in true prose; they are
+            # driven anyway so the shared set is graded rather than trusted.
+            *(f"The REGISTRATION {copula} exempt." for copula in
+              ("is", "are", "was", "were", "stays", "remains", "stayed", "remained")),
+            "Only the REGISTRATION was exempt.",
+            "It was only the REGISTRATION that was exempt.",
+            "The exempt half was ONLY the REGISTRATION.",
+            "The half that was exempt was the REGISTRATION."):
         assert _H_14544_SCOPE_RE.search(scope_spelling), (
             f"the scope pin no longer reads {scope_spelling!r} — a TRUE statement of the scope the "
             "paragraph makes would red this arm, and the diagnostic would assert the opposite of "
@@ -11208,14 +11237,24 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # the ROW in that half — otherwise the widening itself is ungraded and a pattern that lost the
     # half (`(?:REGISTRATION|row)`) would still pass every fixture above.
     for scope_inverse in ("Both halves stay exempt.", "The row alone is the only half exempt.",
-                          # …plus the NEGATION the `is`/`stays`/`remains` copula run makes
-                          # reachable: a widened copula must not also admit `is not`.
+                          # …plus the NEGATION the copula run makes
+                          # reachable: a widened copula must not also admit `is not` / `was not`.
                           "The REGISTRATION is not the ONLY half exempt.",
                           "The REGISTRATION half is not exempt.",
-                          # …and the mirrored predicate / relative-clause forms with the ROW exempt.
+                          "The REGISTRATION was not exempt.",
+                          "Only the REGISTRATION was not exempt.",
+                          # …the plural copulas the shared set admits, in the plural INVERSE that is
+                          # the only place true prose puts them (so widening to `were` cannot pass
+                          # the inverse on the way past).
+                          "Both halves were exempt.",
+                          # …and the mirrored predicate / relative-clause forms with the ROW exempt,
+                          # in the past tense the widening makes reachable.
                           "The row is the exempt half.",
                           "The exempt half is ONLY the row.",
-                          "The half that is exempt is the row."):
+                          "The half that is exempt is the row.",
+                          "The row was the exempt half.",
+                          "The exempt half was ONLY the row.",
+                          "The half that was exempt was the row."):
         assert _H_14544_SCOPE_RE.search(scope_inverse) is None, (
             f"the widened scope pin reads {scope_inverse!r}, so the half it exists to name is no "
             "longer graded — the widening admitted the SHAPE of the true claim, not its inverse")
