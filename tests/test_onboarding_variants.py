@@ -2265,6 +2265,12 @@ def test_3232_generic_restart_lines_are_exact():
     ("Restart your client, afterward once the tools are listed run `tortoise "
      "mcp-status`.", False),
     # ── rows for the remaining named arms ────────────────────────────────────
+    # form (c)'s `however`/`yet` synonyms, and the config-prep pronouns other than
+    # `it` (both were live but had no row — measured by narrowing each arm):
+    ("Restart your client, however first confirm the tools are actually there.",
+     True),
+    ("Restart your client after checking the tools are enabled in them.",
+     False),
     # form (f)'s `please` and its `see|list` verbs, which begin a pre-cue
     # imperative — nothing else in the table fires those alternatives:
     ("Please confirm the tools are actually there. Restart your client, then "
@@ -2300,9 +2306,9 @@ def test_3232_generic_restart_lines_are_exact():
      "tools are actually there.", True),
     # ── rows for the arms behind the shapes above; each one flips when the arm
     # it names is removed (measured per arm). A few alternatives in the regexes
-    # are live but carry no row of their own — they are spelling/morphology
-    # variants of an arm that does, and the comments claim the behaviour, not a
-    # row for every alternative ──────────────────────────────────────────────────
+    # are live but carry no row of their own — spelling variants, and a few
+    # untested pronoun/synonym alternatives — and the comments claim the
+    # behaviour, not a row for every alternative ──────────────────────────────────
     ("Restart your client, and once the tools are listed run `tortoise "
      "mcp-status`.", False),
     ("Restart your client, next once the tools are listed run `tortoise "
