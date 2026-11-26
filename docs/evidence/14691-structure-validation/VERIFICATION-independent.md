@@ -142,8 +142,9 @@ The direction map is `SEMANTICS_DIRECTIONS` (`tortoise/pack_registry.py`), ident
 | `produces` | `<-` | **the target brought the source into existence** | 7 | **0** |
 | `hasPart` | `<->` | composition (symmetric — orientation not at stake) | 8 (5 pairs) | n/a |
 
-So of the **20 asymmetric structural pairs** this run wrote, **7 are correctly oriented and 13 are
-inverted** — and the inversion is not one predicate's quirk: `ownedBy`, `managedBy` and `produces` are
+So of the **22 asymmetric structural ROWS** this run wrote, **7** assert what the corpus says and
+**15** assert the reverse — **13 distinct pairs**, because 6 `ownedBy` rows are only 4 pairs — and
+the inversion is not one predicate's quirk: `ownedBy`, `managedBy` and `produces` are
 all written in the sentence's word order, two of them against a `->` declaration and one against a
 `<-`. The writer (`tortoise/relation_write.py`) passes the model's endpoints straight to
 `link_entities(predicate, src_id, dst_id)` with no re-ordering and no per-predicate branch, so there

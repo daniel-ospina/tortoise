@@ -15,7 +15,7 @@ tells it to.
 | Graph under test | `xv14691_business_structure` — its own graph on this lane's private FalkorDB (`fdb-lane-2a55a53650`, `127.0.0.1:16413`) |
 | Corpus | `docs/evidence/14691-structure-validation/corpus/structure-corpus.json` |
 | Code under test | this worktree at `origin/main` = `f37a250d9b22` (`git rev-parse HEAD origin/main` match at run time) |
-| Run | 2026-11-26, 05:37–05:43 UTC · 5 captures, 1.9 min of extraction |
+| Run | 2026-11-26, 05:37–05:43 UTC · 5 captures, 81.7 s of capture ack time (1.4 min), measured per document in `out/ingest-receipt.json` |
 | Extractor | `extraction_mode: "llm:deepseek-direct"`, model `deepseek-v4-flash` |
 | Predecessor | #14606 (`docs/evidence/14592-operating-model-validation/`) — its harness and method are REUSED here, not rebuilt |
 
@@ -114,7 +114,7 @@ The graph installs its own pack set (starter): `agent-ops`, `dev`, `portfolio`, 
 | **amplification** | **≈138×** |
 | cost | **not reported** — `cost_usd: 0.0` beside `calls_without_cost: 19` on every call, exactly as in #14606 |
 
-Doc-01 also records `graph_ops.total ≈ 1,000` per capture; the amplification, not the wall clock, is
+Doc-01 also records a `graph_ops.total` in the low thousands per capture (the receipt's own field); the amplification, not the wall clock, is
 the unit economics.
 
 ---
@@ -371,8 +371,10 @@ backwards, and unreadable in either direction through MCP. *Which team a role be
    reports structural direction (D1). It is therefore a statement about *what the product says it
    wrote*, corroborated by an independent depth-2 probe (§7) that reached the same rows from the
    graph.
-4. **`check_structure` returned `[]`** on a graph holding 12 inverted-or-untyped relation classes —
-   the structural validator sees no problem, which is consistent with #14606's G1 observation.
+4. **`check_structure` returned `[]`** on a graph holding 15 inverted relation rows (13 distinct
+   pairs) — the structural validator sees no problem, which is consistent with #14606's G1
+   observation. The figure is the artifact's own (`A2_edges.totals`); an earlier revision said "12
+   … classes", which matched no field in the bundle.
 
 ---
 
@@ -530,7 +532,8 @@ and **not** to the primary artifact, and the prose pins reached two headings out
 | an unreadable `managedBy` row graded `INVERTED` (`inverted` 15 → 16, pairs 13 → 14) | `test_an_UNREADABLE_kind_is_not_graded_INVERTED_either` |
 | the independent artifact's `witness_governance_door_returns_empty` / row counts / `advertised_tools` / `typed_nodes` rewritten | `test_the_second_measurements_CORROBORATION_fields_are_pinned` |
 | every `audited` quote row replaced with a sentence the receipt never recorded | `test_every_audited_quote_ROW_is_a_real_quote_of_a_real_document` |
-| §2's isolation block (the report claiming 15 entities before the first write), the A5 heading, §2's cost row, §3's counts, §7's pair/tool figures | `test_report_figures_across_the_sections_are_the_artifacts_figures` |
+| §2's isolation block (the report claiming 15 entities before the first write), the A5 heading, §3's counts, §7's pair/tool figures | `test_report_figures_across_the_sections_are_the_artifacts_figures` |
+| §2's per-document cost row (`doc-04 3 written` → `9`, and the ack column) | `test_the_cost_table_is_the_receipt` (the tables arm did NOT red on this — measured on `df788ab`, which is why it has its own row) |
 | `if contamination:` → `if False:`, and an inserted filter making the branch INERT with every substring intact | `test_the_refusal_FIRES_on_the_run_path` (the source-substring arm it replaced was retired — see §8.1's reconciliation note) |
 
 Two content fixes came with it: `managedBy` had `produces`'s two-way bug mirrored (an unreadable
