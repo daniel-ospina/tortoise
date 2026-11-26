@@ -2338,8 +2338,17 @@ _INVERSION_FORMS = (
         # while the constant reads `ensur(?:e|es|ed|ing)`, so
         # `Restart your client if you are looking in the panel and ensuring the
         # tools are actually there.` stayed GREEN while its `checking` control was
-        # RED (#14679 review at `019ac6ff4b1e`). The two lists are now identical —
-        # read them side by side, not as a memory.
+        # RED (#14679 review at `019ac6ff4b1e`). The two lists are now the same
+        # CLASS, read them side by side — but they are NOT letter-identical, and
+        # saying they were was itself the drift this note exists to prevent
+        # (#14679 review cycle 47, measured): this copy reads `verif(?:y|ies|ied)`
+        # and appends `\w*`, while the constant enumerates morphology and carries
+        # `verifying`. The two coincide on every spelling (`verif(?:y|ies|ied)\w*`
+        # matches `verifying`), and this copy is if anything the WIDER of the two
+        # (`confirm\w*` also matches `confirmation`), which is why the difference
+        # is left as a comment rather than "fixed" by interpolating the constant:
+        # interpolating it would NARROW the skip and silently re-red shapes it
+        # currently tolerates. Read the MEASUREMENT, not the claim of parity.
         r"(?!.*?\b(?:confirm|check|verif(?:y|ies|ied)|ensur(?:e|es|ed|ing)"
         r"|mak(?:e|es|ing)\s+(?:sure|certain)|made\s+(?:sure|certain)"
         r"|be\s+(?:sure|certain)|validat(?:e|es|ed|ing))\w*\b"
@@ -2722,7 +2731,7 @@ _STATEMENT_BREAK_RE = re.compile(
     # DOTTED TOKEN FOLLOWED BY A SPACE still splits (`e.g.: quit and reopen`
     # splits at `e.g.`), which is the same window truncation the colon doctrine
     # already accepts, not extra protection.
-    r"(?:[;—–…]\s*|:\s+|(?:(?<=\s)[-*+](?![-*+])\s+|(?<=\s)--\s+|^[-*+]\s*)"
+    r"(?:[;—–…]\s*|:\s+|(?:(?<=\s)[-*+](?![-*+])\s+|(?<=\s)--\s+|^-+\s*)"
     # ⛔ A MARKDOWN LIST MARKER IS A STATEMENT BOUNDARY — the same doctrine the
     # leading `^-` arm has always applied, which is why the DASH bullet split and
     # its four twins did not. The dash-only arm left `*`, `>`, `+` and both
@@ -2735,9 +2744,21 @@ _STATEMENT_BREAK_RE = re.compile(
     #     GREEN  > Confirm …\n> Restart … / + Confirm …\n+ Restart …  (measured)
     #     GREEN  1) Confirm …\n2) Restart … / (1) Confirm …           (measured)
     #
-    # `\s+` (not `\s*`) after the emphasis-capable markers keeps `**bold**` and
-    # `*emphasis*` inside their clause; `(?![-*+])` keeps `**` from splitting.
-    r"|(?<=\s)>\s+|^>\s*"
+    # ⛔ THE `^`-ANCHORED ARMS CARRY `-` ONLY, AND THAT IS A CORRECTION. They are
+    # applied to the POST-cue SUBSTRING too (`after.lstrip(" \t,…")`), where `^`
+    # is mid-sentence, so `^[-*+]\s*` and `^>\s*` emptied the whole post-cue
+    # window and no post-cue form was applied at all:
+    #
+    #     RED    Restart your client, after confirming the tools …   (undecorated)
+    #     GREEN  Restart your client, **after confirming the tools …**
+    #     GREEN  > Restart your client,\n> after confirming the tools …
+    #
+    # Measured: narrowing to `^-+\s*` and dropping `^>\s*` keeps all 566 rows and
+    # every `test_3232_*` / `test_5153_*` green while fixing both probes. The
+    # whitespace-bounded arms above do the `*`/`+`/`>`/ordinal pre-cue work, since
+    # the paragraph is flattened before splitting. `\s+` (not `\s*`) after the
+    # emphasis-capable markers keeps `**bold**` and `*emphasis*` inside their clause.
+    r"|(?<=\s)>\s+"
     r"|(?<=\s)(?:\(\d{1,2}\)|\d{1,2}[.)])\s+"
     r"|\.\s+(?=[A-Z\"'`(\[*_>])"
     r")")
@@ -2860,11 +2881,27 @@ _FORWARD_SEQUENCER_RE = re.compile(r"^(?:then|and|next|afterwards?)\b", re.IGNOR
 # this test; `Delete the old entry`, `Then confirm the tools …` and
 # `Be sure to confirm the tools …` are not, because `delete` / `confirm` are not
 # in the class.
+# ⛔ THE FRAGMENT CLASS IS NOT ONLY MODALS. Cycle 47 measured that
+# `then you should probably` / `then you will likely` / `You may want to` /
+# `You had better` are fragments in exactly the sense this test means — every
+# word carries no imperation — but one word outside the list defeated the
+# walk-back exactly as `must` used to, leaving the fragment as the governing
+# clause and discarding the confirmation behind it:
+#
+#     RED    Confirm the tools … , then you must restart your client.
+#     GREEN  Confirm the tools … , then you should probably restart your client.
+#
+# `_NEGATED_CUE_LEAD_RE` already states that "`ought` AND `had better` ARE THE
+# SAME LEAD", so the fragment test could not see a member the file names two
+# functions up. `probably|likely|maybe|perhaps|want|better|best|had|ought` and the
+# intensifiers are added on that authority, not as a new class.
 _SEQUENCER_FRAGMENT_RE = re.compile(
     r"^(?:\s*(?:then|next|afterwards?|which|only|just|also|and|but|so|please"
     r"|kindly|you|we|must|should|can|could|will|would|may|might|shall"
     r"|need|needs|have|has|to|be|sure|make|makes"
     r"|first|firstly|now|once|finally|lastly|subsequently|still|too"
+    r"|probably|likely|maybe|perhaps|want|wants|better|best|had|ought"
+    r"|always|simply|prefer|very|really|actually|definitely|surely"
     r"|before|after|until|unless|prior|when)\b\s*,?\s*)+$", re.IGNORECASE)
 
 # ⛔ A CUE GOVERNED BY A TEMPORAL SUBORDINATE INVERTS WHAT FOLLOWS IT. In
@@ -3440,6 +3477,30 @@ def _and_half_opens_its_own_clause(bare: str) -> bool:
                 and _AND_HALF_MAIN_CLAUSE_VERB_RE.search(bare))
 
 
+def _confirmation_predicate_setting_a_tool_list(clause: str) -> bool:
+    """A confirmation predicate that is NOT the `list` inside the tool list.
+
+    `_CONFIRM_PREDICATE` carries the VERB `list`, and `_TOOLS_OBJECT` carries the
+    NOUN `tool list`, so the negated-cue arm matched its own object as the
+    confirmation and redded plain presence copy:
+
+        RED    You shouldn't restart your client unless the tool list is empty.
+        GREEN  You shouldn't restart your client unless the tools are missing.
+
+    Same defect class the file closes one arm over ("THE GUARD READS THE GRADED
+    OBJECT, not its own copy of it"), and it was reachable only once `unless`
+    landed: the `until` twin never had a `tool list` in it. The predicate must
+    therefore sit OUTSIDE the tools-object span — a confirmation is a claim ABOUT
+    the tool list, never the noun itself (measured, #14679 review cycle 47).
+    """
+    spans = [m.span() for m in _TOOLS_OBJECT_RE.finditer(clause)]
+    for match in re.finditer(_CONFIRM_PREDICATE, clause, re.IGNORECASE):
+        if not any(start <= match.start() and match.end() <= end
+                   for start, end in spans):
+            return True
+    return False
+
+
 def _paragraph_cue_order_violation(para: str) -> str | None:
     flat = " ".join(para.split())
     cue_at = _cue_start(flat)
@@ -3640,7 +3701,16 @@ def _paragraph_cue_order_violation(para: str) -> str | None:
         # not hold for a restart that was told NOT to happen yet.
         if (cue_is_negated
                 and _DEFERRING_CONNECTIVE_RE.match(clause)
-                and re.search(_CONFIRM_PREDICATE, clause)
+                # ⛔ THE OBSERVATION SKIP APPLIES HERE TOO. Without it the `unless`
+                # arm redded the presence-only shape it exists to leave GREEN:
+                # `unless you see no tools in the list` — `see` is a member of
+                # `_CONFIRM_PREDICATE`, so the arm fired before the skip the
+                # post-cue loop applies three lines down, and
+                # `_negated_observation_only` returns True on that very clause.
+                and not _negated_observation_only(clause)
+                # ⛔ AND THE PREDICATE MUST BE A CLAIM ABOUT THE OBJECT, not the
+                # object's own noun (`tool list` vs the verb `list`).
+                and _confirmation_predicate_setting_a_tool_list(clause)
                 and _TOOLS_OBJECT_RE.search(clause)):
             return clause
         # A clause led by a FORWARD sequencer continues the cue's own
@@ -5621,6 +5691,66 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     ("(1) Confirm the tools are actually there.\n"
      "(2) Restart your client, and the tools appear in the client's MCP/tool list.",
      True),
+    # ⛔ CYCLE 47 — THE REGRESSIONS THE CYCLE-46 FIXES THEMSELVES INTRODUCED, each
+    # measured by a fresh-context reviewer at `5a676093c4` and closed here.
+    #
+    # 5a. `unless` reached presence and observation copy the arm exists to leave
+    #     GREEN: `_CONFIRM_PREDICATE` carries `see` and `list`, so a negated
+    #     OBSERVATION (`see no tools`) passed as a confirmation, and the new
+    #     `tool list` OBJECT matched the verb `list` as its own confirmation. The
+    #     `until` twin never exposed either, because neither had a `tool list` in
+    #     it. The arm now applies the same `_negated_observation_only` skip the
+    #     post-cue loop applies, and requires the predicate to sit OUTSIDE the
+    #     tools-object span.
+    ("You shouldn't restart your client unless the tool list is empty.", False),
+    ("Don't restart your client unless you see no tools in the list.", False),
+    # 5b. The `^`-anchored statement-break arms are applied to the POST-cue
+    #     SUBSTRING too, where `^` is mid-sentence — so `^[-*+]\s*` / `^>\s*`
+    #     emptied the whole post-cue window and NO post-cue form was applied. The
+    #     `^` arms now carry `-` only (the only member the table actually needs);
+    #     the whitespace-bounded arms do the rest, because the paragraph is
+    #     flattened before it is split.
+    ("Restart your client, **after confirming the tools are actually there**.",
+     True),
+    ("Restart your client, *after confirming the tools are actually there*.",
+     True),
+    ("> Restart your client,\n"
+     "> after confirming the tools are actually there.", True),
+    # 5c. One word outside the fragment class defeated the walk-back exactly as
+    #     `must` used to; `probably|likely|want|better|had|ought` add no
+    #     imperation, and `_NEGATED_CUE_LEAD_RE` already calls `ought`/`had
+    #     better` the same lead.
+    ("Confirm the tools are actually there, then you should probably restart "
+     "your client.", True),
+    ("Confirm the tools are actually there, then you will likely restart your "
+     "client.", True),
+    ("Confirm the tools are actually there. You may want to restart your "
+     "client.", True),
+    ("Confirm the tools are actually there. You had better restart your "
+     "client.", True),
+    # …and the intensifier arm is pinned too, because an unpinned list is the
+    # drift this block exists to stop: measured, removing ONLY these words from
+    # the class flips no row, so they would otherwise ship unmeasured.
+    ("Confirm the tools are actually there, then you should really restart "
+     "your client.", True),
+    ("Confirm the tools are actually there, then you simply restart your "
+     "client.", True),
+    # 5d. ⛔ DECLARED RESIDUAL — a COMMA-LESS pre-cue coordinated imperative.
+    #     `_cue_governing_clause` splits the pre-cue statement on `[,;]` only, so
+    #     the confirmation reached through a bare `and` is never split out and
+    #     form (f)'s `^` anchor never sees it:
+    #
+    #         RED    Delete the old entry, and confirm the tools … Restart …
+    #         GREEN  Delete the old entry and confirm the tools … Restart …
+    #
+    #     Declared rather than widened: splitting on a bare ` and ` would cut
+    #     `tools and config` and `save and close` in two, and the file's doctrine
+    #     is that a decoration or conjunction that CAN be ordinary prose is not
+    #     made a splitter to catch one contrived sentence. Pinned so the residual
+    #     is measured and visible instead of silent, and so a future tightening
+    #     shows up as a deliberate row flip.
+    ("Delete the old entry and confirm the tools are actually there. Restart "
+     "your client, then run a query.", False),
 ])
 def test_3232_restart_order_pin_grades_the_forms_it_claims(line, inverted):
     doc = f"Some lead-in copy.\n\n{line}\n\nRate limit: **100 requests/min per key**.\n"
