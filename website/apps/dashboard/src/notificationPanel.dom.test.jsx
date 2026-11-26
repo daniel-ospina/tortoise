@@ -879,8 +879,6 @@ test('#14686: no usable store at all is reported as its own fact, before any act
 
 // ── 4b. Two episodes, one identity (the row identity is not the decision) ───
 
-/** Two server episodes of the same type with the SAME message — the local
- *  identity is `type|message`, so these are one decision over two rows. */
 /** The accessible name of every control that acts on a row IN THE LIST, per row. */
 function rowActionNames(container) {
   return [...container.querySelectorAll('.notif-list .notif-row')].map((row) => [
@@ -891,6 +889,8 @@ function rowActionNames(container) {
   ])
 }
 
+/** Two server episodes of the same type with the SAME message — the local
+ *  identity is `type|message`, so these are one decision over two rows. */
 function sameWording() {
   const newer = alert({
     message: 'same wording',
@@ -1740,6 +1740,31 @@ test('#14694: two rows in ONE age bucket and with NO count are still named apart
   assert.equal(flat.length, 6)
   assert.equal(new Set(flat).size, 6,
     'the STAMP is what separates two single-window rows in one age bucket')
+})
+
+test('#14694: two rows that differ ONLY by their occurrence span are named apart', () => {
+  // The row renders the bout's span (`first → last`) and the name did not carry it,
+  // so two rows sharing label, message, count and second but written in DIFFERENT
+  // windows announced identically while a sighted reader could tell them apart by
+  // the span (review finding). Reachable: `at` is the server's `created_at` and
+  // `first_at` is the folded window start, so two rows can share a second and
+  // differ in where the bout began.
+  const at = new Date(NOW.getTime() - 30 * MIN).toISOString()
+  const rows = [4, 2].map((h) => alert({
+    at,
+    first_at: new Date(NOW.getTime() - h * HOUR).toISOString(),
+    count: 4,
+    episode: `flag|surface:Memory writes|${h}`,
+    message: 'Memory writes reached 12 units',
+    details: { surface: 'Memory writes' },
+  }))
+  const { container } = renderBell({ alerts: rows })
+  fireEvent.click(bell(container))
+  const flat = rowActionNames(container).flat(2)
+  assert.equal(flat.length, 6)
+  assert.equal(new Set(flat).size, 6,
+    'the SPAN is what separates two rows written in different windows')
+  for (const name of flat) assert.match(name, /→/, 'the span reaches the name')
 })
 
 test('#14694: the reversible and detail actions are named too, not only the list rows', () => {

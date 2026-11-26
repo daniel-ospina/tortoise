@@ -140,17 +140,20 @@ function Badge({ count, warn }) {
  * rows: both dismissed as "Dismiss", both snoozed as "Snooze for Suspicious
  * activity".
  *
- * ⛔ THE STAMP, NOT THE RELATIVE AGE. The count and the age are NOT enough: a row
- * whose `count < 2` carries no `×N` (`episodeCountLabel` returns '' for one
- * detection window) and `ageLabel` floors everything past a day to "1 day ago",
- * so two single-window episodes 30 h and 40 h old — both CURRENT, both on screen,
- * visibly different by their own `stamp` — announced identical names. Measured:
- * 3 distinct names of 6. The absolute stamp is what the row itself renders, so it
- * is the discriminator to carry.
+ * ⛔ THE STAMP AND THE SPAN, NOT THE COUNT AND THE AGE. Neither the count nor the
+ * age discriminates on its own: a row whose `count < 2` carries no `×N`
+ * (`episodeCountLabel` returns '' for one detection window), and `ageLabel` floors
+ * everything past a day to "1 day ago". Two single-window episodes 30 h and 40 h
+ * old — both CURRENT, both on screen, visibly different by their own `stamp` —
+ * announced identical names (measured: 3 distinct names of 6). And a `rangeLabel`
+ * (the bout's `first → last` span) is rendered by the row but was not in the name,
+ * so two rows sharing a label, a message, a count and a second but written in
+ * DIFFERENT windows announced identically while their spans told a sighted reader
+ * them apart. So the name carries every field the row renders that can vary.
  *
- * The bound, stated rather than implied: two rows that share a label, a message, a
- * count AND a second are indistinguishable to a sighted reader too, so no name can
- * separate them — this makes the name exactly as discriminating as the render.
+ * The bound, stated rather than implied: two rows that share every field the row
+ * RENDERS (label, message, chip, count, span, stamp, and so the truncated note)
+ * are indistinguishable to a sighted reader too, so no name can separate them.
  */
 function actionName(action, entry) {
   if (!entry) return action
@@ -159,12 +162,13 @@ function actionName(action, entry) {
   // (two `flag` rows of different rules share `label` 'Suspicious activity').
   const message = entry.message && entry.message !== label ? ` — ${entry.message}` : ''
   const count = entry.countLabel ? ` ${entry.countLabel}` : ''
-  const stamp = entry.stamp
-    ? ` @ ${entry.stamp}`
-    : entry.ageLabel
-      ? ` — ${entry.ageLabel}`
-      : ''
-  return `${action}: ${label}${message}${count}${stamp}`
+  // Only present when `count >= 2`, so a single-window row's name is unchanged.
+  const span = entry.rangeLabel ? ` ${entry.rangeLabel}` : ''
+  // ⛔ NO `ageLabel` FALLBACK: `stamp` and `ageLabel` are both derived from the same
+  // `at` parse (`entryOf`), so they are empty together — a fallback would be code
+  // that reads as a discriminator for a stampless row and can never run.
+  const stamp = entry.stamp ? ` @ ${entry.stamp}` : ''
+  return `${action}: ${label}${message}${count}${span}${stamp}`
 }
 
 function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
@@ -183,7 +187,8 @@ function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
         // two same-identity rows (`×9 … 1 min ago` vs `×3 … 9 min ago`), both read
         // "Details: Suspicious activity". An AT user could not tell which episode
         // they were opening, which is the failure this row key exists to prevent
-        // for sighted readers (review finding). The count and the age are what differ.
+        // for sighted readers (review finding). The stamp and the span are what
+        // differ — see `actionName`, which carries every varying rendered field.
         aria-label={actionName(DETAIL_ACTION, entry)}
       >
         <span className="notif-line">
