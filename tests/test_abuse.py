@@ -1012,6 +1012,35 @@ class TestR1Calibration:
         store2 = _TierStore(allowance=None)
         assert AbuseEngine(store2).point_threshold("t2") == 500
 
+    def test_the_engine_RECORDS_whether_the_level_is_a_plan_limit(self, notified,
+                                                                 monkeypatch):
+        """#14687 round-3 review: the CONSUMER of `tier_relative` was pinned and
+        the PRODUCER was not — and the producer is what decides whether the
+        customer is told a limit exists. Pinned on the row the engine writes."""
+        monkeypatch.setenv("TORTOISE_ABUSE_POINT_WINDOW_S", "60")
+        # A tier floor that contributes: 100 000 -> 50 000.
+        store = _TierStore(allowance=100_000)
+        eng = AbuseEngine(store)
+        for _ in range(51):
+            eng.record_point_create("t1", 1000, now=T0)
+        flag = next(r for r in store.rows
+                    if r["event_type"] == abuse.EVENT_FLAG)
+        assert flag["details"]["tier_relative"] is True, flag["details"]
+        assert flag["details"]["threshold"] == 50_000
+        # …and it is ABSENT (not False) when the level is the absolute constant,
+        # so a selfhost deployment never advertises a plan limit it does not have.
+        store2 = MemoryAbuseStore()
+        eng2 = AbuseEngine(store2)
+        monkeypatch.setenv("TORTOISE_ABUSE_POINT_THRESHOLD", "5")
+        assert eng2.record_point_create("t1", 6, now=T0) == "flag"
+        flag2 = next(r for r in store2.rows
+                     if r["event_type"] == abuse.EVENT_FLAG)
+        assert "tier_relative" not in flag2["details"], flag2["details"]
+        # The rendered payload/message follow the recorded fact.
+        row = abuse._alert_dict({"event_type": "flag",
+                                 "details": flag2["details"]})
+        assert "this Organization's allowance" not in row["message"], row["message"]
+
     def test_a_band_dip_still_escalates_once(self, notified, monkeypatch):
         """#14687 round-2 review: the latch keeps the episode OPEN, so its age
         keeps accumulating and stage 2 becomes reachable across a band dip —

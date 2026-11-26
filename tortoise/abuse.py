@@ -896,18 +896,20 @@ class MemoryAbuseStore:
         return self.org_state(org_id)["flagged_at"]
 
     def org_allowance(self, org_id: str) -> int | None:
-        """#14687: the org's write-op allowance, or ``None``.
+        """#14687: ``None`` — this store CANNOT answer, and says so.
 
-        ``None`` means "this store genuinely cannot answer" — the selfhost /
-        in-memory lane has no tier registry, so the alert level falls back to the
-        configured absolute floor instead of inventing an allowance. A registry
-        seam that does carry one (``registry_read``) answers from it.
+        The registry/selfhost lane has no tier registry: its ``registry_read``
+        returns ``flagged_at`` / ``suspended_at`` off the Org node and never an
+        allowance (the tier lives in ``organizations.ops_allowance``, which only
+        the Supabase store reads). Casting around for one costs an SDK
+        construction plus a graph query PER CALL and always comes back empty —
+        and because "cannot answer" is retried on a short TTL, that would be one
+        graph query per org every 30 s on the capture path, forever, to learn
+        nothing.
+
+        So the answer is stated instead of searched for: no tier, no floor, and
+        the alert level stays the configured absolute one.
         """
-        if self._registry_read is not None:
-            state = self._registry_read(org_id) or {}
-            value = state.get("ops_allowance")
-            if value is not None:
-                return _as_int(value)
         return None
 
     def active_flag_episodes(self, org_id: str) -> list[dict]:
@@ -1566,10 +1568,13 @@ def _point_rate_message(details: dict, *, sustained: bool) -> str:
         if level is not None:
             measured += f", against an alert level of {level:,} units"
             if tier_relative:
-                # The level is half the org's own allowance, and saying so is
-                # what makes the "higher limit" route below a true statement
-                # rather than a copy line about a detector constant.
-                measured += " (half this Organization's allowance)"
+                # The level is a share of the org's own allowance, and saying so
+                # is what makes the "higher limit" route below a true statement
+                # rather than a copy line about a detector constant. Deliberately
+                # NOT "half": the ratio is a knob (`TORTOISE_ABUSE_TIER_FLOOR_
+                # RATIO`), and hard-coding the default's word would misdescribe
+                # every deployment that changed it (round-3 review).
+                measured += " (a share of this Organization's allowance)"
         measured += "."
     elif units is not None:
         measured = f"{surface} reached {units:,} units."
@@ -2268,8 +2273,8 @@ class AbuseEngine:
             self._last_notified.pop((org_id, rule, stage), None)
 
     def point_threshold(self, org_id: str | None = None) -> int:
-        """#14687: the R1 FIRE level — half the org's own write-op allowance, or
-        the configured absolute floor, whichever is higher.
+        """#14687: the R1 FIRE level — the org's own allowance share, or the
+        configured absolute floor, whichever is higher.
 
         A single absolute constant cannot be right: the measured fleet org peaks
         at 3 001 units/hour in one rolling window while the ONLY other org ever
@@ -2277,13 +2282,25 @@ class AbuseEngine:
         enough to silence the fleet is blind to the entire class of org the rule
         exists for, which is why "just raise the number" was refused.
 
-        So the level is TIER-RELATIVE: an org consuming half its own tier
-        allowance in one hour is abnormal by its OWN plan, and the alert's
-        existing remedy ("if you need a higher limit, contact support") becomes a
-        true statement instead of a copy line on a 500-unit threshold that was
-        never a limit. ``TORTOISE_ABUSE_POINT_THRESHOLD`` remains the FLOOR of
-        that comparison, so a tier we cannot read (or a 0 allowance) keeps the
-        shipped absolute level rather than disabling detection.
+        So the level is TIER-RELATIVE: an org consuming a large share of its own
+        tier allowance is abnormal by its OWN plan, and the alert's existing
+        remedy ("if you need a higher limit, contact support") becomes a true
+        statement instead of a copy line on a 500-unit threshold that was never a
+        limit. ``TORTOISE_ABUSE_POINT_THRESHOLD`` remains the FLOOR of that
+        comparison, so a tier we cannot read (or a 0 allowance) keeps the shipped
+        absolute level rather than disabling detection.
+
+        ⚠️ THE DERIVATION IS THE OWNER'S, AND IT MIXES TWO SCALES — stated here
+        because the code cannot fix a product decision. ``organizations.
+        ops_allowance`` is ``included_write_ops_per_month`` (metering.py) and the
+        quantity compared against it is a POINT weight over a ONE-HOUR window, so
+        the ratio is not dimensionally exact: a monthly quota read as an hourly
+        rate. The effect is that the level is high enough that R1 is effectively
+        unreachable inside a tier — which is the trade the finding states out
+        loud ("blind to a free-tier org doing 780–4 999/h", deliberately, because
+        the tier quota is already that org's stop). Making the comparison
+        dimensionally exact is a product decision for #12992's territory, not a
+        silent correction here.
         """
         base = self.point_threshold_base()
         if not org_id:
@@ -2499,16 +2516,20 @@ class AbuseEngine:
             # level the read/write pair below was already there, and above the
             # fire level the staging read runs anyway.
             #
-            # CONSEQUENCE, deliberate and pinned by
-            # `test_a_band_dip_still_escalates_once`: because the episode stays
-            # OPEN across a dip, its age keeps accumulating, so an org that
-            # oscillates between the two levels for a full window now reaches
-            # stage 2 (`review_needed` / "Sustained high activity") where the old
-            # engine's clear-and-refire kept resetting the clock. That is what
-            # stage 2 is FOR — an episode a full window old with continuity — and
-            # it fires ONCE per episode (the notify claim), so the trade is flag
-            # churn (105 -> 35 measured) for one escalation on a genuinely
-            # sustained bout.
+            # CONSEQUENCE, and the cost of the latch, stated with its measurement
+            # rather than a claim: because the episode stays OPEN across a dip,
+            # its age keeps accumulating, so an org that oscillates between the
+            # two levels now reaches stage 2 (`review_needed` / "Sustained high
+            # activity") where the old engine's clear-and-refire kept resetting
+            # the clock. Stage 2 fires at most once per WINDOW (`_claim_notify`,
+            # #5425/#14407's per-window delivery — not once per episode), so on
+            # the issue's oscillating series the trade is measured as: rows
+            # 40 (20 flag + 20 clear) → 20 (1 flag + 19 review), notify calls
+            # 20 → 20. Fewer rows, the same paging, and the composition moves
+            # from clear/refire churn to escalation of ONE sustained episode —
+            # which is what stage 2 is for. In a tiered deployment the tier floor
+            # is what actually silences the fleet (measured peak 3 001/h against
+            # a 25 000/h level); the latch alone is not.
             if total > threshold * self.clear_ratio():
                 return self._flag_still_open(org_id, rule)
             # Clean window → end any active flag episode for this rule, so a
@@ -2724,8 +2745,18 @@ class AbuseEngine:
             # `flag_clear`) left the claim armed, and a genuine re-breach inside
             # the remaining claim window flagged durably but never notified ops —
             # the same mute the comment on that branch records as fixed, reached
-            # through the new early return. Measured on R2 (24h claim) it is not a
+            # through the new early return. With R2's 24h claim that is not a
             # corner: the band is the steady state for 6–10 keys a day.
+            #
+            # ROUND 3 asked whether the opposite risk (a STALE `None` read
+            # re-arming the claim, so a later crossing pages again inside one
+            # episode) argues for gating the release on a write. It does not, and
+            # the reason is that this IS the pre-change behaviour: before the
+            # latch, a band-level value walked the clean branch, which released
+            # the claim on the same read whenever that read succeeded. Gating it
+            # here would make the band the ONE path where an episode silently
+            # outlives its claim, which is a MUTE — and a missed security page is
+            # worse than a duplicate one. Same trade `_release_notify` documents.
             self._release_notify(org_id, rule, EVENT_FLAG)
             self._release_notify(org_id, rule, EVENT_REVIEW)
         return "breach" if active else None

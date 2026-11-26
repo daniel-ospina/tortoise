@@ -59,7 +59,7 @@ export const ACTIVITY_HEADING = 'Recent activity'
 // (round-23 review finding). "by them" is what makes the clause true.
 export const ACTIVITY_LEAD =
   'Rate signals from our abuse detectors. These are measurements, not actions ' +
-  'taken on your account — nothing was disabled, changed or locked by them.'
+  'taken on your account — nothing was disabled, throttled or locked by them.'
 
 export const ALERTS_HEADING = 'Security alerts'
 export const ALERTS_LEAD =
@@ -128,7 +128,9 @@ export const ALERTS_UNAVAILABLE = "Could not read this Organization's alert "
 //: them, and the server now stamps them `activity`. Keeping the rescue here would
 //: have made the mixed-deploy window render a rate as an incident — the exact
 //: framing the register split exists to remove — and the quiet reading is TRUE for
-//: them in either version (nothing was disabled). `suspend` and `auth_ip` stay:
+//: them in either version: nothing is DISABLED by them (`flagged_at` is set, which
+//: is why the lead below says "disabled, throttled or locked" and not "changed").
+//: `suspend` and `auth_ip` stay:
 //: an older API emitted those only for real state changes, and mis-framing one of
 //: those is the direction that must never happen.
 const INCIDENT_BY_DEFINITION = new Set([

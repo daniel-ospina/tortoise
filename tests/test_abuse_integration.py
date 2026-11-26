@@ -1198,9 +1198,22 @@ class TestAlertRegistersAndAcks:
     #: it cannot drift from what actually ships.
     @staticmethod
     def _detail_variants() -> tuple[dict, ...]:
+        # #14687 round-3 review: the numeric R1/R2 shapes were pinned ONLY as a
+        # hand-typed literal in `must_accept`, which is the drift class the
+        # neighbouring `_row_variants` docstring warns about — the shipped
+        # message could change and the fixture would keep asserting the old one.
+        # Both real shapes now render through `_alert_dict` here, so the
+        # property assertions (no human claim, no whole-state claim, the
+        # "nothing was disabled" shape) run over what actually ships.
         return ({"scope": "key", "id": "k-1", "count": 3, "ip": "1.2.3.4",
                  "country": "ES"},
                 {"scope": "team", "id": "org-1", "count": 3},
+                {"rule": "point_create", "count": 2309, "threshold": 500,
+                 "window_s": 3600, "surface": "Memory writes"},
+                {"rule": "point_create", "count": 51000, "threshold": 25000,
+                 "window_s": 3600, "surface": "Memory writes",
+                 "tier_relative": True},
+                # no numbers at all — an OLD row (item 1's honesty case)
                 {})
 
     #: `auth_ip`'s country is a ROW COLUMN, not a `details` key (``recent_alerts``
@@ -1549,8 +1562,16 @@ class TestAlertRegistersAndAcks:
             # wording passes.
             assert not re.search(r"(suspicious|incident|compromis|breach|"
                                  r"attack)", m, re.I), (etype, m)
-            assert ("did not change anything" in body.lower()
-                    or "did not disable anything" in body.lower()), (etype, body)
+            if etype in (abuse.EVENT_FLAG, abuse.EVENT_REVIEW):
+                # #14687: these DO write a state marker (`flagged_at`), so the
+                # whole-state "did not change anything" is false for them and
+                # must not be accepted here (round-3 review: the `or` let a
+                # rewrite back to it pass green).
+                assert "did not disable anything" in body.lower(), (etype, body)
+                assert "did not change anything" not in body.lower(), (etype, body)
+            else:
+                assert ("did not change anything" in body.lower()
+                        or "did not disable anything" in body.lower()), (etype, body)
             assert ("keys" in body.lower() or "support@" in body.lower()), (
                 etype, body)
         # No WHOLE-STATE claim anywhere: the same panel can carry a suspension
@@ -1583,7 +1604,7 @@ class TestAlertRegistersAndAcks:
         tier = _alert_dict({"event_type": "review_needed", "details": {
             "count": 51_000, "threshold": 25_000, "window_s": 3600,
             "surface": "Memory writes", "tier_relative": True}})
-        assert "half this Organization's allowance" in tier["message"], tier
+        assert "a share of this Organization's allowance" in tier["message"], tier
         assert "contact support@premiselabs.co" in tier["message"], tier
         absolute = _alert_dict({"event_type": "review_needed", "details": {
             "count": 900, "threshold": 500, "window_s": 3600,
