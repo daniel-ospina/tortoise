@@ -262,10 +262,23 @@ export function episodeRangeLabel(alert) {
 // ledger: `ALERTS_HEADING`/`ALERTS_LEAD`/`ACTIVITY_HEADING`/`ACTIVITY_LEAD`,
 // `ACKED_CHIP`/`ACK_BUTTON`/`ACK_PENDING`, `SHOW_OLDER`/`HIDE_OLDER`,
 // `NOTHING_RECENT`/`ALL_RECENT_ACKED`, `isCurrent`, `groupAlerts`, `isEmptyFeed`.
-// They are kept only because their tests still assert them, and they are NOT
-// reachable from any render — a reader looking for the copy a customer sees must
-// read `notificationLedger.js` (the ledger's copy) and the server's
-// `_alert_dict` (the per-row sentences), not this file's headings.
+// They are NOT reachable from any render — a reader looking for the copy a
+// customer sees must read `notificationLedger.js` (the ledger's copy) and the
+// server's `_alert_dict` (the per-row sentences), not this file's headings.
+//
+// ⛔ TWO CLASSES, SAID APART, because only one of them is safe to delete blind.
+// `ALERTS_HEADING`/`ALERTS_LEAD`/`ACTIVITY_HEADING`/`ACTIVITY_LEAD`, `isCurrent`,
+// `groupAlerts` and `isEmptyFeed` are still ASSERTED by this file's suite, so
+// deleting them reds a test and the deleter finds out.
+// `ACKED_CHIP`/`ACK_BUTTON`/`SHOW_OLDER`/`HIDE_OLDER`/`NOTHING_RECENT` and
+// `ALL_RECENT_ACKED` are referenced by NOTHING at all — no render and no test —
+// so they are deletable blind (verified: the only hits for each name in the repo
+// are its own declaration and this note). `ACK_PENDING` left this list entirely:
+// the ack button's pending label now imports it, so it has a live consumer.
+// A single sentence for both classes is how this note used to read — "kept only
+// because their tests still assert them" was false for the six a lane would act
+// on, which is the "export with coverage" illusion the note exists to dispel
+// (#14694 review P2).
 //
 // This note exists so a lane can tell DEAD COPY from live copy instead of
 // trusting that an export with passing tests is in use; deleting them is a copy

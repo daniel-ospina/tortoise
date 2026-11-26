@@ -1519,6 +1519,20 @@ export const ACKED_HIDE = 'Hide acknowledged'
 //: one (`_alert_feed` sends `acked` as a boolean and nothing else), and a label
 //: that merely looked like a decision time is the defect this constant closes.
 export const ACKED_DETECTED = (stamp) => `detected ${stamp}`
+//: The per-row REGISTER as the CHIP spells it — and the ONE spelling of that:
+//: the row renders it as a chip AND the controls' accessible name states it, so a
+//: second literal in the panel would be two claims that can drift apart. THREE
+//: values, not two: an unrecognised register fail-quiets into the activity
+//: register (`registerOf`), so a two-valued chip called an unclassified row
+//: "activity" while the same row's detail view said we could not classify it.
+//: ⛔ Distinct from the `KIND_*` block below, which is the DETAIL view's full
+//: sentence per register: these three are the chip's words, not the sentence.
+//: ⛔ The name is not decoration: a `<button>`'s descendants are PRESENTATIONAL,
+//: so an explicit `aria-label` REPLACES the row's own line and anything the name
+//: omits is announced to nobody (#14694 review P2).
+export const CHIP_INCIDENT = 'alert'
+export const CHIP_ACTIVITY = 'activity'
+export const CHIP_UNCLASSIFIED = 'unclassified'
 export const SAVE_FAILED =
   'Your browser did not save that — it will be forgotten when this page '
   + 'reloads.'

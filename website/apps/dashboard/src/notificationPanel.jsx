@@ -77,6 +77,9 @@ import {
   TRUNCATED_NOTE,
   UNSNOOZE,
   UNSNOOZE_GROUP,
+  CHIP_ACTIVITY,
+  CHIP_INCIDENT,
+  CHIP_UNCLASSIFIED,
   EPISODE_GAP_MS,
   buildLedger,
   detailOf,
@@ -94,7 +97,7 @@ import {
 // carried (`scan_saturated` and a failed read), so they are imported rather than
 // paraphrased: a second spelling is a second claim, and the tested one is the one
 // this file must make.
-import { ALERTS_UNAVAILABLE, SCAN_SATURATED_EMPTY } from './securityAlerts.js'
+import { ACK_PENDING, ALERTS_UNAVAILABLE, SCAN_SATURATED_EMPTY } from './securityAlerts.js'
 
 /** The browser's `localStorage` object, or null where there is none (SSR). A
  *  privacy mode can expose the object and throw on first USE, so the object is
@@ -150,8 +153,9 @@ function Badge({ count, warn }) {
  * is the discriminator to carry.
  *
  * The bound, stated rather than implied: the name carries every discriminator the
- * row's own line renders — label, message, count, episode window and the absolute
- * stamp — so two rows that still collide are indistinguishable on screen too.
+ * row's own line renders — the register, label, message, count, episode window,
+ * the absolute stamp and the truncation note — so two rows that still collide are
+ * indistinguishable on screen too.
  */
 function actionName(action, entry) {
   if (!entry) return action
@@ -170,7 +174,21 @@ function actionName(action, entry) {
   // — a `stamp ? … : ageLabel ? …` arm could never run, and it read as a
   // discriminator for a stampless row that does not exist (#14694 review P2).
   const stamp = entry.stamp ? ` @ ${entry.stamp}` : ''
-  return `${action}: ${label}${message}${count}${range}${stamp}`
+  // ⛔ THE REGISTER AND THE TRUNCATION NOTE, NOT ONLY THE DISCRIMINATORS. A
+  // `<button>`'s descendants are PRESENTATIONAL, so an explicit `aria-label`
+  // REPLACES the row's own line: the chip and the `×N+` explanation this name
+  // omitted were painted for a sighted reader and dropped from the accessibility
+  // tree entirely. The register is the point of #10156 — whether anything
+  // happened or a rate was measured — and an AT user could reach it only by
+  // opening every detail. So the name states what the line renders (#14694
+  // review P2). One spelling of each: `CHIP_*` in the ledger, the chip's own copy.
+  const kind = entry.isIncident
+    ? CHIP_INCIDENT
+    : entry.registerKnown
+      ? CHIP_ACTIVITY
+      : CHIP_UNCLASSIFIED
+  const truncated = entry.truncated ? ` (${TRUNCATED_NOTE})` : ''
+  return `${action}: ${kind} — ${label}${message}${count}${range}${stamp}${truncated}`
 }
 
 function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
@@ -205,10 +223,10 @@ function LedgerRow({ entry, onOpen, onSnooze, onDismiss }) {
               this bundle. */}
           <span className="notif-chip">
             {entry.isIncident
-              ? 'alert'
+              ? CHIP_INCIDENT
               : entry.registerKnown
-                ? 'activity'
-                : 'unclassified'}
+                ? CHIP_ACTIVITY
+                : CHIP_UNCLASSIFIED}
           </span>
         </span>
         <span className="notif-message">{entry.message}</span>
@@ -391,7 +409,7 @@ function DetailView({ alert, now, canAcknowledge, onAcknowledge, ackPending,
             disabled={pending}
             title="Stop showing this episode to everyone in the Organization"
           >
-            {pending ? 'Saving…' : ACK_FOR_EVERYONE}
+            {pending ? ACK_PENDING : ACK_FOR_EVERYONE}
           </button>
         ) : null}
         {alert && alert.acked ? <span className="dim small">{ACKED_NOTE}</span> : null}
@@ -496,6 +514,19 @@ export function NotificationBell({
   // rather than a literal: two bells on one page (a future surface) would otherwise
   // share an id, and `aria-controls` would point at whichever rendered first.
   const panelId = React.useId()
+  // ── AND THE FOUR GROUP DISCLOSURES GET THEIR OWN PAIR (#14694 review P2). ──
+  // The bell above is a conformant disclosure, and its four siblings in the list
+  // were not: their only cue was the label flipping between `Snoozed (2)` and
+  // `Hide snoozed`, so an AT user was told "button" with no expanded/collapsed
+  // STATE — the exact rule this file's A11Y contract cites for the bell (APG
+  // Disclosure) and did not apply to the other four. `React.useId` per trigger so
+  // two panels mounted at once cannot share an id; `aria-controls` is emitted only
+  // while the region it names is MOUNTED, the same reasoning the bell carries —
+  // the collapsed list is unmounted, and a reference to an absent element dangles.
+  const listId = React.useId()
+  const snoozedId = React.useId()
+  const dismissedId = React.useId()
+  const ackedId = React.useId()
 
   // Switching Organization (or account) must switch the ledger. Adjusting state
   // DURING render is React's documented alternative to an effect for "a prop
@@ -949,7 +980,7 @@ export function NotificationBell({
               ) : null}
 
               {entries.length ? (
-                <ul className="notif-list">
+                <ul className="notif-list" id={listId}>
                   {entries.map((entry) => (
                     <LedgerRow
                       key={entry.rowKey}
@@ -967,6 +998,12 @@ export function NotificationBell({
                   type="button"
                   className="ghost small notif-more"
                   onClick={() => setShowOlder(!showOlder)}
+                  // The region this controls is the MAIN list: `showOlder` pushes
+                  // `ledgerView.older` into `entries`, it does not mount a second
+                  // list. `aria-controls` only while that list is rendered (see
+                  // `listId`'s own note above).
+                  aria-expanded={showOlder}
+                  aria-controls={showOlder ? listId : undefined}
                 >
                   {showOlder ? OLDER_HIDE : OLDER_TOGGLE(ledgerView.older.length)}
                 </button>
@@ -981,11 +1018,13 @@ export function NotificationBell({
                     type="button"
                     className="ghost small notif-more"
                     onClick={() => setShowSnoozed(!showSnoozed)}
+                    aria-expanded={showSnoozed}
+                    aria-controls={showSnoozed ? snoozedId : undefined}
                   >
                     {showSnoozed ? SNOOZED_HIDE : SNOOZED_TOGGLE(ledgerView.snoozed.length)}
                   </button>
                   {showSnoozed ? (
-                    <ul className="notif-list notif-list-muted">
+                    <ul className="notif-list notif-list-muted" id={snoozedId}>
                       {ledgerView.snoozed.map((entry) => (
                         <li key={entry.rowKey} className="notif-row">
                           <span className="notif-snoozed-text">
@@ -1019,11 +1058,13 @@ export function NotificationBell({
                     type="button"
                     className="ghost small notif-more"
                     onClick={() => setShowDismissed(!showDismissed)}
+                    aria-expanded={showDismissed}
+                    aria-controls={showDismissed ? dismissedId : undefined}
                   >
                     {showDismissed ? DISMISSED_HIDE : DISMISSED_TOGGLE(ledgerView.dismissed.length)}
                   </button>
                   {showDismissed ? (
-                    <ul className="notif-list notif-list-muted">
+                    <ul className="notif-list notif-list-muted" id={dismissedId}>
                       {ledgerView.dismissed.map((entry) => (
                         <li key={entry.rowKey} className="notif-row">
                           <span className="notif-snoozed-text">
@@ -1065,11 +1106,13 @@ export function NotificationBell({
                     type="button"
                     className="ghost small notif-more"
                     onClick={() => setShowAcked(!showAcked)}
+                    aria-expanded={showAcked}
+                    aria-controls={showAcked ? ackedId : undefined}
                   >
                     {showAcked ? ACKED_HIDE : ACKED_TOGGLE(ledgerView.acked.length)}
                   </button>
                   {showAcked ? (
-                    <ul className="notif-list notif-list-muted">
+                    <ul className="notif-list notif-list-muted" id={ackedId}>
                       {ledgerView.acked.map((entry) => (
                         <li key={entry.rowKey} className="notif-row">
                           <span className="notif-snoozed-text">
