@@ -2765,7 +2765,9 @@ and the `_RELATION_ENDPOINT_NAME` arm that never reaches a `:Source`'s denied `c
 `m.url` for a `:Source`, and the preview is cut to `_ENDPOINT_NAME_MAX` with a `nameTruncated` flag).
 
 **Both documents re-derive every figure the row moves** — the section states the customer-callable
-and distinct-door figures TWICE each, and the read-site total and the cell-occurrence figure ONCE
+figure TWICE, the distinct-door figure THREE times (the head sentence, the blast-radius sentence, and
+the `23 cell occurrences over the 16 distinct doors` parenthetical that carries it a third time), and
+the read-site total and the cell-occurrence figure ONCE
 (measured with the guard's own `_SITE_COUNT` / `_CALLABLE_SITE_COUNT` over `_section_13()`) — and
 `tests/test_7948_about_object_read_sites.py` derives them from the table rather than trusting prose:
 read sites `FORTY-THREE` → `FORTY-FOUR`, customer-callable `EIGHTEEN` → `NINETEEN`, distinct doors

@@ -882,8 +882,11 @@ _ENDING_BASE = (
 #:   MODIFIES ``claims``, which is the same attributive slot as the pinned
 #:   `which archived report has the Q3 numbers`. A modifier is not the question's
 #:   predicate, and reading it as one is the round-2/4/5 hijack class. The
-#:   caller reaches the population the stated way instead (``ended_scope=True``,
-#:   or the unqualified `which claims were withdrawn`).
+#:   caller reaches the population the stated way instead — the unqualified
+#:   `which claims were withdrawn`. ⛔ NOT by passing ``ended_scope=True``: that
+#:   parameter is declared only on the PRIVATE ``_tortoise_fts_query``, and no
+#:   public door forwards it, so naming it as the caller's route sends a reader
+#:   after an argument no surface accepts (#13558).
 _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # "has anything we relied on been withdrawn?" / "have any claims been retired?"
     # An EXISTENCE question about an ending: the auxiliary + quantifier is the
