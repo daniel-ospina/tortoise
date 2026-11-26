@@ -11534,6 +11534,14 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The row is not exempt, and so is the weight of the row.",
             "The REGISTRATION is exempt from nothing, and the weight of the row is not exempt"
             " either.",
+            # ⛔ AND THE CORRECTIVE-`but` CONTROLS FOR RULE 2b (round 33). Rule 2b truncates the
+            # negation window at `but`, so these must carry their OWN negation — and they do. The
+            # contrastive reading is the one the literature describes: contrast does NOT recover the
+            # first conjunct's negation into the second, so a second conjunct that is meant to be
+            # negative must say so. Each of these is TRUE prose, each stays tolerated.
+            "The row is not exempt, but neither is the weight of the row.",
+            "The row is not exempt, but the weight of the row is not exempt either.",
+            "The row is not exempt, yet the weight of the row is not exempt.",
             # ⛔ RULE 3 (round 29, P2): `too` as an INTENSIFIER takes an adjective — TRUE prose about
             # a row. The `: The row is too specific` case below is the one that DRIVES the
             # clause-terminal lookahead: it contains `exempt` in the same sentence, so the additive
