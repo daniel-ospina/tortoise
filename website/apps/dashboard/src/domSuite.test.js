@@ -27,7 +27,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { basename, dirname, join } from 'node:path'
@@ -80,10 +80,24 @@ test('#4915: the DOM lane runs with the primary suite, and collects every DOM fi
     // block of `notificationPanel.dom.test.jsx` left this guard GREEN on
     // `{total 14, passed 14, success true}` with that file at 0 rows — a false PASS on
     // the leg that gates this PR. Names must be joined by ROWS, not assumed.
-    const rowsPerFile = Object.fromEntries((report.testResults ?? [])
-      .map((r) => [basename(r.name ?? ''), (r.assertionResults ?? []).length]))
+    //
+    // ⛔ AND KEYED BY PATH, NOT BY BASENAME. `domTestFiles` is a FLAT readdir while
+    // vitest's `include` is RECURSIVE, so a DOM test under `src/<dir>/` can share a
+    // basename with a member of the population; keyed by name, last-wins would let the
+    // crashed file inherit its twin's rows (false PASS, guard GREEN) or blame the
+    // healthy twin for the crash (false RED). MEASURED: `src/zzz/notificationPanel.
+    // dom.test.jsx` + the top-level file SIGKILLed at import left this guard GREEN on
+    // `{total 15, passed 15}`. Resolved path cannot be confused for its twin.
+    const rowsByPath = new Map()
+    for (const r of report.testResults ?? []) {
+      const resolved = realpathSync(r.name ?? '')
+      assert.ok(!rowsByPath.has(resolved),
+        `${basename(resolved)} appears TWICE in the DOM report (${resolved}) — `
+        + 'rows cannot be attributed to a file')
+      rowsByPath.set(resolved, (r.assertionResults ?? []).length)
+    }
     for (const file of domTestFiles) {
-      assert.ok((rowsPerFile[file] ?? 0) > 0,
+      assert.ok((rowsByPath.get(realpathSync(join(here, file))) ?? 0) > 0,
         `${file} was COLLECTED but reported 0 test rows — its worker died at `
         + 'import/collection time, so every assertion in it was lost while the '
         + 'report still looked successful')
