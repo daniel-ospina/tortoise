@@ -57,19 +57,6 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — every `origin/main` row at this base PLUS this
-# lane's own `tests/test_13450_ep_position_axis_participation.py` (`core`, the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) — the verb packs nine shards at 827.4 s (a, c, d, e, f, h, i, j, k) and
-# two at 827.5 s (b, g), so `ceil(827.5/60 x 2)` = 28 m governs (a shard's job-level wall clock is
-# the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.03` (1680 / 827.5 = 2.0302), so the two agree by construction rather than
-# by a hand re-read.
-# ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
-# own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
-# figures stay on the commit that measured them. ⛔ NO FILE COUNT IS STATED HERE: the pool census
-# moves with every merge that adds a test file and "more than `main`" is zero the moment this
-# branch merges, so the count is a HISTORY bound to a sha inside the fence below rather than a
-# standing claim about this tree.
 # reader of the prose can see. On THIS tree — `origin/main` `c1c8df1a` folded in, carrying
 # `#14548`'s residue RATCHET (`tests/test_sdk_privatise_sweep.py`, `core`, 28.0 s — the ONE
 # non-flat weight in this list), `#14560`'s operator-vector row, `#14565`'s reaper-schedule row,
