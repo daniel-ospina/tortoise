@@ -901,8 +901,12 @@ class TestProbeDbBoundedAcquisition:
         this test originally left thin, and it is the half that red-ed:
         ``test-slow (b)`` at ``5fc0b5f38a`` failed this row with
         ``{'ok': False, 'observed': True, 'latency_ms': 1776.7, 'error':
-        'transient connect refused'}`` — the dict shape ONLY the
-        "retry's setup timed out, keep the first error" arm produces — on a
+        'transient connect refused'}`` — the dict shape the "retry's setup timed
+        out, keep the first error" arm produces, and ``latency_ms`` ~ the whole
+        consumed retry window is what PINS it to that arm: the no-retry arm
+        (``remaining <= 0``, the mutant below) reports the same keys but a
+        near-zero ``latency_ms`` and a probe count of 1, so the reading, not the
+        shape, discriminates them — on a
         head that does not touch this file (#9431). The property under test is
         that the acquisition consumes nearly ALL of the total budget, never any
         absolute duration, so raising the budget and the sleep together keeps
