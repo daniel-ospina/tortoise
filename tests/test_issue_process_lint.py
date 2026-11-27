@@ -3733,7 +3733,56 @@ def test_a_range_spans_only_rows_the_issue_DECLARES_and_never_invents_one():
     assert L._ids_in("rows V1..V9", ["V1", "V2", "V6"]) == {"V1"}
     # A hyphen inside prose is not a range between two declared ids unless both ids are declared.
     assert L._ids_in("V1-24 hours", ["V1", "V2"]) == {"V1"}
-    assert L._row_range_span("V1 only", ["V1"]) == set()
+    # ⛔ REACHES the `len(rows) < 2` guard. N1: the assertion here used to be
+    # `_row_range_span("V1 only", ["V1"])`, which contains no range join at all — so neither removing
+    # the guard nor any span change could redden it, and the guard had NO covering assertion. `V1 to V1`
+    # is a join whose endpoints are the same single row: without the guard the span is `{'V1'}`.
+    assert L._row_range_span("V1 to V1", ["V1"]) == set()
+    assert L._row_range_span("V1 to V1", ["V1", "V2"]) == {"V1"}
+
+
+def test_a_disclaimer_on_the_closing_line_is_not_a_claim():
+    """F4: naming the rows you do NOT claim must not read as claiming them.
+
+    The row read unioned every declared id on any line carrying a closing word, so ONE disclosure
+    sentence — the sentence a careful partial PR writes — turned #13886's own shape into `clean`
+    (`claimed` = all six). That is a false PASS on the arm's headline question, and it is what GitHub
+    does too: its closing parser is not context-aware, so the keyword closes all six whatever the
+    sentence says (hence: the disclaimer is NOT a claim, not merely a caveat on one). Every line below
+    claims V2 and disclaims the other five; pre-fix each reported `clean` with `claimed` = all six.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    for line in ("Closes #13036 (row V2 only); V1, V3, V4, V5, V6 remain unmeasured.\n",
+                 "Closes #13036 (row V2 only) — V1/V3/V4/V5/V6 are follow-ups.\n",
+                 "Closes #13036 — only V2 is claimed here; V1, V3, V4, V5, V6 are NOT claimed.\n"):
+        findings, stats = L.classify_partial_close(line, 500, {13036: _scope(rows)},
+                                                  "daniel-ospina/tortoise")
+        assert stats["finding"] == 1, (line, stats)
+        assert findings[0].evidence["claimed"] == ["V2"], (line, findings[0].as_dict())
+        assert findings[0].evidence["unclaimed"] == ["V1", "V3", "V4", "V5", "V6"], line
+        # the remediation is the correct one again: claim V2, do not claim two of six
+        assert "Satisfies #13036: V2" in findings[0].detail, line
+    # CONTROL: `only` LIMITS an affirmative claim, so it must never be read as a disclaimer.
+    assert L.claimed_row_ids("Closes #13036 (row V2 only).\n", 13036, rows) == {"V2"}
+    # CONTROL: a spaced dash BETWEEN two declared ids is a RANGE, not a claim/disclaimer boundary.
+    findings, stats = L.classify_partial_close("Closes #13036 (rows V1 — V6)\n", 500,
+                                               {13036: _scope(rows)})
+    assert findings == [] and stats["clean"] == 1
+
+
+def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
+    """F4's other half: the WHOLE-BODY fallback must not launder a disclaimer.
+
+    The disclaimed ids sit in the body BY CONSTRUCTION, so the fallback's "names all of them
+    anywhere" test found all six and reported `clean` — on a close that claimed none of them. The
+    honest verdict is AMBIGUOUS (the PR said what it is NOT claiming and not what it is), never a
+    pass. Pre-fix: `clean == 1`.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close("Closes #13036 — V1–V6 remain unmeasured\n", 500,
+                                               {13036: _scope(rows)})
+    assert findings == []
+    assert stats["ambiguous"] == 1 and stats["clean"] == 0, stats
 
 
 def test_naming_every_row_ANYWHERE_is_a_complete_close():
@@ -3815,6 +3864,24 @@ def test_the_latest_satisfies_section_wins_rather_than_the_union():
     assert L.criteria_state([later, early])["unticked"] == 2
 
 
+def test_the_latest_SECTION_wins_inside_one_comment():
+    """F6: the rule is section-granular, and the code was body-granular.
+
+    A lane that re-posts its checklist inside ONE comment writes the superseded section and the
+    current one in the same body. The docstring guarantees the LATEST section wins; the code took the
+    newest BODY and then UNIONED its sections, so the finished issue measured `unticked=2` — the very
+    false positive the rule exists to prevent. Pre-fix the first assertion failed with 2.
+    """
+    both = "## Satisfies\n\n- [ ] a\n- [ ] b\n\n## Satisfies\n\n- [x] a\n- [x] b\n"
+    assert L.criteria_state([both])["unticked"] == 0
+    assert L.criteria_state([both])["ticked"] == 2
+    # CONTROL: the newest section may also be the WORSE one — the last state wins, not the best one.
+    worse = "## Satisfies\n\n- [x] a\n- [x] b\n\n## Satisfies\n\n- [ ] a\n- [ ] b\n"
+    assert L.criteria_state([worse])["unticked"] == 2
+    # and the body-level rule still holds: a newer COMMENT supersedes an older one outright.
+    assert L.criteria_state(["## Satisfies\n\n- [ ] a\n", "## Satisfies\n\n- [x] a\n"])["unticked"] == 0
+
+
 def test_row_ids_reads_the_BODY_only_never_a_comment():
     """A `### R1` inside a COMMENT is a quotation of some other issue's layout; reading it would let
     a comment manufacture rows the issue does not have."""
@@ -3854,6 +3921,39 @@ def test_refs_with_a_row_qualifier_is_not_a_closing_target():
     assert L.closing_targets("Refs #13036 (row V2 only)\n", 500) == []
     assert L.closing_targets("Satisfies #13036: V2\nRefs #13036\n", 500) == []
     assert L.closing_targets("Closes #13036 (row V2 only)\n", 500) == [13036]
+
+
+def test_a_self_qualified_closing_ref_is_not_dropped_SILENTLY_when_the_repo_is_unknown():
+    """F5: `KEYWORD OWNER/REPOSITORY#N` is a documented closing form, and the drop must be visible.
+
+    `self-qualified`: the ref names its own repo, so an unresolved ambient repo makes `_claims_in` drop
+    it. Arm 1 passes a `skipped` sink and says so; arm 3 did not, so a `--pr` run that could not resolve
+    the repo printed `0 closing ref(s) read — 0 clean, 0 flagged` and exited 0 — an EMPTY population
+    reported as an answered one. Pre-fix `dropped` stayed `[]`.
+    """
+    dropped: list[int] = []
+    assert L.closing_targets("Closes daniel-ospina/tortoise#13036\n", 500, None, dropped) == []
+    assert dropped == [13036], dropped
+    # CONTROL: with the repo resolved the same body resolves, and nothing is reported as dropped.
+    assert L.closing_targets("Closes daniel-ospina/tortoise#13036\n", 500,
+                             "daniel-ospina/tortoise", dropped) == [13036]
+    assert dropped == [13036], dropped
+
+
+def test_cli_says_so_when_a_self_qualified_closing_ref_could_not_be_read(monkeypatch, capsys):
+    """F5 end to end: the note reaches the counters line's reader, so `0 read` cannot read as `none`."""
+    monkeypatch.setattr(L, "resolve_repo", lambda explicit=None: None)
+
+    def fake_gh(args, timeout=60):
+        if args[:2] == ["pr", "view"]:
+            return json.dumps({"body": "Closes daniel-ospina/tortoise#13036\n", "labels": []})
+        raise AssertionError(args)
+
+    monkeypatch.setattr(L, "_gh", fake_gh)
+    assert L.main(["--pr", "13886", "--arm", "pr-partial-close"]) == L.RC_CLEAN
+    out = capsys.readouterr().out
+    assert "1 owner/repo#N closing claim(s) in PR #13886 were NOT read" in out, out
+    assert "0 closing ref(s) read" in out, out
 
 
 def test_an_unreadable_issue_is_recorded_unread_never_a_pass(monkeypatch):
