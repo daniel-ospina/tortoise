@@ -3111,6 +3111,90 @@ def test_a_DAMAGED_boundary_under_a_RETARGETED_enclosing_repo_cannot_permit_what
         "so the walked-up answer was neither this boundary nor an ancestor of it")
 
 
+def test_a_DAMAGED_boundary_whose_ENCLOSING_worktree_COINCIDES_with_it_cannot_permit_what_it_tracks(
+    tmp_path, monkeypatch, capsys
+):
+    """…and the coincidence form: the enclosing work tree IS this boundary.
+
+    ⛔ THE SAME DEFECT ONE BRANCH OVER, AND IT WAS A P1 (#14741 review, cycle 5, measured).
+    The previous round established that `core.worktree` moves the work tree and never the
+    git dir, and applied that to the ELSEWHERE branch only. An ENCLOSING repository
+    retargeted to point AT this boundary makes its work tree root EQUAL the boundary, so a
+    DAMAGED boundary's walked-up `--show-toplevel` answers the boundary ITSELF — equal —
+    and the `== boundary` branch returned "askable" without ever asking the gitdir question.
+    `--render` then exited **0**, no stderr, and replaced bytes the damaged boundary's OWN
+    index still held, while `_resolves_to_own_gitdir` answered `False` (correctly) and was
+    never consulted.
+
+    Measured before the fix: `show-toplevel == boundary` (True),
+    `absolute-git-dir = <outer>/.git`, `_resolves_to_own_gitdir = False`,
+    `_boundary_is_unaskable = False`, `--render` rc 0, `8 -> 89` bytes.
+
+    This arm pins the `== boundary` branch: revert it to `return False` and it reds alone.
+    """
+    config = ["-c", "user.email=a@b", "-c", "user.name=a"]
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)  # ROOT: tracks nothing here
+    outer = repo / "outer"
+    sub = outer / "sub"
+    sub.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(outer)], check=True)
+    # ⛔ THE ENCLOSING REPOSITORY'S WORK TREE IS THE BOUNDARY — that coincidence is the
+    # whole shape, and it is what made the walked-up answer look "self-resolved". Its index
+    # is left EMPTY on purpose: nothing but the damaged boundary's own index may hold the
+    # destination, or this arm would grade a different provider.
+    subprocess.run(
+        ["git", "-C", str(outer), "config", "core.worktree", str(sub)], check=True)
+    # The boundary: a REAL nested repository whose OWN index tracks the destination.
+    subprocess.run(["git", "-C", str(sub), "init", "-q"], check=True)
+    (sub / "docs").mkdir()
+    keeper = sub / "docs" / "DOC.md"
+    keeper.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(sub), "add", "--", "docs/DOC.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(sub), *config, "commit", "-qm", "sub tracks it"], check=True)
+    # THE DAMAGE: `HEAD` removed, so git will not accept this directory's `.git` and walks
+    # UP — to `outer`, whose `core.worktree` points back AT `sub`.
+    (sub / ".git" / "HEAD").unlink()
+    # PREMISE 1 — the tracking survives in the index about to be overwritten (read from the
+    # index BYTES, because git disowns the damaged gitdir and answers 128 even when named).
+    own_index = (sub / ".git" / "index").read_bytes()
+    assert b"docs/DOC.md" in own_index, (
+        "the premise: the damaged boundary's OWN index must still name the destination")
+    # PREMISE 2 — the walked-up answer EQUALS the boundary. This is the coincidence the arm
+    # exists for: without it the ancestor / elsewhere branch would be graded instead.
+    walked_up = subprocess.run(
+        ["git", "-C", str(sub), "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    assert walked_up.returncode == 0, (
+        f"the premise: git must answer through the walk-up; rc={walked_up.returncode}")
+    assert Path(os.path.realpath(walked_up.stdout.strip())) == Path(os.path.realpath(sub)), (
+        "the premise: the walked-up answer must EQUAL the boundary — that coincidence is "
+        f"the shape this arm grades; got {walked_up.stdout.strip()!r}")
+    # PREMISE 3 — and the gitdir question DOES name somebody else's git dir, which is the
+    # discriminator that was never reached.
+    assert not census._resolves_to_own_gitdir(sub), (
+        "the premise: the gitdir git resolves must NOT be this boundary's own")
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    before = keeper.read_bytes()
+    rc = census.main(["--render", keeper.relative_to(repo).as_posix()])
+    assert rc == 2, (
+        f"a DAMAGED boundary whose ENCLOSING work tree coincides with it must not permit "
+        f"the write, got {rc} — the walked-up answer equals the boundary, so work-tree "
+        "identity cannot decide askability and the gitdir must be asked on this branch too")
+    err = capsys.readouterr().err
+    assert "does not resolve" in err, (
+        f"the refusal must name the unanswerable boundary; stderr:\n{err}")
+    assert keeper.read_bytes() == before, (
+        "tracked content was overwritten: the gitdir question was never reached because "
+        "the walked-up work tree root happened to equal the boundary")
+
+
 def test_a_directory_that_only_LOOKS_like_git_metadata_still_RENDERS(tmp_path, monkeypatch):
     """…and the COUNTERWEIGHT: the metadata heuristic must not refuse a plain directory.
 
@@ -5570,6 +5654,14 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # only arm that pins it: revert `_resolves_to_own_gitdir` to the ancestor test and
         # this one reds while every other arm stays green.
         "test_a_DAMAGED_boundary_under_a_RETARGETED_enclosing_repo_cannot_permit_what_it_tracks",
+        # ⛔ AND THE SAME DEFECT WHERE THE COINCIDENCE HIDES IT (#14741 review, cycle 5,
+        # **P1**): an ENCLOSING repository retargeted to point AT this boundary makes its
+        # work tree root EQUAL the boundary, so a damaged boundary's walked-up
+        # `--show-toplevel` answers the boundary itself and the `== boundary` branch returned
+        # askable WITHOUT asking the gitdir — `--render` exited 0 over bytes the damage left
+        # in the boundary's own index. Both branches are decided by the gitdir identity, and
+        # this is the only arm that pins the `== boundary` one.
+        "test_a_DAMAGED_boundary_whose_ENCLOSING_worktree_COINCIDES_with_it_cannot_permit_what_it_tracks",
     }
     # ⛔ AND THE SET'S OWN SIZE — the direction `missing` structurally cannot see.
     # `missing` reds for a NAME that no longer resolves; it stays GREEN for a member
@@ -5599,8 +5691,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # measured): a healthy repository whose work tree is RETARGETED answers
     # `--show-toplevel` with a directory that is not an ancestor, and treating that as
     # "the repository above" refused a legitimate render.
-    assert len(split_arms) == 63, (
-        f"expected EXACTLY 63 named split arms; got {len(split_arms)} — either a "
+    assert len(split_arms) == 64, (
+        f"expected EXACTLY 64 named split arms; got {len(split_arms)} — either a "
         "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
@@ -5610,7 +5702,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 62` reds a name PRUNED from the literal and `missing` reds a
+    # `len(split_arms) == 64` reds a name PRUNED from the literal and `missing` reds a
     # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
@@ -5686,8 +5778,19 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # 61 -> 62): `--show-toplevel` answering a NON-ancestor is a healthy work tree that
     # is elsewhere, not "the repository above", and refusing it was an over-block on a
     # healthy repository (#14741 review, P3, measured against `origin/main`).
-    assert len(test_functions) == 122, (
-        f"expected EXACTLY 122 test functions in this module; got "
+    # ⛔ AND THE RETARGETED-ENCLOSING-REPO ARM TAKES IT 121 -> 122 (`split_arms` 62 -> 63):
+    # a DAMAGED boundary under a RETARGETED enclosing repository answers `--show-toplevel`
+    # with a directory that is neither the boundary nor an ancestor of it, which the
+    # ancestor test read as the healthy counterweight above and permitted — replacing
+    # content the damaged boundary's OWN index still held (#14741 review, cycle 4, P2,
+    # measured). Only the GITDIR identity separates the two.
+    # ⛔ AND ITS COINCIDENT-WORK-TREE ARM TAKES IT 122 -> 123 (`split_arms` 63 -> 64): the
+    # identical defect one branch over, where the enclosing repository's `core.worktree`
+    # points AT the boundary so the walked-up `--show-toplevel` equals the boundary and the
+    # `== boundary` branch returned askable without asking the gitdir at all (#14741
+    # review, cycle 5, P1, measured — `--render` exited 0 over indexed bytes).
+    assert len(test_functions) == 123, (
+        f"expected EXACTLY 123 test functions in this module; got "
         f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
