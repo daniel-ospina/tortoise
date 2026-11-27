@@ -12367,9 +12367,11 @@ def test_the_index_table_row_states_each_anchor_it_names_at_this_head() -> None:
 #: ⛔ THE `sdk.py:147` FIGURES ARE GRADED BY A DECLARED CENSUS, not by one `re.search`
 #: (#14386 review round 6, P2 — MEASURED). Entry 10 of `_INDEX_ROW_ANCHORS` binds the spelling
 #: ``line at `sdk.py:N` is `main`'s own``, which occurs ONCE, on line 102 — the same line
-#: whose single `sdk.py:147` it grades; the other FIVE occurrences — 3 on line 108 and 2 on
-#: line 114, SIX in all (#14386 review rounds 9 and 10: this said seven / TWICE, the pre-dedup
-#: reading, and the first correction's enumeration then counted line 102 twice) — match that
+#: whose single `sdk.py:147` it grades; the rest — 2 on line 108 and 1 on line 114, FOUR in all
+#: at this head (#14587 review cycle 3: the SIX this note enumerated was the pre-repair reading,
+#: and the two statements it counted on line 114 and line 102 were part of the refuted re-point
+#: figures that cycle DELETED rather than routed — lowering the constant is the deliberate form of
+#: that removal, which is what the census exists to force) — match that
 #: shape not at all. Mutating occurrence 2, 3 or 6 to `:148` (whose line is `from .live import
 #: direction_flows`, NOT the insert) left `485 passed`. The arm reads one match, so one
 #: occurrence is graded out of six: the fail-open direction, on prose this PR itself adds.
@@ -12384,14 +12386,21 @@ def test_the_index_table_row_states_each_anchor_it_names_at_this_head() -> None:
 #:
 #: ⛔ AND THE COUNT NEEDS A RIGHT BOUNDARY, or the sentence above is FALSE (#14386 review round 8,
 #: F2 — MEASURED). `doc.count("sdk.py:147")` counts a PREFIX, so `sdk.py:1475` counts as a hit:
-#: entry 10 grades ONE of the six occurrences, and repointing the other five to `:1475` left the
-#: count at 6 and this arm GREEN — the fail-open direction, on the very guarantee this comment
-#: asserts. (Both figures are this head's reading; the live count is `_SDK147_OCCURRENCES`.)
+#: entry 10 grades ONE of them, and repointing the rest to `:1475` left the count UNCHANGED and
+#: this arm GREEN — the fail-open direction, on the very guarantee this comment
+#: asserts. (⛔ THE `six` / `five` / `at 6` IN THIS PARAGRAPH ARE THE READING OF THE HEAD THAT
+#: ROUND MEASURED, kept as history: the live count is `_SDK147_OCCURRENCES`, which cycle 3 lowered
+#: to 4 after deleting two statements of the token that belonged to refuted figures. A reader who
+#: takes these for this head's numbers has the same defect the census exists to catch.)
 #: The census now matches `sdk\.py:147(?!\d)`, and that mutation is replayed as an
 #: assertion in `test_the_index_table_row_states_each_anchor_it_names_at_this_head`, so the
 #: boundary cannot be dropped again without a red.
 _SDK147_NEEDLE = "from .live import canonical_direction"
-_SDK147_OCCURRENCES = 6
+#: FOUR at this head — `grep -c`-style line counts say 3, the CENSUS counts OCCURRENCES and line
+#: 108 carries two. Lowered from 6 only because cycle 3 deleted two statements of it that were
+#: part of refuted re-point figures (#14587 review cycle 3); raise it deliberately when the
+#: document gains another statement.
+_SDK147_OCCURRENCES = 4
 
 
 def _sdk147_census_failures(doc_text: str | None = None) -> list[str]:
@@ -12421,3 +12430,271 @@ def _sdk147_census_failures(doc_text: str | None = None) -> list[str]:
             f"`{_SDK147_NEEDLE}` occurs at {true_lines} in `sdk` — the `:147` figures name a "
             "line that is no longer unique, so the census cannot mean one address")
     return failures
+
+
+# ══ A NEGATIVE MEMBERSHIP CLAIM ABOUT THIS BUNDLE'S OWN FILES IS UNGRADED PROSE — AND IT HAS
+#    BEEN FALSE AT TWO HEADS ═══════════════════════════════════════════════════════════════════
+#
+# `05-verify.md` states, in the present tense, whether a sibling document is in this branch's
+# diff. That sentence is a claim about a COMMAND's output, and nothing in this file read it.
+# MEASURED at `6c2c4d06`: the bundle asserted that `git diff --numstat origin/main...HEAD --
+# …/04-plan.md` "prints NOTHING" (twice) and "is EMPTY", while the same command prints
+# `1 1 …/04-plan.md` — because `2bedbc41` re-derived the `org_info` span IN that file and left
+# the surrounding prose asserting the file was in no diff at all. The same paragraph also said
+# "both copies already read" the re-derived pair, while `origin/main`'s copy read the BASE pair
+# (`17218-17295`, its own anchors) — a sentence that refuted its own neighbour.
+#
+# The rule here is the one the bundle already states for every other figure: a NEGATIVE claim
+# ("prints NOTHING", "is EMPTY") is both unmeasurable in the document and self-refuting the moment
+# anyone edits the file it names, so state the pair the command PRINTS and let a reader re-run it.
+# ⛔ This arm cannot check the NUMBERS (that needs `origin/main`, which a CI checkout does not
+# always carry, and an arm that skips when a ref is absent is a no-op gate). What it can do — and
+# what would have caught both heads — is refuse the SHAPE that rots.
+_MEMBERSHIP_CMD_RE = re.compile(
+    # ⛔ THE COMMAND PREFIX IS A SET, NOT A SPELLING (#14587 review P3). This read
+    # `numstat` only, while the sentence this block makes AUTHORITATIVE
+    # (`_ORG_INFO_ROUTING` below) is spelled `git diff --name-only`. So a negative
+    # claim written in the very spelling the block routes to was invisible: a
+    # `name-only … prints NOTHING` sentence parsed as `([], [])` and the arm below
+    # stayed green over it — a false PASS in the guard, not a wording preference.
+    # `name-status` is read for the same reason: it is the third way a document can
+    # quote a membership command, and a set that names two of three invites the next
+    # edit to rot through the same hole. The non-vacuity is asserted in the arm below
+    # rather than in a NEW case, because this file's case count is pinned by the
+    # `durations` row and by this docstring's own chain — a new arm here would move a
+    # number three other claims quote.
+    r"(?:numstat|name-only|name-status) origin/main\.\.\.HEAD -- "
+    r"docs/epics/2026-11-04-7949-extractor-v4-capstone/(?P<path>[0-9A-Za-z._-]+\.md)`"
+    # ⛔ A SENTENCE-SCALE WINDOW, AND PINNED (#14587 review cycle 2, P2/P3 — MEASURED). The
+    # window was 60 and then 120; neither is a bound anything graded, and at both widths a
+    # verdict stated further from its command was invisible. Measured with a shape-based
+    # detector: the D5 row's own sentence put `prints NOTHING` 188 characters after the
+    # closing backtick (measured at `3ac0b4b1f2`), and BOTH 60 and 120 read it as `([], [])`
+    # while 400 reads it. It is 400
+    # because that is past the longest in-scope tail at this head, and because the arm below
+    # now carries a fixture whose verdict starts beyond 200 — so a silent revert re-opens a red
+    # rather than a hole.
+    # ⛔ WHAT IT CANNOT SEE, declared rather than implied: the tail stops at a `;`, so a verdict
+    # after one is unread; and it stops at 400 characters, so a verdict a paragraph away from
+    # its command is unread. A future head that needs a wider window must re-pin the fixture
+    # with it, not widen the number alone.
+    r"(?P<tail>[^;]{0,400})"
+)
+
+#: The spellings the documents used for "this file is in no part of this diff".
+#: ⛔ A SHAPE, NOT A STRING, and CASE-FOLDED (#14587 review cycle 2, P2 — MEASURED): as a tuple
+#: of literals this read `prints NOTHING` / `is EMPTY` exactly, so `prints nothing` in lower case
+#: parsed as `([], [])` and the arm was green over it. A guard whose refusals are spelled as
+#: literals refuses only the heads that happen to reuse the same capitals.
+_NEGATIVE_MEMBERSHIP_VERDICTS = re.compile(r"prints\s+nothing|is\s+empty", re.IGNORECASE)
+
+#: The spellings a document uses for a MEASURED pair.
+#: ⛔ A SHAPE, NOT THE NUMBER (#14587 review cycle 2, P2 — MEASURED): this read the literal
+#: digits `1 1`, while the assertion it feeds claims to refuse ANY typed pair — and the numbers
+#: are EXACTLY what rots, so the only pair a future head can produce is one this arm could not
+#: read. Measured: `-> `150 43``, `-> `47 40`` and `-> `23 0`` each parsed as `([], [])`, and the
+#: graded document already carried every one of those figures (`grep -o` -> 1 each). `-> ` and
+#: `prints ` are the two verbs the bundle uses; the digits are `\d+` so a re-typed pair cannot
+#: slip through by changing its numbers, which is the one thing a re-typed pair always changes.
+_POSITIVE_MEMBERSHIP_VERDICTS = re.compile(r"(?:prints|->)\s*`\d+\s+\d+`")
+
+
+def _membership_claims(doc_text: str) -> tuple[list[str], list[str]]:
+    """Split the bundle's `numstat` membership sentences into (negative, positive) claims.
+
+    `negative` is a refusal, not a finding: the document may state what it MEASURED, never a
+    negative it cannot keep. `positive` is the paths the document states a measured pair for,
+    so a deletion of every positive claim is visible instead of silent.
+    """
+    negative: list[str] = []
+    positive: list[str] = []
+    for match in _MEMBERSHIP_CMD_RE.finditer(doc_text):
+        tail = match.group("tail")
+        if _NEGATIVE_MEMBERSHIP_VERDICTS.search(tail):
+            negative.append(f"{match.group('path')} -> {tail.strip()[:70]!r}")
+        elif _POSITIVE_MEMBERSHIP_VERDICTS.search(tail):
+            positive.append(f"{match.group('path')} -> {tail.strip()[:70]!r}")
+    return negative, positive
+
+
+def test_no_bundle_document_states_a_negative_membership_claim_it_cannot_keep():
+    """A `numstat … prints NOTHING` sentence is the shape that was FALSE at `6c2c4d06`.
+
+    ⛔ IT GRADES BOTH POLARITIES (#14587 review P2), because the affirmative form is the SAME
+    head-bound claim with its sign flipped (`#13853` review round 12) and it is the form that was
+    actually live: measured on this head, the D5 row asserted *"the CURRENT I7 span re-point IS
+    this diff's … -> `1 1` at this head"* while `04-plan.md`'s blob is byte-identical to
+    `origin/main`'s (one `git rev-parse` id for both). Read on `negative` alone, that sentence was
+    graded by nothing — and the arm stayed green over it, which is the no-op-gate class this
+    whole block exists to remove rather than to reproduce one layer up.
+    """
+    # ⛔ NON-VACUITY ON THE PATTERN ITSELF (#14587 review P3), before it reads a
+    # document: the three command prefixes a bundle document can quote must ALL be
+    # READ, and each must yield the negative claim when the claim is stated. This
+    # lives here rather than in its own case because the file's case count is a
+    # pinned figure in the `durations` row. Measured before the widening: the
+    # `name-only` fixture below returned `([], [])` — the spelling this block is
+    # being changed to ROUTE to was the one the guard could not see.
+    for spelling in ("numstat", "name-only", "name-status"):
+        fixture = (
+            f"`git diff {spelling} origin/main...HEAD -- "
+            "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` "
+            "prints NOTHING")
+        negative, _ = _membership_claims(fixture)
+        assert negative, (
+            f"`_membership_claims` cannot read a `{spelling}` membership sentence — the "
+            "guard is blind to that spelling, so a document stating a negative claim in "
+            "it would pass as clean. Widen `_MEMBERSHIP_CMD_RE` to cover every prefix a "
+            f"document can quote. Fixture that produced no finding: {fixture!r}")
+    failures = []
+    for name in ("04-plan.md", "05-verify.md"):
+        negative, positive = _membership_claims(
+            _EPIC_CITE_DOCS[name].read_text(encoding="utf-8"))
+        for claim in negative:
+            failures.append(f"{name}: NEGATIVE {claim}")
+        for claim in positive:
+            failures.append(f"{name}: TYPED PAIR {claim}")
+    assert not failures, (
+        "a bundle document states a membership verdict about one of THIS bundle's own "
+        "documents — negative (any `prints nothing` / `is empty`, any case) or a TYPED PAIR "
+        "(`-> `N M`` / `prints `N M``, which is graded as a SHAPE, not as this head's digits). "
+        "⛔ THE SCOPE IS THESE TWO DOCUMENTS, and the message says so rather than claiming "
+        "\"a file in this diff\": the path group above is pinned to this bundle's directory, so a "
+        "`prints NOTHING` about `tortoise/sdk.py` elsewhere in the file is NOT read here and is "
+        "not what this arm asserts (#14587 review cycle 2, P3 — the earlier wording over-claimed "
+        "that scope). Membership changes with every commit that touches the named file, and "
+        "`2bedbc41` / the D5 row each made their own sentence FALSE two lines away from the "
+        "repair it was describing, in one polarity and then the other. Neither figure survives a "
+        "fold: ROUTE the question to the command that answers it and let a reader re-run it. "
+        "Measured: "
+        f"{failures}")
+
+
+#: The sentence that ROUTES membership for the one path this block used to type a figure for.
+#: It is the durable half: the path left this branch's diff at `d332aa5d` (see the arm below), so
+#: the figure could only be re-typed as the NEXT head's, which is the rot the block exists to stop.
+_ORG_INFO_ROUTING = (
+    "git diff --name-only origin/main...HEAD -- "
+    "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md"
+)
+
+
+def test_the_bundle_routes_the_org_info_membership_to_the_command():
+    """The surviving half: the ROUTE must be stated, and deleting it must red.
+
+    ⛔ The arm that stood here demanded a POSITIVE pair (`prints `1 1``) and was FALSE at
+    `d332aa5d`: `main`'s `#14624` reconciled this feature onto `main` with *"docs take main's
+    version"*, so `04-plan.md`'s blob is `origin/main`'s own and
+    `git diff --numstat origin/main...HEAD -- …/04-plan.md` prints NOTHING at this head. Making
+    that assertion pass would have required typing a figure the tree contradicts — the exact
+    defect class this whole block was rebuilt to refuse, one layer up.
+
+    And the affirmative polarity is not a weaker version of the defect, it is the same one: the
+    clause this bundle carries already records the lesson (`#13853` review round 12, P2 — "first
+    the negative, then the affirmative form of it, which is the same head-bound claim with its
+    polarity flipped"). So what is graded is the ROUTE, which a fold cannot falsify, and the
+    mutation arm below proves both polarities are really parsed rather than assumed absent.
+    """
+    text = _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8")
+    negative, positive = _membership_claims(text)
+    assert _ORG_INFO_ROUTING in text, (
+        "`05-verify.md` no longer routes `04-plan.md`'s membership to the command that answers "
+        "it (`_ORG_INFO_ROUTING`). That route is what survives a fold; a typed pair does not — "
+        f"measured at this head: negative={negative} positive={positive}")
+
+
+def test_the_membership_detectors_fire_on_the_sentences_that_actually_shipped():
+    """Mutation attribution, BOTH polarities: the detector reads the shapes that were live.
+
+    The negative fixture is the sentence that shipped at `6c2c4d06`. The positive fixture is the
+    shape the now-retired assertion demanded — parsed here so its ABSENCE from the documents is a
+    measurement rather than a parser that quietly returns `[]` for everything.
+    """
+    pre_fix = (
+        "`git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints NOTHING "
+        "(measured here), so no I7 re-point of this diff puts the file there")
+    negative, positive = _membership_claims(pre_fix)
+    assert negative and not positive, (
+        f"the detector did not fire on the pre-fix sentence — negative={negative} "
+        f"positive={positive}")
+    assert negative[0].startswith("04-plan.md ->"), negative[0]
+    fixed_shape = (
+        "`git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints `1 1` "
+        "at the head it was read at")
+    negative2, positive2 = _membership_claims(fixed_shape)
+    assert positive2 and not negative2, (
+        "the positive half of the detector no longer parses the pair shape, so an EMPTY `positive` "
+        f"list in the documents would prove nothing — negative={negative2} positive={positive2}")
+    # ⛔ THE DOCUMENT'S OWN SPELLING, not the retired assertion's (#14587 review P2). The fixture
+    # above is `prints `1 1``; `05-verify.md` writes `-> `1 1``. Parsing only the fixture's
+    # spelling is how the one live affirmative claim went unread while this arm stayed green —
+    # the fixture proved the parser handled a shape the subject never uses.
+    doc_shape = (
+        "`git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` -> `1 1` "
+        "at this head")
+    negative3, positive3 = _membership_claims(doc_shape)
+    assert positive3 and not negative3, (
+        "the detector does not parse the spelling the DOCUMENTS use (`-> `1 1``), so the live "
+        f"affirmative claim is graded by nothing — negative={negative3} positive={positive3}")
+    # ⛔ THE SHAPES, NOT THIS HEAD'S NUMBERS (#14587 review cycle 2, P2 — MEASURED). A pair
+    # detector pinned to `1 1` refuses exactly one pair, and the numbers are the ONE thing a
+    # re-typed pair always changes — so the fixture below is a DIFFERENT pair, and it is one the
+    # graded document already carried (`grep -o '150 43'` -> 1 at `c8a0ad91`).
+    other_pair = (
+        "`git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` -> `150 43` "
+        "at that head")
+    negative4, positive4 = _membership_claims(other_pair)
+    assert positive4 and not negative4, (
+        "the pair detector is pinned to the literal digits `1 1`, so a re-typed pair — the only "
+        "form a future head can produce, since the numbers are what rot — is graded by NOTHING. "
+        f"negative={negative4} positive={positive4}")
+    # ⛔ AND CASE-FOLDED: `prints nothing` in lower case parsed as `([], [])` while the fixture
+    # above used capitals, which is a guard that refuses only the spellings that reuse a dead
+    # head's capitals.
+    lower_negative = (
+        "`git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints nothing here")
+    negative5, _ = _membership_claims(lower_negative)
+    assert negative5, (
+        "the negative detector is case-SENSITIVE, so a lower-case `prints nothing` claim is "
+        f"graded by nothing — negative={negative5}")
+    # ⛔ AND THE WINDOW IS PINNED, because a window nothing grades is a window that silently
+    # reverts (#14587 review cycle 2, P3): this fixture puts the verdict past character 200 —
+    # FARTHER than the 188 the D5 row's own sentence used (measured at `3ac0b4b1f2`), so a
+    # window narrowed to 200 reds here too, and shrinking it back to 60 or 120 REDS rather
+    # than quietly re-opening the hole.
+    far_verdict = (
+        "`git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` is the command, and "
+        "writing its answer into this sentence is what produced two refuted polarities inside "
+        "one clause in the very same row that states the verdict is deleted in both polarities "
+        "and that no replacement pair is typed here, so at this head the command prints NOTHING "
+        "and the remedy is the command itself")
+    gap = far_verdict.index("prints NOTHING") - far_verdict.index("`", 1)
+    assert gap > 200, (
+        "fixture rot: this fixture exists to put the verdict past character 200 — FARTHER than "
+        f"the 188 the D5 row's own sentence used — and the verdict sits only {gap} characters after the "
+        "command, so it would no longer grade the window it was written for")
+    negative6, _ = _membership_claims(far_verdict)
+    assert negative6, (
+        "the tail window has been narrowed below the distance a real sentence puts its verdict "
+        f"from its command (measured {gap} characters here), so the claim is unread and the arm "
+        f"is green over it — negative={negative6}")
+    # ⛔ AND THE SUBJECT IS ASSERTED, not assumed: an arm over a document that contains no
+    # membership command reads NOTHING and passes — measured before this line existed, the arm
+    # yielded `negative=0 positive=0` over a `05-verify.md` that carried four commands and one
+    # live claim. A guard must prove it was handed the shape, not only that it would grade it.
+    # ⛔ The count is asserted over the DOCUMENT SET rather than per file: `04-plan.md` mentions
+    # the command ZERO times at this head (it is `05-verify.md` that carries the claims), so a
+    # per-file assertion would red on a document the arm was never meant to grade.
+    commands = sum(len(_MEMBERSHIP_CMD_RE.findall(_EPIC_CITE_DOCS[name].read_text(encoding="utf-8")))
+                   for name in ("04-plan.md", "05-verify.md"))
+    assert commands, (
+        "neither graded document carries a membership command for `_MEMBERSHIP_CMD_RE` to read, "
+        "so the `negative`/`positive` arms above grade an EMPTY subject and their green proves "
+        "nothing — re-point the regex at the sentence the documents actually use, or retire the "
+        "arms rather than leaving them reading nothing")

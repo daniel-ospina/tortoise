@@ -3353,6 +3353,71 @@ def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
     )
 
 
+#: How long ONE statement of the creation hook may run, in milliseconds.
+#:
+#: ⛔ THE OTHER HALF OF THE CREATION BUDGET (#14587 review P3-2).
+#: :data:`PROVISION_CONNECT_TIMEOUT_SECONDS` bounds the CONNECT; this bounds each
+#: STATEMENT the hook issues. They are different failures: a record whose TCP
+#: accepts and whose `SELECT` then never returns is not bounded by
+#: `connect_timeout` at all, and this hook runs on a graph-creation REQUEST
+#: (`hosted_api` calls a SYNC function from an `async` endpoint), so an unbounded
+#: statement parks the worker's event loop — including a co-located `/health`.
+#:
+#: 3 s, the same budget as the connect: the two halves bound the SAME request, and
+#: a budget generous to the connect but unlimited afterwards is the shape that
+#: made the "bounded pause" claim false before this landed. `0` is not a value
+#: here — Postgres reads `statement_timeout = 0` as NO TIMEOUT AT ALL.
+#:
+#: ⛔ DECLARED NEXT TO ITS ONLY CONSUMER, not beside the connect constant at the
+#: top of the module, ON PURPOSE: this file's addresses are cited as `file:line`
+#: across the tree (75 of them), and an insertion in the constants block moves
+#: every one below it. Appending here moves none of them.
+#:
+#: ⛔ SCOPE, STATED BECAUSE IT IS WIDER THAN THE HOOK'S OWN STATEMENTS (#14587
+#: review P3-3). `_bound_provision_statements` scopes the GUC on the hook's
+#: TRANSACTION, so it bounds EVERY statement that transaction issues — including
+#: the allocator's `JOURNAL_COUNT_SQL` (`COUNT(*) FROM public.journal_event` for
+#: this org/graph), which `provision_graph_record` reaches whenever
+#: `enumerated_floor is None`, i.e. the re-provision path this hook documents for
+#: a graph that predates it (`set_graph_name` / `set_graph_recording`'s mint).
+#: `tortoise.record_allocator`'s own contract warns about exactly that shape — a
+#: bound short enough to protect a request also bounds a legitimate counting
+#: statement. THAT IS ACCEPTED HERE RATHER THAN EXCLUDED, and the residual is
+#: named instead of hidden: on a journal large enough for `COUNT(*)` to exceed 3 s
+#: the hook FAILS LOUDLY (`provision_failed` is counted, WARNed with the remedy,
+#: and published to `/health`) — the graph is still created and the user's write
+#: still succeeds, because the wrapper never raises. The alternative (unbound
+#: counting) trades that loud, visible refusal for an unbounded statement parked
+#: on a request's event loop, which is the failure this constant exists to close.
+#: No measured worst-case journal size is quoted here: it would be a reading of
+#: ONE deployment's data and would rot as that deployment grows.
+PROVISION_STATEMENT_TIMEOUT_MS = 3000
+
+
+def _bound_provision_statements(connection: Any) -> None:
+    """Scope :data:`PROVISION_STATEMENT_TIMEOUT_MS` on the hook's transaction.
+
+    ⛔ TRANSACTION-LOCAL (``set_config(..., true)``), NEVER a session-level
+    ``SET``: :func:`_default_connect` is POOLED (#9558) and hands out handles
+    other callers borrow, so a session bound would follow the handle into a live
+    write's transaction and impose a creation-sized budget on a record write.
+    ``set_config`` is used rather than ``SET LOCAL`` because it takes a bind
+    parameter (``SET`` does not), which is the same reason
+    :func:`tortoise.record_serve.open_record` uses it.
+
+    ⛔ IT IS SCOPED BY THE CALLER, NOT INSIDE `record_allocator`: that module's
+    contract is "NO GLOBAL ``statement_timeout`` … A caller that wants a bound
+    scopes it locally", and the number here is the CALLER's budget (a
+    graph-creation request, not an allocator operation).
+    """
+    cursor = connection.cursor()
+    try:
+        cursor.execute("SELECT set_config('statement_timeout', %s, true)",
+                       (str(PROVISION_STATEMENT_TIMEOUT_MS),))
+    finally:
+        cursor.close()
+
+
 def provision_graph_record(*, org_id: str, graph_id: str,
                            enumerated_floor: int | None = None
                            ) -> dict[str, Any]:
@@ -3433,6 +3498,11 @@ def provision_graph_record(*, org_id: str, graph_id: str,
     try:
         connection = _default_connect(
             dsn, connect_timeout=PROVISION_CONNECT_TIMEOUT_SECONDS)
+        # ⛔ THE CONNECT BOUND IS NOT THE STATEMENT BOUND (#14587 review P3-2):
+        # scope the statement half on THIS transaction, before the allocator runs,
+        # so a hung SELECT cannot park the create (and the worker's event loop)
+        # with no bound at all.
+        _bound_provision_statements(connection)
         outcome = ra.provision_graph_record(
             connection, org_id=org_id, graph_id=graph_id,
             enumerated_floor=enumerated_floor)

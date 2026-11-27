@@ -605,29 +605,68 @@ async def test_an_already_started_response_is_never_replaced(monkeypatch):
 
 # ── the breach is recorded, OFF the request path ──────────────────────────
 
+#: How long the blocking-writer stand-in waits for the TEST's release before it
+#: gives up. Only a BROKEN arm pays it — with the writer off the request path the
+#: release arrives ~immediately after the refusal, so the wait never nears this.
+#: A hard bound rather than an unbounded `wait()` keeps a mutant that puts the
+#: writer back on the request path failing in seconds instead of hanging into the
+#: leg's watchdog (`--timeout=300`), where the failure would be reported as an
+#: INCOMPLETE leg with no attributable identity instead of as this test.
+_WRITER_RELEASE_GRACE_S = 10.0
+
+
 @pytest.mark.asyncio
 async def test_breach_is_recorded_off_the_request_path(fast_bound, monkeypatch):
     """`_track_analytics_event` does a BLOCKING httpx POST. On the request path
     it would create the very latency this bound exists to cut, so it is
     dispatched fire-and-forget onto the EXISTING best-effort control-plane
     telemetry seam (`monitoring.control_plane_worker("telemetry")`, #3498 —
-    daemon workers, bounded backlog), never the loop's shared default pool."""
+    daemon workers, bounded backlog), never the loop's shared default pool.
+
+    ⛔ THE DISCRIMINATOR IS A HANDSHAKE, NOT A STOPWATCH (#14587). This arm used
+    to assert `elapsed < 0.3` around a `time.sleep(0.4)` writer, and that
+    wall-clock proxy graded the SAME property RED for two different causes. It
+    reddened on a loaded CI leg while the property held: at `3a97d573`, test (f)
+    reported `assert 1.112717223004438 < 0.3` — `the refusal waited on the
+    analytics write (1.11s)` — on a refusal that still arrived ~4 s before the
+    5 s handler it replaced. The 0.78 s of slack was the refusal path's OWN work
+    (the breach counters, the read-stage snapshot, the warning line) plus
+    scheduler jitter on a box running four xdist workers; none of it is the
+    writer, and none of it is a defect.
+
+    An absolute budget cannot separate "waited on the writer" from "the box was
+    busy", so it is replaced by the question the property actually asks: **did
+    the refusal return while the writer was still blocked?** The writer blocks
+    on `release`, which ONLY this test sets — so with the writer off the request
+    path the refusal must return with `seen` still EMPTY, whatever the load. If
+    the writer is back on the request path (called inline, or awaited via
+    `to_thread`/`future.result()`), the refusal cannot return until the grace
+    expires, by which point it has appended: `seen == []` reds deterministically
+    and not because a machine was slow.
+
+    Load-immune by construction and STRICTLY stronger: the old arm could only
+    notice a wait dominating a 0.3 s budget, this one notices ANY wait on the
+    writer. It also costs nothing when it passes (the old arm paid a fixed
+    0.4 s sleep on every run).
+    """
     seen = []
+    release = threading.Event()
 
     def _blocking_writer(org_id, event_name, properties):
-        time.sleep(0.4)          # stand-in for the blocking POST
+        # Stand-in for the blocking POST — it does not complete until this test
+        # says so, which is what makes "waited on it" observable without a clock.
+        release.wait(_WRITER_RELEASE_GRACE_S)
         seen.append((org_id, event_name, properties))
 
     monkeypatch.setattr(ha, "_track_analytics_event", _blocking_writer)
     mw = ha.WaitBoundMiddleware(_slow_app(5.0))
-    t0 = time.monotonic()
     rec = await _drive(mw, _scope("/v1/points", method="POST"))
-    elapsed = time.monotonic() - t0
     assert rec.status == 504
-    assert elapsed < 0.3, (
-        f"the refusal waited on the analytics write ({elapsed:.2f}s) — the "
-        "writer is on the request path")
+    assert seen == [], (
+        "the refusal waited on the analytics write — the writer is on the "
+        "request path")
 
+    release.set()
     for _ in range(200):
         if seen:
             break
