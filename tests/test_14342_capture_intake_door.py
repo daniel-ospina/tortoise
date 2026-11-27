@@ -379,12 +379,24 @@ def test_the_drain_separates_transient_conditions_from_permanent_verdicts():
     saturated box (transient) parked accepted turns `failed` — a lost turn — and
     a permanent refusal burned four minutes re-learning an answer that cannot
     change.
+
+    ⛔ THE IN-FLIGHT ARM FEEDS THE **TYPED** BODY (#14707 review P1), because
+    that is what `_reserve_capture_slot` actually raises: this list used to carry
+    `detail=ha._CAPTURE_SESSION_IN_FLIGHT_DETAIL` — the LEGACY bare string, which
+    the raise site can no longer produce — so the arm was green while the
+    production path classified the same 409 as a VERDICT and parked the turn.
+    The legacy string is kept as its OWN arm below, because
+    `_is_capture_in_flight_refusal` deliberately accepts both shapes.
     """
     transient = [
         ha.HTTPException(status_code=429, detail={"code": ha._CAPTURE_CAPACITY_CODE}),
         ha.HTTPException(status_code=429, detail={"code": "ingest_rate_limited"}),
         ha.HTTPException(status_code=503,
                          detail={"code": "capture_intake_unavailable"}),
+        # THE PRODUCTION SHAPE: the typed body the drain really sees.
+        ha.HTTPException(status_code=409,
+                         detail=ha._capture_session_in_flight_body()),
+        # …and the legacy bare string, which the predicate still accepts.
         ha.HTTPException(status_code=409,
                          detail=ha._CAPTURE_SESSION_IN_FLIGHT_DETAIL),
         # unclassifiable (no HTTP verdict) is retried, never parked on a guess
@@ -395,6 +407,8 @@ def test_the_drain_separates_transient_conditions_from_permanent_verdicts():
 
     permanent = [
         ha.HTTPException(status_code=402, detail={"code": "quota_exceeded"}),
+        # The route's OTHER 409 — an org policy no retry clears — carries no
+        # `code`, and that absence is the terminal branch.
         ha.HTTPException(status_code=409, detail="Session recording is disabled"),
         ha.HTTPException(status_code=400, detail="turn cap"),
         ha.HTTPException(status_code=422, detail="blank transcript"),

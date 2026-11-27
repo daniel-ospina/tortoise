@@ -2131,7 +2131,16 @@ def _capture_intake_fault_is_transient(exc: BaseException) -> bool:
         # guess. `fail()`'s attempt bound still ends it.
         return True
     detail = getattr(exc, "detail", None)
-    if status == 409 and detail == _CAPTURE_SESSION_IN_FLIGHT_DETAIL:
+    # ⛔ THE IN-FLIGHT 409 IS READ THROUGH THE ONE PREDICATE, NOT BY EQUALITY
+    # (#14707 review P1). `_reserve_capture_slot` raises the TYPED body
+    # (`_capture_session_in_flight_body()`), so an equality compare against the
+    # bare MESSAGE string was always False, the code was in neither transient
+    # set, and a same-session 409 classified as a VERDICT — `park()`, a
+    # permanently `failed` turn the client had already pruned on our 202. That
+    # is exactly the regression `_is_capture_in_flight_refusal`'s own docstring
+    # was written to prevent, so this is its second caller rather than a
+    # second copy of the rule.
+    if status == 409 and _is_capture_in_flight_refusal(detail):
         return True
     code = detail.get("code") if isinstance(detail, dict) else None
     if code in _CAPTURE_INTAKE_TRANSIENT_CODES:
