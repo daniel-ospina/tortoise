@@ -12878,7 +12878,26 @@ def test_the_row_claim_list_pattern_reads_an_inner_parenthetical():
 #: only, and the arm below is what keeps a `merge=union` fold from splicing the old frame back in.
 _COMPLETENESS_CLAIM_RE = re.compile(
     r"enumeration\s+is\s+complete|is\s+a\s+completeness\s+claim"
-    r"|those\s+are\s+the\s+named\s+files", re.IGNORECASE)
+    r"|those\s+are\s+the\s+named\s+files"
+    # ⛔ THE PROPERTY, NOT AN ENUMERATION OF SPELLINGS (#14623 review). The three phrases above are
+    # this block's own RETRACTION wording; they are not the CLAIM. Measured on the block at
+    # `38e860488303` with the three-phrase form: a live frame spelled "— a COMPLETE list of every
+    # row.", "The list above is complete.", "— every rowed file." and "This enumeration is
+    # exhausted." shipped GREEN over EVERY arm in the family (0/8 red) — the
+    # enumerate-the-spelling class this file's own comments name (`#14730`). A completeness frame
+    # is a SUPERLATIVE PREDICATED OF THE LIST, so the additions below read the PREDICATION
+    # (`complete list`, `<list> … is complete`, `every … row file`) rather than the bare word.
+    # ⛔ THE BARE WORD IS NOT READ, AND THE REASON IS MEASURED — a first cut that read any
+    # `complete*`/`exhaust*`/`every … row*` FALSE-BLOCKED THE LIVE BLOCK, and assertion 1 reads the
+    # WHOLE header, not `_row_enumeration`: `NO NUMERAL AND NO EXHAUSTIVE ENUMERATION` (this block's
+    # own rule, twice) and the TRUE "Every row item above is therefore spelled with its path beside
+    # it" both matched. Predication is what separates them. Verified both ways on the live header:
+    # no match; on each of the four escapes below and on the block's retired wording: a match.
+    r"|\bcomplete\s+(?:list|enumeration|set)\b"
+    r"|\b(?:list|enumeration|set)\b(?:\W+\w+){0,4}?\W+(?:is|are|remains)\W+(?:now\s+)?"
+    r"(?:complete|exhaust(?:ive|ed))\b"
+    r"|\bevery\s+(?:named\s+)?row(?:s|ed)\s+(?:file|entry)\b",
+    re.IGNORECASE)
 #: The row enumeration's OPENING, and the `⛔` that closes it: the arm below asserts a property of
 #: this list, so it is BOUNDED rather than read out of the whole block — an unbounded read would
 #: grade prose it does not own.
@@ -12943,6 +12962,22 @@ def test_the_fast_shards_header_block_does_not_claim_its_row_list_is_complete():
         "the completeness-frame pattern no longer reads the sentence it was cut for, so assertion "
         "1 passes over any spelling of it — re-point `_COMPLETENESS_CLAIM_RE` at the block's own "
         "retired wording")
+    # ⛔ …AND THE PATTERN READS THE PROPERTY, not three spellings of that retraction (#14623
+    # review, P2). Each `escape` below is a LIVE completeness frame that the three-phrase pattern
+    # did not read — measured at `38e860488303`: 0/8 arms in this family RED for every one of them,
+    # so each shipped GREEN. They are the fixture that stops a re-narrowing going silent, exactly
+    # as the ratio spellings above do for `_EMISSION_RATIO_RE`.
+    for escape in (
+        "A ROW is an entry in `durations` — `tests/test_x.py` row — a COMPLETE list of every row.",
+        "A ROW is an entry in `durations` — `tests/test_x.py` row. The list above is complete.",
+        "A ROW is an entry in `durations` — `tests/test_x.py` row — every rowed file.",
+        "A ROW is an entry in `durations` — `tests/test_x.py` row. This enumeration is exhausted.",
+    ):
+        assert _COMPLETENESS_CLAIM_RE.search(_unquoted_block(escape)) is not None, (
+            "the completeness-frame pattern misses a live frame spelled "
+            f"{escape!r} — it is matching this block's own retraction wording rather than the "
+            "CLAIM, so a frame using any other spelling ships GREEN)"
+        )
     # …and a QUOTED record of a retired frame is NOT a live claim: a guard that reds on its own
     # retraction would force the block's history out of the file.
     # ⛔ THE QUOTE SITS INSIDE THE `⛔`-BOUNDED SLICE ON PURPOSE: `_row_enumeration` stops at the
