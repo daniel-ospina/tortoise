@@ -59,6 +59,19 @@ is not a merge). The *source* is carried by the declaration itself: the
 successor point is the document that asserted it, and its session/provenance
 ride the point.
 
+**Both lookup arms, one representation.** The #14592 receipt was recorded on a
+`partial` identity lookup, and the two arms take different internal routes to
+the same declaration — measured on the receipt's own shape:
+
+| lookup arm | pre-fix payload |
+|---|---|
+| `partial` (the recorded state) | `operators: []` — the endpoint is HELD, then the edge is dropped |
+| `resolved` | `operators: [NAND new→prior]` — `#4716`'s mint-vs-E7 fold puts the ref on its graph id, so the edge *wires* |
+
+Both now close the interval, so the representation is **not** a function of
+lookup quality. On the `resolved` arm the NAND edge is left in place as well — it
+carries EP weight of its own and nothing here subtracts it.
+
 No new node kind, no new relation vocabulary, no MCP/SDK surface change.
 
 ### What was deliberately NOT built
@@ -126,12 +139,18 @@ the *surviving* claims to rank first) is neither implemented nor needed here.
 | | assertion | pre-fix | post-fix |
 |---|---|---|---|
 | **positive** | the declared cross-capture `NAND` writes 1 supersession; older claim retained, `valid_to=2026-03-05`, `expired_at` stamped, `valid_from` kept; newer interval open; `get_historical_knowledge` returns the old claim through `CORRECTS` | ❌ `assert 0 == 1` | ✅ |
+| **positive (other lookup arm)** | the same declaration on a `resolved` lookup closes the same interval (pre-fix this arm wrote the NAND and closed nothing) | ❌ `assert 0 == 1` | ✅ |
 | **positive (read)** | a current-scope query for the old claim's own wording no longer answers with it; the terminal scope still does | ❌ | ✅ |
 | **negative (support)** | the *same* two documents with the model declaring `IMPL` (support) close **nothing**; the older claim keeps its open interval and stays current | ✅ | ✅ |
 | **negative (undeclared)** | a corpus that reverses itself in **wording** but declares no edge gains no contradiction | ✅ | ✅ |
 
 Suite: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_14198_contradiction_closure.py -q`
-→ **4 passed** (2 red on `HEAD~1`).
+→ **5 passed** (3 red on `HEAD~1`, 2 negatives green on both).
+
+Regression surface run alongside, all green: `test_extractor_v2`,
+`test_consolidation_4way`, `test_never_across_fold_5080`, `test_10997_i3_partial_run`,
+`test_10997_identity_hold`, `test_11653_s3_hold_not_add`, `test_supersede_edges`,
+`test_ingest_v2_consolidation` → 1186 passed, 2 skipped.
 
 ## 6. Residuals — stated, not hidden
 
@@ -150,9 +169,10 @@ Suite: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_14198_contradiction_c
    contradiction, so this change leaves both dropping on purpose: the arm is
    `NAND`-only.
 3. **`hold_store=None` on the shipping path (#10997) is unchanged.** This
-   change does not need it — the closure is decided from the S3 prior set, which
-   the run already has — but a *different* endpoint whose identity lookup is
-   partial is still held with no store. That is a separate repair.
+   change does not need it — the closure is decided from the S3 prior set /
+   the fold's own graph id, both of which the run already has — but a
+   *different* endpoint whose identity lookup is partial is still held with no
+   store. That is a separate repair.
 4. **The `partial` lookup still costs recall.** In the corpus run 11 of 25
    doc-05 candidates went unchecked. When the older endpoint is *not* in the S3
    prior set, this change correctly fails open (a warning, no closure) — a

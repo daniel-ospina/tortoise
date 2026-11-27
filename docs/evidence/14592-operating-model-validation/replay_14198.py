@@ -62,7 +62,8 @@ def _points_by_id(receipt: dict, index: int) -> dict[str, dict]:
     return {str(r["id"]): r for r in rows}
 
 
-def build_inputs(receipt: dict) -> tuple[dict, dict, str, str]:
+def build_inputs(receipt: dict, *, coverage: str = "partial") \
+        -> tuple[dict, dict, str, str]:
     """(embed_list, search, new_point_id, old_point_id) — all read by id."""
     doc01 = _points_by_id(receipt, 0)
     doc05 = _points_by_id(receipt, 4)
@@ -115,7 +116,10 @@ def build_inputs(receipt: dict) -> tuple[dict, dict, str, str]:
         ],
         "query_coverage": {
             "derived": {"points": 25},
-            "ran": {"points": 14},      # 11 of 25 did not run — the receipt
+            # partial = the RECORDED state (11 of 25 did not run);
+            # resolved = the counterfactual, used only to measure what the
+            # other lookup state does with the same declaration.
+            "ran": {"points": 25 if coverage == "resolved" else 14},
             "failed": {"points": 0},
         },
     }
@@ -129,7 +133,11 @@ def main(argv: list[str]) -> int:
     from tortoise.extractor_v2 import execute_embed  # the arm under test
 
     receipt = json.loads(RECEIPT.read_text())
-    embed_list, search, new_id, old_id = build_inputs(receipt)
+    coverage = "partial"
+    if "--coverage" in argv:
+        coverage = argv[argv.index("--coverage") + 1]
+    embed_list, search, new_id, old_id = build_inputs(receipt,
+                                                     coverage=coverage)
     out = execute_embed(embed_list, search, session_id="replay-14198-doc05",
                         session_date="2026-03-05")
     supers = out.get("supersessions") or []
@@ -142,6 +150,7 @@ def main(argv: list[str]) -> int:
              or (NAND_DST_REF[:40] in w and "dropped" in w)]
 
     print(f"# replay arm: {arm}")
+    print(f"# lookup state: {coverage}")
     print(f"# extractor_v2 from: {__import__('tortoise').extractor_v2.__file__}")
     print(f"# new claim (this capture) : {new_id}")
     print(f"# older claim (prior)      : {old_id}")
@@ -157,6 +166,14 @@ def main(argv: list[str]) -> int:
         print(f"  - {w}")
     if not named:
         print("  (none)")
+    print()
+    ops = (out.get("payload") or {}).get("operators") or []
+    cross_ops = [x for x in ops
+                 if old_id in (str(x.get("src")), str(x.get("dst")))
+                 and new_id in (str(x.get("src")), str(x.get("dst")))]
+    print(f"operators naming the pair : {len(cross_ops)}")
+    for x in cross_ops:
+        print(f"  {x.get('op_type')}: {str(x.get('src'))[:20]} -> {str(x.get('dst'))[:20]}")
     print()
     verdict = "RECORDED" if cross else "NOT RECORDED"
     print(f"VERDICT: the cross-document contradiction is {verdict}")

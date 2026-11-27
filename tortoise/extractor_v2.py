@@ -12345,6 +12345,71 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             continue
         _dropped_ids.add(_oid)
         _all_ops.append(_held_op)
+    # ── #14198: a DECLARED contradiction whose OLDER side is in a PRIOR
+    # capture CLOSES that claim's interval. ────────────────────────────────
+    # The model has already made the call the ontology assigns to it (#14198:
+    # "the model labels, code does the arithmetic"): a NAND is its declared
+    # contradiction (#2552), not a lexical verdict, so no `_boundary` rule is
+    # involved. The arithmetic rides the SAME channel a declared point-level
+    # `supersedes` ref uses (above): a `supersessions` record, whose consumer
+    # `commit_ops.apply_supersessions` → `sdk._supersede_point` writes the
+    # CORRECTS edge, stamps the older claim's `validTo` from the successor's
+    # window start and its `expiredAt` from ingestion time, and RETAINS the
+    # older claim as terminal (§2.0: the record is truth — a closed interval,
+    # never a deletion, never a merge).
+    #
+    # WHY IT IS NEEDED AT ALL (measured, #14592): a NAND whose older side lives
+    # in a prior capture cannot resolve through `_resolve`, which reads only
+    # THIS capture's `point_ids`/`event_ids` — so doc-05's refutation of
+    # doc-01's certificate claim was HELD (#10997: the lookup was `partial`, and
+    # `hold_store` is None on the shipping path so nothing was persisted) and
+    # then dropped, and the two rival claims sat in the graph with no interval
+    # closed between them (`supersessions: 0`).
+    #
+    # ⛔ NOTHING IS INVENTED, and the arm's reach is deliberately narrow:
+    #   * `NAND` only — an IMPL or MITIGATES naming a prior claim is support /
+    #     edge-relevance, not a reversal, and still drops;
+    #   * the NEWER side must be a point of THIS capture (a contradiction is
+    #     closed by the claim that supersedes, never by one it merely cites);
+    #   * the older side must be a point this capture did NOT emit;
+    #   * the ref resolves through the never-guess `_resolve_point_supersede`
+    #     discipline (unique id / exact content / edge-trimmed equality; 0 or
+    #     2+ candidates warn and fail open).
+    # A corpus that declares no contradiction therefore gains none, and a
+    # same-capture NAND (the ordinary two-rivals-in-tension shape) is untouched.
+    _capture_ids: set[str] = {str(p.get("id") or "") for p in payload_points}
+    for _ev in payload_events:
+        _capture_ids.add(str(_ev.get("id") or ""))
+    _capture_ids.discard("")
+
+    def _close_prior_contradiction(new_id: str, older_id: str,
+                                   older_content: str, where: str) -> bool:
+        """Append the supersession that closes ``older_id``; True when one was
+        recorded (or already was). The older claim is never deleted."""
+        if not new_id or not older_id or new_id == older_id:
+            return False
+        if older_id in _capture_ids:
+            return False
+        if (older_id, new_id) not in pt_record_pairs:
+            pt_record_pairs.add((older_id, new_id))
+            supersessions.append({
+                "superseded": older_id, "supersedes_by": new_id,
+                "evidence": "declared NAND contradiction against a claim from "
+                            "an earlier capture (cross-session reversal; the "
+                            "older claim is retained with a closed interval)"})
+            link_before_create.append({
+                "searched_for": f"prior claim '{older_content[:60]}'",
+                "found": True,
+                "note": f"contradicted by new point {new_id} — the older "
+                        "claim's interval is closed (CORRECTS, retained)"})
+        warnings.append(
+            f"operator endpoint is an EARLIER-CAPTURE claim (#14198): {where} "
+            f"resolved to prior point {older_id[:20]!r} outside this capture — "
+            "the contradiction is recorded as a supersession (CORRECTS + "
+            "closed interval), so the older claim is retained and closed "
+            "rather than left as a second live truth")
+        return True
+
     for op in _all_ops:
         if not isinstance(op, dict):
             warnings.append(f"non-dict operator entry {op!r} skipped")
@@ -12357,66 +12422,33 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         src = _resolve(str(o.get("src", "")))
         dst = _resolve(str(o.get("dst", "")))
         if not src or not dst or src == dst:
-            # ── #14198: a DECLARED contradiction whose older side is in a
-            # PRIOR capture CLOSES that claim's interval instead of being
-            # dropped. `_resolve` reads only THIS capture's `point_ids` /
-            # `event_ids`, so a NAND whose `dst` names a claim emitted by an
-            # earlier session can never resolve here — measured on the #14592
-            # corpus, where doc-05's refutation of doc-01's certificate claim
-            # was dropped exactly here and the two rival claims then sat in the
-            # graph with no marker between them (`supersessions: 0`).
-            #
-            # The model has ALREADY made the call the ontology assigns to it
-            # (#14198: "the model labels, code does the arithmetic"): a NAND is
-            # the declared contradiction (#2552), not a lexical rule. So the
-            # arithmetic rides the SAME channel a declared point-level
-            # `supersedes` ref uses (above) — a `supersessions` record, whose
-            # consumer `commit_ops.apply_supersessions` → `sdk._supersede_point`
-            # writes the CORRECTS edge, stamps the older claim's `validTo` from
-            # the successor's window start and its `expiredAt` from ingestion
-            # time, and RETAINS the older claim as terminal (§2.0: the record is
-            # truth — a closed interval, never a deletion, never a merge).
-            #
-            # ⛔ NOTHING IS INVENTED. The older endpoint resolves through the
-            # never-guess `_resolve_point_supersede` discipline (unique id /
-            # exact content / edge-trimmed equality; 0 or 2+ candidates warn
-            # and fail open), and the arm fires ONLY for a NAND whose NEW side
-            # resolved in this capture — so an IMPL or MITIGATES naming a prior
-            # claim still drops (support and edge-relevance are not reversals),
-            # a NAND whose OLDER side is the one in this capture drops, and a
-            # corpus with no declared contradiction gains none.
             if op_type == "NAND" and src and not dst:
                 prior_row = _resolve_point_supersede(
                     str(o.get("dst", "") or ""), search, warnings=warnings)
-                old_id = str((prior_row or {}).get("id") or "").strip()
-                if old_id and old_id != src:
-                    if (old_id, src) not in pt_record_pairs:
-                        pt_record_pairs.add((old_id, src))
-                        supersessions.append({
-                            "superseded": old_id, "supersedes_by": src,
-                            "evidence": "declared NAND contradiction against a "
-                                        "claim from an earlier capture "
-                                        "(cross-session reversal; the older "
-                                        "claim is retained with a closed "
-                                        "interval)"})
-                        link_before_create.append({
-                            "searched_for":
-                                f"prior claim '{str((prior_row or {}).get('content') or '')[:60]}'",
-                            "found": True,
-                            "note": f"contradicted by new point {src} — the "
-                                    "older claim's interval is closed "
-                                    "(CORRECTS, retained)"})
-                    warnings.append(
-                        "operator endpoint is an EARLIER-CAPTURE claim "
-                        f"(#14198): NAND dst {str(o.get('dst', ''))[:60]!r} "
-                        f"resolved to prior point {old_id[:20]!r} outside this "
-                        "capture — the contradiction is recorded as a "
-                        "supersession (CORRECTS + closed interval) instead "
-                        "of a same-capture edge")
+                if _close_prior_contradiction(
+                        src, str((prior_row or {}).get("id") or "").strip(),
+                        str((prior_row or {}).get("content") or ""),
+                        f"NAND dst {str(o.get('dst', ''))[:60]!r}"):
                     continue
             warnings.append(f"operator dropped: src/dst did not resolve to an "
                             f"emitted point/event ({o.get('src')!r} → {o.get('dst')!r})")
             continue
+        if op_type == "NAND" and src != dst:
+            # The OTHER lookup state (measured on the same receipt): a RESOLVED
+            # lookup folds the older ref onto its graph id (#4716 mint-vs-E7),
+            # so the edge WIRES instead of dropping — doc-05's NAND lands
+            # against doc-01's point and both claims stay live. The declaration
+            # is not lost there, but the reader still gets two live truths, so
+            # the same closure applies; the edge is left in place because a
+            # NAND carries EP weight of its own and nothing this change does
+            # may subtract it.
+            _older = (dst if dst not in _capture_ids
+                      else src if src not in _capture_ids else "")
+            _newer = src if _older == dst else dst if _older else ""
+            if _older and _newer:
+                _close_prior_contradiction(
+                    _newer, _older, str(o.get("dst") or "")[:120],
+                    f"NAND dst {str(o.get('dst', ''))[:60]!r}")
         if op_type in ("IMPL", "NAND", "COHERENCE"):
             if op_type == "NAND":
                 # #2552 (op_02): canonicalize the NAND direction so the

@@ -131,7 +131,7 @@ def _model(relationship: str):
     return _M()
 
 
-def _fake_search(sdk, embed_list, story, **kw):
+def _fake_search(sdk, embed_list, story, *, coverage: str = "partial", **kw):
     """S3's prior set — the claims that existed BEFORE this capture.
 
     ⛔ The PARTIAL coverage report is load-bearing, not decoration. It is the
@@ -155,7 +155,11 @@ def _fake_search(sdk, embed_list, story, **kw):
                        for r in rows],
             "queries_run": 1,
             "query_coverage": {"derived": {"points": 25},
-                               "ran": {"points": 14},
+                               # ``partial`` is the RECORDED state (11 of 25 did
+                               # not run); ``resolved`` is the other lookup arm,
+                               # which takes the MINT route (#4716 mint-vs-E7 folds
+                               # the ref onto its graph id) instead of the hold.
+                               "ran": {"points": 25 if coverage == "resolved" else 14},
                                "failed": {"points": 0}}}
 
 
@@ -183,11 +187,14 @@ def make_graph(tmp_path, monkeypatch):
     from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
     from tortoise.sdk import TortoiseSDK
 
-    monkeypatch.setattr("tortoise.extractor_v2.search_graph", _fake_search)
     made = []
 
-    def _make(relationship: str):
-        sdk = TortoiseSDK(str(tmp_path / f"t14198-{relationship}.db"))
+    def _make(relationship: str, coverage: str = "partial"):
+        monkeypatch.setattr(
+            "tortoise.extractor_v2.search_graph",
+            lambda sdk, embed_list, story, **kw: _fake_search(
+                sdk, embed_list, story, coverage=coverage, **kw))
+        sdk = TortoiseSDK(str(tmp_path / f"t14198-{relationship}-{coverage}.db"))
         made.append(sdk)
         stats = ingest_haystack_v2(sdk, _question(),
                                    model=_model(relationship))
@@ -316,3 +323,28 @@ def test_a_current_scope_query_no_longer_answers_with_the_contradicted_claim(
         entity_type="point", limit=10, include_terminal=True)
     assert _pid(CERT) in {r["id"] for r in history}, (
         "the record is truth: the closed claim must still be reachable")
+
+
+# ── the SAME declaration, on the other lookup arm ───────────────────────────
+def test_the_closure_does_not_depend_on_which_lookup_arm_ran(make_graph):
+    """A RESOLVED identity lookup takes a different internal route to the same
+    declaration — `#4716`'s mint-vs-E7 fold puts the older ref on its graph id,
+    so the NAND WIRES instead of dropping — and must close the same interval.
+
+    This is the asymmetry that would otherwise make the representation a
+    function of lookup quality: measured on the #14592 receipt's own shape, a
+    `partial` lookup produced `operators: []` and a `resolved` one produced the
+    NAND edge, and pre-fix neither closed anything. Both now close; the resolved
+    arm additionally keeps its NAND because that edge carries EP weight and
+    nothing in this change may subtract it.
+    """
+    sdk, stats = make_graph("nand", "resolved")
+    assert stats["supersessions_written"] == 1, (
+        "the closure must not depend on which lookup arm ran")
+
+    old = [r for r in _scan(sdk, include_terminal=True) if r["id"] == _pid(CERT)]
+    assert old and old[0].get("valid_to") == "2026-03-05"
+    assert _pid(CERT) not in {r["id"] for r in _scan(sdk)}
+    hist = sdk.get_historical_knowledge(_pid(AUDIT), "2026-02-20")
+    assert hist["found"] is True
+    assert hist["valid_point"]["id"] == _pid(CERT)
