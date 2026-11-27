@@ -5122,6 +5122,14 @@ jobs:
           # migration, so nothing another file asserts on may run after it
           # without its own re-read.
           #
+          # #14582: the creation hook's DB legs. The hook itself is
+          # DB-free-pinned (every door calls it, and it ARMS rather than only
+          # seeds), but its ACCEPTANCE — a new graph's cursor row exists and its
+          # FIRST record write applies where it used to refuse
+          # `cursor_not_active` — needs this job's DSN, as does `backfill`'s
+          # three counts and its `--dry-run` writing nothing. On the fast matrix
+          # they would SKIP, so the issue's own falsifiers would be inert; this
+          # job's leg gate reds on any skip (#9551), which is what makes them run.
           # #14002: the hosted write path stops appending to the JSONL once the
           # graph is cut over, which takes the `position_divergence` wedge under
           # concurrent writers out of reach. Its DB-FREE legs run in the fast
@@ -5207,6 +5215,7 @@ jobs:
             tests/test_12894_record_cursor.py \
             tests/test_13043_record_allocator_cli.py \
             tests/test_14002_record_only_journal.py \
+            tests/test_14582_creation_hook.py \
             tests/test_9558_record_write_cost.py \
             tests/test_9567_record_capstone.py \
             -v --timeout=300 -p no:cacheprovider -r fEs \
