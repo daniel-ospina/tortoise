@@ -7298,12 +7298,25 @@ _E2_BASELINE = (pathlib.Path(__file__).parent / "eval" / "write_path"
 #: `resolved_config` records the posture and lanes, never the env).
 _E2_ARMS_DOC = _E2_RECEIPTS / "10360-E2-ARMS-2026-11-27.md"
 
-#: The switches an arm command's env prefix may set, plus the extractor selector.
-#: Anything else is REFUSED rather than ignored: an arm command whose prefix this
-#: parser silently skipped would be an arm nobody read, which is the defect
-#: `#14774` review P1 is about.
-_ARM_PREFIX_KEYS = ("TORTOISE_VET", "TORTOISE_VALUE_GATE",
-                    "TORTOISE_S2_DECISION_SEAM", "TORTOISE_EXTRACT_MODEL")
+def _arm_prefix_keys() -> tuple[str, ...]:
+    """The switches an arm command's env prefix may set, plus the extractor selector.
+
+    Anything else is REFUSED rather than ignored: an arm command whose prefix this
+    parser silently skipped would be an arm nobody read, which is the defect
+    `#14774` review P1 is about.
+
+    ⛔ **DERIVED from `runner.ARM_SWITCHES`, never a second hand-maintained copy**
+    (`#14774` review cycle 6, source-verified). The tuple used to be written out
+    again here, and it had already fallen behind: `TORTOISE_STATE_VALUE_VERBATIM`
+    is in `ARM_SWITCHES` but was not in this list — so the most plausible next
+    experiment, an arm that VARIES the verbatim flag this whole PR measures
+    survival on, would have been refused with *"add them to the runner's
+    `ARM_SWITCHES`"* while `ARM_SWITCHES` already had it. A pin that polices
+    hand-written copies cannot itself keep one.
+    """
+    from tests.eval.write_path import runner as wp_runner
+
+    return (*wp_runner.ARM_SWITCHES, "TORTOISE_EXTRACT_MODEL")
 
 #: Clause (b2) of the row — the ONE span the E2 figures belong to.
 #:
@@ -7484,6 +7497,7 @@ def _pct_1dp(numerator: float, denominator: float) -> str:
 def _count(x: float) -> str:
     """`42` for an integral mean, `47.5` for a half — the row's own spellings."""
     return f"{x:g}"
+
 
 
 def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts():
@@ -7732,6 +7746,23 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
         "(a decoy figure elsewhere in (b2) satisfies a per-figure `count == 1` "
         "while the clause states a perturbed one — #14774 review P2)")
 
+    # 6d. …AND NO BARE PERCENTAGE ESCAPES IT (`#14774` review cycle 6, MEASURED):
+    #     the scan above matches only the `N/M = P%` shape, so
+    #     `(For the record the pooled arm mean reads 51.7%.)` inserted anywhere in
+    #     (b2) changed nothing at all — no new match, no changed count — while 6c's
+    #     message claims the clause publishes no figure the receipts do not derive.
+    #     A percentage is the shape a reader quotes, so the closed set is taken
+    #     over the `%` tokens themselves; the one exemption is the retired `#5064`
+    #     reading, which the clause quotes on purpose (and must, per the assertion
+    #     above).
+    _derived_pct = {figure.split(" = ")[1] for figure in _derived_figures}
+    _unexpected_pct = sorted(
+        set(re.findall(r"\d+(?:\.\d+)?%", flattened)) - _derived_pct - {"49.4%"})
+    assert not _unexpected_pct, (
+        "clause (b2) states percentages the receipts do not derive: "
+        f"{_unexpected_pct} — a bare figure is the one a reader quotes, so it is "
+        "held to the same closed set as the `N/M = P%` form (#14774 review P2)")
+
     # 7. THE VERDICT THE ROW RECORDS, held to the artifacts. Three clauses, each
     #    a different claim, so each gets its own assertion:
     #    (i) the Target is MISSED ON THE ARM MEAN, which is the figure the issue
@@ -7785,7 +7816,6 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     _stated_once(
         f"{base_total} graded units",
         "the corpus size the power statement names")
-
     # 7c. …AND THE ROW'S *SPELLED* SAMPLE SIZES AND ITS ROUNDED GAP (#14774 review
     #     P3, MEASURED). The receipts' arm counts were pinned above by
     #     `len(on) == 4` / `len(off) == 2`, but that only pins the RECEIPTS: the
@@ -7813,13 +7843,25 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     _stated_once(
         f"all {_all_words.upper()} runs",
         "the loss class the row draws from every run it measured")
+    # ⛔ AND THE RELABEL RECORD'S OWN COUNT, which the four pins above do not
+    # reach: "two PASS-ARMED runs" is the sentence that says the control pair was
+    # a second realization of the treatment, so a lane editing the arm count must
+    # move it too.
+    _stated_once(
+        f"{_words[len(off)]} PASS-ARMED runs",
+        "the relabel record's own statement of how many runs were mislabelled")
     # ...the separation the row states in WHOLE points is the FLOOR of the
     # measured separation, not its round: 5.75 rounds to 6 and the row says 5, so
     # deriving with `round` would red a row that is (mildly) understating the gap.
     # A power claim should err toward understating the effect, so the floor is the
     # honest derivation and the row's figure is pinned to it.
+    #
+    # ⛔ ANCHORED, and that is not cosmetic: `_stated_once` counts SUBSTRINGS, so
+    # a BARE `5-point gap` is satisfied by `15-point gap` — the mutant stayed
+    # GREEN when this pin was measured against it (`#14774` review cycle 6). The
+    # leading words are part of the claim, so they are part of the figure.
     _stated_once(
-        f"{int(abs(on_mean - off_mean))}-point gap",
+        f"a {int(abs(on_mean - off_mean))}-point gap",
         "the whole-point separation the row says is too small for a power claim")
 
     # 8. the reading this replaces must be gone, not merely supplemented: the
@@ -7865,14 +7907,15 @@ def test_the_e2_off_arm_definition_uses_the_REAL_kill_switch(monkeypatch):
     resolved: dict[str, dict] = {}
     for arm in ("on", "off"):
         settings = _arm_settings(commands[arm])
-        unknown = sorted(set(settings) - set(_ARM_PREFIX_KEYS))
+        unknown = sorted(set(settings) - set(_arm_prefix_keys()))
         assert not unknown, (
             f"the {arm!r} arm command sets switches this pin does not read: "
             f"{unknown} — add them to the runner's `ARM_SWITCHES` and to "
-            "`_ARM_PREFIX_KEYS`, or they arm the run invisibly")
+            "`ARM_SWITCHES`/`_arm_prefix_keys()`, or they arm the run "
+            "invisibly")
         for key in wp_runner.ARM_SWITCHES:
             monkeypatch.delenv(key, raising=False)
-        for key in _ARM_PREFIX_KEYS:
+        for key in _arm_prefix_keys():
             value = settings.get(key)
             if value is not None:
                 monkeypatch.setenv(key, value)
@@ -8004,11 +8047,16 @@ def _arming_switches_in(node: ast.AST, *namespaces: dict,
     reads = _switch_literals(node, skip=_docstring_node_ids(node))
     callees: list = []
     for sub in ast.walk(node):
-        if isinstance(sub, ast.Name):
-            for namespace in namespaces:
-                value = namespace.get(sub.id)
-                if isinstance(value, str) and _SWITCH_NAME.fullmatch(value):
-                    reads.add(value)
+        # ⛔ `Attribute` TOO, not only `Name` (`#14774` review cycle 6, MEASURED:
+        # `os.environ.get(_value_gate.NEW_ARM_FLAG)` was GREEN, because an
+        # `ast.Attribute` is a distinct node kind from an `ast.Name` per CPython's
+        # ASDL, so a Name-only branch never sees the value). ⚠️ Residual, declared
+        # rather than left to be discovered: a switch reached through a SUBSCRIPT
+        # (`os.environ.get(FLAGS["arm"])`) is not readable by a static scan at all.
+        if isinstance(sub, (ast.Name, ast.Attribute)):
+            value = _resolve_expr(sub, list(namespaces))
+            if isinstance(value, str) and _SWITCH_NAME.fullmatch(value):
+                reads.add(value)
         elif isinstance(sub, ast.Call) and depth < 6:
             target = _resolve_expr(sub.func, list(namespaces))
             # ⛔ `isfunction`, deliberately NOT `ismethod`: `os.environ.get` is a
@@ -8101,6 +8149,18 @@ def test_the_arm_switch_surface_names_every_production_arming_read():
     assert "TORTOISE_STATE_VALUE_VERBATIM" in wp_runner.ARM_SWITCHES, (
         "the survival flag must be recorded on every receipt — the figure this "
         "row publishes is a strict-VERBATIM survival number")
+    # ⛔ AND THE ARMS-DOC PARSER MAY SET EVERY ONE OF THEM (`#14774` review cycle
+    #    6). `_arm_prefix_keys()` was a second hand-written copy of this surface
+    #    and had already fallen behind — `TORTOISE_STATE_VALUE_VERBATIM` was in
+    #    `ARM_SWITCHES` but not in the prefix list, so the most plausible next
+    #    experiment (an arm that VARIES the verbatim flag) would have been refused
+    #    by a message telling the lane to add it to the list it was already in.
+    #    Derived now, and pinned here so it cannot drift back.
+    missing_prefix = sorted(set(wp_runner.ARM_SWITCHES) - set(_arm_prefix_keys()))
+    assert not missing_prefix, (
+        f"an arm command cannot set {missing_prefix} — `_arm_prefix_keys()` must "
+        "cover every switch `ARM_SWITCHES` records, or an arm that varies one of "
+        "them is REFUSED by the very parser that exists to read arms")
 
 
 @pytest.mark.parametrize(
