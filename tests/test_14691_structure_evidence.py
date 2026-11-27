@@ -1819,8 +1819,18 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
     assert "1..span + 3" in doc_all, (
         "`_cites_a_site_in`'s docstring no longer names the sweep as \"1..span + 3\" — the sweep "
         "below is `range(1, span + 4)`, i.e. 1..span+3 inclusive")
-    # …and REPORT's copies, which are the ones a reader of the EVIDENCE doc actually meets.
+    # …and REPORT's copies, which are the ones a reader of the EVIDENCE doc actually meets. The
+    # slack copy is a REGEX, not a needle, because it is the same figure the docstring copy is
+    # graded on and it sits one line below §8.20's allowance needle (#14723, round 28: measured
+    # `18 at the start and 0 at the end` -> `17`, `103 passed`).
     report_txt = _report()
+    rep_slack = re.search(r"slack\s+(\d+) at the start and (\d+) at the\s+end", report_txt)
+    assert rep_slack, (
+        "REPORT §8.20 no longer states the honest span's slack as "
+        "\"slack <n> at the start and <n> at the end\"")
+    assert (int(rep_slack.group(1)), int(rep_slack.group(2))) == (derived_slack, 0), (
+        f"REPORT §8.20 states the slack as {rep_slack.group(1)}/"
+        f"{rep_slack.group(2)} while the documents derive {derived_slack}/0")
     for needle, why in (
             (f"most **{_CITATION_WIDEN_BOUND} lines** before",
              "the allowance's figure in §8.20"),
@@ -1832,6 +1842,10 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
             (f"{_CITATION_WIDEN_BOUND + 1} lines of start slack is still RED and "
              f"{_CITATION_WIDEN_BOUND - 1}",
              "the live pair in §8.21"),
+            (f"at {_CITATION_WIDEN_BOUND + 1};",
+             "§8.20's red offset as a literal, beside the refused range that carries it"),
+            (f"at {_CITATION_WIDEN_BOUND - 1} still passes",
+             "§8.20's green offset as a literal, beside the range that carries it"),
     ):
         assert needle in report_txt, (
             f"REPORT.md no longer states {why} as {needle!r} — it is graded against "
