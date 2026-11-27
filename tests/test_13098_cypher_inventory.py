@@ -3367,6 +3367,86 @@ def test_a_HEALTHY_worktree_RETARGETED_elsewhere_is_NOT_refused(tmp_path, monkey
     assert (sub / "docs" / "K.md").exists(), "the render wrote nothing"
 
 
+def test_a_HEALTHY_repository_retargeted_to_AN_ANCESTOR_is_NOT_refused(
+        tmp_path, monkeypatch):
+    """…and a strictly-ANCESTOR work tree root is not a refusal signal either.
+
+    ⛔ THE OTHER HALF OF "THE ANSWER IS NOT THIS DIRECTORY", and the shape every prior
+    round left ungraded (#14741 review, cycle 7, P2, measured). The arm above deliberately
+    pins a toplevel that is NOT an ancestor, on the belief — carried in the docstring as
+    "Only a strict ANCESTOR still means walked-up" — that an ancestor answer can only be
+    git walking UP to an enclosing repository. **Measured false.** A HEALTHY repository
+    whose own `core.worktree` names a **PARENT** of the boundary (its metadata sits in a
+    subdirectory of its own work tree — the inverse of the layout `--separate-git-dir`
+    creates) answers a strict ancestor while its gitdir is its own:
+
+        --show-toplevel      -> <parent>        (a STRICT ANCESTOR of the boundary)
+        --absolute-git-dir   -> <b>/.git        (its OWN gitdir)
+        git ls-files         -> rc 0 over the destination
+
+    The removed fast path refused that boundary without ever asking the gitdir, and the
+    refusal it printed ("that directory's `.git` entry does not resolve to a repository
+    git will use, so it answers as the repository ABOVE it") is false in every clause:
+    the `.git` DOES resolve, and that repository DOES hold the path. So the gitdir question
+    now decides EVERY pointer-form answer and this arm is what reds if an `answer`-shape
+    shortcut is reintroduced on any branch.
+
+    Non-vacuity: on the pre-fix head `_boundary_is_unaskable(sub)` is **True** (the fast
+    path returns before the gitdir question) while `_resolves_to_own_gitdir(sub)` is
+    **True** — so the assertions below fail there, which is the attribution for the fix.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    sub = repo / "sub"
+    (sub / "docs").mkdir(parents=True)
+    subprocess.run(["git", "-C", str(sub), "init", "-q"], check=True)
+    # THE RETARGET: this repository's work tree is its own PARENT, so git answers with a
+    # strict ancestor of the boundary — the shape that was read as damage.
+    subprocess.run(
+        ["git", "-C", str(sub), "config", "core.worktree", str(repo)], check=True)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # PREMISE 1 — the toplevel answer is a STRICT ANCESTOR of the boundary. This is the
+    # whole point: without it the arm grades the `elsewhere` shape instead.
+    resolved = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], cwd=sub,
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    assert resolved.returncode == 0, (
+        f"the premise: git must resolve the retargeted work tree; rc={resolved.returncode} "
+        f"stderr={resolved.stderr!r}")
+    toplevel = Path(resolved.stdout.strip()).resolve()
+    assert sub.resolve().is_relative_to(toplevel), (
+        "the premise: the answer must BE an ancestor of the boundary — this arm exists to "
+        f"grade the ancestor shape, and git answered {toplevel}")
+    assert toplevel != sub.resolve(), (
+        "the premise: the answer must be a STRICT ancestor, not the boundary itself")
+    # PREMISE 2 — while the GITDIR is this boundary's OWN. That pair is what ancestor-hood
+    # cannot separate from damage, and what `_resolves_to_own_gitdir` can.
+    gitdir = subprocess.run(
+        ["git", "rev-parse", "--absolute-git-dir"], cwd=sub,
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    assert Path(gitdir.stdout.strip()).resolve() == (sub / ".git").resolve(), (
+        "the premise: the gitdir must be this boundary's OWN, so the gitdir question "
+        f"permits; git answered {gitdir.stdout!r}")
+    assert census._resolves_to_own_gitdir(sub) is True, (
+        "the premise: the gitdir question must PERMIT this healthy repository — that is "
+        "what makes an `answer`-shape refusal a false diagnosis rather than a true one")
+    assert census._boundary_is_unaskable(sub) is False, (
+        "a healthy repository whose work tree root is a strict ANCESTOR must still be "
+        "askable: ancestor-hood is not the damage signature, and refusing it reported a "
+        "`.git` that does not resolve when it provably does")
+    rc = census.main(["--render", "sub/docs/K.md"])
+    assert rc == 0, (
+        f"an ancestor-shaped but HEALTHY work tree must not block the render, got {rc} — "
+        "the destination is untracked, so no provider has a reason to refuse it")
+    assert (sub / "docs" / "K.md").exists(), "the render wrote nothing"
+
+
 def test_the_tracking_probe_still_PERMITS_both_honest_answers(tmp_path, monkeypatch):
     """…and the fail-closed arm above does not over-block either honest permit.
 
@@ -5711,6 +5791,14 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # not an ancestor — that is "a work tree elsewhere", not "the repository above",
         # and refusing it turned a legitimate render into rc 2.
         "test_a_HEALTHY_worktree_RETARGETED_elsewhere_is_NOT_refused",
+        # ⛔ AND THE ANCESTOR-SHAPED ONE (#14741 review, cycle 7, P2, measured): a healthy
+        # repository whose `core.worktree` names a PARENT of the boundary answers a STRICT
+        # ANCESTOR at `--show-toplevel` while its gitdir is its OWN. The fast path that read
+        # an ancestor as walked-up refused it with a diagnosis that is false about it, and no
+        # arm graded this shape because the `elsewhere` counterweight above deliberately
+        # asserts its answer is NOT an ancestor. The gitdir question decides every
+        # pointer-form answer, and this is the only arm that pins the ancestor one.
+        "test_a_HEALTHY_repository_retargeted_to_AN_ANCESTOR_is_NOT_refused",
         # ⛔ AND THE OTHER SHAPE THAT ANSWERS "ELSEWHERE" (#14741 review, cycle 4, P2):
         # a DAMAGED boundary whose ENCLOSING repository is retargeted by `core.worktree`
         # answers `--show-toplevel` with a directory that is neither the boundary nor an
@@ -5757,8 +5845,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # measured): a healthy repository whose work tree is RETARGETED answers
     # `--show-toplevel` with a directory that is not an ancestor, and treating that as
     # "the repository above" refused a legitimate render.
-    assert len(split_arms) == 64, (
-        f"expected EXACTLY 64 named split arms; got {len(split_arms)} — either a "
+    assert len(split_arms) == 65, (
+        f"expected EXACTLY 65 named split arms; got {len(split_arms)} — either a "
         "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
@@ -5768,7 +5856,7 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 64` reds a name PRUNED from the literal and `missing` reds a
+    # `len(split_arms) == 65` reds a name PRUNED from the literal and `missing` reds a
     # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
@@ -5855,8 +5943,14 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # points AT the boundary so the walked-up `--show-toplevel` equals the boundary and the
     # `== boundary` branch returned askable without asking the gitdir at all (#14741
     # review, cycle 5, P1, measured — `--render` exited 0 over indexed bytes).
-    assert len(test_functions) == 123, (
-        f"expected EXACTLY 123 test functions in this module; got "
+    # ⛔ AND THE ANCESTOR-SHAPED HEALTHY COUNTERWEIGHT TAKES IT 123 -> 124
+    # (`split_arms` 64 -> 65): a healthy repository whose `core.worktree` names a PARENT of
+    # the boundary answers a strict ANCESTOR, which the fast path read as walked-up and
+    # refused with a false diagnosis. Ancestor-hood is not the damage signature
+    # (#14741 review, cycle 7, P2, measured), and the gitdir question now decides every
+    # pointer-form answer.
+    assert len(test_functions) == 124, (
+        f"expected EXACTLY 124 test functions in this module; got "
         f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
