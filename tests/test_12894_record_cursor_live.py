@@ -1248,26 +1248,43 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
             assert "a replay heals the record" not in text, (
                 f"the enumerated arm's sentence leaked onto the armed arm: "
                 f"{text[-400:]!r}")
-            # ⛔ THE SPLIT IS PINNED ON THIS ARM TOO (round 31 P3). The assertion
-            # that stood here was its INVERSE — `"EXECUTED and failed" not in
-            # text` — so it reddened on the CORRECT message and enforced the
-            # defect it should have caught. `allocate` names which WRITE ARM ran,
-            # not which CAUSE failed: this arm's population is the same three the
-            # enumerated arm names (an outage, a statement that executed and
-            # failed, a store/CONFIG refusal), and the allocating replay is the
-            # remedy for the FIRST only. An allocating replay re-executes a
-            # failed statement (it re-fails on `chk_point_baseline_complete`,
-            # #13207) and re-raises a tenant-scope/role refusal. The allocating
-            # FORM stays pinned above because a plain replay is refused on a
-            # cut-over graph.
-            assert "an OUTAGE is healed by an ALLOCATING replay" in text, (
-                "the ARMED arm's outage half lost the allocating form it needs "
-                "— a plain replay is refused on a cut-over graph: "
-                f"{text[-400:]!r}")
-            assert "statement that EXECUTED and failed re-fails" in text, (
+            # ⛔ THE SPLIT IS PINNED ON THIS ARM TOO (round 31 P3, corrected by
+            # round 32). The assertion that stood here originally was its INVERSE
+            # — `"EXECUTED and failed" not in text` — so it reddened on the
+            # CORRECT message and enforced the defect it should have caught.
+            # `allocate` names which WRITE ARM ran, not which CAUSE failed: this
+            # arm's population is FOUR, not three, and the allocating replay is
+            # the remedy for the FIRST only, IN THE MODE THE ROW IS IN.
+            assert "which FORM follows the " in text and "cursor ROW" in text, (
+                "the ARMED arm's outage half must key the FORM on the cursor "
+                "ROW — `journal_skipped=False` does not imply an active row "
+                f"(`UNCUT_GRAPHS_SQL` is `no row OR mode <> active`): {text[-400:]!r}")
+            assert "with NO `record_cursor` row a plain replay writes unchanged" in text, (
+                "the NO-ROW half is the one a plain replay heals; steering it to "
+                f"an allocating replay is refused there: {text[-400:]!r}")
+            assert "replay(allocate=True)" in text, (
+                "the ACTIVE half still needs the allocating form — a plain "
+                f"replay is refused on a cut-over graph: {text[-400:]!r}")
+            assert "`seeded`/`halted` row takes re-seed" in text, (
+                "a seeded/halted cursor needs re-seed (+`reopen`) and `arm` "
+                f"FIRST, and nothing here said so: {text[-400:]!r}")
+            # ⛔ THE FOURTH POPULATION (round-32 review P2): a 40001/40P01/57014
+            # on the allocation is raised UNDER `allocate` and is not in the
+            # allocator map, so it lands HERE — and its contract is the OPPOSITE
+            # of "re-fails": the server aborted the transaction and the counter
+            # rolled back WITH it, so a replay of the same record SUCCEEDS
+            # (`record_allocator.RetryableAllocationFailure`). The previous
+            # revision told it a replay re-fails.
+            for needle in ("40001", "rolled the counter back", "nothing to fix"):
+                assert needle in text, (
+                    "the ARMED arm's RETRYABLE half is missing — a "
+                    "40001/40P01/57014 aborts the transaction and rolls the "
+                    f"counter back, so a replay succeeds: {needle!r} absent from "
+                    f"{text[-400:]!r}")
+            assert "statement that EXECUTED and failed on its own data or a constraint" in text, (
                 "the ARMED arm still promises a heal to a statement that "
-                "executed and failed — an allocating replay RE-EXECUTES it and "
-                f"re-fails on the same data: {text[-400:]!r}")
+                "executed and failed — any replay RE-EXECUTES it and re-fails "
+                f"on the same data: {text[-400:]!r}")
             assert "STORE/CONFIG refusal" in text, (
                 "the ARMED arm does not name the store/CONFIG half of its own "
                 "population: a tenant-scope/role refusal raised after the plan "

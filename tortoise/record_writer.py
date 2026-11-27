@@ -4874,28 +4874,50 @@ def write_live_record(record: Mapping[str, Any], *,
                 "`record_allocator_cli.py status` for the mode"
             )
         else:
-            # ⛔ THIS ARM'S POPULATION IS THE SAME THREE CAUSES AS THE
-            # ENUMERATED ARM ABOVE (round 31 P3): `allocate` says which WRITE ARM
-            # ran, not which CAUSE failed. An OUTAGE is healed by an allocating
-            # replay; a statement that EXECUTED and failed RE-EXECUTES on that
-            # replay and re-fails until its own data or constraint is fixed; a
-            # STORE/CONFIG refusal RE-RAISES on any replay until the DSN or the
-            # role is fixed. Naming the allocating replay as the remedy for all
-            # three sent two of the three populations to a replay that cannot
-            # heal them — the same misdirection this change fixes on the
-            # enumerated arm, and the convergent external shape of the point is a
+            # ⛔ THIS ARM'S POPULATION IS NOT THREE CAUSES, IT IS FOUR, AND THE
+            # REMEDY'S FORM IS THE CURSOR ROW'S, NOT THIS ARM'S (round 31 P3,
+            # corrected by the round-32 review). `allocate` says which WRITE ARM
+            # ran, not which CAUSE failed. The four populations that reach here:
+            #  1. an OUTAGE — replay heals it, but WHICH FORM depends on the
+            #     cursor ROW: no row replays unchanged (`record_projection.py`,
+            #     `_refuse_an_enumerated_replay`'s sibling note), mode='active'
+            #     needs the allocating form (a cut-over graph REFUSES a plain
+            #     one), and `seeded`/`halted` needs re-seed (+`reopen`) and
+            #     `arm` FIRST or the allocation itself refuses — `UNCUT_GRAPHS_SQL`
+            #     is `no row OR mode <> active`, so `journal_skipped=False` does
+            #     NOT imply an active row.
+            #  2. a `40001`/`40P01`/`57014` on the allocation — `IsolationRefused`
+            #     and `RetryableAllocationFailure` are raised UNDER `allocate`
+            #     and are not in the allocator map, so they land HERE; their
+            #     contract is the OPPOSITE of "re-fails": the server aborted the
+            #     transaction and the counter rolled back WITH it, so a replay of
+            #     the same record SUCCEEDS. Naming a replay as the fix would be
+            #     wrong; there is nothing to fix.
+            #  3. a statement that EXECUTED and failed on its own data or a
+            #     constraint — re-executes and re-fails until that cause is
+            #     fixed (#13207's `chk_point_baseline_complete`).
+            #  4. a STORE/CONFIG refusal — re-raises on any replay until the DSN
+            #     or the role is fixed.
+            # The earlier revision of this block named only three, asserted a
+            # cut-over graph unconditionally, and therefore told population 2 a
+            # replay re-fails (false) and population 1's no-row/seeded/halted
+            # half a remedy that raises. The convergent external shape is a
             # `transient` / `correctable` / `permission-terminal` split with the
             # retry named for the FIRST class only (Azure Well-Architected,
-            # Temporal, AdCP's `recovery modes`). The allocating FORM is still
-            # named here because the ROW is the discriminator, not the cause:
-            # `_refuse_an_enumerated_replay` refuses a plain replay on a cut-over
-            # graph, so the outage half is unreachable without it.
+            # Temporal, AdCP's `recovery modes`).
             remedy = (
-                "an OUTAGE is healed by an ALLOCATING replay "
-                "(`replay(allocate=True)`, a CODE call — no CLI verb ships), "
-                "not a plain one, which a cut-over graph refuses; a statement "
-                "that EXECUTED and failed re-fails on that replay too, until "
-                "its own cause (its data or a constraint) is fixed; a "
+                "an OUTAGE is healed by a replay, but which FORM follows the "
+                "cursor ROW, not this arm: with NO `record_cursor` row a plain "
+                "replay writes unchanged; with mode='active' an ALLOCATING "
+                "replay (`replay(allocate=True)`, a CODE call — no CLI verb "
+                "ships), because a cut-over graph REFUSES a plain one; a "
+                "`seeded`/`halted` row takes re-seed (`halted` after `reopen`) "
+                "and then `arm` FIRST, or the allocation itself refuses; a "
+                "`40001`/`40P01`/`57014` on the allocation ABORTED the "
+                "transaction and rolled the counter back WITH it, so a replay "
+                "of the same record SUCCEEDS — nothing to fix; a statement "
+                "that EXECUTED and failed on its own data or a constraint "
+                "re-fails on that replay until that cause is fixed; a "
                 "STORE/CONFIG refusal (the tenant scope, a role that bypasses "
                 "RLS, the cutover guard's own read) re-raises until the DSN or "
                 "the role is fixed, on any replay"
