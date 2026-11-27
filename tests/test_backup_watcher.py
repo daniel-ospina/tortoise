@@ -2481,6 +2481,14 @@ def test_a_confirmed_no_manifest_org_that_HAS_state_is_not_called_never():
     (body,) = (ch.bodies[n] for n in ch.issues)
     assert "CONFIRMED listing" in body, body
     assert "cache miss" not in body, body
+    # …and it publishes NO age for an ABSENCE: the issue TITLE is rendered from
+    # `age`/`age_minutes` (`alert_store._title`), so a stray age-like key here
+    # would change the adoption contract's title shape while the row still read
+    # as "no age". Asserted over EVERY age-prefixed key, not just the two the
+    # title reads: the mutation pass measured that `"age_min": 0` left this
+    # whole file GREEN under a check of `age`/`age_minutes` alone.
+    detail = json.loads(body.split("```")[1])
+    assert not [k for k in detail if k.startswith("age")], detail
     # …and it names EVERY arm that can close it — a list of some closers reads as
     # exhaustive, so an issue that closed for an unlisted reason makes the watcher
     # look like it lies.
@@ -2498,7 +2506,8 @@ def test_a_confirmed_no_manifest_org_that_HAS_state_is_not_called_never():
     # closes_preexisting_backup_set_missing`). A closers list that omits it reads
     # as exhaustive (#9940), so an incident closed by the org leaving the DR
     # surface looks like the watcher invented a resolve.
-    assert "not_eligible" in body, body
+    assert "the class becomes `not_eligible`" in body, body
+    assert "(the org left the DR surface: this closes and NOTHING is opened)" in body, body
     # …and it names the ONE sub-case of "the state disappears" where nothing is
     # filed at all: an arm-(i) org that has ALREADY left the census has no
     # `per_team` key, so the cross-poll diff is the only closer
@@ -2711,6 +2720,43 @@ def test_watcher_stamp_missing_does_not_resolve_a_stale_it_never_measured():
     assert any("METADATA_LOST — team_a" in t for t in ch.issues.values()), ch.issues
 
 
+def test_measured_fresh_lets_a_simulate_drill_win_the_newest_selection():
+    """`_measured_fresh` mirrors `compute_status`'s simulate rule, or a drill can
+    pass itself off as freshness.
+
+    `compute_status` lets a non-expired `ops/simulate` object WIN the newest
+    selection whenever it is older than the real archive
+    (`if simulate_age is not None and simulate_age < newest`), because a drill
+    forges the AGE, not the archive. The #9938 gate that closes STALE only on a
+    measurement must use the SAME rule — otherwise a watcher whose real archive
+    is fresh would let a simulated 200m drill close a real age incident. The
+    mutation pass measured that deleting the selection line left this whole file
+    GREEN, so the claim was unpinned.
+
+    RED mutation: drop `if simulate_age is not None and simulate_age < newest:
+    newest = simulate_age` from `_measured_fresh` → the drill case returns True
+    and the first assertion fails.
+    """
+    ch = _Channels()
+    w = _watcher(MemoryStorage(), ch)
+    fresh = FIXED - timedelta(minutes=10)
+    drill = FIXED - timedelta(minutes=200)
+    org = "team_a"
+
+    # The drill is OLDER than the real archive, so it wins selection: not fresh.
+    assert w._measured_fresh(org, {org: fresh}, FIXED, drill) is False, (
+        "a simulated old age must not be mistaken for a measured-fresh archive")
+    # No drill: the measured 10m archive is fresh.
+    assert w._measured_fresh(org, {org: fresh}, FIXED, None) is True
+    # The drill is NEWER than the archive, so `simulate_age < newest` is false and
+    # the real (old) measurement decides.
+    assert w._measured_fresh(
+        org, {org: FIXED - timedelta(minutes=200)}, FIXED,
+        FIXED - timedelta(minutes=10)) is False
+    # No measurement at all is never fresh, whatever the drill says.
+    assert w._measured_fresh(org, {}, FIXED, drill) is False
+
+
 def test_a_degraded_poll_files_no_new_stale_for_an_unmeasured_org():
     """The open side of an UNMEASURED `stale` (the sibling of #3658's resolve
     side). On a degraded poll `compute_status` substitutes `r2_orgs = orgs`, so
@@ -2820,6 +2866,13 @@ def test_stale_filing_carries_the_measurement_that_justified_it():
     # successor incident exists for a downgraded org when none is filed.
     assert "a default-graph archive is MEASURED no older than" in body, body
     assert "opens the matching kind (#3294" in body, body
+    # …and the class list names BOTH kinds #9938 added to it, and states that the
+    # METADATA_LOST close is CONDITIONAL on a measurement — that class overrides
+    # the age, so a class change alone is not a freshness reading. Both
+    # sentences shipped unpinned: the mutation pass measured that deleting
+    # either one left this whole file GREEN.
+    assert "METADATA_LOST / BACKUP_SET_MISSING" in body, body
+    assert "closes this one only when the same poll MEASURED an archive fresh" in body, body
     assert "this closes and NOTHING is opened" in body, body
     assert "universe-shrink: the subject is gone" in body, body
     assert "consecutive confirming poll(s) before it is applied" in body, body
