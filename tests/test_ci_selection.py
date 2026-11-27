@@ -11180,6 +11180,12 @@ _H_14544_EXEMPT_SCOPE_BREAK_RE = re.compile(
     r"|when|if|since)\b", re.IGNORECASE)
 
 
+#: ⛔ `not only` / `not merely` / `not just` ASSERT what follows — the negation scopes over the
+#: focus particle, never over the predicate — so this phrase is not a negated exemption.
+_H_14544_FOCUS_PARTICLE_RE = re.compile(
+    r"\b(?:not|never)\s+(?:only|merely|just|simply|solely)\b", re.IGNORECASE)
+
+
 def _h_14544_exempt_negated(text: str) -> bool:
     """Whether the LAST `exempt` in `text` is negated inside ITS OWN clause.
 
@@ -11194,7 +11200,15 @@ def _h_14544_exempt_negated(text: str) -> bool:
     before = _H_14544_EXEMPT_SCOPE_BREAK_RE.split(text[:hit.start()])[-1]
     after = _H_14544_EXEMPT_SCOPE_BREAK_RE.split(text[hit.end():])[0]
     after = after[:_H_14544_NEGATION_WINDOW_AFTER]
-    return _H_14544_NEGATION_RE.search(before + " " + after) is not None
+    # ⛔ A FOCUS PARTICLE IS NOT A NEGATION OF THE EXEMPTION (#14623, measured). `not only exempt` /
+    # `not merely exempt` / `not just exempt` ASSERT the exemption — the `not` scopes over the
+    # particle — so counting it suppressed the very claim this guard exists to keep RED:
+    #     The REGISTRATION is not only exempt, and so is the row.    GREEN   <- banned sentence
+    #     The REGISTRATION is only exempt, and so is the row.        RED     <- same claim, no garnish
+    # Masking the particle phrase out of the window is exact: it removes only the affirmative idiom.
+    scope = _H_14544_FOCUS_PARTICLE_RE.sub(
+        lambda hit: " " * len(hit.group(0)), before + " " + after)
+    return _H_14544_NEGATION_RE.search(scope) is not None
 
 
 #: ⛔ A NEGATED PREDICATE NOMINATIVE — `A REGISTRATION IS NOT A ROW` — is not an exemption claim
@@ -11207,7 +11221,14 @@ def _h_14544_exempt_negated(text: str) -> bool:
 #: masked. ⛔ And the contraction alternative closes on `n` inside `isn't`, where there is no `\b` —
 #: so it could never fire, and it is written as `can`-style free text instead of pretending.
 _H_14544_NOT_A_ROW_RE = re.compile(
-    r"\b(?:not|never)\s+(?:a|the|any|either|one)?\s+row\b(?=\s*(?:[,;:.!?)\]]|$))",
+    r"\b(?:not|never)\s+(?:a|the|any|either|one)?\s+row\b"
+    # ⛔ ENDED BY PUNCTUATION **OR BY A COORDINATOR** (#14623, measured). Punctuation alone left a
+    # boundary-less thesis unmasked — `A REGISTRATION IS NOT A ROW and the row is exempt too` — and
+    # its own `NOT` then sat in Rule 2's before-window and READ AS NEGATING THE NEXT CLAUSE'S CLAIM,
+    # so ONE DROPPED COMMA turned the banned sentence GREEN. `and` / `but` / `so` complete the
+    # predication exactly as a comma does; a RELATIVE pronoun does not, which is why
+    # `the row is not a row the ratchet EXEMPTS` stays unmasked and stays GREEN.
+    r"(?=\s*(?:[,;:.!?)\]]|and\b|but\b|so\b|$))",
     re.IGNORECASE)
 
 
@@ -11580,6 +11601,27 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
         "is exempt too.") is not None, (
         "the negated predicate nominative MASKED the claim that followed it: a tolerated match "
         "swallows every candidate inside its own span, so the trailing clause shipped CLEAN")
+    # ⛔ A FOCUS PARTICLE ASSERTS THE EXEMPTION (#14623, measured): `not only exempt` / `not merely
+    # exempt` scoped their `not` over the particle, and counting it suppressed the banned claim, so
+    # the sentence below was GREEN while `… is only exempt, …` was RED. Pinned in both directions.
+    assert _h_14544_banned_claim(
+        "The REGISTRATION is not only exempt, and so is the row.") is not None, (
+        "a focus particle negates itself, not the exemption — reading it as a negated exemption "
+        "let `not only exempt` launder the banned claim GREEN")
+    assert _h_14544_banned_claim(
+        "The REGISTRATION is not merely exempt, and so is the row.") is not None, (
+        "same for `not merely` — it asserts the exemption")
+    # ⛔ AND THE MASK MUST COVER A THESIS ENDED BY A COORDINATOR, not only by punctuation (#14623,
+    # measured): one DROPPED COMMA left the thesis unmasked and its own `NOT` then read as negating
+    # the next clause's claim, turning the banned sentence GREEN. Both comma'd and uncomma'd forms of
+    # the TRUE thesis must stay GREEN as well, which is the other half of the pin.
+    assert _h_14544_banned_claim(
+        "A REGISTRATION IS NOT A ROW and the row is exempt too.") is not None, (
+        "the boundary-less thesis was not masked, so its `NOT` licensed the following clause — one "
+        "dropped comma from the banned sentence")
+    assert _h_14544_banned_claim(
+        "⛔ A REGISTRATION IS NOT A ROW and this sentence is GRADED rather than trusted.") is None, (
+        "the boundary-less thesis is still TRUE prose and must stay GREEN")
     assert _h_14544_banned_claim(
         "The `durations` row is not a row the ratchet exempts.") is None, (
         "the mask deleted the negation of a `not … row that …` FALSE BLOCK — the row there is the "
