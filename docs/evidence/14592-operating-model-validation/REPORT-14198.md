@@ -338,3 +338,16 @@ Regression surface run alongside, all green: `test_extractor_v2`,
 8. **The replay's prior set is a reconstruction, not a recording** (§3). It
    proves the arm fires on the receipt's own declaration; it does not prove the
    shipped pipeline closes that corpus, which needs a fresh-graph re-ingest.
+9. **The minted-endpoint exclusion is conservatively WIDE.** A minted endpoint
+   that would SURVIVE the prune (some other surviving operator references it) is
+   excluded from the successor set too, so a closable closure is declined. Safe
+   direction — a lost closure shows up as two live claims, a lost claim does not
+   — and narrowing it needs the prune's own reachability computation, which runs
+   after this pass. Stated here because the code comment otherwise reads as if a
+   minted endpoint is always pruned.
+10. **The supersede-channel LOSS metric is untouched by this PR, deliberately.**
+   The NAND route calls `_resolve_point_supersede` with a LOCAL warning sink, so
+   an unresolvable older ref does not emit `matches no S3 prior` — that marker is
+   a REPLACE-channel refusal, and the model declared a `NAND`, not a
+   `supersedes` ref. Without the local sink this PR would have re-attributed 2 of
+   doc-05's 3 drops on its own corpus to a channel they never touched.
