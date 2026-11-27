@@ -4682,10 +4682,20 @@ def write_live_record(record: Mapping[str, Any], *,
             else "the journal has the record"
         )
         if journal_skipped:
+            # ⛔ THE REMEDY IS JOURNAL-NEUTRAL ON PURPOSE. This arm's population is
+            # whatever generic `write_failed` is left after the allocator, the
+            # `position_unverifiable` and the `position_divergence` arms have
+            # taken theirs — the tenant-GUC read-back, a bypassing role, a refused
+            # `IsolationRefused`, the cutover guard, a store/config failure. On
+            # most of those the allocator is HEALTHY, so naming it as the thing to
+            # wait on sends the operator to a subsystem that cannot be the cause
+            # (the allocator's own refusals are intercepted one arm earlier by
+            # `_allocator_refusal_cause`, and `plan_refused` takes the build-time
+            # ones); the `%s` cause already names the failure that actually
+            # occurred. Only the statement that provably holds here is made.
             remedy = (
-                "re-emit the record once the allocator is healthy — with no "
-                "journal line there is nothing to replay, and "
-                "`record_allocator_cli.py status` names the counter's mode"
+                "re-emit the record — with no journal line there is nothing to "
+                "replay"
             )
         elif not allocate:
             # ⛔ THE DISCRIMINATOR IS THE CURSOR ROW, NOT THE ARM. `allocate`
