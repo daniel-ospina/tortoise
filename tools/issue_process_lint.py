@@ -1439,6 +1439,17 @@ _RANGE_JOIN = r"(?:\s*(?:--?|–|—|\.{2,}|…)\s*|\s+(?:through|to)\s+)"
 _ROW_NOUN_BEFORE = re.compile(r"(?:\b(?:rows?|ids?|items?|criteria|row\s+ids?)\s+(?:from\s+)?)$",
                               re.IGNORECASE)
 
+# ⛔ AND THE NOUN IS NOT ENOUGH: the most natural way to NAME the set is with that same noun. Round 7
+# measured it as a one-word margin from a pinned control — `(row V2 only; rows V1–V6 bar is unchanged)`
+# read `clean`, where the same sentence WITHOUT the word `rows` was the pinned finding. So a span also
+# requires that its own line carries no PARTIALITY/contrast cue: a sentence that mentions a row set
+# while limiting, postponing or comparing it is not claiming it. Rejecting a span only costs the
+# endpoint read (an understating `finding`), while accepting one costs a false PASS.
+_PARTIALITY_RE = re.compile(
+    r"\bonly\b|\bof\b|un\w*changed\b|untouched|unaffected|across\b|\bbar\b|\blater\b|\bsee\b"
+    r"|deferred|outstanding|pending|in\s+progress|part(?:ial|ly)?\b|between\b",
+    re.IGNORECASE)
+
 
 def _row_range_span(text: str, rows: list[str]) -> set[str]:
     """The rows a DECLARED range in `text` spans — `V1–V6` over `#13036`'s six is all six, not two.
@@ -1465,8 +1476,15 @@ def _row_range_span(text: str, rows: list[str]) -> set[str]:
     spanned: set[str] = set()
     for match in pattern.finditer(text):
         before, after = text[:match.start()], text[match.end():]
-        # See `_ROW_NOUN_BEFORE`: a mention of the row SET is not a claim on it.
+        # See `_ROW_NOUN_BEFORE`: a mention of the row SET is not a claim on it…
         if not (before.strip() == "" and after.strip() == "") and not _ROW_NOUN_BEFORE.search(before):
+            continue
+        # …and not even the noun settles it (`_PARTIALITY_RE`): the same noun introduces a set the
+        # sentence might be limiting, postponing or comparing rather than claiming.
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.end())
+        line = text[line_start:line_end if line_end != -1 else len(text)]
+        if _PARTIALITY_RE.search(line):
             continue
         lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
         spanned |= set(rows[lo:hi + 1])

@@ -3777,10 +3777,15 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
     anywhere" test found all six and reported `clean` — on a close that claimed none of them. The
     honest verdict is AMBIGUOUS (the PR said what it is NOT claiming and not what it is), never a
     pass. Pre-fix: `clean == 1`.
+
+    ⛔ THE DISCLOSURE IS SPELLED AS AN EXPLICIT LIST ON PURPOSE (review round 7, F2): with the range
+    form (`V1–V6 remain unmeasured`) the span read does not fire either, so the body never names all
+    six and the test stayed GREEN with the disclaimer guard mutated away — it pinned nothing. The
+    list form reaches the fallback, so removing the guard reddens this row.
     """
     rows = L.row_ids([CAPSTONE_BODY])
-    findings, stats = L.classify_partial_close("Closes #13036 — V1–V6 remain unmeasured\n", 500,
-                                               {13036: _scope(rows)})
+    findings, stats = L.classify_partial_close(
+        "Closes #13036 — V1, V2, V3, V4, V5, V6 remain unmeasured\n", 500, {13036: _scope(rows)})
     assert findings == []
     assert stats["ambiguous"] == 1 and stats["clean"] == 0, stats
 
@@ -4144,6 +4149,15 @@ def test_every_dash_and_word_spelling_of_a_full_range_is_a_complete_claim(spelli
     ("Closes #13036\n\nThis PR is one step on the V1–V6 bar; V2 is proved.\n", "ambiguous"),
     # row 6 — the COMPLETE close the range read exists for, which must stay clean
     ("Closes #13036 (rows V1–V6)\n", "clean"),
+    # rows 7–13 — the noun gate alone was a ONE-WORD margin (round 7, F1): naming the set WITH the
+    # noun that gates it read `clean`, one word from the pinned finding above.
+    ("Closes #13036 (row V2 only; rows V1–V6 bar is unchanged)\n", "finding"),
+    ("Closes #13036 (row V2 only; the rows V1–V6 are unchanged)\n", "finding"),
+    ("Closes #13036 (row V2 only, all rows V1–V6 unaffected)\n", "finding"),
+    ("Closes #13036 (row V2 only; across rows V1–V6)\n", "finding"),
+    ("Closes #13036 (row V2 only); only rows V1–V6 bar. See rows V3–V6 later.\n", "finding"),
+    ("Closes #13036\n\nThis PR is one step on the rows V1–V6 bar: V2 is now proved.\n", "ambiguous"),
+    ("Closes #13036 (row V2 only; the rows V1 to V6 are still open)\n", "finding"),
 ])
 def test_a_range_that_names_the_row_set_is_not_a_claim_on_it(body, expected):
     """`_row_range_span` used to expand unconditionally, so `(row V2 of V1–V6)` claimed all six.
@@ -4174,9 +4188,8 @@ def test_the_satisfies_clause_still_spans_without_a_row_noun():
     rows = L.row_ids([CAPSTONE_BODY])
     assert L.claimed_row_ids("Satisfies #13036: V2–V4\n", 13036, rows) == {"V2", "V3", "V4"}
     body = "Satisfies #13036: V2–V4\nRefs #13036\n"
-    findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
-    assert stats["clean"] == 0 and stats["finding"] == 0
-    assert findings == [] or findings[0].arm == L.ARM_PARTIAL
+    findings, _stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
+    assert findings == []
 
 
 def test_an_empty_sweep_says_it_read_nothing_not_that_the_arm_did_not_run(capsys, monkeypatch):
