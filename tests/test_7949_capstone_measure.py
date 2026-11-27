@@ -12483,20 +12483,46 @@ def test_no_bundle_document_states_a_negative_membership_claim_it_cannot_keep():
         f"the command prints (`prints \\`1 1\\``) instead. Measured: {failures}")
 
 
-def test_the_org_info_repoint_is_still_stated_as_the_numstat_the_document_read():
-    """The positive half: deleting the measured claim must red, not read as 'nothing to say'."""
-    _, positive = _membership_claims(
-        _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8"))
-    assert "04-plan.md" in positive, (
-        "`05-verify.md` no longer states a MEASURED `numstat origin/main...HEAD` pair for "
-        "`04-plan.md`. The `org_info` span re-point (`17218-17295` -> `17375-17452`) is this "
-        "branch's own work — `git diff --numstat origin/main...HEAD -- "
-        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints `1 1` — so the row "
-        f"is not optional prose. Measured positive claims: {positive}")
+#: The sentence that ROUTES membership for the one path this block used to type a figure for.
+#: It is the durable half: the path left this branch's diff at `d332aa5d` (see the arm below), so
+#: the figure could only be re-typed as the NEXT head's, which is the rot the block exists to stop.
+_ORG_INFO_ROUTING = (
+    "git diff --name-only origin/main...HEAD -- "
+    "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md"
+)
 
 
-def test_the_negative_membership_detector_fires_on_the_sentence_that_actually_shipped():
-    """Mutation attribution: the detector reads the shape that was live, not a hypothetical."""
+def test_the_bundle_routes_the_org_info_membership_to_the_command():
+    """The surviving half: the ROUTE must be stated, and deleting it must red.
+
+    ⛔ The arm that stood here demanded a POSITIVE pair (`prints `1 1``) and was FALSE at
+    `d332aa5d`: `main`'s `#14624` reconciled this feature onto `main` with *"docs take main's
+    version"*, so `04-plan.md`'s blob is `origin/main`'s own and
+    `git diff --numstat origin/main...HEAD -- …/04-plan.md` prints NOTHING at this head. Making
+    that assertion pass would have required typing a figure the tree contradicts — the exact
+    defect class this whole block was rebuilt to refuse, one layer up.
+
+    And the affirmative polarity is not a weaker version of the defect, it is the same one: the
+    clause this bundle carries already records the lesson (`#13853` review round 12, P2 — "first
+    the negative, then the affirmative form of it, which is the same head-bound claim with its
+    polarity flipped"). So what is graded is the ROUTE, which a fold cannot falsify, and the
+    mutation arm below proves both polarities are really parsed rather than assumed absent.
+    """
+    text = _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8")
+    negative, positive = _membership_claims(text)
+    assert _ORG_INFO_ROUTING in text, (
+        "`05-verify.md` no longer routes `04-plan.md`'s membership to the command that answers "
+        "it (`_ORG_INFO_ROUTING`). That route is what survives a fold; a typed pair does not — "
+        f"measured at this head: negative={negative} positive={positive}")
+
+
+def test_the_membership_detectors_fire_on_the_sentences_that_actually_shipped():
+    """Mutation attribution, BOTH polarities: the detector reads the shapes that were live.
+
+    The negative fixture is the sentence that shipped at `6c2c4d06`. The positive fixture is the
+    shape the now-retired assertion demanded — parsed here so its ABSENCE from the documents is a
+    measurement rather than a parser that quietly returns `[]` for everything.
+    """
     pre_fix = (
         "`git diff --numstat origin/main...HEAD -- "
         "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints NOTHING "
@@ -12506,3 +12532,11 @@ def test_the_negative_membership_detector_fires_on_the_sentence_that_actually_sh
         f"the detector did not fire on the pre-fix sentence — negative={negative} "
         f"positive={positive}")
     assert negative[0].startswith("04-plan.md ->"), negative[0]
+    fixed_shape = (
+        "`git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints `1 1` "
+        "at the head it was read at")
+    negative2, positive2 = _membership_claims(fixed_shape)
+    assert positive2 == ["04-plan.md"] and not negative2, (
+        "the positive half of the detector no longer parses the pair shape, so an EMPTY `positive` "
+        f"list in the documents would prove nothing — negative={negative2} positive={positive2}")
