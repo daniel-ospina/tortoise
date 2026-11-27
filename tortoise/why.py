@@ -558,10 +558,11 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
     #2490: the gate is a PROJECTION-side has_ep OVERRIDE, NOT a WHERE
     insertion — why() explicitly serves terminal ids in the supersession
     block, so filtering them out of _EP_CYPHER's WHERE would drop the very
-    rows why must present. Terminal rows (status in the terminal vocab OR
-    the legacy outdated flag) read has_ep=False + contested=False even when
-    EP measured them pre-terminalization (their posterior decayed to vacuity
-    at the write)."""
+    rows why must present. Terminal rows — ended on EITHER axis (#13034):
+    status in the terminal vocab, the legacy outdated flag, ``isClosed``, or
+    a stage in the resolved ``terminal`` slot — read has_ep=False +
+    contested=False even when EP measured them pre-terminalization (their
+    posterior decayed to vacuity at the write)."""
     for row in rows:
         if not row or not row[0]:
             continue
@@ -576,7 +577,14 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
         has_ep = bool(row[3])
         # #2490: terminal rows never surface a decayed posterior as measured
         # EP — has_ep=False + contested=False (projection-side override).
-        terminal = len(row) > 5 and is_terminal_status(row[4], bool(row[5]))
+        # #14796: BOTH axes, not just the word one. `_EP_CYPHER` now returns
+        # the position columns (13/14) for exactly this call; the len guards
+        # keep the pre-#14796 row shape (and the contract doubles the existing
+        # suite builds) answering from the word axis alone rather than raising.
+        terminal = len(row) > 5 and is_terminal_status(
+            row[4], bool(row[5]),
+            is_closed=row[13] if len(row) > 13 else None,
+            stage_slot=row[14] if len(row) > 14 else None)
         if terminal:
             has_ep = False
         # #3276: explicit measurement state — see EpBreakdown. baseline_set
@@ -598,7 +606,8 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
         # surface uses (presence from the raw columns, then the #2490 fold).
         # Index map for `_EP_CYPHER`: 0 id, 1 alpha, 2 beta, 3 measured,
         # 4 status, 5 outdated, 6 baseline_set, 7 has_belief, 8 posterior_alpha,
-        # 9 ep_alpha, 10 confidence, 11 posterior_beta, 12 ep_beta. The len
+        # 9 ep_alpha, 10 confidence, 11 posterior_beta, 12 ep_beta,
+        # 13 isClosed, 14 pipelineSlot (#14796 — the position axis). The len
         # guard covers the pre-#11702 7-col contract doubles, which carry a
         # belief by construction.
         if len(row) > 12:
@@ -977,7 +986,18 @@ _EP_CYPHER = (
     # #11702 cycle 3: the β columns ride so `ep_state()` can apply the same
     # α+β <= 0 rule the predicate does — a stored (0, 0) pair is no belief.
     "  n.posterior_alpha, n.ep_alpha, n.confidence, "
-    "  n.posterior_beta, n.ep_beta"
+    "  n.posterior_beta, n.ep_beta, "
+    # #14796: the POSITION axis rides the TAIL (13 = ``isClosed``, 14 =
+    # ``pipelineSlot``) so `_assemble_ep_rows` can hand `is_terminal_status`
+    # every input it takes. Without them a record ended ONLY by the position
+    # axis (``isClosed`` true, ``status`` still ``live``, no ``outdated``) took
+    # neither branch of the #2490 gate, so `has_ep` stayed true and this
+    # surface — the one every agent read goes through — served its stored
+    # posterior as MEASURED EP. Design §6: *a read that serves a superseded
+    # claim as current is wrong*. Appended, never inserted, so the 0..12 index
+    # map documented in `_assemble_ep_rows` keeps its meaning under the len
+    # guards that tolerate the pre-#14796 row shape.
+    "  coalesce(n.isClosed, false), n.pipelineSlot"
 )
 # Tradeoffs (decision points): the point is the operator SOURCE (INPUT idx 0)
 # and the alternatives are the operator's IMPL TARGETS at idx > 0 (the
