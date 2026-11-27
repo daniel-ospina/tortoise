@@ -301,8 +301,8 @@ def compute_status(
       NOT in census             (``stamp_missing`` needs   (``stamp_missing``
                                 ``org in orgs``)            needs ``t in orgs``)
     measured age > threshold,   ``stale`` (on ANY poll —   ``stale``
-      state PRESENT             rows 1-2 are its
-                                degraded cases)
+      state PRESENT             row 1 is its degraded
+                                case)
     measured age <= threshold,  ``ok``                     ``ok``
       state PRESENT
     org the sweep skips         ``not_eligible``           (key omitted)
