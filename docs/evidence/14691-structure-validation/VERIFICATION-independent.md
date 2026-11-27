@@ -131,11 +131,13 @@ own number.
 The strongest example is a point the corpus never makes, attached to a ``quote``
 that is not in the corpus at all — taken from `out/t6-score.json`
 `claim_layer.invented_examples` (which is where `score_t6.py` derives it), **not**
-from the audit's capped `audited` array, where it does not appear:
+from the audit's capped `audited` array, where it does not appear. The blockquote
+below is that row's `point`, reproduced exactly as the artifact stores it — the
+scorer caps the field at a fixed width, so it ends mid-word — and the `quote` it
+is attached to is one of the exhibits REPORT §3 shows:
 
-> "Any future proposal to share or duplicate a feature across the Lumen Core /
-> Lumen Field boundary would be a change to this baseline, not a continuation
-> of it."
+> Any future proposal to share or duplicate a feature across the Lumen Core /
+> Lumen Field boundary would be a change to this baseline, not a c
 
 `"any future proposal"`, `"baseline"` and `"no shared feature surface"` appear
 nowhere in the corpus (verified by substring search). The structure is not

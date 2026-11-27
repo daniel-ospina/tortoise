@@ -2752,6 +2752,140 @@ def test_the_quote_bucket_is_decided_by_the_TURN_and_the_corpus_STATES_them():
          for r in quotes["invented_examples"]])
     assert all(r["best_turn_overlap"] >= 0.6 for r in summaries), summaries
 
+
+def _fence_after(pattern: str) -> list[str]:
+    """The ```text fence BODY that follows the first REPORT.md line matching
+    `pattern` — the EXHIBIT, which `_report_line` cannot reach and which a
+    document-wide token search would grade by its §8 record instead."""
+    lines = _report().splitlines()
+    for start, line in enumerate(lines):
+        if not re.search(pattern, line):
+            continue
+        for opener, nxt in enumerate(lines[start + 1:], start + 1):
+            if not nxt.strip().startswith("```"):
+                continue
+            body = []
+            for content in lines[opener + 1:]:
+                if content.strip().startswith("```"):
+                    return body
+                body.append(content)
+            return []
+        return []
+    return []
+
+
+def _blockquote_after(pattern: str) -> str:
+    """The first `>` blockquote below the VERIFICATION-independent.md paragraph
+    whose FIRST line matches `pattern`, flattened — the exhibit that document
+    shows for the row it names."""
+    lines = _verification().splitlines()
+    for start, line in enumerate(lines):
+        if not re.search(pattern, line):
+            continue
+        for pos in range(start, len(lines)):
+            if not lines[pos].strip():
+                continue
+            if lines[pos].lstrip().startswith(">"):
+                break
+            # advance to the END of the paragraph this line belongs to, then read
+            # the blockquote that follows it — the exhibit, not the prose.
+            nxt = pos
+            while nxt < len(lines) and lines[nxt].strip():
+                nxt += 1
+            while nxt < len(lines) and not lines[nxt].strip():
+                nxt += 1
+            assert nxt < len(lines) and lines[nxt].lstrip().startswith(">"), (
+                f"the paragraph at {lines[start][:40]!r} is followed by no "
+                "blockquote exhibit")
+            block = []
+            for quote in lines[nxt:]:
+                if not quote.lstrip().startswith(">"):
+                    break
+                block.append(quote.lstrip()[1:].strip())
+            # the exhibit is a markdown blockquote WRAPPING the field in straight
+            # quotes; the artifact stores the field bare, so the wrapper is stripped
+            return " ".join(" ".join(block).split()).strip('"').strip()
+        return ""
+    return ""
+
+
+def _corpus_text() -> str:
+    return " ".join(" ".join(t["content"].split())
+                    for d in _corpus()["documents"] for t in d["turns"]).lower()
+
+
+def test_the_EXHIBITED_invented_quote_is_the_artifacts_quote():
+    r"""Reds if REPORT §3's invented-example fence, or the W4 blockquote in
+    VERIFICATION-independent.md, is a RESTATED copy rather than a DERIVED one.
+
+    ⛔ #14723 review, fresh context. This is the class the whole file exists to
+    close, found one artefact across from where rounds 27-33 were looking: those
+    brought every copy of a *number* under a derivation, and the *quoted exhibit*
+    was left under none. Measured on the committed pre-fix text: changing a single
+    word inside the fence — `belongs to exactly one product` -> `belongs to
+    EXACTLY one` — left **103 passed**, while the paragraph directly beneath it
+    still asserts `None of those sentences is in the corpus`. The exhibit IS the
+    substantiation of that sentence, so an ungraded exhibit is an ungraded claim,
+    and the bundle's only claim-layer FAIL rested on it.
+
+    Resolved residual, declared rather than hidden: a DELETION of trailing
+    exhibited rows leaves a shorter prefix, which this arm admits — it grades
+    every row it is SHOWN against the artifact, and the row
+    VERIFICATION-independent.md points at must be among them.
+    """
+    module = _load_score_module()
+    sanctioned = module.a4_invention()["quotes"]["invented_examples"]
+
+    def norm(s: str) -> str:
+        return " ".join(s.split())
+
+    body = norm(" ".join(_fence_after(r"^Examples of the invented")))
+    assert body, "REPORT.md §3 has no invented-examples fence to grade"
+
+    # The exhibit must be the artifact's OWN quotes, in the artifact's order, and
+    # nothing else: an exact quote count is what makes a replaced or padded
+    # exhibit red instead of merely longer.
+    expected = [norm(r["quote"]) for r in sanctioned]
+    assert body.count('"') % 2 == 0, ("unbalanced exhibit fence", body)
+    shown = [q.strip() for q in body.split('"')[1::2]]
+    assert len(shown) == body.count('"') // 2, (len(shown), body.count('"'))
+    assert shown, body
+    assert shown == expected[:len(shown)], (
+        "REPORT §3's exhibited invented-quotes are not the artifact's own quotes "
+        "in order — a restated exhibit, so the `None of those sentences is in the "
+        "corpus` claim beside it grades nothing",
+        list(zip(shown, expected[:len(shown)], strict=False)))
+
+    # `None of those sentences is in the corpus` is the claim, so grade IT: no
+    # exhibited sentence occurs in the corpus, and each sits below the 0.6 band.
+    corpus = _corpus_text()
+    shown_rows = sanctioned[:len(shown)]
+    for row in shown_rows:
+        assert norm(row["quote"]).lower() not in corpus, (
+            "§3 exhibits this sentence as absent from the corpus and the corpus "
+            f"states it: {row['quote'][:80]!r}")
+        assert row["best_turn_overlap"] < 0.6, row
+
+    # VERIFICATION-independent.md shows a *point*, introduced by a sentence that
+    # names `invented_examples` without saying WHICH field it reproduces. Pin the
+    # field, so the two documents' exhibits cannot drift apart while both stay
+    # fluent.
+    quoted = _blockquote_after(r"^The strongest example is a point the corpus")
+    assert quoted, "VERIFICATION-independent.md W4 has no exhibited example"
+    normed = {norm(r["point"]).lower(): r for r in sanctioned if r.get("point")}
+    assert quoted.lower() in normed, (
+        "W4's blockquote is not any `invented_examples` point as stored — it is a "
+        f"restated exhibit, a sentence no field of the artifact holds: {quoted!r}")
+    assert quoted.lower() not in {e.lower() for e in expected}, (
+        "W4's blockquote is a `quote` but the prose introduces it as the row's "
+        "point, so the field it names is wrong")
+    # ...and the row it exhibits must be one the REPORT's fence also shows, so the
+    # two documents cannot exhibit two different examples under one story.
+    assert normed[quoted.lower()]["quote"] in [r["quote"] for r in shown_rows], (
+        "W4 exhibits a row that REPORT §3's fence does not show",
+        normed[quoted.lower()]["quote"][:80])
+
+
 def test_each_door_finding_ANSWER_is_the_artifacts_answer_in_SUBSTANCE():
     r"""Reds if a REPORT answer keeps its leading "No" and reverses its claim.
 
