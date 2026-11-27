@@ -232,19 +232,25 @@ version: 1
 # `test_the_fast_shards_header_block_calls_a_row_only_what_has_one` reds when that entry is absent.
 # Nor is a row the map's only carrier of a weight: `durations_floors` can additionally PIN a declared
 # value.
-# ⛔ THIS FOLD'S OWN DELTA IS MEASURED, not reasoned: this PR adds no test file and leaves the
-# selector untouched, so the pool and the parse on this tree compare EQUAL to `main`'s — every
-# surface list, every `durations` row, every `durations_floors` entry and `tier1`, value by value,
-# zero differing — and a comment-only `durations` rewrite on either side moves no member of the
-# pool. ⛔ NO POOL SIZE AND NO ROW COUNT IS STATED HERE as a claim about this head, on purpose:
-# written as figures they owe a re-measurement to whoever next moves one and nothing grades them,
-# which is exactly the rot this block's own doctrine names — the invariant above is what holds.
-# ⛔ That zero is a READING of this head, never a promise about the next fold: `fast_pool()` takes
+# ⛔ A `durations` WEIGHT IS NOT A MEMBERSHIP, and that half survives on its own: a comment-only
+# `durations` rewrite on either side moves no member of the pool. ⛔ THE IDENTICAL-TO-`main` CLAIM
+# THIS NOTE USED TO CARRY IS DELETED, not re-pointed, because the block's own re-derivation refutes
+# it on this head: it read "this PR adds no test file and leaves the selector untouched, so the pool
+# and the parse on this tree compare EQUAL to `main`'s — every surface list, every `durations` row,
+# every `durations_floors` entry and `tier1`, value by value, zero differing". That was TRUE of the
+# fold whose delta it measured (a two-sentence prose repair, which touched neither the surface map
+# nor the selector) and FALSE from the moment a lane that REGISTERS a row carried it: on this tree
+# the `core` surface list and the `durations` map each hold one entry `main` does not, while
+# `durations_floors` and `tier1` still compare equal — so the blanket word was the defect, not the
+# per-key reading it replaced. ⛔ NO POOL SIZE AND NO ROW COUNT IS STATED HERE as a claim about
+# this head, on purpose: written as figures they owe a re-measurement to whoever next moves one and
+# nothing grades them, which is exactly the rot this block's own doctrine names. ⛔ THE DELTA IS A
+# READING OF THIS HEAD, never a promise about the next fold: `fast_pool()` takes
 # its inputs from the tree being measured (the manifest, the selector's own constants, and the
 # filesystem under an `on_demand: <dir>/**` subtree, which `on_demand_subtree_files` expands with
 # `rglob("test_*.py")` on purpose — a file added to a non-gating subtree must not silently re-enter
-# the gate), so re-measure the delta on the tree you are merging INTO rather than carrying this
-# sentence's zero.
+# the gate), so re-measure it on the tree you are merging INTO rather than carrying this head's
+# answer.
 # The name lists are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), and
 # `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
