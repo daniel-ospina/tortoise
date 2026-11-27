@@ -52,17 +52,28 @@ is **invisible to the read door** that answers *"what does this person own?"*.
 * `tortoise/relation_guards.py` — a new **ORIENTATION** leg beside the endpoint
   leg: `orient_declared_pair` / `declared_label_sides`, outcomes
   `as_asked` / `reversed_orientation` / `abstain`. It answers from **two**
-  premises, and both are in scope: (a) an EXACT declared pair asked in reverse
-  (measured at this head: **37 pairs across 27 predicates**, every one
-  `evidence="declared-pair"`) — the same state the pair leg reports as
-  `reversed`, i.e. the swap its own message already prescribes; and (b) the
-  LABEL-SPELLED side of the declarations, which is the only premise that can
-  orient a pair the packs declare for OTHER kinds. It abstains only where
-  neither answers: both ends the labelled class, a `:Subject` on *both* ends,
-  several labels on one side, an undeclared predicate, an unreadable
-  declaration set. ⚠️ (a) is not a cosmetic addition — on the DIRECT-arm
-  predicates (`causes`/`supports` → `IMPL`) it moves a PRICED belief between the
-  two endpoints, which is the declared correction, not a side effect.
+  premises, and both are in scope: (a) an EXACT declared pair asked in reverse —
+  measured at this head, split the way a REACHABLE ask reaches it: **33 pairs
+  across 24 predicates** carry no label end and are corrected with
+  `evidence="declared-pair"`, while the 4 label-spelled rows (`ownedBy`,
+  `assignedTo` ×2, `holds`) cannot be asked as a declared pair by any write (a
+  `Subject` is a LABEL, not a kind) and are premise (b)'s, with
+  `evidence="declared-endpoint-label"`. Both counts move with the packs, so they
+  measure that head and are not constants. This is the same state the pair leg
+  reports as `reversed`, i.e. the swap its own message already prescribes; and
+  (b) the LABEL-SPELLED side of the declarations, which is the only premise that
+  can orient a pair the packs declare for OTHER kinds. It abstains only where
+  neither answers, and the reasons are enumerated with their own ids in
+  `relation_guards` (no predicate; an undeclared predicate; a `declarationOnly`
+  row that binds no pair; an ambiguous pair; an unresolved endpoint kind; no
+  label-spelled side — `hasPart` asked `dev:epic -> dev:issue`; several labels on
+  one side, or a label on *both* — `:Subject` on both ends, *"Dev manages
+  Marta"*; and an unreadable declaration set). ⚠️ (a) is not a cosmetic
+  addition — on the DIRECT-arm predicate `causes` → `IMPL` it moves a PRICED
+  belief between the two endpoints, which is the declared correction, not a side
+  effect. ⚠️ And `supports` is **not** reached: it declares no pair row at all,
+  so the leg abstains `predicate-not-declared` on it (measured) — see the
+  residuals, where that is filed as a pack-declaration gap.
 * `tortoise/relation_write.py` — the planner consumes that verdict **before** it
   chooses an arm, so both the structural and the direct arm carry the declared
   orientation. A reversed pair is **redirected, not dropped**
@@ -73,8 +84,10 @@ is **invisible to the read door** that answers *"what does this person own?"*.
   ⚠️ `RelationEdge.orientation is None` does NOT mean "verified correct": it
   covers the abstentions too, so a count of *corrected* rows is what the receipt
   can answer and a count of *checked* rows is not.
-* `tests/test_relation_orientation_14304.py` — 21 assertions on the verdict and
-  on the plan/write path.
+* `tests/test_relation_orientation_14304.py` — the pins on the verdict and on
+  the plan/write path (⛔ the CASE COUNT is deliberately not quoted: it moves
+  whenever a review round adds a pin, and `tools/ci_selection.py --integrity` is
+  the authority — the same rule `config/ci-surfaces.yml` states for this file).
 
 ## 3. Proof
 
@@ -223,6 +236,13 @@ So the answer is **detect-and-re-derive, not migrate**:
   `_create_object(..., managedBy=…)` writes through the entity door, which
   already orients correctly (`entity -[:managedBy]-> subject`). Closing the
   narrative-route case is a **pack declaration**, not a verb list in code.
+  ⚠️ **The same gap covers the OTHER PRICED verbs, and it is the one to check
+  first before assuming coverage**: measured, `supports`, `refutes`, `produces`,
+  `related`, `transacts`, `mutuallyExclusive` and `mutuallySupportive` also
+  declare no pair row, so the leg abstains `predicate-not-declared` on every one
+  of them — including on a priced `IMPL`/`NAND`, which is therefore still
+  written in the STATED direction with no correction and no declaration. Only
+  `causes` (and the paired-kind predicates) are reached today.
 * **The leg is a PLACEMENT rule, not an ownership claim.** It puts the
   label-spelled end on the side the declaration spells it and never infers
   which end owns which. That matters on a `direction: "<-"` row —
