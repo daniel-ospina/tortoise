@@ -929,7 +929,15 @@ mechanisms:
       baseline (`#7949` E2). The CONTROL arm — same corpus, same judge pin, same
       extractor, the S2.2 pass DISARMED by the real kill-switch
       (`TORTOISE_VALUE_GATE=0`, SET rather than omitted) — measured
-      37/90 = 41.1% and 41/90 = 45.6% (mean 39/90 = 43.3%). ⛔ THE SAMPLE IS TOO
+      37/90 = 41.1% and 41/90 = 45.6% (mean 39/90 = 43.3%). ⛔ THE THIRD
+      COMPARATOR TERM IS ON THE RECORD, NOT ASSUMED: the flags-on receipts were
+      produced at `234d7db4be` and the control receipts at `4530cd5d54ca`, so
+      their `extractor.source_file` differs (each arm ran in its own worktree, and
+      a PATH locates bytes without identifying them); what makes "same extractor"
+      true is that `git diff 4530cd5d54ca 234d7db4be -- tortoise/` is EMPTY, so
+      the extractor is byte-identical across the two arms — a reader can check
+      that instead of taking it on trust, and the derivation pin reds on any
+      other commit. ⛔ THE SAMPLE IS TOO
       SMALL TO SEPARATE THE ARMS, AND THE BAR IS NOT RESOLVED EITHER — saying so
       is part of the record: the four flags-on draws span 40–50 units, so the
       committed bar sits INSIDE that spread (it is one draw of a noisy
@@ -964,9 +972,17 @@ mechanisms:
       NOT be concluded) in
       `tests/eval/write_path/receipts/10360-e2-arms-2026-11-27/10360-E2-ARMS-2026-11-27.md`; this clause
       is re-derived from those files by
-      `tests/test_state_value_verbatim_10360.py::test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts`,
-      which also resolves the arm definition itself and requires the two arms to
-      resolve DIFFERENT `vet_enabled`.
+      `tests/test_state_value_verbatim_10360.py::test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts`
+      — which also pins the two commits above and requires all six receipts to
+      agree on the extractor's module, entrypoint and `real` flag — and the arm
+      DEFINITION is resolved by a *different* test in that file,
+      `…::test_the_e2_off_arm_definition_uses_the_REAL_kill_switch`, which is the
+      one requiring the two documented commands to resolve DIFFERENT
+      `vet_enabled`. ⚠️ The four flags-on receipts predate the arm readback, so
+      they carry NO `arm` block and are named in `_ARM_READBACK_GRANDFATHERED`:
+      their arm is sound — no spelling of the documented ON command disarms the
+      pass — but it is NOT verified per receipt, and this clause must not read as
+      if it were.
       The `38/77 = 49.4%` / `UNMEASURED(<an E2 LLM arm run>)` reading this
       replaces was a `#5064` comment figure (2026-10-13) that nothing could
       re-derive.

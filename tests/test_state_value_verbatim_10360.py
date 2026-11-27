@@ -7445,6 +7445,25 @@ _ARM_READBACK_GRANDFATHERED = frozenset({
 })
 
 
+#: The commits the six E2 receipts were produced at, per arm (`#14774` review
+#: cycle 5 P2). ⛔ Recorded rather than inferred, because the receipts CANNOT prove
+#: the comparator term "same extractor" from what they carry: `extractor` holds a
+#: `source_file` PATH, and the two arms ran in different worktrees, so that path
+#: differs BY ARM and identifies no bytes (external rung: the accepted code
+#: identity is a revision or content hash; a path is metadata). The receipt's real
+#: identity is `commit`, and it genuinely DIFFERS between the arms — which is why
+#: (b2) records both commits instead of asserting sameness. What makes the term
+#: true is measurable and was measured: `git diff 4530cd5d54ca 234d7db4be --
+#: tortoise/` is empty, and `git rev-parse <both>:tortoise/extractor_v2.py` is the
+#: SAME blob (`6b25b1ec930102f9e0946e532fca97ce1f2c8052`) at both. The pin reds on
+#: any other commit, so a single-arm re-run has to re-establish the comparator
+#: rather than inherit it.
+_E2_ARM_COMMITS = {
+    "on": "234d7db4be",
+    "off": "4530cd5d54ca",
+}
+
+
 def _e2_arm_receipts(arm: str) -> list[pathlib.Path]:
     """The committed receipts for one arm, in run order."""
     found = sorted(_E2_RECEIPTS.glob(f"w2b-10360-e2-{arm}-*-2026-11-27.json"))
@@ -7485,6 +7504,13 @@ def _e2_arm_runs(arm: str) -> list[dict]:
             # #14774 review P1: the ARM the run actually produced. `None` on a
             # receipt older than the readback — refused unless grandfathered.
             "arm": blob.get("arm"),
+            # #14774 review cycle 5 P2: the receipt's CODE IDENTITY and the
+            # extractor block it names. `extractor.source_file` is a worktree
+            # PATH and differs by arm, so the comparator term "same extractor"
+            # rests on `commit` + the identity tuple, both asserted in the
+            # derivation test — neither was read before.
+            "commit": blob.get("commit"),
+            "extractor": blob.get("extractor"),
         })
     return runs
 
@@ -7524,6 +7550,43 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
         "sample size is what the row states")
     assert len(off) == 2, f"expected 2 flags-off receipts, found {len(off)}"
 
+    # ⛔ THE THIRD COMPARATOR TERM, "same extractor" (#14774 review cycle 5 P2,
+    #    MEASURED). Two of (b2)'s comparator terms are pinned per receipt above
+    #    and below (`corpus_hash`, `judge_pin`); the third was asserted NOWHERE,
+    #    and it is the one the receipts cannot prove from what they used to carry:
+    #    `extractor` names a `source_file` PATH that differs by arm, while the
+    #    record's actual code identity (`commit`) DIFFERS between the arms. The
+    #    claim holds today — the extractor file is the same blob at both commits —
+    #    but nothing established it, so a future single-arm re-run on a changed
+    #    extractor left every guard green (same corpus hash, same judge pin, same
+    #    posture, same totals) while (b2) went on asserting a comparator it no
+    #    longer had. Both facts are asserted now, and the row records both commits
+    #    (section 4b) instead of implying one.
+    for arm, runs in (("on", on), ("off", off)):
+        commits = {run["commit"] for run in runs}
+        assert commits == {_E2_ARM_COMMITS[arm]}, (
+            f"the {arm!r} arm's receipts were produced at {sorted(commits)}, not "
+            f"at the recorded {_E2_ARM_COMMITS[arm]!r} — the arm was re-run, so "
+            "the 'same extractor' comparator and the row's record of the two "
+            "commits must be re-established, not inherited")
+    _identities = {
+        ((run["extractor"] or {}).get("module"),
+         (run["extractor"] or {}).get("qualname"),
+         (run["extractor"] or {}).get("real"))
+        for run in on + off}
+    assert _identities == {("tortoise.extractor_v2", "extract_session_v2", True)}, (
+        f"the receipts disagree on the extractor identity: "
+        f"{sorted(_identities, key=str)} — 'same extractor' is the comparator "
+        "term (b2) rests on, so a receipt from a different module, entrypoint or "
+        "a stub is not a member of this arm pair")
+    for run in on + off:
+        _source = (run["extractor"] or {}).get("source_file") or ""
+        assert _source.replace("\\", "/").endswith("tortoise/extractor_v2.py"), (
+            f"{run['path'].name}: the extractor's source_file is {_source!r}, not "
+            "the production extractor — the path is deliberately NOT compared "
+            "across arms (each arm ran in its own worktree), but it must name "
+            "the module whose identity is asserted above")
+
     # ⛔ AND THEY STAY OUT OF E4's CANDIDATE POOL (the CI red on this PR, not a
     #    style rule). `receipts/*.json` is the pool
     #    `capstone_measure.select_e4_receipt` reads, and it picks the NEWEST
@@ -7551,9 +7614,17 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     #    mode/seed and never env, and `posture == "llm"` below holds in BOTH arms.
     #    So a run whose "off" spelling resolved ON committed a receipt
     #    indistinguishable from the treatment arm, and every assertion in this
-    #    test certified it. The runner now records the resolved switches; this
-    #    reads them back per receipt, and the two arms must resolve DIFFERENT
-    #    `vet_enabled` — the A/A-vs-A/B distinction the arms doc relies on.
+    #    test certified it. The runner now records the resolved switches, and
+    #    this reads them back per receipt — but ONLY the `off` side can be
+    #    asserted here: all four pass-armed receipts predate the readback and are
+    #    named in `_ARM_READBACK_GRANDFATHERED`, so they carry NO `arm` block and
+    #    no `on` receipt's `vet_enabled` is verified per receipt (#14774 review
+    #    cycle 5 P3 — the sentence here used to claim otherwise). The `on` side
+    #    comes from the DOCUMENTED commands in
+    #    `test_the_e2_off_arm_definition_uses_the_REAL_kill_switch`, which is the
+    #    test that requires the two arms to resolve DIFFERENT `vet_enabled`; the
+    #    grandfathering is sound for the ON arm because no spelling of that
+    #    command disarms the pass (argued at `_ARM_READBACK_GRANDFATHERED`).
     for arm, runs in (("on", on), ("off", off)):
         for run in runs:
             readback = run["arm"]
@@ -7665,6 +7736,22 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     for run in on + off:
         stated = f"{run['survived']}/{run['total']} = {_pct_1dp(run['survived'], run['total'])}"
         _stated_once(stated, f"receipt {run['path'].name} ({run['run_id']})")
+    # 4b. …AND THE TWO COMMITS THE ARMS RAN AT ARE ON THE RECORD, as a CLOSED
+    #     SET (`#14774` review cycle 5 P2). The receipts' code identity DIFFERS
+    #     between the arms, and (b2) now states both rather than leaving a reader
+    #     to assume one. A set, not an exactly-once count: the clause legitimately
+    #     names each commit twice — once as the record, once inside the `git diff`
+    #     a reader replays — and what must not happen is a THIRD, unrecorded
+    #     commit appearing in the clause, or one of the two going missing. Derived
+    #     from the receipts, not typed here, so a re-run at another commit reds
+    #     this until the row says the new one.
+    _scan_commits = set(re.findall(r"\b[0-9a-f]{10,40}\b", flattened))
+    assert _scan_commits == set(_E2_ARM_COMMITS.values()), (
+        "clause (b2) must name exactly the commits the receipts were produced "
+        f"at — unexpected {sorted(_scan_commits - set(_E2_ARM_COMMITS.values()))}, "
+        f"missing {sorted(set(_E2_ARM_COMMITS.values()) - _scan_commits)}; a "
+        "re-run on another commit has to re-establish the 'same extractor' "
+        "comparator rather than inherit it")
     # 5. …and so is each arm's MEAN, which is the figure a reader compares to
     #    the bar (the per-run pair alone invites cherry-picking the better draw).
     for arm, runs in (("flags-on", on), ("flags-off", off)):
@@ -8161,6 +8248,43 @@ def test_the_arm_switch_surface_names_every_production_arming_read():
         f"an arm command cannot set {missing_prefix} — `_arm_prefix_keys()` must "
         "cover every switch `ARM_SWITCHES` records, or an arm that varies one of "
         "them is REFUSED by the very parser that exists to read arms")
+
+
+def test_the_arming_scan_reads_a_switch_reached_through_a_module_ATTRIBUTE():
+    """The scan resolves `module.CONSTANT`, the shape two production terms use.
+
+    ⛔ NON-VACUITY for the `ast.Attribute` branch (`#14774` review cycle 5 P2,
+    MEASURED). `_arming_switches_in` resolved only `ast.Name`, so the failure it
+    exists for — *"a new production arming switch that `ARM_SWITCHES` does not
+    record produces a receipt that omits it entirely"* — happened for a switch
+    reached through a module-level constant, and the pin stayed GREEN:
+    `env_flag(_value_gate.NEW_ARM_FLAG, True)` returned `set()`. The branch is
+    fixed; this row is what makes the fix attributable, because without it the
+    `Attribute` half could be deleted again and the suite would stay green — the
+    rule this file has applied to itself for six cycles.
+
+    ⚠️ This tests the PARSER, not production: production's own reads are pinned
+    by `test_the_arm_switch_surface_names_every_production_arming_read` above.
+    """
+    class _FakeValueGate:                 # stands in for `tortoise.value_gate`
+        NEW_ARM_FLAG = "TORTOISE_NEW_ARM"
+
+    # argument position inside a call, which is where a switch is actually read
+    reads = _arming_switches_in(
+        ast.parse("armed = env_flag(_fake.NEW_ARM_FLAG, True)"),
+        {"_fake": _FakeValueGate})
+    assert reads == {"TORTOISE_NEW_ARM"}, (
+        f"the scan read {sorted(reads)} from `_fake.NEW_ARM_FLAG` — an "
+        "`ast.Attribute` in argument position is a distinct node kind from "
+        "`ast.Name`, and a Name-only resolver misses it, so the receipt is "
+        "under-recorded exactly as the assertion above describes")
+    # …and the Name / literal forms still resolve, so this row pins the ATTRIBUTE
+    # branch rather than passing on the other two.
+    for source in ("armed = env_flag(NEW_ARM_FLAG, True)",
+                   'armed = env_flag("TORTOISE_NEW_ARM", True)'):
+        assert _arming_switches_in(
+            ast.parse(source), {"NEW_ARM_FLAG": "TORTOISE_NEW_ARM"}) == {
+                "TORTOISE_NEW_ARM"}, source
 
 
 @pytest.mark.parametrize(
