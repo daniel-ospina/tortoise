@@ -1311,12 +1311,16 @@ def test_only_the_verbatim_patch_feeds_can_carry_a_mapping_flatten_key():
 
     `_split_properties(patch=True)` is passed by the whole `NodePatch` feed, so
     the docstring names EIGHT record types; the load-bearing claim is narrower —
-    a Mapping-valued ``_POINT_FLATTEN_COLUMNS`` key can only ARRIVE on the two
+    a Mapping-valued ``_POINT_FLATTEN_COLUMNS`` key can only ARRIVE on the
     feeds that copy arbitrary caller props verbatim (`from_payload is None`:
     `PointRevised`, `OperatorAnnotated`) or on the `EntityMutated` arm, whose
     `state` map is written as it stands. The other five NodePatch records
-    declare their keys, and if one ever declared a flatten column this leg — not
-    the prose — is what should redden.
+    declare their keys — `from_payload`, `renames` **and `literals`**, the three
+    the `patch=True` docstring names — and if one ever declared a flatten column
+    as ANY of those this leg, not the prose, is what should redden. (A first
+    version graded `from_payload`/`renames` only, so a
+    `literals=(('quote', ...),)` was invisible while the docstring claimed
+    `literals` was covered.)
     """
     verbatim = []
     for name, mutation in record_projection.RECORD_MUTATIONS.items():
@@ -1326,7 +1330,9 @@ def test_only_the_verbatim_patch_feeds_can_carry_a_mapping_flatten_key():
         if getattr(effect, "from_payload", None) is None:
             verbatim.append(name)
             continue
-        declared = set(effect.from_payload) | {k for k, _ in effect.renames}
+        declared = (set(effect.from_payload)
+                    | {k for k, _ in effect.renames}
+                    | {k for k, _ in effect.literals})
         assert not (declared & record_projection._POINT_FLATTEN_COLUMNS), (
             f"{name} declares a flatten column as a typed patch key, so a "
             "Mapping can reach the split from a DECLARED feed — the docstring's "
@@ -1409,11 +1415,15 @@ class _ScopeBlindCursor:
 
     ⛔ ORDER MATTERS, and the first cut of this fake got it wrong (#11783 round
     27 P2): `journal_skipped=True` IMPLIES `allocate`, and the allocator's
-    isolation gate (`record_allocator._assert_read_committed`) opens its own
-    cursor and `close()`s it in a `finally` BEFORE `_apply_tenant_scope` runs.
-    (The gate is `record_allocator.require_read_committed`, called from
-    `record_projection.py:9092`; a first version of this note cited
-    `_assert_read_committed`, a symbol that does not exist — #11783 round 28 P3.)
+    isolation gate — `record_allocator.require_read_committed`, called from
+    `record_projection.replay`'s `if allocate:` arm, BEFORE the tenant scope —
+    opens its own cursor and `close()`s it in a `finally` before
+    `_apply_tenant_scope` runs. (An earlier version of this note cited
+    `record_allocator._assert_read_committed`, a symbol that exists NOWHERE —
+    #11783 round 28 P3 — and then a LINE NUMBER for the call, which was stale
+    on arrival and re-staled by the next commit above it. Cited by
+    SYMBOL/CONDITION here on purpose: nothing grades line numbers in these
+    two modules, so they rot.)
     A fake with no `close()` therefore died in that `finally` with
     `AttributeError: '_ScopeBlindCursor' object has no attribute 'close'` — so
     the arm this leg claims to grade (a scope refusal, a STORE/CONFIG fact

@@ -1204,13 +1204,15 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
     DENIES (a P3 the branch carried: the arm's remedy texts were UNPINNED, and
     the enumerated copy read *"a replay heals the record UNLESS … a
     `record_cursor` row"*). The writer below reaches this arm AS a
-    `RecordStatementError` — the one class whose remedy is *not* a replay: a
-    replay RE-EXECUTES the same statement and re-fails until the data or the
-    constraint is fixed. The old sentence sent that operator to a chain that
-    cannot work, which is the SAME defect this branch fixes in the vocabulary
-    home (`status_vocabulary.py`) and on `/health` (`monitoring.py`). Both arms
-    are driven on the SAME exception so the assertion is about the arm's
-    SENTENCE, not about which failure was produced.
+    `RecordStatementError` — the class THIS LEG drives, and one whose remedy is
+    *not* a replay: a replay RE-EXECUTES the same statement and re-fails until
+    the data or the constraint is fixed. (⛔ NOT "the ONE class whose remedy is
+    not a replay": the store/CONFIG half is the other, which is why the shipped
+    sentence names BOTH — round 28 P2.) The old sentence sent that operator to a
+    chain that cannot work, which is the SAME defect this branch fixes in the
+    vocabulary home (`status_vocabulary.py`) and on `/health` (`monitoring.py`).
+    Both arms are driven on the SAME exception so the assertion is about the
+    arm's SENTENCE, not about which failure was produced.
     """
     org, graph = tenant
     _append_positions(schema, org, graph, [1, 2])

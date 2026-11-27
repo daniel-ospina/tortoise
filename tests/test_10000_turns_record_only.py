@@ -3290,11 +3290,15 @@ def test_the_write_path_vocabulary_does_not_call_a_statement_failure_an_outage()
         "`FOR THAT HALF` must be the FOURTH assertion's discriminator")
 
 
-# The three bullets the docstring above grades. Recorded VERBATIM so the table
-# is a measurement over text that cannot drift with the branch.
+# The three bullets the docstring above grades. Recorded VERBATIM — line breaks
+# and indent included — so the table is a measurement over text that cannot
+# drift with the branch. (`git show 427e410f91:tortoise/status_vocabulary.py`
+# holds the first one across TWO lines; a version that joined them with a space
+# and still called itself VERBATIM was not one, which is the class of claim this
+# table exists to stop — #11783 round 29.)
 PREDECESSOR_WRITE_FAILED_BULLET = (
-    "* ``write_failed`` is the record being UNREACHABLE, or a "
-    "connection/statement failing — ``degraded`` literally;")
+    "* ``write_failed`` is the record being UNREACHABLE, or a connection/statement\n"
+    "  failing — ``degraded`` literally;")
 ORIGIN_MAIN_WRITE_FAILED_BULLET = (
     "* ``write_failed`` covers two causes: the record was unreachable\n"
     "  (``degraded`` literally), OR the record was reached and refused the\n"
