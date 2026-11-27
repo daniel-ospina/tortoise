@@ -95,7 +95,7 @@ def test_the_measured_corpus_pair_is_reversed_but_UNDECLARED_in_both_orders():
     `test_the_owner_on_the_target_side_is_left_alone` assert, not this test.)
     """
     from tortoise.relation_guards import (
-        REVERSED_PAIR,
+        UNDECLARED_PAIR,
         declared_relation_pairs,
         relation_pair_verdict,
     )
@@ -103,16 +103,21 @@ def test_the_measured_corpus_pair_is_reversed_but_UNDECLARED_in_both_orders():
     declared = declared_relation_pairs()
     assert declared is not None
     # The endpoint leg's answer for the measured write — legal, and silent.
+    # ⛔ `==` and not `not in (REVERSED_PAIR,)`: the loose spelling also passes on
+    # `accept`/`normalised`/`abstained`, so the day a pack declares this pair the
+    # premise silently becomes false while the test stays green and keeps
+    # claiming it (measured — the pair leg answers `undeclared_pair` both ways at
+    # this head).
     assert relation_pair_verdict(
         "ownedBy", "core:naturalPerson", "object",
         from_label="Subject", to_label="Object", declared=declared,
-    ).outcome not in (REVERSED_PAIR,)
+    ).outcome == UNDECLARED_PAIR
     # …and the same pair, reversed, is also NOT `reversed_pair`: no pack declares
     # this pair in either order, which is why the pair leg could never fix it.
     assert relation_pair_verdict(
         "ownedBy", "object", "core:naturalPerson",
         from_label="Object", to_label="Subject", declared=declared,
-    ).outcome not in (REVERSED_PAIR,)
+    ).outcome == UNDECLARED_PAIR
 
 
 def test_the_owner_on_the_source_side_is_reversed():
@@ -211,6 +216,35 @@ def test_an_undeclared_predicate_abstains():
 def test_an_unresolved_endpoint_abstains():
     verdict = orient_declared_pair("ownedBy", None, "object")
     assert verdict.outcome == ABSTAIN
+
+
+def test_an_unreadable_declaration_set_abstains(monkeypatch):
+    """A declaration read that FAILED must abstain, never silently accept.
+
+    ⛔ The `declared is None` arm is the fail-closed half of this leg: a write
+    must not depend on a read this leg could not make, so the caller keeps its
+    OWN order — but it keeps it because the leg said it could not answer, not
+    because the order was checked. Pinned here because
+    `config/ci-surfaces.yml`'s `durations:` row for this file claims the
+    abstention set covers "an unreadable declaration set" (#14790 review): the
+    only other unreadable test in the tree pins the PAIR leg
+    (`test_relation_guards_14263.py`), so without this case the manifest's claim
+    about THIS file was false.
+    """
+    import tortoise.relation_guards as relation_guards
+
+    monkeypatch.setattr(relation_guards, "declared_relation_pairs", lambda: None)
+    verdict = relation_guards.orient_declared_pair(
+        "ownedBy", "core:naturalPerson", "object")
+    assert verdict.outcome == ABSTAIN
+    assert verdict.reason == relation_guards.ABSTAIN_UNREADABLE
+    # …and the planner takes the same path: no correction, and no raise.
+    edges, _drops = plan_relation_edges(
+        [{"src": "Dana", "dst": "NordicFreight account", "predicate": "ownedBy"}],
+        INDEX,
+    )
+    assert [(e.src_id, e.dst_id) for e in edges] == [(DANA, ACCOUNT)]
+    assert edges[0].orientation is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

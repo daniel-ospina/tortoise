@@ -68,9 +68,28 @@ outcome          when                                             reported?
 ⛔ THERE IS A SECOND, NARROWER LEG IN THIS MODULE — THE ORIENTATION LEG
 (``orient_declared_pair``, ``#14304``) — and it is not a wider version of this
 one. This leg answers *is this predicate declared for these two KINDS?*; the
-other answers *which SIDE do the declarations put each of these ENDS on?*, and
-it fires exactly where this leg abstains or reports ``undeclared`` with the ends
-the wrong way round. The measured case: **8 ``ownedBy`` rows written
+other answers *which SIDE do the declarations put each of these ENDS on?*.
+⛔ THE ORIENTATION LEG ANSWERS FROM **TWO** PREMISES, and a reader sizing it must
+count both (they are stated here because an earlier spelling of this paragraph
+claimed the leg fires "exactly where this leg abstains or reports
+``undeclared``", which is false and understates where a correction can land):
+
+  (a) the EXACT declared pair asked in REVERSE. Every declaration whose pair is
+      asked the other way round is corrected here, and the pair leg calls that
+      same state ``reversed`` — this leg performs the swap that message already
+      prescribes. Measured at `#14304`'s head: **37 pairs across 27 predicates**
+      (``causes``, ``hasPart``, ``addresses``, ``decomposesInto``, …, every one
+      of them ``evidence="declared-pair"``); the figure moves with the packs,
+      so it is a measurement of that head and not a constant. ⚠️ On a DIRECT-arm
+      predicate this is where a PRICED belief moves: a reversed ``causes`` now
+      writes ``IMPL(bug -> incident)``, so the expectation it raises moves
+      between the two endpoints — that IS the declared correction, and it is
+      stated rather than left to be discovered.
+  (b) the LABEL-SPELLED side, which is the only premise that can orient a pair
+      the packs declare for OTHER kinds, and where this leg does fire exactly
+      when the pair leg abstains or reports ``undeclared``.
+
+The measured case: **8 ``ownedBy`` rows written
 ``Subject -> Object`` on a fresh corpus** (``#14592``), i.e. `Marta Reyes
 --ownedBy--> the cold-chain temperature log`, which under `ownedBy`'s documented
 sense (§3.6, ``pack_registry.SEMANTICS_DIRECTIONS``) asserts the LOG owns MARTA.
@@ -827,10 +846,16 @@ def relation_pair_verdict(
 #   packs/project-management `assignedTo: pm:card   -> Subject`
 #   packs/venture            `holds:      venture:investment -> Subject`
 #
-# So the orientation leg reads the LABEL-SPELLED side of the declarations, and
-# only that side. ⛔ IT IS A PLACEMENT RULE, NOT AN OWNERSHIP CLAIM: it puts the
-# labelled end where the declaration spells it and never asks which end OWNS
-# which. That distinction is load-bearing on a `direction: "<-"` row, and
+# So the orientation leg reads the LABEL-SPELLED side of the declarations — as
+# its SECOND premise, consulted only when the exact declared pair (either
+# orientation, step (1) of `orient_declared_pair`) could not answer. ⛔ It is NOT
+# "and only that side": an exact declared pair asked in reverse is corrected by
+# step (1) with ``evidence="declared-pair"``, which is a wider population than
+# the three label-spelled rows below and reaches the PRICED direct-arm
+# predicates (``causes``/``supports`` → ``IMPL``). ⛔ IT IS A PLACEMENT RULE, NOT
+# AN OWNERSHIP CLAIM: it puts the labelled end where the declaration spells it
+# and never asks which end OWNS which. That distinction is load-bearing on a
+# `direction: "<-"` row, and
 # `packs/venture`'s `holds` is one (`venture:investment -> Subject`, `<-`,
 # #11083): there the labelled `Subject` is the company the investment is a stake
 # IN — the OWNED end, not the accountable owner — and the leg still places it on

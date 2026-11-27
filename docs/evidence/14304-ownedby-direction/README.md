@@ -51,17 +51,29 @@ is **invisible to the read door** that answers *"what does this person own?"*.
 
 * `tortoise/relation_guards.py` — a new **ORIENTATION** leg beside the endpoint
   leg: `orient_declared_pair` / `declared_label_sides`, outcomes
-  `as_asked` / `reversed_orientation` / `abstain`. It reads the LABEL-SPELLED
-  side of the declarations and nothing else, and abstains wherever the
-  declarations cannot answer (both ends are kinds; a `:Subject` on *both* ends).
+  `as_asked` / `reversed_orientation` / `abstain`. It answers from **two**
+  premises, and both are in scope: (a) an EXACT declared pair asked in reverse
+  (measured at this head: **37 pairs across 27 predicates**, every one
+  `evidence="declared-pair"`) — the same state the pair leg reports as
+  `reversed`, i.e. the swap its own message already prescribes; and (b) the
+  LABEL-SPELLED side of the declarations, which is the only premise that can
+  orient a pair the packs declare for OTHER kinds. It abstains only where
+  neither answers: both ends the labelled class, a `:Subject` on *both* ends,
+  several labels on one side, an undeclared predicate, an unreadable
+  declaration set. ⚠️ (a) is not a cosmetic addition — on the DIRECT-arm
+  predicates (`causes`/`supports` → `IMPL`) it moves a PRICED belief between the
+  two endpoints, which is the declared correction, not a side effect.
 * `tortoise/relation_write.py` — the planner consumes that verdict **before** it
   chooses an arm, so both the structural and the direct arm carry the declared
   orientation. A reversed pair is **redirected, not dropped**
-  (`docs/ax/ax-principles.md` §1): the ends are swapped, the predicate and its
-  priced meaning are untouched, and the correction is **declared** on the receipt
+  (`docs/ax/ax-principles.md` §1): the ends are swapped and the PREDICATE is
+  untouched, and the correction is **declared** on the receipt
   row (`RelationEdge.orientation`), in `warnings` (`narrative relation
   RE-ORIENTED (#14304)`), and in an additive `relation_write.reoriented` count.
-* `tests/test_relation_orientation_14304.py` — 19 assertions on the verdict and
+  ⚠️ `RelationEdge.orientation is None` does NOT mean "verified correct": it
+  covers the abstentions too, so a count of *corrected* rows is what the receipt
+  can answer and a count of *checked* rows is not.
+* `tests/test_relation_orientation_14304.py` — 21 assertions on the verdict and
   on the plan/write path.
 
 ## 3. Proof
@@ -226,6 +238,18 @@ So the answer is **detect-and-re-derive, not migrate**:
 * **`ingest`'s first-class relation route** writes through the projection
   primitive and was not changed here; it is where `#11656`'s pair judgement
   already runs. Same pairing rule, different writer — tracked with `#14285`.
+* ⛔ **The SDK's public `link_entities` door is NOT re-oriented** — and that is
+  a residual, not an omission discovered later. The orientation leg runs in
+  `relation_write.plan_relation_edges` (`_declared_orientation`), reached only
+  from `apply_relation_edges`, whose sole production caller is the narrative
+  capture path (`sdk.py`: the `capture_session`/extraction route). A consumer
+  calling `TortoiseSDK.link_entities("ownedBy", person, thing)` directly goes
+  through `_create_edge` → `_relation_pair_notes`, which runs the PAIR leg only,
+  so it still writes the inverted edge with an `undeclared_pair` note. Closing
+  it means moving the orientation decision into `link_entities` itself, where
+  the caller's intent (a deliberate `src`/`dst`) is not the same premise as a
+  sentence's word order — a design question, tracked rather than smuggled in
+  here.
 * **Extraction prompt.** `OUTPUT_CONTRACT`'s `relations[]` still states no
   orientation. The deterministic guarantee is the write seam (this PR); teaching
   the model the predicate's sense would cost prompt tokens on every capture and

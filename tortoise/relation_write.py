@@ -191,6 +191,16 @@ folds into one edge report ``written=1`` for a stated population of ``2``.
   here because it is the one place a reader reconciling ``written + dropped +
   folded`` against the STATED population can see ``1`` for ``2`` statements
   without a fold or a drop to explain it, and the explanation is this bullet.
+  ⚠️ **THE DECLARATION IS ON THE FIRST STATEMENT OF A PAIR, so it is
+  ORDER-DEPENDENT** (measured, #14790 review): the same two statements stated
+  ``A owns B`` then ``B --ownedBy--> A`` and stated in the OTHER order write the
+  identical edge in the identical orientation, but only the first ordering
+  records ``orientation`` on the row (and the ``RE-ORIENTED`` warning / the
+  ``reoriented`` count); in the second, the already-correct spelling is kept and
+  the reversed one is deduped, so a redirect WAS computed and applied and is
+  nowhere in the receipt. Nothing is mis-written — the graph result is identical
+  — but a reader auditing "was every correction declared?" must read this
+  sentence, not the count.
 
 RESIDUALS THIS LEG DOES NOT CLOSE (measured, not assumed)
 ---------------------------------------------------------
@@ -312,12 +322,19 @@ class RelationEdge:
     #: property at all.
     direction: str | None = None
     #: The DECLARED-ORIENTATION correction applied to this edge (#14304), or
-    #: ``None`` when the statement's own order already matched the packs'
-    #: declaration. ``src_id``/``dst_id`` above are what is WRITTEN; the payload
-    #: names what was STATED, so the redirect is provable from the receipt rather
-    #: than asserted in prose. `docs/ax/ax-principles.md` Rule 1 makes carrying
-    #: it mandatory: a correction the caller did not ask for is a change to what
-    #: the graph holds, so it is declared, never silently applied.
+    #: ``None`` when this leg made NO correction. ⛔ ``None`` is NOT "verified
+    #: correct": it covers BOTH *the statement's own order already matched the
+    #: packs' declaration* AND *the leg abstained* — an undeclared predicate, no
+    #: label-spelled side, both ends the labelled class, several labels on one
+    #: side, a label on both sides, or an unreadable declaration set. A reader
+    #: counting ``orientation is None`` as coverage would overstate it; the
+    #: abstention reason is on `relation_guards`' verdict, not on this row, so a
+    #: count of *corrected* rows is what this field can answer and a count of
+    #: *checked* rows is not. ``src_id``/``dst_id`` above are what is WRITTEN; the
+    #: payload names what was STATED, so the redirect is provable from the receipt
+    #: rather than asserted in prose. `docs/ax/ax-principles.md` Rule 1 makes
+    #: carrying it mandatory: a correction the caller did not ask for is a change
+    #: to what the graph holds, so it is declared, never silently applied.
     orientation: dict | None = None
 
 
