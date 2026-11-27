@@ -1268,32 +1268,42 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
             assert "`seeded`/`halted` row takes re-seed" in text, (
                 "a seeded/halted cursor needs re-seed (+`reopen`) and `arm` "
                 f"FIRST, and nothing here said so: {text[-400:]!r}")
-            # ⛔ THE RETRYABLE HALF, BOTH DIRECTIONS (round-32 P2 -> round-34 P3).
-            # The first cut of this pin asserted `"nothing to fix" in text`,
-            # which LOCKED IN an overclaim: `40001`/`40P01` are conflicts whose
-            # uncontended retry wins, but `57014` is `query_canceled`
-            # (`record_allocator.RETRYABLE_STATES`) — a `statement_timeout` or a
-            # cancel while a lock is held — and the identical replay hits the
-            # same budget or the same holder. So the pin now demands the split
-            # (retry for the conflicts, a budget/holder to fix for the cancel)
-            # and forbids the old blanket claim, which is what a future sweep
-            # would otherwise restore.
+            # ⛔ THE RETRYABLE HALF, BOTH DIRECTIONS (round-32 P2 -> round-34 P3
+            # -> round-35 P3 -> round-36 P3). This pin has been wrong in BOTH
+            # directions and the history is the reason it now pins the mapping
+            # rather than a slogan:
+            #   * round 32 pinned `"nothing to fix" in text`, which LOCKED IN an
+            #     overclaim: `40001`/`40P01` are conflicts whose uncontended
+            #     retry wins, but `57014` is `query_canceled`
+            #     (`record_allocator.RETRYABLE_STATES`), and a `statement_timeout`
+            #     or a lock still held makes the identical replay re-fail;
+            #   * round 34 replaced it with a class-wide "re-fails on the
+            #     identical replay", which is false for the OTHER `57014` member
+            #     (`record_allocator.py:46-48`: "a local timeout, or an operator
+            #     cancel") — measured with `pg_cancel_backend`, whose identical
+            #     replay SUCCEEDED;
+            #   * round 36 found the polarity itself unguarded (`"both re-fail
+            #     on that retry"` left this leg GREEN), so `both succeed on that
+            #     retry` is now needled too.
+            # What is pinned is the SHIPPED mapping: the retry for the conflicts
+            # and the one-shot cancel, a persisting cause for the rest.
             for needle in ("40001", "40P01", "57014", "rolled the counter back",
                            "starts from the same number", "retry it",
+                           "both succeed on that retry",
                            "operator or driver cancel",
                            "only while its cause persists",
                            "re-fails on the identical replay"):
                 assert needle in text, (
                     "the ARMED arm's RETRYABLE half is missing — an aborted "
                     "allocation rolls the counter back, so a replay starts "
-                    "from the same number; a `57014` cancel is the member "
-                    f"that re-fails until its budget/holder changes: {needle!r} "
-                    f"absent from {text[-400:]!r}")
+                    "from the same number, and the retry heals a conflict or a "
+                    "one-shot cancel while a PERSISTING cause (a budget, a held "
+                    f"lock) re-fails it: {needle!r} absent from {text[-400:]!r}")
             assert "nothing to fix" not in text, (
                 "the ARMED arm is back to telling a `57014` population that "
-                "there is nothing to fix — a `statement_timeout` or a held "
-                "lock re-fails on the identical replay, so the blanket claim "
-                f"is false for one of the three states it names: {text[-400:]!r}")
+                "there is nothing to fix — a `statement_timeout` this write "
+                "does not fit, or a lock still held, re-fails on the identical "
+                f"replay, so the blanket claim is false for that member: {text[-400:]!r}")
             assert "statement that EXECUTED and failed on its own data or a constraint" in text, (
                 "the ARMED arm still promises a heal to a statement that "
                 "executed and failed — any replay RE-EXECUTES it and re-fails "

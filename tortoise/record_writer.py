@@ -4890,25 +4890,32 @@ def write_live_record(record: Mapping[str, Any], *,
             #     `RetryableAllocationFailure` is raised UNDER `allocate` and is
             #     not in the allocator map, so it lands HERE; the server aborted
             #     the transaction and the counter rolled back WITH it, so a
-            #     replay of the same record starts from the SAME NUMBER, which
-            #     is why writing a replay off as "re-fails" would be wrong.
-            #     ⛔ BUT THE OTHER DIRECTION IS WRONG TOO, FOR ONE MEMBER
-            #     (round-34 review P3, measured at source): `40001`/`40P01` are
-            #     CONFLICTS — the same statement wins an uncontended retry, so
-            #     there is nothing else to fix — while `57014`
-            #     (`record_allocator.RETRYABLE_STATES`) is a cancel, and the
-            #     allocator's own class table defines it as "a local timeout, OR
-            #     AN OPERATOR CANCEL" (`record_allocator.py:46-48`): the first two
-            #     re-fail on the identical replay (same budget, same holder),
-            #     the third is ONE-SHOT and the retry simply runs. "SUCCEEDS —
-            #     nothing to fix" was therefore FALSE for one member.
-            #     ⛔ AND THE FIRST FIX OVER-CORRECTED (round-35 review P3,
-            #     measured: `pg_cancel_backend` on a running statement yields
-            #     `pgcode == "57014"`, `classify()` keys on the SQLSTATE alone
-            #     (`record_allocator.py:404-412`), and with no timeout and no lock
-            #     holder the IDENTICAL replay succeeded) — so the re-fail is
-            #     scoped to a cause that PERSISTS, not to the SQLSTATE. Naming
-            #     one member as the whole class is the same defect, mirrored.
+            #     replay of the same record starts from the SAME NUMBER.
+            #     ⛔ WHICH OF THESE MEMBERS THE RETRY THEN HEALS IS NOT ONE
+            #     ANSWER, and each half of that cost a review finding:
+            #       * `40001`/`40P01` are CONFLICTS — the same statement wins an
+            #         uncontended retry, so the retry is the whole remedy and
+            #         "nothing to fix" is TRUE for them;
+            #       * `57014` is `query_canceled`, which the allocator's own
+            #         class table defines as "a local timeout, OR AN OPERATOR
+            #         CANCEL" (`record_allocator.py:46-48`), and `classify()`
+            #         keys on the SQLSTATE alone (`:404-412`) — so this arm
+            #         cannot tell those two apart. An operator/driver cancel is
+            #         ONE-SHOT and the retry simply runs (measured by the
+            #         round-35 review: `pg_cancel_backend` yields
+            #         `pgcode == "57014"`, and with no timeout and no lock
+            #         holder the IDENTICAL replay SUCCEEDED); a local
+            #         `statement_timeout` this write does not fit, or a lock
+            #         still held, makes the identical replay re-fail until that
+            #         budget or that holder changes.
+            #     So "SUCCEEDS — nothing to fix" was FALSE for one member (round
+            #     34) and a class-wide "re-fails" was FALSE for another (round
+            #     35) — the same defect mirrored. The SHIPPED sentence therefore
+            #     states the retry, the one-shot member and the persisting-cause
+            #     member SEPARATELY, and this paragraph must keep that same
+            #     mapping rather than summarising it (round-36 review P3: an
+            #     earlier revision of this paragraph got the two halves exactly
+            #     backwards while the shipped sentence was right).
             #  3. a statement that EXECUTED and failed on its own data or a
             #     constraint — re-executes and re-fails until that cause is
             #     fixed (#13207's `chk_point_baseline_complete`).
