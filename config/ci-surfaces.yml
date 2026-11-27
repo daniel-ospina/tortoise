@@ -87,7 +87,7 @@ version: 1
 # and a reader could grep three counts out of the block). ⛔ Every OTHER row this tree carries is `main`'s at this head, so
 # reading one of them as this lane's delta would attribute a partition move to a row that did not
 # cause it.
-# ⛔ PER-COMMIT FOLD FACTS ABOUT THIS BRANCH — never a claim about this head: `origin/main`
+# ⛔ PER-COMMIT FOLD FACTS ABOUT THIS BRANCH — never a claim about this head. On THIS tree — `origin/main`
 # `e2a9c695adfb` folded in, over `a0cea310786d`, the fold THIS BRANCH de-spliced (the de-splice is a
 # commit of this branch's own, not an act that fold performed — the possessive spelling credited it
 # with an edit it never made). The rows below landed across the folds and the
