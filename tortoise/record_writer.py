@@ -3958,10 +3958,18 @@ def _plan_refusal_cause(
     not redundant: it means one PLAN statement failed to EXECUTE — the store was
     reached and the write was attempted — which is a STORE failure however it is
     caused (a constraint the record's own data violates, a driver error, a
-    connection dropped mid-transaction). Keeping it on ``write_failed`` is what
-    keeps ``test_9318_journal_collision.py::test_a_write_that_failed_for_another_
-    reason_is_still_write_failed`` true rather than re-labelling an execution
-    failure.
+    connection dropped mid-transaction). Keeping it on ``write_failed`` keeps an
+    execution failure from being re-labelled as a plan refusal.
+    ⛔ AND THIS EXCLUSION IS NOT WHAT HOLDS THAT PIN (measured): every
+    ``RecordStatementError`` raise site is on the far side of the stamped call,
+    so it is never stamped, and
+    ``test_9318_journal_collision.py::test_a_write_that_failed_for_another_
+    reason_is_still_write_failed`` monkeypatches ``replay`` wholesale — deleting
+    the exclusion here AND at the stamp leaves it GREEN. What holds it is the
+    marker's ABSENCE. The exclusion is DEFENCE IN DEPTH, for a raise that later
+    moves INSIDE ``replay_plan``; the pin that actually exercises this boundary
+    is ``test_record_searchkeys_10620.py::
+    test_a_store_refusal_after_the_plan_was_built_stays_write_failed``.
 
     ``__cause__`` first, ``__context__`` second, bounded with a visited set —
     the same walk, and the same reason, as :func:`_journal_collision_cause`
