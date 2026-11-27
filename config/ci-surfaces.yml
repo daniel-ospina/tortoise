@@ -70,7 +70,10 @@ version: 1
 # than carried (#14587 review cycle 10, P2, MEASURED): `tests/test_14691_structure_evidence.py` is
 # `main`'s row — it is already in `git show 344a1c086e06:config/ci-surfaces.yml` — so it is NOT this
 # lane's delta. At THIS head the two manifests' pools are IDENTICAL: loading each side's own manifest
-# through `fast_pool()` gives the same 1343 files, `set(fast_pool(head)) - set(fast_pool(main))` is
+# through `fast_pool()` gives the same file SET (⛔ no figure — a pool size is a live census here, and
+# this sentence stated `1343` until #14587 review cycle 12, P2: true the day it was written, unfenced,
+# bound to no sha, and invisible to `_POOL_CENSUS_RE` because `gives` is not one of the verbs it
+# reads), `set(fast_pool(head)) - set(fast_pool(main))` is
 # EMPTY and so is the reverse, and the partition is seven-at-828.0 / four-at-827.9 on BOTH sides. So
 # the only honest statement of the delta here is that there is none, and the `nine-and-two ->
 # seven-and-four` move #14723 measured belongs to `main`'s own commit, not to this branch.
