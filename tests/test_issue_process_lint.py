@@ -4129,3 +4129,66 @@ def test_every_dash_and_word_spelling_of_a_full_range_is_a_complete_claim(spelli
         f"Closes #13036 (rows {spelling})\n", 500, {13036: _scope(rows)})
     assert findings == [], spelling
     assert stats["clean"] == 1, spelling
+
+
+# The reviewer's acceptance table (round 6, Issue 1): a range that NAMES the row set is not a claim on
+# it. Every row is pinned, INCLUDING the two that must not move — the measured defect (row 1) and the
+# complete close the range read exists for (row 6).
+@pytest.mark.parametrize("body,expected", [
+    # row 1 — the measured instance, unchanged
+    ("Closes #13036 (row V2 only)\n", "finding"),
+    # rows 2–5 — a partial close that mentions the bar BY ITS RANGE must never read as a pass
+    ("Closes #13036 (row V2 only; the V1–V6 bar is unchanged)\n", "finding"),
+    ("Closes #13036 (row V2) — the V1–V6 bar stays open\n", "finding"),
+    ("Closes #13036 (V2 of V1–V6)\n", "finding"),
+    ("Closes #13036\n\nThis PR is one step on the V1–V6 bar; V2 is proved.\n", "ambiguous"),
+    # row 6 — the COMPLETE close the range read exists for, which must stay clean
+    ("Closes #13036 (rows V1–V6)\n", "clean"),
+])
+def test_a_range_that_names_the_row_set_is_not_a_claim_on_it(body, expected):
+    """`_row_range_span` used to expand unconditionally, so `(row V2 of V1–V6)` claimed all six.
+
+    `#13036` is titled `## The bar — all six must be measured`, so naming the bar by its id range is
+    the natural sentence for a lane to write — and it turned the arm's headline defect into `clean`,
+    in the passing direction the module ranks worst. A span now needs a plural row noun before it
+    (`rows V1–V6`) or to be the whole claim (`Satisfies #N: V2–V4`); a mere mention keeps the
+    endpoints, which understates in the safe direction and lands a finding.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
+    if expected == "finding":
+        assert len(findings) == 1, body
+        assert stats["finding"] == 1, body
+        assert stats["clean"] == 0, body
+    else:
+        assert stats[expected] == 1, body
+        assert stats["clean"] == (1 if expected == "clean" else 0), body
+
+
+def test_the_satisfies_clause_still_spans_without_a_row_noun():
+    """The other half of the gate: `Satisfies #13036: V2–V4` carries nothing BUT the range.
+
+    A claim written in the documented partial form must still span, or the fix for the false PASS
+    above would create a false finding on the very spelling the arm's remediation recommends.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    assert L.claimed_row_ids("Satisfies #13036: V2–V4\n", 13036, rows) == {"V2", "V3", "V4"}
+    body = "Satisfies #13036: V2–V4\nRefs #13036\n"
+    findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
+    assert stats["clean"] == 0 and stats["finding"] == 0
+    assert findings == [] or findings[0].arm == L.ARM_PARTIAL
+
+
+def test_an_empty_sweep_says_it_read_nothing_not_that_the_arm_did_not_run(capsys, monkeypatch):
+    """`--sweep` with zero open PRs CAN run arm 3 and simply had nothing to read (review round 6, P3).
+
+    Reporting the mode's own limitation there misstates the reason — the same did-not-run vs
+    found-nothing distinction the arm is careful about everywhere else.
+    """
+    monkeypatch.setattr(L, "sweep_prs", lambda repo, limit: [])
+    monkeypatch.setattr(L, "resolve_repo", lambda repo: repo)
+    rc = L.main(["--sweep", "--limit", "5", "--arm", L.ARM_PARTIAL, "--repo", "daniel-ospina/tortoise"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "did NOT RUN" not in out
+    assert "0 closing ref(s) read" in out

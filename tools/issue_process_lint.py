@@ -1428,6 +1428,17 @@ def row_ids(issue_bodies: list[str]) -> list[str]:
 # naming its two endpoints, so a COMPLETE close reported a finding on four rows it had claimed.
 _RANGE_JOIN = r"(?:\s*(?:--?|–|—|\.{2,}|…)\s*|\s+(?:through|to)\s+)"
 
+# ⛔ A RANGE ONLY SPANS WHEN IT IS THE OBJECT OF A CLAIM, NOT WHEN IT JUST NAMES THE ROW SET.
+# `Closes #13036 (rows V1–V6)` claims six; `Closes #13036 (row V2 of V1–V6)` and `… (the V1–V6 bar
+# is unchanged)` claim ONE and merely REFER to the set. Expanding unconditionally made every such
+# sentence `clean`: `#13036` is titled `## The bar — all six must be measured`, so naming the bar by
+# its id range is the natural thing for a lane to write, and the arm reported a pass on the exact
+# defect it exists to catch. The gate is a plural row noun immediately before the range (`rows`,
+# `ids`, `items`, `criteria`), or a range that IS the whole claim — which is how `Satisfies #N: V2–V4`
+# arrives here, its clause carrying nothing else.
+_ROW_NOUN_BEFORE = re.compile(r"(?:\b(?:rows?|ids?|items?|criteria|row\s+ids?)\s+(?:from\s+)?)$",
+                              re.IGNORECASE)
+
 
 def _row_range_span(text: str, rows: list[str]) -> set[str]:
     """The rows a DECLARED range in `text` spans — `V1–V6` over `#13036`'s six is all six, not two.
@@ -1438,6 +1449,12 @@ def _row_range_span(text: str, rows: list[str]) -> set[str]:
     ⚠️ RESIDUAL (narrow, and in the flagging direction): an endpoint the issue does not declare
     cannot anchor a span — `rows V1..V9` on a six-row issue reads as `V1` alone, because `V9` is not
     a row this issue has. Guessing its position is how the arm would start inventing rows.
+
+    ⛔ AND A SPAN NEEDS A CLAIM, NOT JUST TWO DECLARED ENDPOINTS (`_ROW_NOUN_BEFORE`): expanding
+    unconditionally made `(row V2 of V1–V6)` and `(the V1–V6 bar is unchanged)` claim all six, so the
+    measured defect read `clean` as soon as its author named the bar — the false PASS this arm ranks
+    worst, and undeclared in the direction that matters. Only a plural row noun before the range, or
+    a range that IS the whole text (the `Satisfies #N: V2–V4` clause), spans.
     """
     if len(rows) < 2:
         return set()
@@ -1447,6 +1464,10 @@ def _row_range_span(text: str, rows: list[str]) -> set[str]:
     order = {row: i for i, row in enumerate(rows)}
     spanned: set[str] = set()
     for match in pattern.finditer(text):
+        before, after = text[:match.start()], text[match.end():]
+        # See `_ROW_NOUN_BEFORE`: a mention of the row SET is not a claim on it.
+        if not (before.strip() == "" and after.strip() == "") and not _ROW_NOUN_BEFORE.search(before):
+            continue
         lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
         spanned |= set(rows[lo:hi + 1])
     return spanned
@@ -1454,12 +1475,16 @@ def _row_range_span(text: str, rows: list[str]) -> set[str]:
 
 def _ids_in(text: str, rows: list[str]) -> set[str]:
     """Which of `rows` this text NAMES — whole tokens (so `R1` is not found inside `R10`/`AR1`), plus
-    every row a range shorthand spans.
+    every row a range shorthand SPANS.
 
     The range read is not cosmetic: `Closes #13036 (rows V1–V6)` is a COMPLETE close of all six, and
     reading it as its two endpoints flagged it as a partial claim naming four unclaimed rows — a false
     positive on the correct behaviour this arm exists to encourage, with remediation that told the
     author to claim two rows of six.
+
+    ⛔ BUT A RANGE THAT ONLY NAMES THE SET IS NOT A CLAIM ON IT (`_row_range_span`): the span is taken
+    only where a plural row noun introduces it or the range IS the whole text, so `(row V2 of V1–V6)`
+    keeps its endpoints and stays a finding.
     """
     named = {row for row in rows
              if re.search(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", text)}
@@ -1478,6 +1503,7 @@ def _ids_in(text: str, rows: list[str]) -> set[str]:
 _DISCLAIMER_RE = re.compile(
     r"not\s+claim(?:ed|s)?|unclaimed|not\s+closed|not\s+measured|unmeasured|not\s+proved|unproved"
     r"|not\s+complete|incomplete|remain\w*\s+(?:open|unmeasured|unproved|unclaimed|deferred|out)"
+    r"|(?:stays?|left|still)\s+open|not\s+finished"
     r"|follow[\s-]?ups?|deferred|out\s+of\s+scope|excluded|except|apart\s+from|other\s+than",
     re.IGNORECASE)
 # Where one CLAIM can end and a disclaimer can begin. A SPACED dash is a boundary (`#N — only V2 is
@@ -2124,9 +2150,17 @@ def main(argv: list[str] | None = None) -> int:
     if not arm_partial_selected:
         closing_line: str | None = None
     elif closing_scope is None:
-        closing_line = ("closing-scope arm did NOT RUN in this mode (it reads the closed issue's own "
-                        "`## Satisfies` checklist) — so there is no verdict from it here")
-    else:
+        if args.sweep and run_arm_partial:
+            # ⛔ AN EMPTY SWEEP IS NOT "THE ARM DID NOT RUN IN THIS MODE": the mode can run it and
+            # simply had no PR to read. Reporting the mode's own limitation over a population of zero
+            # misstates the reason, which is the did-not-run-vs-found-nothing distinction this arm is
+            # otherwise careful about (review round 6, P3).
+            closing_scope = {"closes": 0, "clean": 0, "finding": 0,
+                             "abstained": 0, "ambiguous": 0, "unread": 0}
+        else:
+            closing_line = ("closing-scope arm did NOT RUN in this mode (it reads the closed issue's own "
+                            "`## Satisfies` checklist) — so there is no verdict from it here")
+    if closing_scope is not None:
         # ⛔ THE COUNTERS ARE THE ARTIFACT (measured: 0 of 30 newest open issues carry a `## Satisfies`
         # checklist and 1 declares ≥2 row headings, so ABSTAINED is the DOMINANT outcome here). A line
         # that printed only findings would make "this arm cannot answer that question about most
