@@ -57,22 +57,6 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `2e9c5cdfbb` folded in, over
-# `234d7db4`, the fold THIS BRANCH de-spliced (the de-splice is a commit of this branch's own,
-# not an act that fold performed — the possessive spelling credited it with an edit it never made)
-# — the rows below landed across the folds and the
-# ones before them. ⛔ NO POOL SIZE, NO ROW COUNT AND NO FOLD LIST here either — the rule the
-# paragraph below states, and the reason it is stated twice: an earlier spelling of THIS sentence
-# named a fold as "the newest" that was not, and credited another with a splice its file never
-# took. What a reader needs is PER-COMMIT fact, not a window: `2e9c5cdfbb` is the fold this head
-# LAST de-spliced — the splice the paragraph below resolves by a fresh RE-DERIVATION, not by
-# provenance (that resolution belongs to `ff10fb328891`'s fold `24493da53136`, which is the one
-# that produced DUPLICATE `durations` keys) — and `ff10fb328891` changed ONE `durations` ROW and
-# no line of this block. ⛔ AND NOT "the folds after X touched nothing": that window was FALSE
-# here. `bf16c791a489`, the fold cited in the next sentence, is itself after `a0cea310786d` and
-# moved seventeen lines INSIDE this block; and an earlier fold, `f2d4f2408cf5`, spliced a SECOND
-# derivation in it (`de311a35a2da`), so `2e9c5cdfbb` — not `a0cea310786d` — is the last fold
-# this head found splicing a second DERIVATION — not the only fold to splice anything, since `ff10fb328891` spliced `durations`.
 # reader of the prose can see. On THIS tree — the LAST `origin/main` fold on this branch, plus THIS
 # lane's own row (`tests/test_14691_structure_evidence.py`, `core`, at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) — the verb packs seven shards at 828.0 s (a, f, g, h, i, j, k) and four at
@@ -315,8 +299,6 @@ version: 1
 # and so cannot be a delta against `main`. A census measures exactly ONE tree — re-measure it with
 # `ci_selection.fast_pool(ci_selection.load_manifest())` at the head you cite.)
 # ⛔ HISTORICAL-POOL-CENSUS-END
-# the gate), so re-measure it on the tree you are merging INTO rather than carrying this head's
-# answer.
 # The name lists are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), and
 # `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
