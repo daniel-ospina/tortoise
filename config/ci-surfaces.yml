@@ -41,7 +41,7 @@ version: 1
 # different number on a different lane and is not touched by this line.
 #
 # #11576 raised S 10 -> 11 for the SAME reason, one merge later: main's
-# `test_embed_decision_step_11086.py` and this branch's
+# `test_embed_decision_step_11086.py` and `#11576`'s own
 # `test_demo_session_read_exclusion_8290.py` land in `fast_pool()` together, and the union packs a
 # worst-shard figure heavier than either side alone packs it — `shard_watchdog_minutes()` rounds that
 # figure up, so a fraction of a second of extra packing crosses a whole watchdog minute. At that
@@ -52,7 +52,7 @@ version: 1
 # attributed to the wrong landing, so a figure here would be a carried number under an attribution
 # that does not hold. The figures live in the commits that measured them; what is kept is the
 # direction, which is what justifies the number: the 2026-11-16 sweep packed the eleven shards to
-# 23 m, `#12926`'s own `10.0 s` row moved that to 24 m, a later landing moved it to 25 m, and the
+# 23 m, `#12926`'s own row moved that to 24 m, a later landing moved it to 25 m, and the
 # 2026-11-23 sweep took it to the 28 m this block grades.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
@@ -87,11 +87,186 @@ version: 1
 # and a reader could grep three counts out of the block). ⛔ Every OTHER row this tree carries is `main`'s at this head, so
 # reading one of them as this lane's delta would attribute a partition move to a row that did not
 # cause it.
+# reader of the prose can see. On THIS tree — `origin/main` `e2a9c695adfb` folded in, over
+# `a0cea310786d`, the fold THIS BRANCH de-spliced (the de-splice is a commit of this branch's own,
+# not an act that fold performed — the possessive spelling credited it with an edit it never made)
+# — the rows below landed across the folds and the
+# ones before them. ⛔ NO POOL SIZE, NO ROW COUNT AND NO FOLD LIST here either — the rule the
+# paragraph below states, and the reason it is stated twice: an earlier spelling of THIS sentence
+# named a fold as "the newest" that was not, and credited another with a splice its file never
+# took. What a reader needs is PER-COMMIT fact, not a window: `e2a9c695adfb` is the fold this head
+# LAST de-spliced — the splice the paragraph below resolves by a fresh RE-DERIVATION, not by
+# provenance (that resolution belongs to `ff10fb328891`'s fold `24493da53136`, which is the one
+# that produced DUPLICATE `durations` keys) — and `ff10fb328891` changed ONE `durations` ROW and
+# no line of this block. ⛔ AND NOT "the folds after X touched nothing": that window was FALSE
+# here. `bf16c791a489`, the fold cited in the next sentence, is itself after `a0cea310786d` and
+# moved seventeen lines INSIDE this block; and an earlier fold, `f2d4f2408cf5`, spliced a SECOND
+# derivation in it (`de311a35a2da`), so `e2a9c695adfb` — not `a0cea310786d` — is the last fold
+# this head found splicing a second DERIVATION — not the only fold to splice anything, since `ff10fb328891` spliced `durations`.
+# ⛔ AND MEASURED, NOT with `git show --stat` — that prints NO diff for a MERGE commit unless it
+# is given `-m` (it falls back to the combined `--cc` form, which lists a file only when it
+# differs from EVERY parent), and this block's whole subject is
+# merges, so it reads "untouched" over a spliced file: measured on `bf16c791a489`, a two-parent
+# fold in THIS branch's history that moved seventeen lines of this block, and
+# `git show --stat bf16c791a489 -- config/ci-surfaces.yml` printed nothing. The safe form is
+# `git diff <sha>^1 <sha> -- config/ci-surfaces.yml`, run PER FOLD — never as "empty since X",
+# which is the same census rot one level down. Each splice's figures live on the commit that
+# measured them — never carried into this derivation. THIS TREE'S DERIVATION CARRIES:
+# `#14597`'s expansion fusion over the residue RATCHET
+# (`tests/test_expansion_fusion_14344.py`, `core`, carrying a `durations` row),
+# `#14415`'s `tests/test_14219_batch_ingest.py` row and `tests/test_14219_batches_api.py` row,
+# `#14548`'s residue RATCHET, `#14552`'s `tests/test_record_read_point_vector_keys.py` row,
+# `#14560`'s `tests/test_14560_operator_vectors.py` row, `#14565`'s
+# `tests/test_14559_reaper_schedule.py` row, `#14574`'s drift-reporter registration
+# (`tests/test_fly_secret_declaration_report.py`), `#14592`'s
+# `tests/test_14592_operating_model_evidence.py` row and `tests/test_14592_read_parity.py` row
+# (`core` on BOTH, plus `eval` on the first and `api` on the second — and the first is also a
+# `tier1` member, so that ONE FILE reaches the pool through `core`, `eval` and `tier1` yet
+# contributes a SINGLE `fast_pool()` entry, because the pool is a SET — the two files are two
+# members, and the pool being a SET is the whole of the claim), `#14607`'s registrations
+# (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), `#14671`'s
+# `tests/test_13450_ep_position_axis_participation.py` row in `durations` — `core`-registered — and
+# `#14726`'s dual registration, `tests/test_own_site_fragment_targets.py` row in
+# `durations`, on `core` AND `onboarding` — the verb packs the pool into two bins: nine shards at
+# 827.8 s (a, b, e, f, g, h, i, j, k) and two at 827.7 s (c, d), so
+# `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
+# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
+# (1680 / 827.8 = 2.0295), so the two agree by construction rather than by a hand re-read.
+# ⛔ THAT `origin/main` FOLD LABEL IS HAND-CHECKED, and it is stated here rather than left
+# implied: it has been wrong REPEATEDLY inside this issue (`90c125a736a0c`, `d6a2104518762`,
+# `cc7b1f3f2c6a3`, `e182b8b8b0cb3`, and `dc479c6f` — ⛔ NOT the correction this head carries: that
+# label was re-pointed again after `dc479c6f`, which is exactly why no sha in this list claims to
+# be current), each time caught by a reader rather than by a gate. ⛔ NO NUMERAL AND NO
+# EXHAUSTIVE ENUMERATION: earlier spellings of this sentence were falsified by their own count
+# (a spelled-out number is still a count, as the paragraph below says — and an earlier draft of
+# THIS note carried a count of its own drafts, which nothing in the tree can verify and which
+# is the same graded-or-absent rule one level in), and a walk of the label transitions since
+# `origin/main` finds more than the list names.
+# The claim a reader needs is that it has rotted repeatedly.
+# ⛔ A MECHANICAL PIN WAS TRIED AND REJECTED, and the reason is a measurement rather than a
+# preference: asserting the label prefixes `git rev-parse origin/main` is TRUE only for a tree that
+# has itself just folded the tip. ⛔ THAT SNAPSHOT IS PAST TENSE ON PURPOSE: it was MEASURED while
+# this change was under review, and landing it moves `origin/main` past the label, so a present-tense
+# form would be false from the moment it merges. On `main` — the tree this block LANDS IN — the label
+# WAS `bbef0b8840` while `origin/main` was `a0be10ac456b`, so that assertion REDS there by
+# construction; and where `origin/main` does not resolve (a depth-1 CI checkout) it can only SKIP. A
+# gate that is red where it lands and absent where it gates is not a gate. On a branch whose own
+# first-parent history carries self-merges there is no sound mechanical reading of “the fold this
+# head carries”, so the RULE survives and the label is re-pointed by hand on each fold — a residual
+# named on the artifact, which is the convention this block uses BELOW for the row-exemption class.
+# ⛔ EVERY file named above EXISTS on `main` — the claim is that none is a file this change ADDS,
+# not that none is touched: `tests/test_14560_operator_vectors.py` IS edited here (its section
+# banner stops claiming "no database needed" over an arm that needs one), so the bare "is `main`'s
+# at this head" the earlier wording carried was false on the face of this diff.
+# ⛔ Not claiming "and every one is `core`": registration status is a THIS-HEAD fact, and `#14544`
+# is the proof it moves (the sentence below records that file leaving `core`) — which is why the
+# surfaces it STATES are GRADED rather than trusted:
+# `test_the_derivation_surface_claims_are_graded_against_the_manifest` asserts the surface set
+# this derivation STATES, file for file, and REDs if a stated registration moves in EITHER
+# direction. ⛔ THE POPULATION IS HAND-MAINTAINED, declared rather than implied: the arm holds the
+# set as a LITERAL and asserts the manifest against it — it does not read surfaces out of the prose
+# above, so spelling a NEW file's surface into this paragraph reds nothing. That parse was not
+# attempted because "plus `eval` on the first and `api` on the second" is an ANAPHOR: a reader
+# bound to surface tokens would have to guess which file each one names, the one-spelling matcher
+# class this block files separately. What IS graded is the arm's own set, whole.
+# ⛔ NO NUMERAL, deliberately (#14623 review): an earlier count here was stale —
+# `test_expansion_fusion_14344.py` on `core` carries a named surface above and was asserted-closed
+# while ungraded. The arm's stated set is the count.
+# ⛔ AND THAT SET IS GRADED WHOLE rather than one membership at a time: a file
+# that GAINS a surface this paragraph does not name re-stales the sentence exactly as a loss does.
+# ⛔ THE SCOPE IS THE ARM FAMILY, not every arm in the suite: registration membership IS asserted
+# by name elsewhere (`manifest["surfaces"]["core"]` and siblings), so the unqualified "no arm
+# reads" this sentence used to carry was itself the class of claim this block exists to remove
+# (#14623 review round 18, P3).
+# ⛔ NO PER-FILE WEIGHT IS QUOTED FOR THE FILES IN THE DERIVATION ABOVE, on purpose: a weight
+# beside a file re-stales against the run it came from and `--refresh-durations` rewrites it with no
+# human decision. The emission arm below DOES red on a weight move — even 0.1 s regroups the bins —
+# but its remedy is "re-run the verb and paste its figures", which leaves a quoted weight in place
+# and green, so the figure is not written rather than graded by an arm that would not look for it.
+# ⛔ That rule binds ANY weight beside a file that nothing grades; the derivation above is just
+# where it bites first. The `2.0` rows named further down are the contrast that proves it is a rule
+# and not an oversight: those ARE quoted with their value, and
+# `test_the_fast_shards_header_block_grades_the_carry_row_spelling` reads the number BOTH ways
+# (a row that moved to `3.1` under a sentence still claiming `2.0` reds it), which is what makes
+# quoting them a graded claim instead of a stale — the test of the rule is GRADED-OR-ABSENT, not
+# which paragraph the figure sits in. ⛔ The set is named by VALUE and never counted — see the
+# no-row-count rule below.
+# ⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted. A ROW is an entry
+# in `durations` — among the files named above, `#14597`'s
+# `tests/test_expansion_fusion_14344.py` row, `#14560`'s
+# `tests/test_14560_operator_vectors.py` row, `#14565`'s
+# `tests/test_14559_reaper_schedule.py` row, `#14552`'s
+# `tests/test_record_read_point_vector_keys.py` row,
+# `#14592`'s `tests/test_14592_operating_model_evidence.py` row and
+# `tests/test_14592_read_parity.py` row, `#14415`'s `tests/test_14219_batch_ingest.py` row and
+# `tests/test_14219_batches_api.py` row, plus the RATCHET's own
+# `tests/test_sdk_privatise_sweep.py` row. ⛔ THE LIST IS POSITIVE ONLY — it names files above that
+# carry a `durations` entry, and it makes NO claim about the row status of the ones it omits: a
+# `--refresh-durations` sweep ADDS a row the first time it measures a `fast_pool()` member
+# (`tools/ci_timing.py`), so an ABSENCE stated in this LIST would be false one sweep later. ⛔ The
+# absence claims this block DOES make are the `carry NO row` names further down, and those ARE
+# graded in BOTH directions: `test_the_fast_shards_header_block_grades_the_carry_row_spelling` reds
+# the sentence the moment a sweep writes a row it calls absent, so they are re-derived on a sweep
+# rather than deleted on one. What the block asserts about `#14574`'s file and `#14607`'s is the
+# WORD REGISTRATION, which stays true whether or not a row lands beside it. ⛔ `#14415`'s files are named BY PATH here on
+# purpose: the earlier "`#14415`'s batch rows" — and, before this fix, `#14597`'s — named them by
+# ISSUE only, so no matcher could reach them and deleting that `durations` row left this block's
+# arm GREEN over a row claim it makes. Every row item above is therefore spelled with its path
+# beside the word.
+# Spelling the enumeration without numerals is deliberate — the doctrine sentence below says no pool
+# size and no row count is stated here as a claim about this head, and a spelled-out number is still
+# a count (measured 2026-11-25: an earlier revision said "`#14415`'s two batch rows" and
+# "`#14607`'s two registrations", which that sentence contradicted inside one block).
+# A REGISTRATION is a surface entry on ANY `surfaces` key — `fast_pool()` folds every one of them
+# (its `for s, files in manifest["surfaces"].items(): classified.update(files)`) — but it is NEITHER
+# necessary NOR sufficient for pool membership, and both directions mislead: the same call also folds
+# `tier1` (`classified.update(manifest.get("tier1", []))`), so a `tier1`-only file is in the pool
+# with NO registration at all (measured: strip `test_tier_naming.py` from every `surfaces` key but
+# leave it in `tier1` -> still in `fast_pool()`, and the verb still packs it into the matrix); and the
+# call then subtracts `slow_files`, `ENV_BROKEN_FILES`, `carve_out` and `on_demand`, so a file
+# registered on three surfaces can still be outside the pool. What the word DOES establish is the
+# registration itself, and nothing about a `durations` row. `core` is the common case but is not the
+# definition: the `#14544` sentence below is carried by an `eval` registration ALONE. That is why
+# `#14574`'s file and `#14607`'s are named as REGISTRATIONS — so calling any of them a "row" asserts
+# a `durations` entry the registration does not establish, and
+# `test_the_fast_shards_header_block_calls_a_row_only_what_has_one` reds when that entry is absent.
+# Nor is a row the map's only carrier of a weight: `durations_floors` can additionally PIN a declared
+# value.
+# ⛔ THIS FOLD'S OWN DELTA IS MEASURED, not reasoned: this PR adds no test file and leaves the
+# selector untouched, so the pool and the parse on this tree compare EQUAL to `main`'s — every
+# surface list, every `durations` row, every `durations_floors` entry and `tier1`, value by value,
+# zero differing — and a comment-only `durations` rewrite on either side moves no member of the
+# pool. ⛔ NO POOL SIZE AND NO ROW COUNT IS STATED HERE as a claim about this head, on purpose:
+# written as figures they owe a re-measurement to whoever next moves one and nothing grades them,
+# which is exactly the rot this block's own doctrine names — the invariant above is what holds.
+# ⛔ That zero is a READING of this head, never a promise about the next fold: `fast_pool()` takes
+# its inputs from the tree being measured (the manifest, the selector's own constants, and the
+# filesystem under an `on_demand: <dir>/**` subtree, which `on_demand_subtree_files` expands with
+# `rglob("test_*.py")` on purpose — a file added to a non-gating subtree must not silently re-enter
+# the gate), so re-measure the delta on the tree you are merging INTO rather than carrying this
+# sentence's zero.
 # The name lists are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), and
 # `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
 # derivation, so they are a graded claim about THIS head — a fold re-derives them with the verb, it
 # never carries them.
+# ⛔ THIS BLOCK ARRIVES SPLICED ON A FOLD THAT RE-DERIVES IT ON BOTH SIDES, and that is mechanical
+# rather than mysterious: `config/ci-surfaces.yml` carries a `merge=union` driver, so where both
+# parents change this text the fold applies BOTH derivations, raises no conflict marker, and the
+# guard then reads `<est stated twice>` / `<ceil stated 2 times>`. ⛔ NOT on every fold, and the
+# quantifier matters: `union` fires on a CONFLICTING hunk, so a fold with this block changed on ONE
+# side applies that one derivation and cannot splice it. ⛔ THE ONE-SIDED-FOLD MEASUREMENT IS NOT
+# CARRIED HERE: how many of the branch's last N folds were one-sided is a window that the NEXT fold
+# renumbers, so this paragraph states the RULE, and any enumeration belongs on the commit that
+# measured it (`git log`) — which is what the "NO WINDOW IS STATED HERE" sentence below MEANS, and
+# why no count stands beside this one. Measured on the
+# `a0cea310786d` fold: two copies arrived, one naming `origin/main` `bbef0b8840d7` with this
+# branch's derivation (827.4/827.5), one naming `origin/main` `bbef0b8840`
+# with `#14726`'s (827.6). They DISAGREED on the bins, and neither describes this head AS WRITTEN —
+# the second copy gets the figures right by coincidence and the ATTRIBUTION wrong, calling
+# `#14726`'s row "this change's own" when on this tree it arrived with the fold. Neither side is
+# picked: both are DELETED, and the derivation above is a fresh re-derivation on this merged
+# tree.
 
 # ⛔ THIS BLOCK ARRIVED SPLICED AGAIN AT THE `origin/main` `4b2fba3e8a` MERGE, and the repair is
 # recorded rather than hidden: `config/ci-surfaces.yml` carries a `merge=union` driver, so the fold
@@ -120,10 +295,44 @@ version: 1
 # and the re-derivation above is computed with `--emit-push-matrix` on the merged tree. Each
 # earlier fold's figures live on the commit that measured them (`git log`), which is where a
 # spliced copy belongs.
+# driver, the same failure — and this time the two copies DISAGREED on the bins, so AT MOST ONE of
+# them could describe that tree. ⛔ WHICH ONE IS NOT STATED AND NEITHER COPY'S FIGURES ARE QUOTED:
+# restating a fold's numbers inline is the carry the paragraph above refuses, and the measurement
+# lives on the commit that took it (`git log`). An earlier spelling of this sentence claimed
+# "NEITHER copy described this tree: both stated" a single partition — which cannot be true of a
+# pair that disagreed, and was measured false. Neither copy was picked; the paragraph above is
+# re-derived fresh on this merged tree, and WHICH ONE IT COUNTS AS IS NOT STATED: that ordinal
+# is a window the NEXT fold renumbers — the same reason the paragraph below states no window — so
+# it is left unstated rather than stated and re-staled, on the schedule the figures above refuse.
+# ⛔ NO WINDOW IS STATED HERE, and the reason is a measurement: "the folds after `a0cea310786d`
+# touched nothing" was FALSE in this very paragraph, because `bf16c791a489` landed after it and
+# moved seventeen lines of this block. The derivation reads ONCE because each fold was checked on
+# its OWN commit. ⛔ THOSE FOLDS' ATTRIBUTION IS NOT CARRIED FROM THE FOLD THAT DID: the `ff10fb328891`
+# fold before them spliced this block on NEITHER side — it left the derivation reading once — and
+# spliced `durations` instead: under the same `merge=union` driver
+# `test_14560_operator_vectors.py` and `test_13098_cypher_inventory.py` each arrived as a DUPLICATE
+# `durations` key, with no conflict marker raised. ⛔ It is the SILENT form of the same defect, and
+# the scope of "silent" is exact rather than rhetorical: plain `yaml.safe_load` keeps the LAST copy
+# and discards the first without a word. This repo's own `parse_manifest_text` REFUSES instead —
+# measured on the spliced tree, it raised `DuplicateManifestKeyError` naming both lines — which is
+# why both readers are cited: the red is the arm, and the silence is what the arm exists for.
+# Resolved by PROVENANCE rather than by a side — this branch owns the `#14560` row's rewrite (`main`
+# never touched it), `main` owns the `#13098` row's (`#14625` rewrote it; this branch inherited the
+# pre-cut note) — so neither side was picked wholesale.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
-# `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
-# well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
-# row cannot move a bin.
+# `tests/test_dod_5090_probe.py` from the `core` surface: dropping that REGISTRATION cannot move a
+# bin, because the file's pool entry comes from the `eval` registration ALONE (as the sentence above
+# says), and `#14544` left that `eval` registration alone. The REGISTRATION is the ONLY half
+# exempt: the bin is held by the `tests/test_dod_5090_probe.py` row in `durations`, and that row's
+# WEIGHT is `#14544`'s own edit — the commit that took the file off `core` re-read the same file's weight after
+# cutting its cases (its note on the row records exactly that) — so a packing change attributed to
+# that row is a cause this paragraph does NOT exclude, and the row's WEIGHT is that cut's re-read
+# rather than the default (the ROW itself predates it — `#10465` introduced it, and this cut
+# replaced that note with its own reading, so the note at this head records the cut).
+# The weight is not restated here: the no-per-file-weight rule above binds the
+# figure, and a weight re-read is a packing input rather than the membership change this paragraph is
+# about.
+#
 # ⛔ THIS SENTENCE IS A MERGE MAGNET, and that is why the partition is stated ONCE, above, in ONE
 # form. The repair is mechanical: re-derive with `--emit-push-matrix` on the tree you are merging
 # INTO, then keep ONE sentence.
@@ -147,14 +356,14 @@ version: 1
 # and is graded by nothing is a claim that rots, so what survives is the RULE rather than the
 # values: read the letter off `--emit-push-matrix` at the head you are citing, and never infer it
 # from a neighbouring row. ⛔ The worked example this paragraph used to carry was ITSELF false: it
-# claimed `tests/test_14407_alert_delivery.py`'s `core` row "sits in a DIFFERENT bin than
+# claimed `tests/test_14407_alert_delivery.py`'s `core` registration "sits in a DIFFERENT bin than
 # `test_notify`'s precisely because a `core` neighbour packs elsewhere". It cannot — `fast_pool()`
 # folds every surface into one `classified` set and returns `sorted(...)` of it
 # (`tools/ci_selection.py`, `fast_pool`), so a file registered on TWO surfaces (`api` beside
 # `test_abuse`, `core` beside `test_notify`) contributes ONE pool entry and therefore ONE bin.
 # ⛔ THAT IS THE WHOLE CLAIM, and it is deliberately bin-free: this sentence used to add "measured at
 # this head both of those files land in the same one", which was TRUE when written and FALSE one
-# fold later (this head packs `test_14407_alert_delivery` and `test_notify` in DIFFERENT bins) —
+# fold later (the fold that landed it found the two in DIFFERENT bins) —
 # the mechanism does not entail co-location with another file, so the empirical half could only rot.
 # A dual registration is exactly the case where a neighbour's bin tells you nothing, which is why the
 # rule is to read the letter off the verb rather than to remember a pairing.
@@ -13540,7 +13749,7 @@ durations:
   test_13610_graph_vector_copy.py: 2.0  # new in #13610 (PR #13617) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so this row takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ('a default is not a reading'): the `core` registration above puts the file in `fast_pool()`, and `--integrity` stays green either way (the coverage check is a 0.90 RATIO with headroom), so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file; the file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because the entry-rule pin iterates an EXPLICIT tuple and cannot see a file nobody listed (`#13110`'s round-5 review recorded that exact variant surviving a round). What the weight covers — ⚠️ NOT uniformly hermetic, and this row says which half is which instead of claiming the cheap one: most cases are in-process (they import `ast`/`pathlib` and monkeypatch the searcher, the encoder and `record_vector.vector_search` — no network, no model call), while the FOLD cases build a REAL embedded graph (`tempfile.mkdtemp` + `FalkorProjection`, one redislite `redis-server` spawn per case, measured), and on a URI-set lane those two constructions are REDIRECTED to the server the run was given by the epic-#1647 class-level redirect. What they assert: the DoD (a DEFAULT deployment — no env var — answers a dense `:Object` and `:Subject` query from the record whose graph holds no copy, which the pre-change tree FAILS: `searcher() -> None`, four graph statements, `[]`), the no-silent-loss proof (unverified coverage — 1 record vector against 3 vector-bearing graph nodes — DECLINES the record leg and the graph answers, with the MUTANT driven in the same test: force coverage verified and the graph-only row disappears, so the assertion is about the mechanism and not the fixture), post-contract's no-fallback arm (a record failure is a `degraded`/`query_failed` leg, never a frozen cohort), the write gate being the read gate INVERTED (`mirror_required`) with every unknown — no tenant, unarmed, no DSN, unverified, unimportable — answering `True`, and a post-contract short count unable to flip the read back; the folds stopping the ENCODE (not merely the write) and deleting NOTHING; the graph denominator counting only `embedding IS NOT NULL` nodes (a total-node count would make the contract unreachable on `#5008`'s designed absences) against the record's `embedding_vec IS NOT NULL` rows; and the WIRING, by `ast`: all three `_record_vector_searcher` construction sites pass the denominator, because a site that forgets it answers `None` forever and silently keeps double-storage. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_13108_dense_leg_index_skip.py: 0.1  # new in #13108/#13121 (the fix commit `a2fe16beb8`); The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity` cannot police one missing row. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local seconds figure and no CASE COUNT are quoted (`tools/ci_selection.py --integrity` is the authority). What the weight covers, hermetic (no DB, no graph, no embedder): the four things that must stay true once the read consults the measured inventory — an absent label SKIPS both index attempts and is still recorded `scan_fallback` (`#4999`'s "an index was expected and was not used"), an indexed label still attempts and uses the index, `None` (not measured) attempts as before so a guess never demotes every read to a scan, and `#2952`/DoD row 3 still DECLARES a genuine fallback — plus rows/shape unchanged, the embedded lane unaffected, and `degradation_chain` forwarding the inventory only when supplied — ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0
   test_dense_leg_probe_13108.py: 0.1  # new in #13108/#13121; The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, `--integrity`'s 0.90 coverage ratio stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local seconds figure and no CASE COUNT are quoted here on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority). What the weight covers, hermetic on both sides (no graph, no store, no model call, no process spawn): the numbers `#13108` reopens `STORAGE-ARCHITECTURE.md` §14.3 V3 on — `percentile`'s nearest rank and its `None`-for-an-empty-sample (never `0.0`), `summarise`'s inclusive 500 ms `over_budget` boundary, the per-arm `None` latency cells, and the mechanism/reason distributions; plus the instrument's OWN honesty: `measure` REFUSES an arm that lost a read (a worker that raised, a worker that died without raising, and a mechanism outside the engine's closed vocabulary all answer a refusal rather than a short arm), the three-valued `probe_index_attempt` outcome that never folds an aborted signature into a double refusal, `seed`'s carried `harvest_stats`, the `#5128` interpreter preamble, and the selection that makes these pins run at all (`CORE_ALSO` + a tools-only diff) — ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0
-  test_14560_operator_vectors.py: 2.0  # new in #14560 (this PR) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity` stays green either way (the coverage check is a 0.90 RATIO with headroom), so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file. The file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because that ENTRY-RULE pin iterates an EXPLICIT tuple and cannot see a file nobody listed — the same defect `#13110` and `#13826` each shipped and each had reported. What the weight covers — ⚠️ NOT uniformly hermetic, and this row says which half is which instead of claiming the cheap one: the DESTRUCTIVE-consumer arms are DB-free (they monkeypatch `record_vector._record_vector_count` and read `hosted_backup._restore_retires_vector`, no graph, no network, no model call), while the MEASUREMENT arms build a real graph (a unique graph name per test on the docker lane) through the `sdk` fixture — except the operator arm, which takes the journal-backed `journalled_sdk` so it can read the record the write actually appended. ⛔ NO ARM COUNT is quoted here beyond that split: it moves whenever a review round adds one (this row said "three" while the file had four, and `main` has since added a fifth), which is the same rot the seconds figure rule forbids — and those SKIP visibly, not at import, when no live URI is configured, which is why the file is a normal pool member rather than a `uri_requiring` one. What they assert: a pure `create_operator` carries no VECTOR in EITHER store (its graph read-back omits `embedding` entirely, and the journalled snapshot carries `embedding: None` — `#5004` forces the key present, so the record's INSERT has the column and binds it to NULL rather than dropping a value — so the 17,899 zero-vector operator rows lost nothing); a hybrid `create_point(op_type=…)` carries its vector in BOTH; `_label_vector_count("operator")` reads the operator SLICE while `("point")` still reads the whole `:Point` label; a TRIVIAL (`0 >= 0`) verdict cannot license a restore drop; and `:Point`'s restore drop is HELD until `#13971`'s per-ID ask (both directions driven, so the hold is a hold and not a blanket refusal). ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
+  test_14560_operator_vectors.py: 2.0  # new in #14560 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity` stays green either way (the coverage check is a 0.90 RATIO with headroom), so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file. The file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because that ENTRY-RULE pin iterates an EXPLICIT tuple and cannot see a file nobody listed — the same defect `#13110` and `#13826` each shipped and each had reported. What the weight covers — ⚠️ NOT uniformly hermetic, and this row says which half is which instead of claiming the cheap one: the DESTRUCTIVE-consumer arm that monkeypatches the counter is DB-free (it monkeypatches `record_vector._record_vector_count` and reads `hosted_backup._restore_retires_vector`, no graph, no network, no model call), and so is the restore-hold arm beside it (`_GATED_RESTORE_LABELS` / `_derived_mirror_required`, no graph) — ⛔ NOT the whole section those sit under: `test_the_sdk_UPDATE_door_holds_the_Point_vector_too` lives in it too and builds a REAL graph through the `sdk` fixture, because the door it pins loses a WRITE rather than a row (`_update_entity` pops `embedding` from the props it applies) — while the MEASUREMENT arms build a real graph (a unique graph name per test on the docker lane) through the `sdk` fixture — except every arm that grades the RECORD's shape (the operator, the plain-Point control and the hybrid), which takes the journal-backed `journalled_sdk` so each reads the JSONL the production write appended rather than the dict `_emit_event` was handed — `#5004` COPIES that dict and forces `embedding` present on the COPY (`clean = {k: v for k, v in point.items() …}` then `clean.setdefault("embedding", None)`), so the handed dict carries only the caller's INTENT and an arm grading it stays green over a record whose row lost the key. ⛔ NO ARM COUNT is quoted here beyond that split: it moves whenever a review round adds one (this row once named a count while the file already carried more than it said, and the file has grown since), which is the same rot the seconds figure rule forbids — and those SKIP visibly, not at import, when no live URI is configured, which is why the file is a normal pool member rather than a `uri_requiring` one. What they assert: a pure `create_operator` carries no VECTOR in EITHER store (its graph read-back omits `embedding` entirely, and the journalled snapshot carries `embedding: None` — `#5004` forces the key present, so the record's INSERT has the column and binds it to NULL rather than dropping a value — so the 17,899 zero-vector operator rows lost nothing); a hybrid `create_point(op_type=…)` carries its vector in BOTH; `_label_vector_count("operator")` reads the operator SLICE while `("point")` still reads the whole `:Point` label; a TRIVIAL (`0 >= 0`) verdict cannot license a restore drop; and `:Point`'s restore drop is HELD until `#13971`'s per-ID ask (both directions driven, so the hold is a hold and not a blanket refusal). ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_13098_cypher_inventory.py: 2.0  # new in #13098 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local timing and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count is `tools/ci_selection.py --integrity`'s business. What the weight covers: the census pin's BOTH directions (`check()` exits 0 on the tracked SOURCE that carries the pins, and 1 both on a drifted / missing / stale pin AND on a source that has a rendered census row pasted into it — the arms that made the pin non-vacuous), the census-vs-`rg` reconciliation including its third line, the lambda-scope regression, the shape-precedence table, the Postgres-vs-Cypher discriminator, and the harness's diff semantics (row count, three-way null, multiset for unordered, sequence for ordered, column shape, fingerprint stability) plus its refusals (no stores, inapplicable mutation, a mutation that changes nothing, a missing `psql`, a record schema that never materialises) and `_redact` on a password containing a raw `@`. Hermetic: no DB, no graph, no docker, no network, no model call.
   test_13665_sentry_init_off_loop.py: 2.5  # new in #13665; The row must EXIST, not merely default ("a default is not a reading"): the `api` registration above also puts the file in `fast_pool()`, and `--integrity`'s 0.90 coverage ratio stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. What the weight covers, and the one arm that is NOT hermetic: five arms are pure in-process (a ticker counting `asyncio` wake-ups while the SDK init is stubbed to sleep — the fix arm asserting the loop keeps serving and its ON-LOOP control asserting the same stub starves it, which is what stops the pair from passing vacuously; the second call returning without a SECOND executor hand-off, asserted on a counted `asyncio.to_thread`; the no-DSN gate short-circuiting BEFORE that hand-off, so no thread is submitted at all — also counted, which is what catches the gate sliding back inside `init()`, onto the worker; and two OVERLAPPING calls serialising on the worker's `_init_lock`, so `sentry_sdk.init` still runs once — the loop-side fast path cannot cover that pair, because the coroutine suspends at the hand-off before `_enabled` is set). The sixth arm drives the REAL hosted lifespan through `TestClient` entry to assert WHICH init the startup half awaits, so it pays that lifespan (the #2850 liveness arming, the MCP session manager, the bounded boot sweeps) — the cost this bound is sizing. Nothing here calls the network, a model, `gh`, or a graph the fixture does not own; the lifespan's own store probes are the same ones every `TestClient(ha.app)` case in this suite pays. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority) — ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0
   test_13722_projection_open_round_trips.py: 0.4  # new in #13722; The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. What the weight covers: the probe's STATEMENT, without a database (exactly ONE graph query, no aggregate over the graph, still a node traversal so the fail-loud arm survives, and `_probe_error` still retained on a raise), the MUTANT that proves the aggregate detector still rejects the statement #13722 removed, and — against the real store — #13722's own metric: a steady-state projection open bounded at 12 wire commands, a trivial read exactly 1, no aggregating graph query inside an open, and the probe flat (not O(n)) on a 50k-node graph; plus the scaling arm's OWN sampling, asserted on call order — the two sizes AND the control are timed in one interleaved pass, so a ratio cannot be measured across a load drift (a helper that sampled each quantity in its own sequential block reds it, which is what stops a false red on a correct fix from being designed back in); and the #7949 capstone probe's `pointKind` cite, re-derived from the fragment it quotes rather than from the +30-line delta this PR's own insert made to every cite below it (a cite is pinned to its content). ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from (the #3400/#4348 rule); the count is `tools/ci_selection.py --integrity`'s business — ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0
