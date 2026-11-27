@@ -1427,10 +1427,28 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
                 "the blanket 'a replay heals the record' claim is back on a "
                 "population that includes a statement that executed and "
                 f"failed: {text[-400:]!r}")
-            assert "ENUMERATED replay is refused" in text, (
+            # ⛔ AND THE CURSOR-ROW CLAUSE CARRIES THE SAME SCOPE (review pass at
+            # `a4ce608545`, P2). Scoping the guard clause alone made the SENTENCE
+            # CONTRADICT ITSELF: twelve words earlier it now says the cutover
+            # guard is asked "only on one that carries a position", while this
+            # clause claimed EVERY enumerated replay on a cut-over graph is
+            # refused. It is not — `_refuse_an_enumerated_replay` is gated
+            # `position and not allocate and records`
+            # (`record_projection.py:9105`) and `position=False` is a real mode
+            # on this arm (`position=True if allocate else seq is not None`,
+            # `record_writer.py:4330-4335`, with `seq is None` a NAMED skip,
+            # `_note_unproven_position`). So the remedy pointer after it was a
+            # dead end for that population. Pinned in the scoped form, so the
+            # over-broad text cannot come back and the CORRECT text does not red.
+            assert "ENUMERATED replay that carries a position is refused" in text, (
                 "the enumerated arm lost the cursor-row condition that makes "
-                "the allocating replay the remedy on a cut-over graph: "
-                f"{text[-400:]!r}")
+                "the allocating replay the remedy on a cut-over graph, or "
+                "lost its POSITION scope — `position=False` never reaches "
+                f"`_refuse_an_enumerated_replay`: {text[-400:]!r}")
+            assert "an ENUMERATED replay is refused" not in text, (
+                "the UNSCOPED form is back — the guard is gated on `position`, "
+                "and a `position=False` enumerated replay on a cut-over graph "
+                f"is not refused at all: {text[-400:]!r}")
             # …and the guard that condition gates IS reachable here, so its
             # example stays: removing it from BOTH arms would over-correct
             # (round-33 P3 fixed the ARMED arm only).
