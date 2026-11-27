@@ -30,11 +30,13 @@ What this file pins, and why each pin is here rather than in a comment:
 
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 import pathlib
 import re
 import sys
+import textwrap
 import traceback
 
 import pytest
@@ -7546,9 +7548,17 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
                * base_total - base_survived) < 1e-6, (
         "the committed baseline is not an integer unit count on the receipts' "
         f"population of {base_total} — the bar is not comparable")
-    assert base_total == on[0]["total"] == off[0]["total"], (
-        "the receipts' graded population must be the corpus the baseline was "
-        "measured on; a different denominator is not comparable")
+    # ⛔ A THIRD ASSERTION STOOD HERE AND COULD NOT FAIL (#14774 review P3,
+    #    MEASURED): `assert base_total == on[0]["total"] == off[0]["total"]`.
+    #    `base_total` IS `totals.pop()` and the other two are members of that
+    #    same one-element set, so all three are equal by construction — while its
+    #    message claimed to compare the receipts' population against the
+    #    baseline's, and `baselines/main.json` records no population to compare
+    #    against. The integer-count assertion above is what actually rules out a
+    #    wrong denominator (it fails on any population where the baseline ratio
+    #    does not land on a whole unit count), together with the `fixtures_hash`
+    #    equality below. Deleted rather than reworded: an assertion that cannot
+    #    fail is attributed to a behaviour it never tested.
 
     for run in on + off:
         # 1. each receipt is internally consistent: the aggregate it publishes
@@ -7637,15 +7647,27 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     #     figures, so compare the SET, not each member's count: a decoy adds a
     #     figure nobody derived and a perturbation removes one that was. The one
     #     exception is the retired `#5064` reading, which (b2) quotes on purpose
-    #     to say what this replaces; that sentence is cut off before the scan, and
-    #     its presence is required, so "no stray figure" cannot be satisfied by
-    #     deleting the history either.
+    #     to say what this replaces.
+    #
+    # ⛔ AND THE SCAN IS THE WHOLE CLAUSE, NOT THE TEXT BEFORE THAT SENTENCE
+    #    (#14774 review P2, the residual the region cut left open, MEASURED).
+    #    The retired quote is the LAST sentence of (b2), and cutting there made
+    #    the tail invisible to BOTH halves of the pin: `_stated_once` counts only
+    #    derived strings, so an appended figure changed no count, and the scan
+    #    never reached it. Reproduced at the previous head: appending
+    #    `and 42/90 = 46.7%` to the end of (b2) left every assertion here GREEN —
+    #    including this one, whose message claims "clause (b2) publishes figures
+    #    that are not exactly the ones the receipts derive". So the retired figure
+    #    is now subtracted EXACTLY ONCE from a scan of the WHOLE clause: its
+    #    presence is still required (deleting the history does not satisfy the
+    #    pin), and any figure the receipts do not derive — wherever in (b2) it is
+    #    written — is unexpected.
     _retired_quote = ("The `38/77 = 49.4%` / `UNMEASURED(<an E2 LLM arm run>)` "
                       "reading this replaces")
     assert _retired_quote in flattened, (
         "clause (b2) must still name the reading it replaces — the pre-receipt "
         "`38/77` quote is the record of what this measurement closes")
-    _derived_region = flattened.split(_retired_quote)[0]
+    _retired_figure = "38/77 = 49.4%"
     _derived_figures = [
         f"{r['survived']}/{r['total']} = {_pct_1dp(r['survived'], r['total'])}"
         for r in on + off]
@@ -7658,7 +7680,13 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     _derived_figures.append(
         f"{base_survived}/{base_total} = {_pct_1dp(base_survived, base_total)}")
     _scan = re.findall(
-        r"\d+(?:\.\d+)?/\d+(?:\.\d+)? = \d+(?:\.\d+)?%", _derived_region)
+        r"\d+(?:\.\d+)?/\d+(?:\.\d+)? = \d+(?:\.\d+)?%", flattened)
+    assert _scan.count(_retired_figure) == 1, (
+        f"clause (b2) must quote the retired `{_retired_figure}` reading EXACTLY "
+        f"once — found {_scan.count(_retired_figure)}. Zero means the history this "
+        "measurement closes stopped being recorded; more than one means it is "
+        "quoted as if it were still live")
+    _scan.remove(_retired_figure)
     assert sorted(_scan) == sorted(_derived_figures), (
         "clause (b2) publishes figures that are not exactly the ones the receipts "
         f"derive — unexpected {sorted(set(_scan) - set(_derived_figures))}, "
@@ -7759,11 +7787,140 @@ def test_the_e2_off_arm_definition_uses_the_REAL_kill_switch(monkeypatch):
         f"{resolved['off']['value_gate']}) — since #10996 an ABSENT "
         "TORTOISE_VALUE_GATE is the ON spelling, so the 'control' arm is a second "
         "realization of the treatment. Set it to 0; do not unset it")
-    assert resolved["on"]["vet_enabled"] != resolved["off"]["vet_enabled"], (
-        "the two documented arms resolve the SAME vet_enabled — a comparison of "
-        "a run against itself, reported as a measurement (#10610, #14774 P1)")
+    # ⛔ A `resolved["on"]["vet_enabled"] != resolved["off"]["vet_enabled"]`
+    #    assertion stood here and could never be the row that catches anything
+    #    (#14774 review P3, MEASURED): it is implied by the two identity
+    #    assertions above, so every mutant that would falsify it reds one of
+    #    THEM first. Deleted rather than kept, and the reasoning it carried moved
+    #    onto the assertion that actually fires for that mutant — the paragraph
+    #    above already states it at the point of failure.
     # …and the kill-switch is the SPELLING that does it: the OFF prefix must
     # SET the default-ON switch to its falsy value, not merely omit it.
     assert "TORTOISE_VALUE_GATE=0" in commands["off"], (
         f"the flags-OFF command does not use the kill-switch: {commands['off']!r}"
         " — an unset default-ON switch is the ON arm")
+
+
+def _arming_switches_read_by(fn) -> set[str]:
+    """The `TORTOISE_*` env names a production arming function reads — from CODE.
+
+    ⛔ Docstrings are excluded on purpose: they NAME sibling switches in prose
+    (`_s2_seam_armed`'s mentions `TORTOISE_CLASSIFY_LATER`, which arms S2.3 and
+    does not arm the pass), so a source scan that counted string constants
+    everywhere would red on prose that is correct. Only constants in executable
+    position count, which is exactly what a new arming read is.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    docstring_nodes = set()
+    for node in ast.walk(tree):
+        # statement-list bodies only: `ast.Lambda.body` is an EXPRESSION, so a
+        # bare `getattr(node, "body")` walks into a Constant and subscripts it.
+        if not isinstance(node, (ast.Module, ast.FunctionDef,
+                                 ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        body = node.body
+        if not body:
+            continue
+        first = body[0]
+        if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            docstring_nodes.add(id(first.value))
+    return {
+        node.value for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        and id(node) not in docstring_nodes
+        and re.fullmatch(r"TORTOISE_[A-Z0-9_]+", node.value)
+    }
+
+
+def test_the_arm_switch_surface_names_every_production_arming_read():
+    """`ARM_SWITCHES` must record every switch a production arming term reads.
+
+    (#14774 review P3, MEASURED.) `_validate_arm_block`'s `unknown switches`
+    arm says *"a new switch must be added there or it is recorded nowhere"* —
+    but that arm can only see a hand-authored receipt with an EXTRA key.
+    `extractor_arm_readback` builds `env` from `ARM_SWITCHES` alone, so a new
+    PRODUCTION arming switch that was never added to the tuple produces a
+    receipt that simply omits it: `validate_receipt` returns `[]`, §25 stays
+    green, and the arm is under-recorded. That is the failure the message names
+    and the one the check could not detect, so the tuple is pinned against the
+    production reads instead.
+
+    ⛔ The direction that matters is PRODUCTION → TUPLE. The converse is not
+    asserted and must not be: `TORTOISE_STATE_VALUE_VERBATIM` is recorded by
+    design without arming the S2.2 pass (it defaults ON, `#11449`, and is unset
+    in BOTH arms), so an assertion that every recorded switch arms VET would be
+    false.
+
+    MUTANT (measured): add `or is_truthy(os.environ.get("TORTOISE_NEW_ARM"))` to
+    `extractor_v2._vet_enabled` — the scan finds `TORTOISE_NEW_ARM`, the tuple
+    does not, and this test REDS naming it.
+    """
+    import tortoise.extractor_v2 as ev2
+    import tortoise.value_gate as vg
+    from tests.eval.write_path import runner as wp_runner
+    from tortoise import s2_decision_seam
+
+    reads: set[str] = set()
+    for fn in (ev2._vet_enabled, ev2._s2_seam_armed, vg.value_gate_enabled,
+               vg.resolve_enabled, s2_decision_seam.seam_enabled):
+        reads |= _arming_switches_read_by(fn)
+    # Two of the three terms read their env through a module-level CONSTANT, so
+    # the name is not a literal inside any function body.
+    reads.add(vg.ENV_FLAG)
+    reads.add(s2_decision_seam.ENV_FLAG)
+    # sanity: the scan must have found the three terms the readback composes,
+    # or it is reading nothing and the assertion below is vacuous.
+    assert {"TORTOISE_VET", "TORTOISE_S2_DECISION_SEAM",
+            vg.ENV_FLAG} <= reads, (
+        f"the arming-source scan found only {sorted(reads)} — the pin is "
+        "reading the wrong functions and would pass on a new switch")
+    missing = sorted(reads - set(wp_runner.ARM_SWITCHES))
+    assert not missing, (
+        f"production arming reads {missing}, which `ARM_SWITCHES` does not "
+        "record — a receipt produced under such a switch omits it entirely, so "
+        "its arm is under-recorded and `validate_receipt` cannot see it. Add it "
+        "to `tests/eval/write_path/runner.py::ARM_SWITCHES` and to the arms doc")
+    # …and the third flag this issue names is recorded even though it does not
+    # arm the pass: it decides whether a verbatim value SURVIVES, and a receipt
+    # that does not name it cannot say what its survival number was measured on.
+    assert "TORTOISE_STATE_VALUE_VERBATIM" in wp_runner.ARM_SWITCHES, (
+        "the survival flag must be recorded on every receipt — the figure this "
+        "row publishes is a strict-VERBATIM survival number")
+
+
+@pytest.mark.parametrize(
+    "arm, expected",
+    [
+        # the arm a healthy receipt carries — the shape every other test builds
+        ({"env": {}, "readable": True, "vet_enabled": False}, None),
+        # a switch the runner's own surface does not know: recorded nowhere
+        ({"env": {"TORTOISE_UNKNOWN": "1"}, "readable": True, "vet_enabled": True},
+         "unknown switches"),
+        # `readable` is the honesty flag itself, so it must be a real bool
+        ({"env": {}, "readable": "yes"}, "expected a bool"),
+        # a readable arm that does not say WHICH arm it resolved
+        ({"env": {}, "readable": True}, "vet_enabled"),
+    ],
+)
+def test_the_arm_readback_validator_refuses_each_malformed_shape(arm, expected):
+    """Every refusal arm of `_validate_arm_block` fires, and names itself.
+
+    (#14774 review P3, MEASURED.) Before this test nothing built an `arm` block
+    with an unknown switch, a non-bool `readable`, or a missing `vet_enabled`:
+    every reaching test built a well-formed block through `run_benchmark` and
+    asserted `validate_receipt(...) == []`, so the mutant
+    `def _validate_arm_block(arm): return []` left the whole suite GREEN. Each
+    case here is one arm, and `expected` is a substring of the issue it must
+    emit — so deleting an arm reds its case rather than silently widening what
+    the validator accepts.
+    """
+    from tests.eval.write_path import runner as wp_runner
+
+    issues = wp_runner._validate_arm_block(arm)
+    if expected is None:
+        assert issues == [], f"a well-formed arm block was refused: {issues}"
+        return
+    assert issues, f"{arm} was accepted; every refusal arm must be reachable"
+    assert any(expected in issue for issue in issues), (
+        f"{arm} was refused, but no issue names {expected!r}: {issues}")
