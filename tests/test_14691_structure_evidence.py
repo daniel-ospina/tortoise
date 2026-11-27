@@ -1417,14 +1417,15 @@ def _cites_a_site_in(cited: tuple[str, int, int], sites) -> bool:
     1. **The same range.**
     2. **One line inside** the artifact's range — `lo == hi` and `other_lo <= lo <= other_hi`.
     3. **A wider range that BEGINS at or just before the artifact's start** — the prose quotes
-       a span plus its call site (`entity_reads.py:533-559` against `:551-559`).
+       a span plus its call site (the one honest wider span in either document: start slack 18,
+       end exact).
 
     ⛔ CONTAINMENT IN EITHER DIRECTION WAS NOT ENOUGH, measured: it admitted a range that BEGINS
     exactly where a refused mutant begins and pads its END onto the pinned site (such a range
     CONTAINS the site, which is why a containment test admits it on that one disjunct alone).
     Equality alone would red on the two honest
-    shapes above, and OVERLAP would accept a MOVED range (`:172-179` -> `:166-173`), so the
-    three shapes are enumerated rather than approximated.
+    shapes above, and OVERLAP would accept a MOVED range (the same width, shifted a few lines
+    down), so the three shapes are enumerated rather than approximated.
 
     ⛔ AND BOUNDING THE START ALONE WAS STILL NOT ENOUGH (#14691 review, round 16, finding 1):
     with only the start bound, the same padding attack survived from the OTHER side — a range
@@ -1433,16 +1434,23 @@ def _cites_a_site_in(cited: tuple[str, int, int], sites) -> bool:
     the artifact's start or up to `_CITATION_WIDEN_BOUND` lines BEFORE it, and requires it to end
     at EXACTLY the artifact's end (`hi - other_hi == 0`). A start strictly INSIDE the range is
     refused by the `lo <= other_lo` clause — measured, holding the end at the artifact's end:
-    start offsets 1..18 inside return False, and every offset past the artifact's end returns
-    False too, because `hi - other_hi == 0` then fails. ⛔ NOT "1..19": the offset that lands ON
-    the artifact's last line (`lo == hi == other_hi`) returns **True**, and it is not an inside
-    start at all — it is the degenerate single-line range shape 2 exists to admit. (Measured on
-    the site `sdk.py:62739-62758`: offsets 1..18 RED, 19 GREEN, 20..22 RED. The restatement of
-    the rule was the defect here once already, so grade it against
-    `test_the_citation_shape_table_is_the_predicate_the_docstring_states` rather than trust this
-    sentence.) That is
-    what the one honest wider span in the two documents actually does — `entity_reads.py:533-559`
-    against the artifact's `:551-559` is slack 18 at the start and 0 at the end (measured) — so
+    start offsets `1` through `span - 1` inside return False (where `span = other_hi - other_lo`),
+    and every offset PAST the artifact's end returns False too, because `lo <= other_lo` then
+    fails. ⛔ THE ONE OFFSET THAT IS NOT REFUSED IS `span` ITSELF — the artifact's LAST LINE, where
+    `lo == hi == other_hi` collapses the range to the degenerate single line that shape 2 exists
+    to admit, so it returns **True**. That is a shape-2 admission, not an inside start.
+    ⛔ STATE THIS RULE AS AN OFFSET FROM THE SPAN, NEVER AS LITERAL POSITIONS — and cite no
+    artifact by line range here. A rebase can move a site by lines AND change its span: the
+    `#14624` creation hook moved this site +23 lines and widened it 19 → 20, which made the
+    previous restatement of this sentence ("start offsets 1..18 inside return False", "19
+    GREEN") false at the site the artifact then carried — an off-by-one in the SENTENCE, not in
+    the predicate, and the same class as the literal line ranges that expired in round 21. So do
+    not trust this prose and do not restate it: it is graded by
+    `test_the_citation_shape_table_is_the_predicate_the_docstring_states`, which SWEEPS every
+    offset in `1..span + 3` against the live predicate. That is
+    what the one honest wider span in the two documents actually does — `entity_reads`'s
+    `hasPart` read range against the artifact's copy of it is slack 18 at the start and 0 at the
+    end (measured) — so
     the honest shape stays green, and an end-padded citation cannot pass at ANY start offset.
     ⛔ The START allowance is 20, not 0, and it is LIVE — measured as OFFSETS from the artifact's
     start, which is the only form that survives a rebase: a range beginning **19 lines before**
@@ -1620,11 +1628,13 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
     r"""Reds if `_cites_a_site_in` admits or refuses a shape its docstring names.
 
     ⛔ #14723, round 22. The arm below grades the DOCUMENTS, so a wrong table in the
-    predicate's OWN docstring is prose nothing grades — and it was wrong: it read
-    "start offsets 1..19 inside return False", while the offset that lands on the
-    artifact's last line collapses the range to the single line shape 2 exists to
-    admit and returns True (measured: 1..18 RED, 19 GREEN, 20..22 RED). Fixing the
-    sentence alone leaves the next restatement free, so the TABLE is pinned here.
+    predicate's OWN docstring is prose nothing grades — and it was wrong: it wrote the
+    inside offsets as literal positions ("1..18 inside return False", "19 GREEN")
+    while the offset that lands on the artifact's last line collapses the range to the
+    single line shape 2 exists to admit and returns True. Those figures were true of a
+    span-19 site and false one commit later, when the same site became span 20 — an
+    off-by-one in the SENTENCE, not the predicate. So it is now stated as `1..span - 1`
+    refused and `span` admitted, and SWEPT below rather than restated anywhere.
 
     Both directions are graded: the honest shapes must stay green (an over-tightened
     predicate reds the documents) and the padded/moved ones must stay red (the
@@ -1681,6 +1691,22 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
         "start slack of the PROSE's red figure (21 lines before), end exact":
             ((name, lo - 21, hi), False),
     }
+    # …and the docstring's INSIDE claim is SWEPT, derived from the site's own span: every start
+    # strictly inside the range refused, the LAST-LINE offset (`span`, the degenerate single line)
+    # admitted, and every offset past the end refused. A sweep, because the figures cannot then be
+    # restated wrong — the defect above WAS a restated figure, and a literal is what expired.
+    for k in range(1, span + 4):
+        table[f"start offset {k} inside a span-{span} site, end exact"] = (
+            (name, lo + k, hi), k == span)
+    # ⛔ …and the predicate's docstring must name no artifact by LINE RANGE. A literal site
+    # expired twice here (round 21, and the +23-line hook that also widened the span), so a
+    # literal — qualified or bare — is the defect the offset rule exists to remove. Grade it.
+    literal = re.search(r"(?:[A-Za-z0-9_/.]+\.py)?:\d+(?:-\d+)?",
+                        _cites_a_site_in.__doc__ or "")
+    assert literal is None, (
+        f"`_cites_a_site_in`'s docstring cites {literal.group(0) if literal else ''} by line "
+        "range — state the vector as an offset from the span; a literal site expires with a "
+        "rebase, and one already made this sentence false once")
     wrong = {shape: got for shape, (cited, expected) in table.items()
              if (got := _cites_a_site_in(cited, one)) is not expected}
     assert not wrong, (
