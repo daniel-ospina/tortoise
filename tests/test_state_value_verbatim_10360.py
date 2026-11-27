@@ -7271,9 +7271,23 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
 # survival number is a property of a MODEL RUN, and running the arms again is
 # the only thing that moves it. An assertion on the number without the receipts
 # behind it would be exactly the quotation this issue exists to remove.
+#
+# ⛔ WHY THESE RECEIPTS LIVE IN THEIR OWN DIRECTORY (#14774, MEASURED ON CI).
+# `tests/eval/write_path/receipts/*.json` is also E4's candidate pool: the
+# capstone probe selects E4's artifact as the NEWEST receipt on the frozen
+# corpus (`capstone_measure.select_e4_receipt` — deliberately by each file's own
+# `corpus_hash`, never by name). These arm receipts ARE on the frozen corpus and
+# DO carry an `operator_audit`, so landing them in the shared root became E4's
+# artifact and moved its published number 5/15 -> 3/15, reddening
+# `test_7949_capstone_measure.py::test_the_e4_number_is_the_frozen_receipts_five_and_not_the_old_ones`
+# — a check that is red on this PR because of it. The layout doc already has the
+# home for this (`receipts/7947-arms-2026-10-18/` for `#7947`'s arms): an
+# experiment's arm receipts belong in their own subdirectory, which E4's
+# non-recursive `*.json` glob does not read. The derivation test below asserts
+# that scoping, so moving them back into the pool cannot be a silent change.
 
 _E2_RECEIPTS = (pathlib.Path(__file__).parent / "eval" / "write_path"
-                / "receipts")
+                / "receipts" / "10360-e2-arms-2026-11-27")
 _E2_BASELINE = (pathlib.Path(__file__).parent / "eval" / "write_path"
                 / "baselines" / "main.json")
 
@@ -7461,6 +7475,28 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
         "sample size is what the row states")
     assert len(off) == 2, f"expected 2 flags-off receipts, found {len(off)}"
 
+    # ⛔ AND THEY STAY OUT OF E4's CANDIDATE POOL (the CI red on this PR, not a
+    #    style rule). `receipts/*.json` is the pool
+    #    `capstone_measure.select_e4_receipt` reads, and it picks the NEWEST
+    #    receipt whose own `corpus_hash` matches the frozen pin — these arm
+    #    receipts are on the frozen corpus and carry an `operator_audit`, so in
+    #    the shared root they BECAME E4's artifact and moved its published number
+    #    5/15 -> 3/15, reddening
+    #    `test_7949_capstone_measure.py::test_the_e4_number_is_the_frozen_receipts_five_and_not_the_old_ones`.
+    #    The subdirectory is the layout's own home for an experiment's arm
+    #    receipts (`receipts/7947-arms-2026-10-18/`) and E4's glob is
+    #    non-recursive, so the scoping is a FACT this test asserts rather than a
+    #    convention the next lane has to remember.
+    _pool = _E2_RECEIPTS.parent
+    assert _pool.name == "receipts", (
+        "the arm receipts must live one level under the E4 pool, not inside it "
+        f"(they are in {_E2_RECEIPTS})")
+    _in_pool = sorted(p.name for p in _pool.glob("w2b-10360-e2-*.json"))
+    assert not _in_pool, (
+        f"E2 arm receipts are back in E4's candidate pool: {_in_pool} — the "
+        "capstone selector takes the newest on-pin receipt carrying an "
+        "`operator_audit`, so these would silently re-publish E4's number")
+
     # ⛔ THE ARM ITSELF (#14774 review P1, MEASURED). The filename was the ONLY
     #    thing tying a receipt to an arm: `resolved_config` carries posture/lanes/
     #    mode/seed and never env, and `posture == "llm"` below holds in BOTH arms.
@@ -7590,6 +7626,45 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
         stated_census,
         "the failure census it publishes beside 'THE LOSS CLASS IS THE USABLE "
         "RESULT' must be the one the receipts produce")
+
+    # 6c. ⛔ AND THE FIGURE SET IS EXACTLY THE DERIVED SET (#14774 review P2, the
+    #     residual `count == 1` leaves open, MEASURED). `_stated_once` asks
+    #     whether a figure appears once — so PERTURBING a figure in (b2) and
+    #     appending the correct string as a decoy ELSEWHERE IN (b2) leaves that
+    #     figure's count at 1 and every assertion GREEN (reproduced: `44/90 =
+    #     48.9%` -> `49.9%` plus a `44/90 = 48.9%` decoy in (b2) passed this test
+    #     on the previous head). The derived clause publishes a CLOSED set of
+    #     figures, so compare the SET, not each member's count: a decoy adds a
+    #     figure nobody derived and a perturbation removes one that was. The one
+    #     exception is the retired `#5064` reading, which (b2) quotes on purpose
+    #     to say what this replaces; that sentence is cut off before the scan, and
+    #     its presence is required, so "no stray figure" cannot be satisfied by
+    #     deleting the history either.
+    _retired_quote = ("The `38/77 = 49.4%` / `UNMEASURED(<an E2 LLM arm run>)` "
+                      "reading this replaces")
+    assert _retired_quote in flattened, (
+        "clause (b2) must still name the reading it replaces — the pre-receipt "
+        "`38/77` quote is the record of what this measurement closes")
+    _derived_region = flattened.split(_retired_quote)[0]
+    _derived_figures = [
+        f"{r['survived']}/{r['total']} = {_pct_1dp(r['survived'], r['total'])}"
+        for r in on + off]
+    for arm, runs in (("flags-on", on), ("flags-off", off)):
+        mean_survived = sum(r["survived"] for r in runs) / len(runs)
+        mean_total = sum(r["total"] for r in runs) / len(runs)
+        _derived_figures.append(
+            f"{_count(mean_survived)}/{_count(mean_total)} = "
+            f"{_pct_1dp(mean_survived, mean_total)}")
+    _derived_figures.append(
+        f"{base_survived}/{base_total} = {_pct_1dp(base_survived, base_total)}")
+    _scan = re.findall(
+        r"\d+(?:\.\d+)?/\d+(?:\.\d+)? = \d+(?:\.\d+)?%", _derived_region)
+    assert sorted(_scan) == sorted(_derived_figures), (
+        "clause (b2) publishes figures that are not exactly the ones the receipts "
+        f"derive — unexpected {sorted(set(_scan) - set(_derived_figures))}, "
+        f"missing {sorted(set(_derived_figures) - set(_scan))} "
+        "(a decoy figure elsewhere in (b2) satisfies a per-figure `count == 1` "
+        "while the clause states a perturbed one — #14774 review P2)")
 
     # 7. THE VERDICT THE ROW RECORDS, held to the artifacts. Three clauses, each
     #    a different claim, so each gets its own assertion:

@@ -959,10 +959,10 @@ mechanisms:
       not in the point's CONTENT at all, so no rule that acts on an
       already-emitted point (this refusal, or any repair/merge arm) can recover
       it. ⚠️ THE RECEIPTS ARE DURABLE AND THE FIGURES ARE DERIVED FROM THEM:
-      `tests/eval/write_path/receipts/w2b-10360-e2-on-{1,2,3,4}-2026-11-27.json`
+      `tests/eval/write_path/receipts/10360-e2-arms-2026-11-27/w2b-10360-e2-on-{1,2,3,4}-2026-11-27.json`
       and `…-off-{1,2}-2026-11-27.json`, with the arm definition (and what may
       NOT be concluded) in
-      `tests/eval/write_path/receipts/10360-E2-ARMS-2026-11-27.md`; this clause
+      `tests/eval/write_path/receipts/10360-e2-arms-2026-11-27/10360-E2-ARMS-2026-11-27.md`; this clause
       is re-derived from those files by
       `tests/test_state_value_verbatim_10360.py::test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts`,
       which also resolves the arm definition itself and requires the two arms to
