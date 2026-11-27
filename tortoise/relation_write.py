@@ -179,6 +179,15 @@ arm — including the four where it did not (#11548 round 3 P2 + review F3):
   arms used to append per repetition and report ``dropped=2`` for a population
   the landing arms call ``1``. :func:`_drop_once` applies the same identity to
   them.
+* ⚠️ TWO statements that become the SAME edge after the ORIENTATION leg ran
+  (``A owns B`` and ``B --ownedBy--> A``, #14304) are the same edge and count
+  once, exactly as a literal repeat does — the second one hits the plan's
+  identity key AFTER the ends were oriented, so it is deduped rather than
+  planned as a second, opposite edge. Before #14304 the two produced two
+  mutually-contradicting edges; that was the defect, not the accounting. Named
+  here because it is the one place a reader reconciling ``written + dropped +
+  folded`` against the STATED population can see ``1`` for ``2`` statements
+  without a fold or a drop to explain it, and the explanation is this bullet.
 
 RESIDUALS THIS LEG DOES NOT CLOSE (measured, not assumed)
 ---------------------------------------------------------
@@ -748,6 +757,14 @@ def plan_relation_edges(
     #: un-writable statement is one statement, exactly as it is on the landing
     #: arms (see :func:`_drop_once`).
     seen_drops: set[tuple[str, str, str, str | None]] = set()
+    #: The packs' declared relation pairs, read ONCE per plan (#14304) — the
+    #: same lazy read the pair leg makes per door write, hoisted so a capture
+    #: with thirty relations does not rebuild the table thirty times.
+    #: ``None`` = the declarations could not be read, in which case the
+    #: orientation leg abstains for EVERY relation rather than re-reading per
+    #: row and answering differently for two rows of one capture.
+    declared_pairs: dict | None = None
+    declared_pairs_read = False
     for rel in relations or ():
         if not isinstance(rel, dict):
             continue
@@ -777,7 +794,17 @@ def plan_relation_edges(
         # ``src``/``dst`` NAMES are deliberately left as STATED: they identify
         # the statement (a drop row quotes them back to the caller), while
         # ``src_id``/``dst_id`` are what the graph is asked to hold.
-        orientation = _declared_orientation(predicate, src_kind, dst_kind)
+        if not declared_pairs_read:
+            declared_pairs_read = True
+            try:
+                from .relation_guards import declared_relation_pairs
+
+                declared_pairs = declared_relation_pairs()
+            except Exception:  # noqa: BLE001, RUF100 — a gate read must not raise
+                declared_pairs = None
+        orientation = (_declared_orientation(predicate, src_kind, dst_kind,
+                                             declared_pairs)
+                       if declared_pairs is not None else None)
         if orientation is not None:
             src_id, dst_id = dst_id, src_id
             src_kind, dst_kind = dst_kind, src_kind
