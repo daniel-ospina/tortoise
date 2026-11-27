@@ -1998,6 +1998,56 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
         f"REPORT §8.23 states the END sweep reaches 1..{reported_max} while the rows the table "
         f"carries reach 1..{max(swept_end)} on the span-{span} site — the docstring's copy of "
         "this extent is graded, so the evidence document's copy may not drift from it")
+    # ⛔ AND THE TWO ROUND RECORDS THIS ROUND WROTE MAY NOT RESTATE THE BOUNDARY AS LITERAL
+    # POSITIONS (#14723, round 33). Round 32 graded `_cites_a_site_in`'s copy of the refused
+    # inside range and this arm's own docstring copy, and left the copies the round ITSELF wrote
+    # free: §8.27's mutant row named "offset `19` on the span-20 site", §8.28's closing sentence
+    # quoted "refuses 1..19 on a span-20 site", and §8.27's opening paragraph restated the start
+    # sweep's extent as `1..span + 3`. The first two are that figure AT ONE SITE — they go false
+    # the moment the shaping site moves, which is exactly what happened once already (span 19 ->
+    # 20) and what round 22 exists for — and all three were mutable with the suite GREEN:
+    # measured at `15d8e247d2ca`, each applied alone with the file restored byte-for-byte
+    # (`sha256sum` compared): §8.27 `19` -> `18` **103 passed** · §8.27 `span-20` -> `span-21`
+    # **103 passed** · §8.28 `1..19` -> `1..18` **103 passed** · §8.28 `span-20` -> `span-21`
+    # **103 passed** · §8.27 `1..span + 3` -> `1..span + 4` **103 passed** · §8.27's extent
+    # sentence deleted outright **103 passed**.
+    # The two boundary copies are stated in SPAN FORM now — the form both docstrings use and the
+    # form the rule's own docstring requires ("STATE THIS RULE AS AN OFFSET FROM THE SPAN, NEVER
+    # AS LITERAL POSITIONS") — so they cannot expire on a rebase, and all three are graded against
+    # a derivation here so they cannot drift by one offset either. A reword back into literal
+    # positions fails the needle rather than passing silently.
+    section_827 = next((s for s in sections if s.startswith("8.27 ")), None)
+    section_828 = next((s for s in sections if s.startswith("8.28 ")), None)
+    for where, prose, form in (
+            ("§8.27's mutant row", section_827,
+             r"the last inside offset, `span\s*-\s*(\d+)`, on that site"),
+            ("§8.28's closed-residual sentence", section_828,
+             r"the predicate refuses `?1\.\.span\s*-\s*(\d+)`? on that site"),
+    ):
+        assert prose, (
+            f"REPORT no longer carries {where} — the refused inside boundary it states is "
+            "graded here, so the section may not be renumbered or deleted away silently")
+        copy = re.search(form, re.sub(r"\s+", " ", prose))
+        assert copy, (
+            f"REPORT {where} no longer states the refused inside boundary in SPAN FORM as "
+            f"{form!r} — it may not be dropped, and it may not be reworded back into literal "
+            "positions, which is the form that expired when this site went span 19 -> 20")
+        assert span - int(copy.group(1)) == max(inner_refused), (
+            f"REPORT {where} states the refused inside boundary as 1..span - {copy.group(1)} "
+            f"while the predicate refuses 1..{max(inner_refused)} on a span-{span} site — the "
+            "report documents a boundary one offset away from the one this arm grades")
+    assert section_827, "REPORT no longer carries §8.27 — its extent copy is graded here"
+    extent_827 = re.search(r"the start sweep's UPPER extent \(`1\.\.span\s*\+\s*(\d+)`\)",
+                           re.sub(r"\s+", " ", section_827))
+    assert extent_827, (
+        "REPORT §8.27 no longer states the start sweep's upper extent as "
+        "\"the start sweep's UPPER extent (`1..span + <n>`)\" — it is graded against the "
+        "docstring's own extent sentence, so it may not be dropped silently")
+    assert int(extent_827.group(1)) == int(stated_past.group(1)), (
+        f"REPORT §8.27 states the start sweep's upper extent as 1..span + "
+        f"{extent_827.group(1)} while the docstring states 1..span + {stated_past.group(1)} — "
+        f"the report's copy claims a sweep the loop does not run (measured: the copy deleted "
+        "outright left 103 passed)")
     # …and REPORT's copies, which are the ones a reader of the EVIDENCE doc actually meets. The
     # slack copy is a REGEX, not a needle, because it is the same figure the docstring copy is
     # graded on and it sits one line below §8.20's allowance needle (#14723, round 28: measured

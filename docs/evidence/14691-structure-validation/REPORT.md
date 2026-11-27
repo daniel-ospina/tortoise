@@ -1270,7 +1270,7 @@ Measured at `b6ca61743b82`, each mutant applied alone and the file restored byte
 
 | mutant | result | what became false |
 |---|---|---|
-| predicate docstring `` `1` through `span - 1` `` → `` `span - 2` `` | **103 passed** | an inside start the predicate REFUSES is stated as admitted (offset `19` on the span-20 site) |
+| predicate docstring `` `1` through `span - 1` `` → `` `span - 2` `` | **103 passed** | an inside start the predicate REFUSES is stated as admitted (the last inside offset, `span - 1`, on that site) |
 | the same figure's lower bound `` `1` `` → `` `2` `` | **103 passed** | offset `1` is stated as admitted |
 | the sentence deleted outright | **103 passed** | nothing — the rule's only statement of the refused range is gone |
 
@@ -1326,9 +1326,49 @@ That residual copy is closed in the same round: this arm's own docstring states 
 *"`1..span - 1` refused and `span` admitted"*, and it is now compared against the same derived
 maximum. Measured at the round-31 head, that copy's `1..span - 1` → `1..span - 2` left all
 **103 passed** while the sentence claimed an inside start the predicate refuses is admitted; with
-the arm in place the same mutant reds with *"this arm's docstring refuses inside starts
-1..span - 2 while the predicate refuses 1..19 on a span-20 site"*. No artifact, pin, row or
-predicate changed; no new test file, so no `config/ci-surfaces.yml` row is needed.
+the arm in place the same mutant reds, saying exactly that: the predicate refuses `1..span - 1` on
+that site, and the arm's docstring had stated one inside offset less than that. No artifact, pin,
+row or predicate changed; no new test file, so no `config/ci-surfaces.yml` row is needed.
+
+### 8.29 Round 33 — the copies THIS round wrote were the ones nothing graded
+
+Round 32's five mutants red — re-measured here at `15d8e247d2ca`, each applied alone with the file
+restored byte-for-byte (`sha256sum` compared): the predicate admitting start offset `1` inside reds
+on the new `inner_admitted` limb ("ADMITS start offset(s) [1] strictly inside a span-20 site");
+this arm's docstring `1..span - 1` → `1..span - 2` reds on the new arm-docstring limb; the
+predicate docstring's `span - 1` → `span - 2` and `` `1` `` → `` `2` `` red; the sentence deleted
+reds; control **103 passed**. The derivation round 32 claims therefore holds — the refusal set is
+the predicate's own answers, not the table's declaration.
+
+What it left free is the copies it WROTE. §8.27's mutant row named the boundary as *"offset `19` on
+the span-20 site"*, §8.28's closing sentence quoted *"refuses 1..19 on a span-20 site"*, and
+§8.27's opening paragraph restated the start sweep's extent as `1..span + 3`. The first two are
+that figure **at one site**: they go false the moment the shaping site moves, which is the defect
+round 22 was opened for (the site did go span 19 → 20). All three were mutable with the suite
+GREEN — measured at `15d8e247d2ca`, each applied alone and the file restored byte-for-byte
+(`sha256sum` compared):
+
+| mutant | result |
+|---|---|
+| §8.27 "offset `19`" → "offset `18`" | **103 passed** |
+| §8.27 "span-20 site" → "span-21 site" | **103 passed** |
+| §8.28 "1..19" → "1..18" | **103 passed** |
+| §8.28 "span-20 site" → "span-21 site" | **103 passed** |
+| §8.27 "`1..span + 3`" → "`1..span + 4`" | **103 passed** |
+| §8.27's extent sentence deleted outright | **103 passed** |
+
+**Fix (the literals are removed, and the span-form copies are derived).** §8.27's row and §8.28's
+sentence now state the boundary in SPAN FORM — the form both docstrings use, and the form the rule's
+own docstring requires (*"STATE THIS RULE AS AN OFFSET FROM THE SPAN, NEVER AS LITERAL POSITIONS"*)
+— so neither can expire on a rebase, and the arm parses both against the same derived maximum it
+uses for the docstrings, plus §8.27's extent against the docstring's own extent sentence. A copy
+reworded back into literal positions fails the needle rather than passing silently.
+
+Mutants at this head, each applied alone, file restored byte-for-byte: §8.27 `span - 1` →
+`span - 2` RED · §8.28 `1..span - 1` → `1..span - 2` RED · §8.27 `1..span + 3` → `1..span + 4` RED ·
+§8.27's boundary sentence deleted RED · §8.28's boundary sentence deleted RED · control **103
+passed**. No artifact, pin, row or predicate changed; no new test file, so no
+`config/ci-surfaces.yml` row is needed.
 
 ---
 
