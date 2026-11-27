@@ -236,15 +236,16 @@ token is the `never` in the D-3 pointer rule ("New prose here names a location b
 code symbol, and **never** an issue"). It is called out here, in §1.1, and on the approval line so
 it cannot be mistaken for a removal.
 
-Both halves of D-3 are deliberately **scoped to new prose**, and the scope is load-bearing, not
-stylistic. The neighbouring `as history` clause is guarded the same way (§1.3's change list, item 3)
-and for the same reason: an unconditional rule would be false in every shape where a batch has not
-been approved.
-A strict-zero claim in the header would also contradict the `ONTOLOGY.md:36` carve-out in the one
-shape this document itself offers as the minimal-risk landing — **all batches with `P-1` rejected**
-(§F.3) — where 17 location refs stay. Scoped, `P-3` and `P-1` are independent: `P-1` decides whether
-the *existing* location refs survive, `P-3` decides what *new* prose may mint. Approach it as
-"never numbers anywhere" and both become false the moment one batch is deferred.
+The two sentences the header **gains** — D-3's changelog pointer and `P-3`'s naming rule — are
+deliberately **scoped to new prose**, and the scope is load-bearing, not stylistic. `D-3`'s other
+half is NOT scoped: its strict-zero target for the 323 existing `#NNNN` is the whole-model goal that
+the batches below carry out (`:64`, and §1.8's `P-1`). The neighbouring `as history` clause is
+guarded the same way (§1.3's change list, item 3) and for the same reason: an unconditional rule
+would be false in every shape where a batch has not been approved. An unscoped version of the header
+rule would also contradict the `ONTOLOGY.md:36` carve-out in the shape §F.3 offers as the
+minimal-risk landing — **all six batches with `P-1` and `P-4` rejected**, where **18** references
+stay. Scoped, `P-3` and `P-1` are independent: `P-1` decides whether the *existing* location refs
+survive, `P-3` decides what *new* prose may mint.
 
 **Deliberately NOT counted, and stated so it cannot look like an oversight:** the header also
 gains *"Anything that records when something was decided… belongs in
@@ -426,7 +427,7 @@ than removing a citation from them, and each is separately rejectable.
 |---|-----------|------------------------|--------------------|
 | **P-1** | **The carve-out at the tail of `ONTOLOGY.md:36` is removed.** The source says a reference recording *where a term or decision lives* (`validTo`'s registration, `c_cal`) *"is not history and **stays**"*. D-3's strict-zero target removes that category too. | The source header protects this category explicitly. A change that removes it is a **policy change**, not an application of the existing rule — the header's own sentence even calls the removal of history refs *"a separate change"* while marking location refs as out of scope. Presenting this as "the change the sentence leaves open" would misrepresent it. | **Restore the carve-out**: location refs (`#909 §4.3 #11` at `:405`, `#909 §4.3 #10` at `:398`) stay, and the model keeps **17** references (the `#NNNN §x.y` form: 16 × `#909 §4.3`, 1 × `#5013 §4.4`). The rest of this proposal is unaffected, and **`P-3` does NOT have to be rejected with it**: `P-3`'s rule is scoped to *new prose*, so it governs what the document mints from here on and says nothing about the 17 pointers the carve-out keeps. |
 | **P-2** | **`v3.38` → `v3.39`, in the frontmatter `title:` and the H1, with `updated:` → `2026-11-23`.** | Those lines are part of the exact change the owner approves (`ONTOLOGY-CHANGELOG.md:585`), and a proposal that bumps one and not the other leaves the file asserting two versions. | Keep `v3.38`; the diff then contains no version change and the changelog entry records the model change without a version number. |
-| **P-3** | **The header gains one normative sentence** — new prose names a location by section or by code symbol, never by an issue — plus the single changelog pointer. The sentence is scoped to *new prose* on purpose: unscoped, it would contradict `P-1`'s carve-out in the shape §F.3 recommends (all batches, `P-1` rejected). | It is the only place in this proposal where the model **gains** a rule, and additions to an owner-gated document deserve their own line. | The pointer stays in the changelog and this file names no rule about naming; the remaining batches then have no header to lean on for "no numbers, ever". |
+| **P-3** | **The header gains one normative sentence** — new prose names a location by section or by code symbol, never by an issue — plus the single changelog pointer. The sentence is scoped to *new prose* on purpose: unscoped, it would contradict `P-1`'s carve-out in the shape §F.3 recommends (all six batches, `P-1` and `P-4` rejected — 18 refs stay). | It is the only place in this proposal where the model **gains** a rule, and additions to an owner-gated document deserve their own line. | The pointer stays in the changelog and this file names no rule about naming; the remaining batches then have no header to lean on for "no numbers, ever". |
 
 **Nothing else in Batch 1 changes a policy.** If P-1, P-2 and P-3 are all rejected, Batch 1
 reduces to: nine citations removed from §2, the header untouched, and §1 untouched.
