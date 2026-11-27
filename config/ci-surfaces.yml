@@ -63,7 +63,7 @@ version: 1
 # possessive spelling here credited the fold's own row to this branch. ⛔ NOT because "the two
 # manifests are byte-identical" — that is FALSE, and what makes it false is a DURABLE fact rather than
 # a head-bound figure (#14587 review cycle 15, P2: this sentence carried a numstat pair for "this
-# head", which moved at EVERY repair commit on this branch as its own prose was rewritten, so a
+# head", which kept moving as its own prose was rewritten, so a
 # reader checking it got a different number and distrusted the claim it supported — which is why no
 # such pair is quoted here; `git log --numstat` is the reading): the two manifests' DATA rows differ
 # by ONE line in one row's inline note, while the
