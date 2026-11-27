@@ -294,7 +294,7 @@ version: 1
 # spliced copy belongs.
 # ⛔ NO WINDOW IS STATED HERE, and the reason is a measurement: "the folds after `a0cea310786d`
 # touched nothing" was FALSE in this very paragraph — a later fold moved seventeen lines of this
-# block. ⛔ THAT FOLD IS NOT NAMED HERE ON PURPOSE: three shas measured on a SIBLING branch's folds
+# block. ⛔ THAT FOLD IS NOT NAMED HERE ON PURPOSE: shas measured on a SIBLING branch's folds
 # had entered this paragraph as facts about THIS branch, and #14723's review measured them absent
 # from this history — so `git merge-base --is-ancestor <sha> HEAD` is the test before any sha is
 # restated as a fact here, and a fact that loses that test belongs on the commit/lane that measured
@@ -330,7 +330,7 @@ version: 1
 # INTO, then keep ONE sentence.
 #
 # ⛔ NO PER-FILE SHARD LETTER IS RECORDED HERE. A letter is a measurement of the greedy packer, so
-# it is false one fold later and no test reads it; a sweep that deleted seven of eight false letters
+# it is false one fold later and no test reads it; a sweep that deleted false letters
 # once missed a survivor for exactly that reason. State the RULE, let the graded clause above carry
 # the names, and cite the sha you measured the letter at inside the fenced span below.
 # ⛔ One exemption, and it is FENCED rather than inferred: prose inference from "measured at …"
