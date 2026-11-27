@@ -4616,12 +4616,21 @@ def write_live_record(record: Mapping[str, Any], *,
             # NEITHER store and has no position row to re-refuse. Saying it
             # anyway sends the operator to a repair path with no line to replay,
             # which is the exact misdirection splitting this token out of
-            # `write_failed` exists to end. ⛔ EVERY arm that names the
-            # journal's PROVENANCE branches on this flag — the ALLOCATOR arm
-            # above (`allocator_journal_clause`), the generic `write_failed` arm
-            # below, and this one — so it is the FLAG, not the arm, that selects
-            # the sentence; an unqualified copy left behind in any of them is the
-            # defect this note exists to stop.
+            # `write_failed` exists to end. ⛔ EVERY arm REACHABLE ON THE
+            # RECORD-ONLY ARM branches on this flag — the ALLOCATOR arm above
+            # (`allocator_journal_clause`), the generic `write_failed` arm below,
+            # and this one — so it is the FLAG, not the arm, that selects the
+            # sentence; an unqualified copy left behind in any of them is the
+            # defect this note exists to stop. ⛔ TWO OTHER arms name the journal's
+            # provenance UNCONDITIONALLY and are exempt because they cannot fire
+            # there: `journal_collision` and `position_divergence` are unreachable
+            # when `journal_skipped` is set — that flag forces `allocate`
+            # (:4273), an allocated plan writes the position through
+            # `ALLOCATION_SQL` rather than the journal INSERT the collision guard
+            # keys on (`record_projection.py:9122`), and `position_divergence` is
+            # additionally guarded by `allocate and seq is not None` (:4423),
+            # which a skipped append never has. Do not "fix" them; grep for arms
+            # that BOTH name the provenance AND are reachable on this flag.
             journal_clause = (
                 "the record reached NEITHER store (the caller did not append: "
                 "this graph was cut over, so the journal holds no line); "
