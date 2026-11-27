@@ -1893,8 +1893,10 @@ def derived_embedding_columns(
       `_upsert_object`/`_upsert_subject` call `encode_for_row(name)`
       unconditionally, so the record derives from `name`; the split REFUSES a
       carried `embedding` (`DERIVED_COLUMNS`) and `_declared_mutations` BINDS the
-      derived value into its column after the split (`record_projection.py:6815-6816`:
-      "Bound AFTER the split and not merged into `props`") — the derived value is
+      derived value into its column after the split (``_declared_mutations`` in
+      ``record_projection.py``: "Bound AFTER the split and not merged into
+      ``props``" — the quoted FRAGMENT is the citation, never a line number);
+      the derived value is
       what the row holds, and it gets there by binding, never by overriding the
       snapshot;
     * nothing is derived where the graph suppresses the write — an `EventRecorded`
@@ -3968,7 +3970,11 @@ def _plan_refusal_cause(
     the exclusion here AND at the stamp leaves it GREEN. What holds it is the
     marker's ABSENCE. ⛔ AND THE EXCLUSION BELOW IS DEFENCE IN DEPTH THAT CANNOT
     FIRE WHILE THE STAMP'S OWN EXCLUSION STANDS (measured): the stamp refuses a
-    ``RecordStatementError`` (``record_projection.py:9081-9083``), so a raise that
+    ``RecordStatementError`` (``record_projection.replay``'s plan-build stamp —
+    the ``if not isinstance(exc, (RecordStatementError,
+    JournalPositionCollision))`` guard; cited by SYMBOL because a line number
+    here ROTS: the two attempts this parenthetical has carried were both off by
+    one by the time they shipped, #11783 round 29), so a raise that
     moved INSIDE ``replay_plan`` would be unstamped rather than exempted here, and
     this type test does work only once THAT one is removed or narrowed. The pin
     that exercises this boundary is ``test_record_searchkeys_10620.py::
@@ -4735,7 +4741,9 @@ def write_live_record(record: Mapping[str, Any], *,
             # cannot fire on this arm at all — the flag forces `allocate`
             # (:4273) and an allocated plan writes the position through
             # `ALLOCATION_SQL` rather than the journal INSERT the collision guard
-            # keys on (`record_projection.py:9132`); `position_unverifiable` is
+            # keys on (``replay``'s ``_JOURNAL_INSERT_PREFIX`` call site — by
+            # SYMBOL, not a line number: the number that stood here was off by
+            # one on arrival, #11783 round 29); `position_unverifiable` is
             # exempt by its OWN guard (`and not journal_skipped`, :4281) rather
             # than by reachability; and `position_divergence` is unreachable FROM
             # `live_write` only WHEN IT SETS THIS FLAG, which passes `seq=None`

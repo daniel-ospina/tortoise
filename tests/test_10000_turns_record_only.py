@@ -3218,7 +3218,10 @@ def test_the_write_path_vocabulary_does_not_call_a_statement_failure_an_outage()
 
     ⛔ FOUR ASSERTIONS, FOUR DIFFERENT READINGS — measured in-process against
     this module's own ``__doc__`` (no tree edit; re-measured 2026-11-27, #11783
-    round 28):
+    round 28). They are the four rows of ``_WRITE_FAILED_NEEDLES``, asserted by
+    the ONE loop below rather than four inline `assert`s, so a reading cannot be
+    dropped from the assertions while the table above still promises it
+    (round 29 P3). In table order:
 
     * the branch's PREDECESSOR bullet (``* ``write_failed`` is the record being
       UNREACHABLE, or a connection/statement failing — ``degraded``
@@ -3247,33 +3250,28 @@ def test_the_write_path_vocabulary_does_not_call_a_statement_failure_an_outage()
     bullet = doc[start:]
     nxt = bullet.find("\n* ``", 1)
     bullet = bullet[:nxt] if nxt != -1 else bullet
-    assert "UNREACHABLE" in bullet, (
-        "the `write_failed` bullet no longer names the UNREACHABLE half")
-    assert "statement" in bullet.lower(), (
-        "the `write_failed` bullet no longer names the half that REACHED the "
-        "store and failed there — the population a replay re-refuses")
-    assert "not an outage" in bullet, (
-        "the `write_failed` bullet applies `degraded` to the STATEMENT half: "
-        "`degraded` is 'configured but could not be REACHED' (this module's "
-        "own definition) and a statement that ran proves the store WAS "
-        "reached, so that half is an impairment, not an outage")
-    assert "FOR THAT HALF" in bullet, (
-        "the `degraded`-literal claim is not scoped to the unreachable half — "
-        "as a whole `write_failed` is not the literal fit (the bullet above "
-        "says `circuit_open` is, and the size sentence derives its count as "
-        "the members that are NOT a measured outage); if the wording moved, "
-        "update this needle rather than dropping the scope")
+    # ⛔ THE NEEDLES ARE ONE LIST, ITERATED HERE AND GRADED BELOW — not two
+    # copies of the same four readings. `_WRITE_FAILED_NEEDLES` is the single
+    # definition: THIS loop asserts every row of it, and
+    # `_write_failed_bullet_reds` scores the same rows, so neither the four
+    # assertions nor the mutation table above can be narrowed by deleting a
+    # needle from one side (round 29 P3: an AST-drop of
+    # `assert "FOR THAT HALF" in bullet` from this body left the leg GREEN,
+    # because the four assertions and the table were separate definitions).
+    for needle, case_insensitive, message in _WRITE_FAILED_NEEDLES:
+        haystack = bullet.lower() if case_insensitive else bullet
+        assert needle in haystack, message
 
     # ⛔ THE MUTATION TABLE ABOVE IS ENFORCED HERE, not merely written down:
     # two revisions of this docstring stated mutations that were never
-    # re-measured (round 27 P3, round 28 P2). `_write_failed_bullet_reds` is the
-    # shared definition of the four needles, and each historical bullet below is
+    # re-measured (round 27 P3, round 28 P2). Each historical bullet below is
     # the RECORDED text it claims to be, so a needle edit that invalidates the
     # table reddens this leg instead of leaving a false claim for the next
     # reviewer to trust.
     assert _write_failed_bullet_reds(bullet) == [], (
-        "the four assertions above and `_write_failed_bullet_reds` disagree — "
-        "they are two copies of ONE definition; update both")
+        "the assertion loop above and `_write_failed_bullet_reds` disagree — "
+        "they read `_WRITE_FAILED_NEEDLES`, so this can only mean a needle "
+        "was made unreadable; fix the list, not this call")
     assert _write_failed_bullet_reds(PREDECESSOR_WRITE_FAILED_BULLET) == [3, 4], (
         "the predecessor bullet no longer reddens the THIRD and FOURTH "
         "assertions — re-measure the table in this docstring rather than "
@@ -3305,23 +3303,47 @@ ORIGIN_MAIN_WRITE_FAILED_BULLET = (
     "  projection — an impairment, not an outage;")
 
 
-def _write_failed_bullet_reds(bullet: str) -> list[int]:
-    """Which of the four assertions above red on ``bullet``, 1-based.
+# ⛔ THE FOUR NEEDLES, ONCE. `(needle, case_insensitive, failure_message)` in
+# the order the docstring's mutation table calls them 1-4. The leg's assertion
+# LOOP iterates this tuple and `_write_failed_bullet_reds` grades it, which is
+# what makes "the mutation table is enforced here" true rather than aspirational
+# (round 29 P3). Add a reading by adding a row; do not re-inline an `assert`.
+_WRITE_FAILED_NEEDLES: tuple[tuple[str, bool, str], ...] = (
+    ("UNREACHABLE", False,
+     "the `write_failed` bullet no longer names the UNREACHABLE half"),
+    ("statement", True,
+     "the `write_failed` bullet no longer names the half that REACHED the "
+     "store and failed there — the population a replay re-refuses"),
+    ("not an outage", False,
+     "the `write_failed` bullet applies `degraded` to the STATEMENT half: "
+     "`degraded` is 'configured but could not be REACHED' (this module's "
+     "own definition) and a statement that ran proves the store WAS "
+     "reached, so that half is an impairment, not an outage"),
+    ("FOR THAT HALF", False,
+     "the `degraded`-literal claim is not scoped to the unreachable half — "
+     "as a whole `write_failed` is not the literal fit (the bullet above "
+     "says `circuit_open` is, and the size sentence derives its count as "
+     "the members that are NOT a measured outage); if the wording moved, "
+     "update this needle rather than dropping the scope"),
+)
 
-    The shared definition of the needles, so the mutation table in
+
+def _write_failed_bullet_reds(bullet: str) -> list[int]:
+    """Which of the four needles red on ``bullet``, 1-based.
+
+    The SAME rows the leg's assertion loop iterates (``_WRITE_FAILED_NEEDLES``),
+    so the mutation table in
     ``test_the_write_path_vocabulary_does_not_call_a_statement_failure_an_outage``
-    is measured rather than asserted in prose.
+    is measured rather than asserted in prose — and deleting a row from the list
+    narrows both the assertions and the table at once, instead of leaving one of
+    the two claiming a reading the other no longer makes.
     """
-    reds = []
-    if "UNREACHABLE" not in bullet:
-        reds.append(1)
-    if "statement" not in bullet.lower():
-        reds.append(2)
-    if "not an outage" not in bullet:
-        reds.append(3)
-    if "FOR THAT HALF" not in bullet:
-        reds.append(4)
-    return reds
+    return [
+        index
+        for index, (needle, case_insensitive, _message) in enumerate(
+            _WRITE_FAILED_NEEDLES, 1)
+        if needle not in (bullet.lower() if case_insensitive else bullet)
+    ]
 
 
 # ── the demo seeders are writers too (the population, not the capture path) ──
