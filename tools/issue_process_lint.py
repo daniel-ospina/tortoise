@@ -1860,7 +1860,16 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
     # overrode the qualifier: `Closes #N (row V2 only)` + an unticked checklist read `clean`, the
     # false PASS this arm exists for. A `Satisfies` line is now read under the same polarity rules
     # every other read uses, and only where the closing line named nothing.
-    named |= _satisfies_claim(text, issue, rows, repo)
+    # ⛔ AND "ONLY WHERE THE CLOSING LINE NAMED NOTHING" IS THE GUARD, NOT A DESCRIPTION (review round
+    # 18, F1). The polarity fix above left the union itself UNCONDITIONAL, so the precedence this
+    # block states was never enforced: `Closes #N (row V2 only)` + `Satisfies #N: V1 … V6` — a lane
+    # copying the process doc's own complete-close form under a qualified closing line — unioned the
+    # other five in and read `clean`, which is the arm's headline false PASS. The union also EXTENDED
+    # a closing line's claim with a body line's rows (`(row V2 only)` + `Satisfies #N: V5` claimed
+    # both). A closing line that named at least one row is the claim; `Satisfies` is consulted only
+    # when it named none, which keeps a bare `Closes #N` + a complete `Satisfies` reading clean.
+    if not named:
+        named |= _satisfies_claim(text, issue, rows, repo)
     return named, disclaimed
 
 

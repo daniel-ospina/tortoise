@@ -4415,21 +4415,40 @@ def test_a_fully_qualified_closing_ref_is_read_with_its_repo(body, expected, unc
         assert findings == [], [f.as_dict() for f in findings]
 
 
-@pytest.mark.parametrize("body,expected", [
+@pytest.mark.parametrize("body,expected,unclaimed", [
     # the documented partial form still CLAIMS when it is an affirmative statement, bare or
     # fully-qualified (round 17, F2 — the qualified form was simply not matched, so the claim vanished)
-    ("Closes #13036\n\nSatisfies #13036: V2\n", "finding"),
-    ("Closes #13036\n\nSatisfies daniel-ospina/tortoise#13036: V2\n", "finding"),
+    ("Closes #13036\n\nSatisfies #13036: V2\n", "finding", None),
+    ("Closes #13036\n\nSatisfies daniel-ospina/tortoise#13036: V2\n", "finding", None),
     # …and it still CLOSES when it names every row
-    ("Closes #13036\n\nSatisfies #13036: V1, V2, V3, V4, V5, V6\n", "clean"),
+    ("Closes #13036\n\nSatisfies #13036: V1, V2, V3, V4, V5, V6\n", "clean", None),
     # …while an UNTICKED template claims nothing at all (it is a mention, so the verdict is the honest
     # non-answer, never a pass)
-    ("Closes #13036\n\n- [ ] Satisfies #13036: V1, V2, V3, V4, V5, V6\n", "ambiguous"),
+    ("Closes #13036\n\n- [ ] Satisfies #13036: V1, V2, V3, V4, V5, V6\n", "ambiguous", None),
+    # ⛔ AND THE CLOSING LINE WINS WHERE IT NAMED ANYTHING (review round 18, F1). The precedence the
+    # block above `_closing_line_claim`'s return states was unenforced: this shape — a lane copying
+    # the process doc's own complete-close form beneath a qualified closing line — unioned the other
+    # five rows in and read `clean`, the arm's headline false PASS. This row is what makes the rule
+    # vary under test; it did not, which is why the guard could ship missing.
+    ("Closes #13036 (row V2 only).\n\nSatisfies #13036: V1, V2, V3, V4, V5, V6\n",
+     "finding", ["V1", "V3", "V4", "V5", "V6"]),
+    # …and the union may not EXTEND a closing line's claim either: consulting `Satisfies` here would
+    # report both rows as claimed, so the disclosure of V5 would erase V2's qualifier.
+    ("Closes #13036 (row V2 only).\n\nSatisfies #13036: V5\n",
+     "finding", ["V1", "V3", "V4", "V5", "V6"]),
+    # CONTROL: the same `Satisfies` line with NO closing-line claim is still read — a bare `Closes`
+    # names nothing, so precedence does not suppress it. Without this row the guard could be
+    # "fixed" by dropping `_satisfies_claim` entirely and no case would redden.
+    ("Closes #13036\n\nSatisfies #13036: V5\n", "finding", None),
 ])
-def test_the_satisfies_form_is_read_under_its_own_polarity(body, expected):
+def test_the_satisfies_form_is_read_under_its_own_polarity(body, expected, unclaimed):
     rows = L.row_ids([CAPSTONE_BODY])
     findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)},
                                               "daniel-ospina/tortoise")
     assert stats[expected] == 1, (body, stats)
     if expected == "finding":
-        assert findings[0].evidence["claimed"] == ["V2"], findings[0].evidence
+        assert findings[0].evidence["claimed"], findings[0].evidence
+        assert set(findings[0].evidence["claimed"]) < set(rows), findings[0].evidence
+        if unclaimed is not None:
+            assert findings[0].evidence["claimed"] == ["V2"], findings[0].evidence
+            assert findings[0].evidence["unclaimed"] == unclaimed, findings[0].evidence
