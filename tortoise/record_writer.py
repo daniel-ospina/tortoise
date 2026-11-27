@@ -4888,16 +4888,33 @@ def write_live_record(record: Mapping[str, Any], *,
             #     `journal_skipped=False` does NOT imply an active row.
             #  2. a `40001`/`40P01`/`57014` on the allocation —
             #     `RetryableAllocationFailure` is raised UNDER `allocate` and is
-            #     not in the allocator map, so it lands HERE; its contract is the
-            #     OPPOSITE of "re-fails": the server aborted the transaction and
-            #     the counter rolled back WITH it, so a replay of the same record
-            #     SUCCEEDS. Naming a replay as the fix would be wrong; there is
-            #     nothing to fix.
+            #     not in the allocator map, so it lands HERE; the server aborted
+            #     the transaction and the counter rolled back WITH it, so a
+            #     replay of the same record starts from the SAME NUMBER, which
+            #     is why writing a replay off as "re-fails" would be wrong.
+            #     ⛔ BUT THE OTHER DIRECTION IS WRONG TOO, FOR ONE MEMBER
+            #     (round-34 review P3, measured at source): `40001`/`40P01` are
+            #     CONFLICTS — the same statement wins an uncontended retry, so
+            #     there is nothing else to fix — while `57014` is
+            #     `query_canceled` (`record_allocator.RETRYABLE_STATES`), which
+            #     covers a `statement_timeout` and a cancel while a lock is
+            #     held: the identical replay hits the same budget or the same
+            #     holder and re-fails, so there IS something to fix. The
+            #     allocator's own contract is the weaker claim ("the caller
+            #     MAY retry"), and the repo's own leg constructs the re-failing
+            #     case by holding the counter row `FOR UPDATE` from a second
+            #     session. "SUCCEEDS — nothing to fix" was therefore FALSE for
+            #     one of the three states it named, and it is exactly the
+            #     "told to do nothing" shape this block refuses at item 4.
             #  3. a statement that EXECUTED and failed on its own data or a
             #     constraint — re-executes and re-fails until that cause is
             #     fixed (#13207's `chk_point_baseline_complete`).
-            #  4. a STORE/CONFIG refusal — re-raises on any replay until the DSN
-            #     or the role is fixed. ⛔ THE ISOLATION GUARD BELONGS HERE, not
+            #  4. a STORE/CONFIG refusal — re-raises until the DSN or the role
+            #     is fixed, and WHICH replays re-raise depends on the member
+            #     (round-34 review P3): the tenant scope and the role gate run
+            #     unconditionally, so any replay meets them; the isolation
+            #     guard is asked only under `allocate`, so a NON-allocating
+            #     replay is not refused by it. ⛔ THE ISOLATION GUARD BELONGS HERE, not
             #     in 2: `IsolationRefused` is raised by `require_read_committed`,
             #     which runs only when `allocate` is set and BEFORE any statement
             #     — nothing was aborted and nothing rolled back, so every replay
@@ -4910,7 +4927,12 @@ def write_live_record(record: Mapping[str, Any], *,
             #     this class in 2 ("nothing to fix"), which would have told an
             #     operator on a REPEATABLE READ/SERIALIZABLE deployment to do
             #     nothing while every armed write is refused indefinitely.
-            #     Population 4's "until the DSN ... is fixed" clause covers it.
+            #     Population 4's "until the DSN ... is fixed" clause covers it,
+            #     and the shipped sentence names the isolation member and
+            #     qualifies which replays re-raise — a comment that reasons
+            #     correctly while the operator sentence does not is the defect
+            #     this block's own rule (`EACH CAUSE IS NAMED IN THE SHIPPED
+            #     SENTENCE`) exists to stop.
             # The earlier revision of this block named only three, asserted a
             # cut-over graph unconditionally, and therefore told population 2 a
             # replay re-fails (false) and population 1's no-row/seeded/halted
@@ -4928,7 +4950,11 @@ def write_live_record(record: Mapping[str, Any], *,
                 "and then `arm` FIRST, or the allocation itself refuses; a "
                 "`40001`/`40P01`/`57014` on the allocation ABORTED the "
                 "transaction and rolled the counter back WITH it, so a replay "
-                "of the same record SUCCEEDS — nothing to fix; a statement "
+                "of the same record starts from the same number: retry it — "
+                "for a `40001`/`40P01` that is the whole remedy, while a "
+                "`57014` is a CANCEL (a `statement_timeout`, a lock held too "
+                "long) and re-fails on the identical replay until that budget "
+                "or that holder changes; a statement "
                 "that EXECUTED and failed on its own data or a constraint "
                 "re-fails on that replay until that cause is fixed; a "
                 # ⛔ THE EXAMPLES MUST BE REACHABLE ON *THIS* ARM (round-33 P3).
@@ -4940,12 +4966,19 @@ def write_live_record(record: Mapping[str, Any], *,
                 # cause on the arm that makes it unreachable is the SAME class of
                 # defect this PR exists to fix — a sentence whose claim does not
                 # match its arm's population — reappearing in the CAUSE half
-                # instead of the remedy half. The two examples kept here ARE
+                # instead of the remedy half. The three examples kept here ARE
                 # reachable: `scope_connection` (the tenant GUC + role gate) runs
-                # unconditionally, before the guards, on both arms.
+                # unconditionally, before the guards, on both arms, and
+                # `IsolationRefused` is raised on THIS arm by construction
+                # (`require_read_committed` is gated on `allocate`,
+                # `record_projection.py:9092`) — which is also why the clause
+                # qualifies WHICH replays re-raise rather than saying "any":
+                # a non-allocating replay is never asked the isolation question.
                 "STORE/CONFIG refusal (the tenant scope, a role that bypasses "
-                "RLS) re-raises until the DSN or the role is fixed, on any "
-                "replay"
+                "RLS, a transaction isolation this arm refuses) re-raises "
+                "until the DSN or the role is fixed; only an ALLOCATING write "
+                "is asked the isolation question, so a non-allocating replay "
+                "is not refused by it"
             )
         _logger.warning(
             "the record write did not happen (write_failed) — %s; %s: "

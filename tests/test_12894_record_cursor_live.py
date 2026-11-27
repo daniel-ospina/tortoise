@@ -1268,19 +1268,31 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
             assert "`seeded`/`halted` row takes re-seed" in text, (
                 "a seeded/halted cursor needs re-seed (+`reopen`) and `arm` "
                 f"FIRST, and nothing here said so: {text[-400:]!r}")
-            # ⛔ THE FOURTH POPULATION (round-32 review P2): a 40001/40P01/57014
-            # on the allocation is raised UNDER `allocate` and is not in the
-            # allocator map, so it lands HERE — and its contract is the OPPOSITE
-            # of "re-fails": the server aborted the transaction and the counter
-            # rolled back WITH it, so a replay of the same record SUCCEEDS
-            # (`record_allocator.RetryableAllocationFailure`). The previous
-            # revision told it a replay re-fails.
-            for needle in ("40001", "rolled the counter back", "nothing to fix"):
+            # ⛔ THE RETRYABLE HALF, BOTH DIRECTIONS (round-32 P2 -> round-34 P3).
+            # The first cut of this pin asserted `"nothing to fix" in text`,
+            # which LOCKED IN an overclaim: `40001`/`40P01` are conflicts whose
+            # uncontended retry wins, but `57014` is `query_canceled`
+            # (`record_allocator.RETRYABLE_STATES`) — a `statement_timeout` or a
+            # cancel while a lock is held — and the identical replay hits the
+            # same budget or the same holder. So the pin now demands the split
+            # (retry for the conflicts, a budget/holder to fix for the cancel)
+            # and forbids the old blanket claim, which is what a future sweep
+            # would otherwise restore.
+            for needle in ("40001", "40P01", "57014", "rolled the counter back",
+                           "starts from the same number", "retry it",
+                           "is a CANCEL",
+                           "re-fails on the identical replay"):
                 assert needle in text, (
-                    "the ARMED arm's RETRYABLE half is missing — a "
-                    "40001/40P01/57014 aborts the transaction and rolls the "
-                    f"counter back, so a replay succeeds: {needle!r} absent from "
-                    f"{text[-400:]!r}")
+                    "the ARMED arm's RETRYABLE half is missing — an aborted "
+                    "allocation rolls the counter back, so a replay starts "
+                    "from the same number; a `57014` cancel is the member "
+                    f"that re-fails until its budget/holder changes: {needle!r} "
+                    f"absent from {text[-400:]!r}")
+            assert "nothing to fix" not in text, (
+                "the ARMED arm is back to telling a `57014` population that "
+                "there is nothing to fix — a `statement_timeout` or a held "
+                "lock re-fails on the identical replay, so the blanket claim "
+                f"is false for one of the three states it names: {text[-400:]!r}")
             assert "statement that EXECUTED and failed on its own data or a constraint" in text, (
                 "the ARMED arm still promises a heal to a statement that "
                 "executed and failed — any replay RE-EXECUTES it and re-fails "
@@ -1308,6 +1320,29 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
                     "`scope_connection` causes with it — the tenant GUC and the "
                     "role gate run unconditionally on both arms: "
                     f"{reachable!r} absent from {text[-400:]!r}")
+            # ⛔ AND THE ISOLATION MEMBER IS NAMED AND ITS REPLAY SCOPE
+            # QUALIFIED (round-34 P3). `IsolationRefused` IS this arm's (the
+            # guard is gated on `allocate`, `record_projection.py:9092`), and
+            # the comment says this clause is where an operator reads it — but
+            # the old shipped clause ended `on any replay`, which is false for
+            # it: a NON-allocating replay (`record_runner.cmd_apply` refuses
+            # `--allocate` unconditionally) is never asked the isolation
+            # question. Both directions pinned, so neither the member nor the
+            # qualifier can be dropped, and the blanket quantifier cannot come
+            # back.
+            assert "a transaction isolation this arm refuses" in text, (
+                "the ARMED arm's STORE/CONFIG clause stopped naming the "
+                "isolation member — `IsolationRefused` is raised on this arm "
+                "by construction (`require_read_committed` is gated on "
+                f"`allocate`): {text[-400:]!r}")
+            assert "only an ALLOCATING write is asked the isolation question" in text, (
+                "the isolation clause lost its replay scope — `on any replay` "
+                "would tell a REPEATABLE-READ operator that a non-allocating "
+                f"replay re-raises, and it does not: {text[-400:]!r}")
+            assert "on any replay" not in text, (
+                "the unqualified `on any replay` quantifier is back — it is "
+                "false for the isolation member, which is asked only on an "
+                f"allocating write: {text[-400:]!r}")
         else:
             # ⛔ EVERY CLAUSE OF THE SPLIT IS PINNED, because this sentence is
             # read on THREE populations (an outage, a statement that executed
