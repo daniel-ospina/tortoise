@@ -12357,6 +12357,63 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         src = _resolve(str(o.get("src", "")))
         dst = _resolve(str(o.get("dst", "")))
         if not src or not dst or src == dst:
+            # ── #14198: a DECLARED contradiction whose older side is in a
+            # PRIOR capture CLOSES that claim's interval instead of being
+            # dropped. `_resolve` reads only THIS capture's `point_ids` /
+            # `event_ids`, so a NAND whose `dst` names a claim emitted by an
+            # earlier session can never resolve here — measured on the #14592
+            # corpus, where doc-05's refutation of doc-01's certificate claim
+            # was dropped exactly here and the two rival claims then sat in the
+            # graph with no marker between them (`supersessions: 0`).
+            #
+            # The model has ALREADY made the call the ontology assigns to it
+            # (#14198: "the model labels, code does the arithmetic"): a NAND is
+            # the declared contradiction (#2552), not a lexical rule. So the
+            # arithmetic rides the SAME channel a declared point-level
+            # `supersedes` ref uses (above) — a `supersessions` record, whose
+            # consumer `commit_ops.apply_supersessions` → `sdk._supersede_point`
+            # writes the CORRECTS edge, stamps the older claim's `validTo` from
+            # the successor's window start and its `expiredAt` from ingestion
+            # time, and RETAINS the older claim as terminal (§2.0: the record is
+            # truth — a closed interval, never a deletion, never a merge).
+            #
+            # ⛔ NOTHING IS INVENTED. The older endpoint resolves through the
+            # never-guess `_resolve_point_supersede` discipline (unique id /
+            # exact content / edge-trimmed equality; 0 or 2+ candidates warn
+            # and fail open), and the arm fires ONLY for a NAND whose NEW side
+            # resolved in this capture — so an IMPL or MITIGATES naming a prior
+            # claim still drops (support and edge-relevance are not reversals),
+            # a NAND whose OLDER side is the one in this capture drops, and a
+            # corpus with no declared contradiction gains none.
+            if op_type == "NAND" and src and not dst:
+                prior_row = _resolve_point_supersede(
+                    str(o.get("dst", "") or ""), search, warnings=warnings)
+                old_id = str((prior_row or {}).get("id") or "").strip()
+                if old_id and old_id != src:
+                    if (old_id, src) not in pt_record_pairs:
+                        pt_record_pairs.add((old_id, src))
+                        supersessions.append({
+                            "superseded": old_id, "supersedes_by": src,
+                            "evidence": "declared NAND contradiction against a "
+                                        "claim from an earlier capture "
+                                        "(cross-session reversal; the older "
+                                        "claim is retained with a closed "
+                                        "interval)"})
+                        link_before_create.append({
+                            "searched_for":
+                                f"prior claim '{str((prior_row or {}).get('content') or '')[:60]}'",
+                            "found": True,
+                            "note": f"contradicted by new point {src} — the "
+                                    "older claim's interval is closed "
+                                    "(CORRECTS, retained)"})
+                    warnings.append(
+                        "operator endpoint is an EARLIER-CAPTURE claim "
+                        f"(#14198): NAND dst {str(o.get('dst', ''))[:60]!r} "
+                        f"resolved to prior point {old_id[:20]!r} outside this "
+                        "capture — the contradiction is recorded as a "
+                        "supersession (CORRECTS + closed interval) instead "
+                        "of a same-capture edge")
+                    continue
             warnings.append(f"operator dropped: src/dst did not resolve to an "
                             f"emitted point/event ({o.get('src')!r} → {o.get('dst')!r})")
             continue

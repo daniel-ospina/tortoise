@@ -1,0 +1,289 @@
+"""#14198 — a contradiction DECLARED across two captures CLOSES the older
+claim's interval; it does not leave two rival claims with no marker.
+
+WHY THIS FILE EXISTS
+--------------------
+`docs/evidence/14592-operating-model-validation/REPORT.md` §G1 measured, on a
+fresh graph, that a corpus containing a reversing document produced **no
+contradiction at all**: doc-01's *"ColdPath Logistics holds a validated
+cold-chain certificate"* and doc-05's *"The cold-chain audit failed ColdPath
+Logistics last week"* were both `status: live`, with `supersessions: 0`. The
+report's own words: *"It does not represent a contradiction between two
+documents."*
+
+The mechanism was NOT that the extractor failed to try. It tried, and declared
+the contradiction in the vocabulary the ontology gives it — a `NAND` (its stated
+predicate: `refutes`; #2552's declaration channel). The edge was then lost in
+the ONE place that cannot cross a document boundary:
+
+    extractor_v2.execute_embed, the operator pass
+    ("operator dropped: src/dst did not resolve to an emitted point/event")
+
+`_resolve` reads only THIS capture's `point_ids` / `event_ids`, so a NAND whose
+older side lives in a PRIOR capture can never resolve there. On the corpus run
+the endpoint was first HELD (`#10997 S3 HOLD` — the identity lookup was
+`partial`, and `hold_store` is `None` on the shipping path so the hold was not
+persisted), and then dropped. Two of doc-05's three drops were that shape.
+
+WHAT THE FIX IS, AND WHAT IT IS NOT
+-----------------------------------
+A declared `NAND` whose NEW side resolved in this capture and whose OLDER side
+resolves in the S3 prior set now emits the SAME record a declared point-level
+`supersedes` ref emits (`commit_ops.apply_supersessions` →
+`sdk._supersede_point`): the `CORRECTS` edge, the older claim's `validTo`
+stamped from the successor's window start, `expiredAt` stamped from ingestion
+time, and the older claim **retained as terminal** — closed, never deleted
+(§2.0: the record is truth) and never merged (⛔ no fold).
+
+⛔ It is NOT a lexical contradiction detector. The issue's own ruling is that
+the MODEL labels a contradiction and code does the interval arithmetic; the
+lexical `_boundary`/`classify_consolidation` machinery keeps its present
+behaviour (two rivals survive). The negatives below pin that: nothing is
+inferred from content, so a corpus without a declared contradiction gains none.
+
+Run:  TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_14198_contradiction_closure.py -v
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tortoise.ids import content_hash
+
+CERT = "ColdPath Logistics holds a validated cold-chain certificate"
+AUDIT = "The cold-chain audit failed ColdPath Logistics last week"
+
+
+def _pid(content: str) -> str:
+    return f"pt_{content_hash(content)[:62]}"
+
+
+def _embed_for(blob: str, *, relationship: str) -> dict:
+    """The model's S2/S4 map, keyed on the transcript blob.
+
+    ``relationship`` is the one thing the three tests vary: ``nand`` is the
+    corpus's declared contradiction, ``impl`` is a declared SUPPORT edge over
+    the same pair (the over-fire negative), ``none`` declares nothing at all.
+    """
+    cert_session = "certificate" in blob and "audit" not in blob
+    audit_session = "audit" in blob
+    if cert_session:
+        return {
+            "entities": [{"name": "ColdPath Logistics", "kind": "core:organization",
+                          "lifecycle": "created", "supersedes": None}],
+            "events": [], "operators": [],
+            "points": [{"content": CERT, "pointKind": "statement",
+                        "about_entities": ["ColdPath Logistics"], "tier": "B",
+                        "when": "2026-02-03",
+                        "quote": CERT,
+                        "search_keys": ["cold-chain certificate"]}],
+        }
+    if audit_session:
+        operators = []
+        if relationship == "nand":
+            operators = [{"op_type": "NAND", "src": AUDIT, "dst": CERT,
+                          "stated_predicate": "refutes"}]
+        elif relationship == "impl":
+            operators = [{"op_type": "IMPL", "src": AUDIT, "dst": CERT,
+                          "stated_predicate": "supports"}]
+        return {
+            "entities": [{"name": "ColdPath Logistics", "kind": "core:organization",
+                          "lifecycle": "created", "supersedes": None}],
+            "events": [], "operators": operators,
+            "points": [{"content": AUDIT, "pointKind": "statement",
+                        "about_entities": ["ColdPath Logistics"], "tier": "B",
+                        "when": "2026-03-05",
+                        "quote": AUDIT,
+                        "search_keys": ["cold-chain audit"]}],
+        }
+    return {"entities": [], "events": [], "points": [], "operators": []}
+
+
+def _story_for(transcript: str) -> str:
+    if "certificate" in transcript and "audit" not in transcript:
+        return "ColdPath Logistics holds a validated cold-chain certificate."
+    if "audit" in transcript:
+        return "The cold-chain audit failed ColdPath Logistics."
+    return "The team discusses the delivery partner."
+
+
+def _model(relationship: str):
+    def respond(system: str, user: str) -> str:
+        if "STORY SUMMARIZER" in system:
+            return _story_for(user)
+        if "GAP REVIEWER" in system:
+            return json.dumps({"entities": [], "events": [], "points": [],
+                               "operators": [], "retractions": [],
+                               "chain_notes": [], "link_before_create": []})
+        if "GRAPH MAPPER" in system:
+            return json.dumps(_embed_for(user, relationship=relationship))
+        raise AssertionError(f"unexpected system prompt: {system[:60]}")
+
+    class _M:
+        def complete(self, *, system: str, user: str) -> str:
+            return respond(system, user)
+
+    return _M()
+
+
+def _fake_search(sdk, embed_list, story, **kw):
+    """S3's prior set — the claims that existed BEFORE this capture.
+
+    ⛔ The PARTIAL coverage report is load-bearing, not decoration. It is the
+    state the corpus run recorded (`S3 identity partial: the existing-item
+    lookup did not run for 11 of 25 candidate(s)`), and `_mint_endpoint`'s
+    #10997 gate HOLDS (rather than mints) an endpoint whenever the lookup is not
+    `resolved`. Replaying against a `resolved` lookup would take the MINT arm
+    and never reach the drop this test exists for.
+    """
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (p:Point {pointKind:'statement'}) "
+        "WHERE (p.status IS NULL OR NOT (p.status IN $terminal)) "
+        "RETURN p.id, p.content LIMIT 25",
+        params={"terminal": ["retracted", "superseded", "archived",
+                             "outdated"]},
+    ).result_set
+    return {"mode": "real", "degraded": False, "reason": None,
+            "entities": [], "events": [],
+            "points": [{"id": r[0], "content": r[1], "kind": "statement"}
+                       for r in rows],
+            "queries_run": 1,
+            "query_coverage": {"derived": {"points": 25},
+                               "ran": {"points": 14},
+                               "failed": {"points": 0}}}
+
+
+def _question() -> dict:
+    return {
+        "question_id": "q14198",
+        "haystack_session_ids": ["doc-01", "doc-05"],
+        "haystack_dates": ["2026-02-03", "2026-03-05"],
+        "haystack_sessions": [
+            [{"role": "user",
+              "content": f"ColdPath Logistics holds a validated "
+                         f"certificate — {CERT}",
+              "has_answer": True},
+             {"role": "assistant", "content": "noted", "has_answer": False}],
+            [{"role": "user",
+              "content": f"The audit — {AUDIT}",
+              "has_answer": True}],
+        ],
+    }
+
+
+@pytest.fixture
+def make_graph(tmp_path, monkeypatch):
+    """Two captures on one fresh graph; ``relationship`` picks the declaration."""
+    from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+    from tortoise.sdk import TortoiseSDK
+
+    monkeypatch.setattr("tortoise.extractor_v2.search_graph", _fake_search)
+    made = []
+
+    def _make(relationship: str):
+        sdk = TortoiseSDK(str(tmp_path / f"t14198-{relationship}.db"))
+        made.append(sdk)
+        stats = ingest_haystack_v2(sdk, _question(),
+                                   model=_model(relationship))
+        return sdk, stats
+
+    yield _make
+    for sdk in made:
+        sdk.close()
+
+
+def _scan(sdk, include_terminal=False):
+    return sdk._tortoise_fts_query(query=None, kind="statement",
+                                  entity_type="point", limit=20,
+                                  include_terminal=include_terminal)
+
+
+# ── the positive: the corpus's declared contradiction is REPRESENTED ──
+def test_declared_cross_capture_contradiction_closes_the_older_claim(make_graph):
+    """doc-05's declared NAND closes doc-01's claim: CORRECTS + a closed
+    interval, both claims retained, the newer interval still open.
+
+    REDS PRE-FIX: the NAND could not resolve its older endpoint in-capture, so
+    it was dropped (`operator dropped: src/dst did not resolve…`) and
+    ``supersessions_written`` was 0 — the state #14592 measured.
+    """
+    sdk, stats = make_graph("nand")
+    assert stats["supersessions_written"] == 1, (
+        "the declared cross-capture contradiction produced no supersession — "
+        "this is the #14198/#14592 loss (older claim never closed)")
+
+    # (1) the older claim is RETAINED and CLOSED, with what/when named on it.
+    ended = [r for r in _scan(sdk, include_terminal=True)
+             if r["id"] == _pid(CERT)]
+    assert ended, "the contradicted claim must still be readable (record is truth)"
+    old = ended[0]
+    assert old["status"] in ("outdated", "superseded")
+    assert old.get("valid_to") == "2026-03-05", (
+        "the older world-time interval must end where the newer claim starts")
+    assert old["expired_at"], "the ingestion-time expiry must be stamped"
+    assert old["valid_from"] == "2026-02-03"
+
+    # (2) the newer claim keeps its interval OPEN.
+    live = [r for r in _scan(sdk) if r["id"] == _pid(AUDIT)]
+    assert live, "the newer claim is the current one and must be retrievable"
+    assert live[0].get("valid_to") in (None, ""), (
+        "the newer interval stays open")
+
+    # (3) a reader asking "what is true now" gets ONE answer …
+    current_ids = {r["id"] for r in _scan(sdk)}
+    assert _pid(CERT) not in current_ids
+    assert _pid(AUDIT) in current_ids
+
+    # (4) … and "what did we believe before" still returns the old one, through
+    # the CORRECTS chain — which is also the proof that the edge exists.
+    hist = sdk.get_historical_knowledge(_pid(AUDIT), "2026-02-20")
+    assert hist["found"] is True
+    assert hist["valid_point"]["id"] == _pid(CERT)
+    assert hist["valid_point"]["valid_to"] == "2026-03-05"
+    assert [e["id"] for e in hist["chain"]] == [_pid(AUDIT), _pid(CERT)]
+
+
+# ── negatives: nothing is invented ───────────────────────────────────────────
+def test_declared_support_across_captures_closes_nothing(make_graph):
+    """Over-fire negative: the SAME two documents, with the model declaring
+    SUPPORT (`IMPL`) instead of a contradiction, must close nothing.
+
+    A support edge is not a reversal — an older claim that a newer one agrees
+    with keeps its interval open.
+    """
+    sdk, stats = make_graph("impl")
+    assert stats["supersessions_written"] == 0
+    live_ids = {r["id"] for r in _scan(sdk)}
+    assert _pid(CERT) in live_ids, "an agreed-with claim must stay current"
+    assert _pid(AUDIT) in live_ids
+    # the older claim's interval is still OPEN, and it is still CURRENT
+    unreceived = [r for r in _scan(sdk, include_terminal=True)
+                  if r["id"] == _pid(CERT)]
+    assert unreceived and unreceived[0].get("valid_to") in (None, "")
+    # with no CORRECTS the chain behind the new point is itself — never the cert
+    hist = sdk.get_historical_knowledge(_pid(AUDIT), "2026-03-10")
+    assert hist["found"] is True
+    assert [e["id"] for e in hist["chain"]] == [_pid(AUDIT)]
+
+
+def test_undeclared_reversal_invents_no_contradiction(make_graph):
+    """Over-fire negative: a corpus that reverses itself in its WORDING but
+    declares no contradiction gains none.
+
+    This is the measured shape of the #14592 corpus's decision pair — "We
+    choose ColdPath Logistics as our delivery partner" vs "We revert to
+    NordicFreight …" share only ~0.54 of their tokens and carry no declared
+    edge, so no lexical rule may close either: `#14198`'s ruling is that the
+    model labels and code does the arithmetic, never that code guesses.
+    """
+    sdk, stats = make_graph("none")
+    assert stats["supersessions_written"] == 0
+    live_ids = {r["id"] for r in _scan(sdk)}
+    assert _pid(CERT) in live_ids
+    assert _pid(AUDIT) in live_ids
