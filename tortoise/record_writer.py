@@ -4895,17 +4895,20 @@ def write_live_record(record: Mapping[str, Any], *,
             #     ⛔ BUT THE OTHER DIRECTION IS WRONG TOO, FOR ONE MEMBER
             #     (round-34 review P3, measured at source): `40001`/`40P01` are
             #     CONFLICTS — the same statement wins an uncontended retry, so
-            #     there is nothing else to fix — while `57014` is
-            #     `query_canceled` (`record_allocator.RETRYABLE_STATES`), which
-            #     covers a `statement_timeout` and a cancel while a lock is
-            #     held: the identical replay hits the same budget or the same
-            #     holder and re-fails, so there IS something to fix. The
-            #     allocator's own contract is the weaker claim ("the caller
-            #     MAY retry"), and the repo's own leg constructs the re-failing
-            #     case by holding the counter row `FOR UPDATE` from a second
-            #     session. "SUCCEEDS — nothing to fix" was therefore FALSE for
-            #     one of the three states it named, and it is exactly the
-            #     "told to do nothing" shape this block refuses at item 4.
+            #     there is nothing else to fix — while `57014`
+            #     (`record_allocator.RETRYABLE_STATES`) is a cancel, and the
+            #     allocator's own class table defines it as "a local timeout, OR
+            #     AN OPERATOR CANCEL" (`record_allocator.py:46-48`): the first two
+            #     re-fail on the identical replay (same budget, same holder),
+            #     the third is ONE-SHOT and the retry simply runs. "SUCCEEDS —
+            #     nothing to fix" was therefore FALSE for one member.
+            #     ⛔ AND THE FIRST FIX OVER-CORRECTED (round-35 review P3,
+            #     measured: `pg_cancel_backend` on a running statement yields
+            #     `pgcode == "57014"`, `classify()` keys on the SQLSTATE alone
+            #     (`record_allocator.py:404-412`), and with no timeout and no lock
+            #     holder the IDENTICAL replay succeeded) — so the re-fail is
+            #     scoped to a cause that PERSISTS, not to the SQLSTATE. Naming
+            #     one member as the whole class is the same defect, mirrored.
             #  3. a statement that EXECUTED and failed on its own data or a
             #     constraint — re-executes and re-fails until that cause is
             #     fixed (#13207's `chk_point_baseline_complete`).
@@ -4951,10 +4954,12 @@ def write_live_record(record: Mapping[str, Any], *,
                 "`40001`/`40P01`/`57014` on the allocation ABORTED the "
                 "transaction and rolled the counter back WITH it, so a replay "
                 "of the same record starts from the same number: retry it — "
-                "for a `40001`/`40P01` that is the whole remedy, while a "
-                "`57014` is a CANCEL (a `statement_timeout`, a lock held too "
-                "long) and re-fails on the identical replay until that budget "
-                "or that holder changes; a statement "
+                "a `40001`/`40P01` conflict, and a `57014` CANCEL that was an "
+                "operator or driver cancel, both succeed on that retry, while "
+                "a `57014` re-fails on the identical replay only while its "
+                "cause persists (a `statement_timeout` this write does not fit, "
+                "a lock still held), so the budget or the holder is what "
+                "changes; a statement "
                 "that EXECUTED and failed on its own data or a constraint "
                 "re-fails on that replay until that cause is fixed; a "
                 # ⛔ THE EXAMPLES MUST BE REACHABLE ON *THIS* ARM (round-33 P3).

@@ -1280,7 +1280,8 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
             # would otherwise restore.
             for needle in ("40001", "40P01", "57014", "rolled the counter back",
                            "starts from the same number", "retry it",
-                           "is a CANCEL",
+                           "operator or driver cancel",
+                           "only while its cause persists",
                            "re-fails on the identical replay"):
                 assert needle in text, (
                     "the ARMED arm's RETRYABLE half is missing — an aborted "
