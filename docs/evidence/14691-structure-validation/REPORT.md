@@ -956,11 +956,13 @@ and three of the P2s, and states the residual rather than implying it away.
   pinned to code content, but the report repeats them: `navigation.py:172-179` → `166-173`
   (the round-10 mutant, applied to the prose) and `sdk.py:62739-62758` → `61000-61019` both
   left `97 passed`. `test_every_CODE_citation_in_the_documents_is_one_an_artifact_carries`
-  grades the SAME site — the same range, one line inside it, or a wider span that begins at or
-  just before the artifact's start and ends where it ends — so the honest wider span
-  (`:533-559` against the artifact's `:551-559`, slack 18 at the start and 0 at the end) passes
-  while a moved range, a range that opens in unrelated code, and a range that pads its END onto
-  the site all red (each measured).
+  grades the SAME site — the same range, one line **inside** it, or a wider span that begins at
+  most **20 lines** before the artifact's start (`_CITATION_WIDEN_BOUND`) and ends **exactly**
+  where it ends — so the honest wider span (`:533-559` against the artifact's `:551-559`, slack
+  18 at the start and 0 at the end) passes while a moved range, a range bracketing the site
+  (`:1-99999`), a range opening more than 20 lines early in unrelated code (`:62718-62758` at 21;
+  `:62720-62758` at 19 still passes, measured), and a range that pads its END onto the site
+  (`:62739-99999`, 37,241 lines) all red (each measured).
 - **P2 — the DUPLICATE figure.** A pin shaped `expected in line` grades ONE copy, so
   `| … **5/5** | 5/5 (parent end…)` kept its second copy free: mutating EITHER `5/5` stayed
   green and only mutating BOTH reddened. `test_the_A2_class_table_derives_BOTH_cells_from_the_artifact`
@@ -1047,6 +1049,22 @@ A1 caveat's arm was grading a subject its own docstring never named. This log's 
 stay as history; they are no longer load-bearing.
 
 ---
+
+### 8.20 The seventeenth round — the citation bound's END, and the prose that outlived the code
+
+The round-16 review's headline was that bounding a wider citation's START left its END free:
+`62739-99999` opens exactly on the artifact's start and pads 37,241 lines, and the suite stayed
+at `102 passed`. Shape 3 now pins the END (`hi - other_hi == 0`) while keeping the 20-line START
+allowance the one honest wider span needs (18); measured at this head, `:62739-99999` reds and
+`:533-559` still passes.
+
+The same round found three descriptions that had outlived the code they describe — the
+`_prose_tokens()` docstring still naming the deleted `## 8.`..`## 9.` bound, §8.17's citation
+bullet still calling the relation "containment" (the relation round 15 measured as insufficient),
+and a paragraph whose deletion took the §8 exclusion's *reason* with it, leaving a justification
+the next lane could only "fix" by un-excluding a log full of historical mutants. All three were
+the arm's own subject: a rule a reader cannot reconstruct from the text is a rule the next lane
+will undo.
 
 ## 9. Mandate-preflight disclosure
 
