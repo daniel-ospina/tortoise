@@ -1344,11 +1344,15 @@ class BackupWatcher:
                 "which requires state PRESENT), or the class becomes "
                 "`not_eligible` (the org left the DR surface: this closes and "
                 "NOTHING is opened). ⛔ NOT a closer: the org leaving the "
-                "`per_team` CENSUS while its state lingers — "
-                "`compute_status` re-lists every state-only org from "
-                "`state_orgs` regardless of the census, and arm (ii) becomes "
-                "arm (i) once its prefix goes, so the subject stays in this "
-                "kind's set and the incident stays open."),
+                "`per_team` CENSUS while it remains ELIGIBLE and its state "
+                "lingers — `compute_status` re-lists every ELIGIBLE state-only "
+                "org from `state_orgs` regardless of census membership, and arm "
+                "(ii) becomes arm (i) once its prefix goes, so the subject stays "
+                "in this kind's set and the incident stays open. (Leaving the "
+                "ELIGIBLE set is the exception that does close it: the "
+                "state-only census drops the org, no `per_team` key is "
+                "computed for it, and the cross-poll diff resolves the "
+                "incident.)"),
         }
 
     def _measured_fresh(self, org: str,

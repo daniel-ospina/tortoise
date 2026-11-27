@@ -1002,6 +1002,41 @@ def test_watcher_census_shrink_does_not_falsely_resolve_backup_set_missing():
     assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_x"]
 
 
+def test_a_state_only_org_that_leaves_the_ELIGIBLE_set_closes_its_backup_set_missing():
+    """The census qualifier on BACKUP_SET_MISSING has ONE exception, and it is
+    measured here rather than assumed (#9938 review round 5).
+
+    `compute_status`'s state-only loop is eligibility-gated, so an arm-(i) org
+    that leaves the census **and** the eligible set drops out of
+    `backup_set_missing` entirely (no `per_team` key is computed for it at all),
+    and the cross-poll diff resolves the incident. That is the arm the runbook
+    and the payload must name as the one census-adjacent closer that fires —
+    while `test_watcher_census_shrink_does_not_falsely_resolve_backup_set_missing`
+    pins the mirror case (eligible, so it is re-listed and nothing closes).
+
+    The close is pinned on the cross-poll DIFF, not on the `not_eligible`
+    branch: an org outside the census has no `per_team` key, so that branch
+    never sees it.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_state(storage, "team_x")          # state, no prefix → arm (i)
+    _seed_archive(storage, "team_y", 0.5)   # a real org keeps the read credible
+    _seed_state(storage, "team_y")
+    w = _watcher(storage, ch, orgs=("team_x", "team_y"),
+                 eligible_provider=lambda: ["team_x", "team_y"])
+    w.poll()
+    assert any("BACKUP_SET_MISSING — team_x" in t for t in ch.issues.values()), ch.issues
+
+    # offboarded: out of the census AND out of the eligible set, state lingering
+    w._orgs = lambda: ["team_y"]
+    w._eligible = lambda: ["team_y"]
+    w.poll()
+    assert not any("BACKUP_SET_MISSING" in t for t in ch.issues.values()), ch.issues
+    assert any("resolved" in m.lower() and "BACKUP_SET_MISSING" in m
+               for m in ch.telegram), ch.telegram
+
+
 def test_watcher_blank_eligibility_ids_are_unconfirmed_too():
     """#3658 review (cycle 3). A guard that rejects only a ZERO-LENGTH result is
     bypassed one element away: `[""]` (or a whitespace-only id) is non-empty,
