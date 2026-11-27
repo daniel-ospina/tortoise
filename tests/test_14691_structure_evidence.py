@@ -1379,12 +1379,19 @@ def _cites_a_site_in(cited: tuple[str, int, int], sites) -> bool:
        a span plus its call site (`entity_reads.py:533-559` against `:551-559`).
 
     ⛔ CONTAINMENT IN EITHER DIRECTION WAS NOT ENOUGH, measured: it admitted
-    `sdk.py:61000-62758` and `sdk.py:1-99999` — each BEGINS exactly where the refused mutant
-    `61000-61019` begins and pads its END onto the pinned site. The discriminator is the
-    START, not the containment: a range that opens in unrelated code and closes on the site
-    is a different citation however far it reaches. Equality alone would red on the two
-    honest shapes above, and OVERLAP would accept `:172-179` -> `:166-173`, so the three
-    shapes are enumerated rather than approximated.
+    `sdk.py:61000-62758` and `sdk.py:1-99999` — each BEGINS where the refused mutant
+    `61000-61019` begins and pads its END onto the pinned site. Equality alone would red on
+    the two honest shapes above, and OVERLAP would accept `:172-179` -> `:166-173`, so the
+    three shapes are enumerated rather than approximated.
+
+    ⛔ AND BOUNDING THE START ALONE WAS STILL NOT ENOUGH (#14691 review, round 16, finding 1):
+    with only `other_lo - lo <= _CITATION_WIDEN_BOUND`, the same padding attack survived from
+    the OTHER side — `sdk.py:62739-99999` opens exactly on the artifact's start and pads the
+    END by 37,241 lines, which left `102 passed` (measured). So shape 3 widens the START and
+    the END by nothing: `hi - other_hi == 0`. That is what the one honest wider span in the
+    two documents actually does — `entity_reads.py:533-559` against the artifact's `:551-559`
+    is slack 18 at the start and 0 at the end (measured), so the honest shape stays green and
+    an end-padded citation cannot pass.
     """
     name, lo, hi = cited
     for other_name, other_lo, other_hi in sites:
@@ -1395,7 +1402,8 @@ def _cites_a_site_in(cited: tuple[str, int, int], sites) -> bool:
         if lo == hi and other_lo <= lo <= other_hi:
             return True
         if (lo <= other_lo and other_hi <= hi
-                and other_lo - lo <= _CITATION_WIDEN_BOUND):
+                and other_lo - lo <= _CITATION_WIDEN_BOUND
+                and hi - other_hi == 0):
             return True
     return False
 
@@ -3767,21 +3775,6 @@ _PROSE_ALLOWED = (
 
 def _prose_tokens() -> set[str]:
     text = (_report() + "\n\n" + (BUNDLE / "VERIFICATION-independent.md").read_text())
-    # ⛔ §8 IS THE REVIEW-ROUND LOG, NOT A MEASUREMENT (#14691 review, round 14,
-    # finding 3). Its numbers are what each round's falsifier run PRINTED — pytest
-    # counts, mutant descriptions, "N passed" — and no artifact carries them, so this
-    # scan cannot grade them and must not pretend to. The exclusion is bounded at the
-    # SECTION (`## 8.` .. `## 9.`), and the reason is now the true one: the previous
-    # cut stopped at §8.1 while claiming only "the mutant tables quote invented figures
-    # ON PURPOSE", so it silently excluded 34 651 of 84 641 characters — §8.2 through
-    # §8.16, 16 headings — under a reason that covered one of them. Measured at
-    # `0368cbb7`: `§8.6 85-passed-green -> 86`, `§8.15 92 passed -> 93`,
-    # `§8.9 on 6 of 20 -> 7 of 20` and `§8.7 1 left 73 passed -> 74` all stayed GREEN.
-    # ⛔ The §8 figures that ARE claims about an artifact are graded by their own arms,
-    # NOT by riding on this exclusion — `§8.9`'s "keeps the artifact at 809,812 bytes"
-    # by `test_EVERY_bytes_figure_in_the_documents_is_the_committed_file` (which reds
-    # on `809,813`, measured), and the door citations by
-    # `test_every_CODE_citation_in_the_documents_is_one_an_artifact_carries`.
     # ⛔ THE REVIEW LOG IS `### 8.1`..`### 8.18`, NOT the whole of §8 (#14691 review, round
     # 15, finding 2). The bound used to START at `### 8.1` and run to §9 — excluding 8.2–8.16
     # as well, under a reason that named only the mutant tables. Bounding at `## 8.` fixed that

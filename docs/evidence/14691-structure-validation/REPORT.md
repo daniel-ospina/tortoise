@@ -951,8 +951,11 @@ and three of the P2s, and states the residual rather than implying it away.
   pinned to code content, but the report repeats them: `navigation.py:172-179` → `166-173`
   (the round-10 mutant, applied to the prose) and `sdk.py:62739-62758` → `61000-61019` both
   left `97 passed`. `test_every_CODE_citation_in_the_documents_is_one_an_artifact_carries`
-  grades CONTAINMENT of the same site, so a wider honest span (`:533-559` against the
-  artifact's `:551-559`) passes and a moved range reds.
+  grades the SAME site — the same range, one line inside it, or a wider span that begins at or
+  just before the artifact's start and ends where it ends — so the honest wider span
+  (`:533-559` against the artifact's `:551-559`, slack 18 at the start and 0 at the end) passes
+  while a moved range, a range that opens in unrelated code, and a range that pads its END onto
+  the site all red (each measured).
 - **P2 — the DUPLICATE figure.** A pin shaped `expected in line` grades ONE copy, so
   `| … **5/5** | 5/5 (parent end…)` kept its second copy free: mutating EITHER `5/5` stayed
   green and only mutating BOTH reddened. `test_the_A2_class_table_derives_BOTH_cells_from_the_artifact`
