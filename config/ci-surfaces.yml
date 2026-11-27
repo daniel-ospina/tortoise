@@ -157,8 +157,8 @@ version: 1
 # head carries”, so the RULE survives and the label is re-pointed by hand on each fold — a residual
 # named on the artifact, which is the convention this block uses BELOW for the row-exemption class.
 # ⛔ EVERY file named above EXISTS on `main` — the claim is that none is a file this change ADDS,
-# not that none is touched: `tests/test_14560_operator_vectors.py` IS edited here (its section
-# banner stops claiming "no database needed" over an arm that needs one), so the bare "is `main`'s
+# not that none is touched: `tests/test_expansion_fusion_14344.py` IS edited here (a docstring
+# citation re-cut, `search_engine.py:5075` → `:5079`), so the bare "is `main`'s
 # at this head" the earlier wording carried was false on the face of this diff.
 # ⛔ Not claiming "and every one is `core`": registration status is a THIS-HEAD fact, and `#14544`
 # is the proof it moves (the sentence below records that file leaving `core`) — which is why the
@@ -242,7 +242,7 @@ version: 1
 # every `durations_floors` entry and `tier1`, value by value, zero differing". That was TRUE of the
 # fold whose delta it measured (a two-sentence prose repair, which touched neither the surface map
 # nor the selector) and FALSE from the moment a lane that REGISTERS a row carried it: on this tree
-# the `core` surface list and the `durations` map each hold one entry `main` does not, while
+# the `ep` surface list and the `durations` map each hold one entry `main` does not, while
 # `durations_floors` and `tier1` still compare equal — so the blanket word was the defect, not the
 # per-key reading it replaced. ⛔ NO POOL SIZE AND NO ROW COUNT IS STATED HERE as a claim about
 # this head, on purpose: written as figures they owe a re-measurement to whoever next moves one and
