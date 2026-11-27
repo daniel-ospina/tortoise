@@ -1072,9 +1072,27 @@ metric §0 is about does not move for it. §1's `rg` reconciliation is re-measur
 with `--markdown` at this head — the two new files' six rows are in it, so a reader can resolve every
 one.
 
+**The cut this PR (#14342, `feat/14342-capture-queue`) makes — ONE new scanned product module that
+moves `files_scanned` and NOTHING else.** Re-cut by RUNNING the tool on the merged tree, never by
+arithmetic on the markers: `files_scanned` 318→**319**, and `sites` **1332**, `files` **103**,
+`unresolved` **105**, `candidates` **594**, `partial` **324**, `non_cypher_door_calls` **267**,
+`ast_door_calls` **1599** and every shape pin are the values this tree measures — identical to the
+pin above, because `tortoise/capture_intake.py` is product surface the census SCANS and a module it
+sees none of. ⛔ **THE BLIND SPOT IS STATED RATHER THAN IMPLIED, and it is the same one `#14422`
+records**: the module's six statements (`_PUT_CYPHER`, `_CLAIM_CYPHER`, `_FINISH_CYPHER`,
+`_PARK_CYPHER`, `_RECLAIM_CYPHER`, `_DEPTH_CYPHER`) are handed to an INJECTED callable —
+`GraphIntakeStore._run` → `self._query(cypher, params=…)`, wired to `_graph_query_seam(proj)` in
+`hosted_api.py` — so §1's door predicate (`.<query|ro_query|execute>(`) matches NOTHING here and
+`sites` does not move; a reader who takes this module's Cypher surface from `sites` will miss all
+six. Re-take the count at the head you ship with
+`grep -c '^_[A-Z]*_CYPHER = ' tortoise/capture_intake.py` (six at the head this cut was written at),
+never by carrying this sentence. ⛔ **NOT re-measured at this head, and therefore NOT typed here:**
+§1's unpinned `rg`/verb predicates and the `--all-surface` row — their own commands at the head you
+merge are the only source, for the reason this document's re-cut chain exists.
+
 <!-- cypher-inventory:sites = 1332 -->
 <!-- cypher-inventory:files = 103 -->
-<!-- cypher-inventory:files_scanned = 318 -->
+<!-- cypher-inventory:files_scanned = 319 -->
 <!-- cypher-inventory:unresolved = 105 -->
 <!-- cypher-inventory:candidates = 594 -->
 <!-- cypher-inventory:shape_adjacency = 293 -->

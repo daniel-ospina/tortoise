@@ -320,11 +320,20 @@ def test_the_refusal_reaches_the_wire_as_a_typed_body_and_a_header(
     positional string, or drop `headers={"Retry-After": ...}` -> the body is a
     string (`.json()["detail"]["code"]` raises) and/or the header is `None` on
     the response, while every exception-object test above stays green.
+
+    ⚠️ #14342 CHANGED WHAT A SATURATED GATE ANSWERS BY DEFAULT: the refusal is
+    converted into an ACCEPTANCE (202 + a queued `:CaptureIntake` row), so this
+    wire shape is now the shape of the ROLLBACK path. It is pinned here with
+    `TORTOISE_CAPTURE_INTAKE=0` on purpose: the rollback must restore the exact
+    pre-#14342 contract, not a partial one — and the typed body is what a caller
+    on that path still has to be able to branch on. The default (202) wire shape
+    is pinned by `tests/test_14342_capture_intake_door.py`.
     """
     from fastapi.testclient import TestClient
 
     from tortoise.hosted_api import app, get_current_org_gated
 
+    monkeypatch.setenv("TORTOISE_CAPTURE_INTAKE", "0")
     monkeypatch.setattr(ha, "_CAPTURE_MAX_IN_FLIGHT", 1)
     monkeypatch.setattr(ha, "_CAPTURE_IN_FLIGHT", 0)
     monkeypatch.setattr(ha, "_CAPTURE_SESSIONS", {})

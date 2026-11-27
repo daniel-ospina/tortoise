@@ -354,15 +354,15 @@ FUNNEL_QUERY = (
 #
 # The prefix is INTERPOLATED from its one owner (``session_schema``), not bound
 # as a ``$`` parameter, and what that buys is LINE COST, stated at its real size:
-# the one PRODUCTION execution is ``hosted_api.py:29666`` (the two TEST sites are
+# the one PRODUCTION execution is ``hosted_api.py:30479`` (the two TEST sites are
 # ``tests/test_activation_scorecard.py`` — a stubbed ``_G``, through the hosted
 # route — and ``tests/test_demo_session_read_exclusion_8290.py``, which queries it
 # directly on a real embedded engine), and a ``params=…`` argument there does not
 # fit in 100 columns, so it wraps and pushes later lines down. Measured over every
 # ``hosted_api.py:<line>`` cite in the tracked tree: **7** distinct cite
-# targets have a line number LARGER than 29666 (36999 … 99999) and those are the
-# ones that shift; **477** have a number smaller than it (26 … 28446) and cannot
-# move. (485 distinct targets in all — the remainder is 29666 itself, which this
+# targets have a line number LARGER than 30479 (37761 … 99999) and those are the
+# ones that shift; **482** have a number smaller than it (26 … 28446) and cannot
+# move. (490 distinct targets in all — the remainder is 30479 itself, which this
 # very comment names. NEVER re-take these by hand — that is how they went wrong
 # twice. `uv run python tools/hosted_api_cite_census.py --refresh` re-states every
 # figure in this note AND the list-helper's in one command whenever
@@ -378,49 +378,6 @@ FUNNEL_QUERY = (
 # count — and the command, not a per-PR assertion, is what carries the figures: a
 # per-PR `--check` would red PRs whose only remedy is prose in a module they never
 # opened, which is the false block this note's neighbour paragraph removed.)
-# ⛔ THE DROP FROM A PRE-SPLIT READING IS NOT A HAND-COUNT ERROR, AND MUST NOT BE
-# "CORRECTED" BACK. `docs/architecture/CYPHER-INVENTORY.md` is now a GENERATED,
-# untracked build artifact (`--render`'s output, #13098), and its Appendix A
-# carried **244** distinct targets of those the census counts — 150 above the pivot,
-# 93 below it and the pivot itself — of which **243** were cited NOWHERE ELSE (the
-# pivot is cited by these notes; nothing else in the appendix was cited in a second
-# place). Those 243 are exactly what the population lost: 150 above the pivot and
-# 93 below, which is why the citing-file count fell by one and nothing else moved.
-# So a reader who re-measures the old appendix gets 244/150/93 and a reader who
-# re-measures the tree gets the live triple the note above states: both are right,
-# they count different trees, and neither licenses typing a figure here — ⛔ which is
-# why this paragraph types NEITHER. A live figure copied down here is an ungraded
-# duplicate of a graded one: `--refresh` rewrites the note and leaves the copy, so the
-# very base move that repairs one side re-opens the contradiction (#14625 review, P2,
-# measured by running the module's own refresh over a hypothetical next base).
-# ⛔ THE FOUR DERIVED FIGURES IN THE PARAGRAPH ABOVE ARE DELIBERATELY NOT IN A
-# `_NOTES` ROW, and that is a LIMIT rather than an omission: they describe a tree
-# that no longer exists (the pre-split appendix), so `--check` — which recomputes
-# against the tree in front of it — has nothing to compare them with. They were
-# `242` / `92` / `483` / `475` until #14625's review re-measured them (P1): once
-# `main` landed `#14592`, the base tree read **728** distinct targets over **208**
-# citing files, the appendix's 244 split 150 above / 93 below / 1 at the pivot, and
-# the only shared target was the pivot — so 244 − 1 = **243** cited nowhere else,
-# not 242, and the tree's live reading is the note above's, not the 483/7/475 an
-# earlier cut of this sentence typed. ⛔ AND THE RECOUNT IS A BASE
-# CHANGE, NOT AN ERROR — state it that way, because `242` was CORRECT where it was
-# written. At `939e37f664` (the base the first version used) that base's OWN pivot was
-# `28477`, not this base's `29666`: on ITS pivot the appendix's 244 split 150 above it /
-# 93 below / 1 at it, so the pivot ITSELF was among the rows, and TWO of them were also
-# cited elsewhere — that pivot (`28477`) and line `19186` — so
-# 244 − 2 = **242**. `main`'s `#14592` then restamped the appendix (its own lines
-# moved), and at this branch's base it reads 244 split **150 / 93 / 1**
-# with NEITHER of those two rows present and only the pivot shared, so 244 − 1 =
-# **243**. Both counts are right at their own base; a reader who calls 242 wrong is
-# counting a tree it was never measured on. (Measured with the appendix's own address
-# shape at each sha: `git grep -a -o -E '[[:alnum:]_.-]*hosted_api\.py:[0-9]+' <sha> --
-# docs/architecture/CYPHER-INVENTORY.md`. At `939e37f664` the rows `19186` and `28477`
-# are the two shared targets; at the shipping base (`bbef0b88`) only `29666` is.) ⛔ THE SPLIT IS
-# RE-MEASURED AT EVERY REBASE, never carried: `#14625`'s rebase onto `c1c8df1a3817`
-# moved the appendix's own line numbers and left every one of the four figures
-# IDENTICAL (244 distinct, 150 above / 93 below / 1 at, only the pivot shared elsewhere),
-# which is what a line-number-only restamp must do — and is why the base sha is named in
-# this clause rather than a figure.
 # ``STAGE3_PREDICATE`` is interpolated for the same reason, but as a predicate
 # EXPRESSION (``WHERE ({STAGE3_PREDICATE}) AND …``), never inside a quoted
 # literal — so escaping is not what it needs. The one value interpolated INSIDE a

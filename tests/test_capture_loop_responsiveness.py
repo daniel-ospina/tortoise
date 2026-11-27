@@ -888,10 +888,21 @@ def test_capture_capacity_limit_fails_fast_instead_of_queueing(
     up to fly.toml's hard_limit of connections on a 4GB VM, i.e. an OOM kill,
     which is the same outage class. At capacity the request must therefore fail
     fast (429 + Retry-After), never enqueue without bound.
+
+    ⚠️ #14342 CHANGED WHAT A SATURATED DOOR ANSWERS BY DEFAULT: over the ceiling
+    the capture is ACCEPTED into the durable intake queue (202) instead of
+    refused in memory, so THIS contract is now the ROLLBACK path's — pinned here
+    with `TORTOISE_CAPTURE_INTAKE=0`, exactly as
+    `tests/test_12992_capture_capacity_typed_refusal.py` pins the rollback wire
+    shape. The bound the rollback protects (nothing is held on the pool for a
+    request that cannot run) still holds on the default path: a queued turn is a
+    row, not a parked transcript, and the door charges the per-org ingest window
+    before it accepts.
     """
     import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import app
 
+    monkeypatch.setenv("TORTOISE_CAPTURE_INTAKE", "0")
     monkeypatch.setattr(ha_mod, "_CAPTURE_MAX_IN_FLIGHT", 1)
     release = threading.Event()
     entered = threading.Event()
@@ -956,15 +967,22 @@ def test_capture_admission_is_reserved_before_the_extraction(client, monkeypatch
     shape. The first request is parked INSIDE the pipeline but BEFORE any
     extraction (awaiting, so the loop stays free), with the cap at 1: a second
     request must already be refused. A check-only gate admits both.
+
+    ⚠️ As above (#14342): the default answer to a saturated door is now a 202
+    acceptance into the durable intake queue, so the fail-fast contract is pinned
+    on the ROLLBACK path (`TORTOISE_CAPTURE_INTAKE=0`).
     """
     import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import app
 
+    monkeypatch.setenv("TORTOISE_CAPTURE_INTAKE", "0")
     monkeypatch.setattr(ha_mod, "_CAPTURE_MAX_IN_FLIGHT", 1)
     entered = threading.Event()
     release = threading.Event()
 
-    async def _parked_impl(body, request, team, slot=None, state=None):
+    async def _parked_impl(body, request, team, slot=None, state=None,
+                           deferred_resume=False, gate_only=False,
+                           ingest_charged=False):
         entered.set()
         await asyncio.to_thread(release.wait, 30)
         return {"ok": True}
