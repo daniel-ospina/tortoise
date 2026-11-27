@@ -923,10 +923,33 @@ mechanisms:
       the separator exclusion moved neither number on this corpus (re-measured
       after it landed, 62 judged / 0 refused), which is why the pin did not have
       to move; (b2) STRICT VERBATIM
-      SURVIVAL stays SHORT of target and is NOT re-measured here: 38/77 = 49.4%
-      on the flags-on arm against the 49/90 = 54.4% committed baseline (`#5064`
-      comment 2026-10-13, `#7949` E2) — the figure that would move is the E2
-      arm's, and this lane ran no LLM arm. `UNMEASURED(<an E2 LLM arm run>)`.
+      SURVIVAL is now MEASURED on the flags-on arm, and it still stays SHORT of
+      target: 44/90 = 48.9% and 40/90 = 44.4% over two runs (mean 42/90 = 46.7%)
+      against the 49/90 = 54.4% committed baseline (`#7949` E2). ⛔ THAT IS
+      TWO RUNS PER ARM, AND THE BAR IS NOT RESOLVABLE AT THIS SAMPLE SIZE —
+      saying so is part of the record: the FLAGS-OFF arm measured 45/90 = 50.0%
+      and 50/90 = 55.6% (mean 47.5/90 = 52.8%), so the committed 54.4% bar sits
+      INSIDE the off arm's observed band — it is one draw of the same noisy
+      distribution, not a ceiling of it — while both flags-on runs land below it
+      and the 4–5 unit between-run range is as large as the two arms' mean
+      separation. Neither "the flags cost survival" nor "the flags buy it" is a
+      supported claim at n = 2 per arm; a run count that could resolve a 5-point
+      gap needs a power analysis this corpus (90 graded units) does not supply.
+      ⛔ THE LOSS CLASS IS THE USABLE RESULT: every failed unit in all FOUR runs
+      is `content_missing` (46, 50, 45, 40) — not one `provenance_missing` and
+      not one `ep_update_missing` — which is residual (a) below measured on the
+      shipped arm instead of asserted: the value is not in the point's CONTENT
+      at all, so no rule that acts on an already-emitted point (this refusal, or
+      any repair/merge arm) can recover it. ⚠️ THE RECEIPTS ARE DURABLE AND THE
+      FIGURES ARE DERIVED FROM THEM:
+      `tests/eval/write_path/receipts/w2b-10360-e2-{on,off}-{1,2}-2026-11-27.json`,
+      with the arm definition (and what may NOT be concluded) in
+      `tests/eval/write_path/receipts/10360-E2-ARMS-2026-11-27.md`; this clause
+      is re-derived from those files by
+      `tests/test_state_value_verbatim_10360.py::test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts`.
+      The `38/77 = 49.4%` / `UNMEASURED(<an E2 LLM arm run>)` reading this
+      replaces was a `#5064` comment figure (2026-10-13) that nothing could
+      re-derive.
       (c) a rewritten CLOCK or ISO date is not caught (form excluded by design),
       and neither is a colon-form value that happens to be a valid clock shape
       without being a clock (`4:32` read as a marathon time) — the two are the

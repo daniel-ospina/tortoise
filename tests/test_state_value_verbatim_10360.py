@@ -6014,9 +6014,11 @@ def test_the_registry_rows_measured_disclosures_are_pinned():
     absent" defect #10360 exists to remove.
 
     ⛔ WHAT THIS TEST DOES **NOT** CLAIM: that every clause of that row is now
-    pinned. Residuals (a) and (b2) are unpinnable in a unit test by construction
-    (a value the model never EMITS is upstream of selection; the survival target
-    needs an E2 LLM arm run), and (e)–(o) are pinned where they live or are
+    pinned. Residual (a) is unpinnable in a unit test by construction (a value
+    the model never EMITS is upstream of selection), (b2)'s survival figures are
+    pinned in §25 against the committed E2 receipts — not here, because they are
+    a property of a model RUN and not of the rule — and (e)–(o) are pinned where
+    they live or are
     out of this test's scope. What it pins is the set the row's ⚠️ paragraph
     names as a battery: (c) the `4:32` non-clock, (d) `per <unit>` rates,
     (d2) the identifier fail-open, and `20k-mile`/`20000 miles`.
@@ -7226,3 +7228,196 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
                             "the TTL is 20 minutes") == "ALIGNED"
     assert v2._value_slot_divergence("the TTL is 20 minutes",
                                      "the TTL is 20 minutes") == ()
+
+
+# ── 25. the E2 arm NUMBER, derived from the committed receipts ──────────────
+#
+# `#10360`'s Indicator (2) is that the strict-verbatim survival number is
+# PRODUCED by a lane, not quoted from a comment. Before these receipts the
+# figure was a `#5064` comment (`38/77 = 49.4%`, 2026-10-13) plus a lane's
+# `/tmp` receipts that no other box could read, and the registry row recorded it
+# `UNMEASURED(<an E2 LLM arm run>)`. The receipts now live in the ledger's own
+# home and THIS test re-derives the row's clause (b2) from them, so the row
+# cannot cite a number the committed artifacts do not carry.
+#
+# ⛔ WHAT THIS PINS, AND WHAT IT DELIBERATELY DOES NOT:
+#   * the per-run figures, the per-arm means and the failure-class census are
+#     recomputed from `session_results` — never read out of `metrics`, which
+#     would make this a restatement of the file instead of a derivation;
+#   * the arm definition (two receipts per arm) and the arm-independent
+#     invariants (posture, judge pin, corpus hash): a receipt from another
+#     corpus or another judge protocol is not a comparator;
+#   * that both flags-on runs are BELOW the committed baseline, and that the
+#     baseline sits INSIDE the flags-off arm's observed band. That is the honest
+#     reading at n = 2 per arm: the Target is missed, and the bar is not
+#     RESOLVED either — the two arms' between-run range is as large as their
+#     mean separation, so neither "the flags cost survival" nor "the flags buy
+#     it" is a supported claim.
+# It does NOT claim the Target is met, and it does not test the extractor: the
+# survival number is a property of a MODEL RUN, and running the arms again is
+# the only thing that moves it. An assertion on the number without the receipts
+# behind it would be exactly the quotation this issue exists to remove.
+
+_E2_RECEIPTS = (pathlib.Path(__file__).parent / "eval" / "write_path"
+                / "receipts")
+_E2_BASELINE = (pathlib.Path(__file__).parent / "eval" / "write_path"
+                / "baselines" / "main.json")
+
+
+def _e2_arm_receipts(arm: str) -> list[pathlib.Path]:
+    """The committed receipts for one arm, in run order."""
+    found = sorted(_E2_RECEIPTS.glob(f"w2b-10360-e2-{arm}-*-2026-11-27.json"))
+    return found
+
+
+def _e2_arm_runs(arm: str) -> list[dict]:
+    """Re-derive one arm's runs from its receipts.
+
+    ⚠️ `survived`/`total` are summed from `session_results`, NOT read from
+    `metrics`: the aggregate the runner publishes is the pooled ratio of these
+    same rows, so recomputing it here is what makes the receipts the SOURCE
+    rather than a place the number is also written down.
+    """
+    runs = []
+    for path in _e2_arm_receipts(arm):
+        blob = json.loads(path.read_text(encoding="utf-8"))
+        assert blob["run_status"] == "completed", (
+            f"{path.name} is not a completed run — a failed run cannot carry a "
+            "survival figure")
+        sessions = blob["session_results"]
+        survived = sum(r["strict"]["survived"] for r in sessions)
+        total = sum(r["strict"]["total"] for r in sessions)
+        classes: dict[str, int] = {}
+        for r in sessions:
+            for unit in r["failed_units"]:
+                classes[unit["failure"]] = classes.get(unit["failure"], 0) + 1
+        runs.append({
+            "path": path,
+            "run_id": blob["run_id"],
+            "survived": survived,
+            "total": total,
+            "classes": classes,
+            "metrics_value": blob["metrics"]["salient_unit_survival_strict"],
+            "corpus_hash": blob["corpus_hash"],
+            "judge_pin": blob["judge_pin"],
+            "posture": (blob["resolved_config"] or {}).get("extractor_posture"),
+        })
+    return runs
+
+
+def _pct_1dp(numerator: float, denominator: float) -> str:
+    """`48.9%` — the rendering the registry row uses for every E2 figure."""
+    return f"{100.0 * numerator / denominator:.1f}%"
+
+
+def _count(x: float) -> str:
+    """`42` for an integral mean, `47.5` for a half — the row's own spellings."""
+    return f"{x:g}"
+
+
+def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts():
+    """Clause (b2) of the registry row, re-derived from the committed receipts.
+
+    The row states the strict-verbatim survival figure for `#10360`'s Target.
+    Every version of that figure before this one was unreproducible — a comment
+    quote, or a receipt in `/tmp` — and the row called it `UNMEASURED`. This
+    test closes that: the receipts are committed, and the numbers the row
+    states must be the numbers they produce.
+    """
+    on = _e2_arm_runs("on")
+    off = _e2_arm_runs("off")
+    # ⚠️ TWO PER ARM is the arm definition, not an accident: one run under
+    # stochastic decoding is one draw, and the run-to-run range on this corpus
+    # (4-5 units) is as large as the two arms' mean separation. A receipt count
+    # other than 2 must move the row's own statement of its sample size.
+    assert len(on) == 2, f"expected 2 flags-on receipts, found {len(on)}"
+    assert len(off) == 2, f"expected 2 flags-off receipts, found {len(off)}"
+
+    baseline = json.loads(_E2_BASELINE.read_text(encoding="utf-8"))
+    totals = {run["total"] for run in on + off}
+    assert len(totals) == 1, (
+        f"the receipts disagree on the graded population ({sorted(totals)}) — "
+        "they are not the same corpus and are not a comparator")
+    base_total = totals.pop()
+    # the committed bar in UNITS, so the comparison below is a count and not a
+    # float rounding. If the baseline ratio ever stops landing on an integer
+    # count, this comparison is INVALID rather than merely imprecise, so it is
+    # asserted here instead of silently rounded.
+    base_survived = round(
+        baseline["metrics"]["salient_unit_survival_strict"] * base_total)
+    assert abs(baseline["metrics"]["salient_unit_survival_strict"]
+               * base_total - base_survived) < 1e-6, (
+        "the committed baseline is not an integer unit count on the receipts' "
+        f"population of {base_total} — the bar is not comparable")
+    assert base_total == on[0]["total"] == off[0]["total"], (
+        "the receipts' graded population must be the corpus the baseline was "
+        "measured on; a different denominator is not comparable")
+
+    for run in on + off:
+        # 1. each receipt is internally consistent: the aggregate it publishes
+        #    IS the pooled ratio of its own session rows.
+        assert round(run["metrics_value"] * run["total"]) == run["survived"], (
+            f"{run['path'].name}: metrics disagree with session_results")
+        # 2. same corpus, same judge protocol, same posture — or the arms are
+        #    not a comparator at all.
+        assert run["corpus_hash"] == baseline["fixtures_hash"], run["path"].name
+        assert run["judge_pin"] == baseline["judge_pin"], run["path"].name
+        assert run["posture"] == "llm", run["path"].name
+        # 3. ⛔ THE LOSS CLASS IS THE USABLE RESULT: not one failed unit is
+        #    provenance or EP-update — every one has the value ABSENT FROM THE
+        #    CONTENT, which is what makes the residual upstream of every
+        #    mechanical rule in the extractor rather than a gap in this one.
+        assert run["classes"] == {"content_missing": run["classes"].get(
+            "content_missing")}, (
+            f"{run['path'].name}: failure classes are {run['classes']} — a "
+            "provenance or EP-update failure would mean the loss is NOT purely "
+            "upstream, and the row's residual (a) would be the wrong story")
+
+    row = (pathlib.Path(__file__).resolve().parent.parent
+           / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    flattened = " ".join(row.split())
+
+    # 4. every per-run figure the row states is the one its receipt produces.
+    for run in on + off:
+        stated = f"{run['survived']}/{run['total']} = {_pct_1dp(run['survived'], run['total'])}"
+        assert stated in flattened, (
+            f"the row does not state {stated} — receipt {run['path'].name} "
+            f"({run['run_id']}) produces it")
+    # 5. …and so is each arm's MEAN, which is the figure a reader compares to
+    #    the bar (the per-run pair alone invites cherry-picking the better draw).
+    for arm, runs in (("flags-on", on), ("flags-off", off)):
+        mean_survived = sum(r["survived"] for r in runs) / len(runs)
+        mean_total = sum(r["total"] for r in runs) / len(runs)
+        stated = (f"{_count(mean_survived)}/{_count(mean_total)} = "
+                  f"{_pct_1dp(mean_survived, mean_total)}")
+        assert stated in flattened, (
+            f"the row does not state the {arm} mean {stated}")
+    # 6. the committed bar itself, in the row's own form.
+    assert f"{base_survived}/{base_total} = {_pct_1dp(base_survived, base_total)}" in flattened, (
+        "the row must state the committed baseline it compares against")
+
+    # 7. THE VERDICT THE ROW RECORDS, held to the artifacts: every flags-on run
+    #    is BELOW the bar, and the bar is INSIDE the flags-off band. Both halves
+    #    are load-bearing — the first is "the Target is missed", the second is
+    #    "and the bar is not resolved either", which is why the row must not
+    #    claim the flags cost survival.
+    assert all(r["survived"] < base_survived for r in on), (
+        "a flags-on run reached the committed baseline — the row's 'stays "
+        "SHORT of target' clause is now false and must be re-derived")
+    assert any(r["survived"] >= base_survived for r in off), (
+        "no flags-off run reached the committed baseline — the row's claim "
+        "that the bar sits INSIDE the flags-off band is now false")
+    assert min(r["survived"] for r in off) < base_survived, (
+        "every flags-off run cleared the bar — then the baseline is a CEILING "
+        "of that arm, not a draw inside its band, and the row overstates the "
+        "aperture")
+
+    # 8. the reading this replaces must be gone, not merely supplemented: the
+    #    old clause asserted BOTH that the figure was not re-measured and that
+    #    it was unmeasurable, and a row carrying both stories is how a future
+    #    lane re-quotes the dead one.
+    assert "NOT re-measured here" not in flattened, (
+        "the row still carries the pre-receipt 'NOT re-measured here' clause")
+    assert "SURVIVAL is now MEASURED on the flags-on arm" in flattened, (
+        "the row must state that the figure is now measured on the flags-on "
+        "arm — that is Indicator (2) of this issue")
