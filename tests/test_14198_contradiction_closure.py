@@ -36,16 +36,22 @@ start, `expiredAt` stamped from ingestion time, and the older claim **retained
 as terminal** — closed, never deleted (§2.0: the record is truth) and never
 merged (⛔ no fold).
 
-⛔ THREE gates keep that honest — and only the first two are pinned by a case
-that REDS when its gate is removed. The arm is SYMMETRIC on emission order (the
-model may write the pair either way, and `_canonicalize_nand_direction` cannot
-repair a cross-capture NAND), and the two rivals are ordered by WORLD TIME
-rather than capture membership (#14198: *"facts are compared on world-time
-dates, not arrival order"*), so a backfill does not emit an inverted window the
-consumer refuses. The third — the emitted side must be a POINT — is
-**redundantly** guarded: an Event is never in `payload_points`, so removing the
-`pt_` gate alone leaves the event-side case green and it takes both gates removed
-to red it (measured; REPORT §5 states the same).
+⛔ TWO properties keep that honest, each pinned by a case below that REDS when
+it is removed: the arm is SYMMETRIC on emission order (the model may write the
+pair either way, and `_canonicalize_nand_direction` cannot repair a
+cross-capture NAND), and the two rivals are ordered by WORLD TIME rather than
+capture membership (#14198: *"facts are compared on world-time dates, not
+arrival order"*), so a backfill does not emit an inverted window the consumer
+refuses.
+
+The reach of the arm is decided by ONE guard, `_written_point_ids` (payload
+points minus the `#2552` mints), and it is the authority for every shape the arm
+must refuse: an Event is not in it, a minted endpoint is not in it (the prune can
+delete it), and a folded prior id is not in it. An earlier cut also carried
+`new_id not in _capture_ids` and a `startswith("pt_")` test; both were INERT
+(every id in `_written_point_ids` satisfies them) and were deleted. Measured:
+removing `_written_point_ids` reds BOTH the event-side case and the
+minted-successor one, so that single guard is what those cases pin.
 
 ⛔ It is NOT a lexical contradiction detector. The issue's own ruling is that
 the MODEL labels a contradiction and code does the interval arithmetic; the
@@ -904,6 +910,45 @@ def test_a_prior_another_producer_closed_keeps_this_declaration_as_evidence():
     assert said, (
         "the receipt must say the claim was already closed, and by which "
         "successor — otherwise the closure is attributed to the wrong document")
+    assert "kept as the evidence" in said[0], (
+        "on the WIRING route the NAND survives, so the receipt may say so")
+
+
+def test_the_cross_producer_warning_does_not_promise_a_dropped_edge():
+    """The same case on the DROP route — the shape the #14592 receipt ran.
+
+    ⛔ MEASURED (#14198 review 5, P2): the cross-producer warning said "the
+    declared NAND is kept as the evidence of this refutation" unconditionally,
+    but on a PARTIAL identity lookup the pair falls through to
+    `operator dropped: src/dst did not resolve to an emitted point/event`. The
+    receipt then asserted the evidence survived and, one line later, reported
+    the drop — the exact contradiction the decline's own warning is required to
+    avoid, reintroduced by the fix for the previous round. The wording is
+    route-aware now, and this test pins the drop half (the test above pins the
+    wiring half).
+    """
+    from tortoise.extractor_v2 import execute_embed
+
+    lapsed = "ColdPath Logistics's cold-chain certificate lapsed in March"
+    search = {"points": [{"id": PRIOR_ID, "content": CERT, "kind": "statement",
+                          "when": "2026-01-05"}],
+              "query_coverage": _PARTIAL}
+    out = execute_embed({
+        "entities": [], "events": [],
+        "points": [_statement(lapsed),
+                   _statement(AUDIT),
+                   {**_statement(lapsed), "supersedes": CERT}],
+        "operators": [{"op_type": "NAND", "src": AUDIT, "dst": CERT}],
+    }, search, session_id="shape", session_date="2026-03-05")
+    said = [w for w in out.get("warnings") or [] if "ALREADY closed by" in w]
+    assert said, "the receipt must still name the successor that closed the claim"
+    assert "kept as the evidence" not in said[0], (
+        "on the drop route the edge is NOT kept — claiming it was puts two "
+        "contradictory lines in one receipt")
+    assert "dropped as before" in said[0], (
+        "the warning must say what happens to the edge on THIS route")
+    assert not (out.get("payload") or {}).get("operators"), (
+        "the drop route really does drop it — the warning now matches")
 
 
 def test_a_fuzzy_closure_still_discloses_its_recall_band():

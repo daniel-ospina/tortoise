@@ -12470,7 +12470,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
 
     def _close_prior_contradiction(new_id: str, older_id: str,
                                    older_content: str, where: str,
-                                   older_row: dict | None = None) -> bool:
+                                   older_row: dict | None = None,
+                                   *, keeps_edge: bool = True) -> bool:
         """Append the supersession that closes the older claim; True when one
         was recorded (or already was). The older claim is never deleted.
 
@@ -12557,13 +12558,22 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         closed_by = {str(r.get("superseded") or ""): str(r.get("supersedes_by") or "")
                      for r in supersessions}
         if older_id in closed_by:
+            # ⚠️ `keeps_edge` — the DROP route falls through to
+            # `operator dropped: …`, so promising that the edge was kept here
+            # would put two contradictory lines in one receipt: the round-4 rule
+            # for the decline, which this warning broke when it was written
+            # (review of #14794, cycle 5).
             warnings.append(
                 f"operator endpoint is an EARLIER-CAPTURE claim (#14198): {where} "
                 f"resolved to prior point {older_id[:20]!r}, whose interval is "
                 f"ALREADY closed by {closed_by[older_id][:20]!r} in this capture "
                 "— so no second supersession is recorded (the consumer would "
-                "skip it as an idempotent no-op, silently). The declared NAND "
-                "is kept as the evidence of this refutation")
+                "skip it as an idempotent no-op, silently). " +
+                ("The declared NAND is kept as the evidence of this refutation"
+                 if keeps_edge else
+                 "This refutation's edge is dropped as before — the identity "
+                 "lookup was partial, and the adjacent `operator dropped` line "
+                 "says so"))
             return False
         new_when = str(_capture_point_when.get(new_id) or "")
         older_when = _prior_start(older_id, older_row)
@@ -12704,7 +12714,9 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                         str((prior_row or {}).get("id") or "").strip(),
                         str((prior_row or {}).get("content") or ""),
                         f"NAND {prior_side} {prior_ref[:60]!r}",
-                        prior_row):
+                        prior_row,
+                        # this route returns to `operator dropped: …`
+                        keeps_edge=False):
                     continue
             warnings.append(f"operator dropped: src/dst did not resolve to an "
                             f"emitted point/event ({o.get('src')!r} → {o.get('dst')!r})")
