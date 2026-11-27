@@ -104,7 +104,11 @@ IN FLIGHT: <ids> — branch <b> — box <c> — since <UTC>
 - **§8 review at the head that lands**, findings fixed before the record (a body edit after a record
   wipes the attestation).
 - **§9 close only when every criterion is ticked**, and read the closure back — a `Closes` on a
-  non-default base is inert (`tools/closes_landing.py`, #10597).
+  non-default base is inert (`tools/closes_landing.py`, #10597), and a `Closes #N` that claims only
+  SOME of the issue's rows still closes the WHOLE issue, whatever qualifier surrounds it (#13946;
+  `tools/issue_process_lint.py --arm pr-partial-close` reads the claim against the issue's own
+  `## Satisfies` tick state or its declared row headings, and names the rows that would be closed
+  unmeasured).
 
 ## The instruments
 
@@ -112,15 +116,26 @@ IN FLIGHT: <ids> — branch <b> — box <c> — since <UTC>
 |---|---|---|
 | Does a PR claim an issue that nothing resolves? | `tools/issue_process_lint.py` | **advisory: rc 0 clean / 3 findings / 2 unmeasured** |
 | Does an issue with WIP have a `## Satisfies` checklist? | `tools/issue_process_lint.py` | **advisory: same codes** |
+| Does a `Closes` resolve an issue whose own rows it has not all claimed? | `tools/issue_process_lint.py --arm pr-partial-close` | **advisory: same codes; MOUNTED warn-only on `.github/workflows/closes-coherence.yml`** |
 | Has the surface actually moved toward its target? | `tools/surface-target-check.py` | refusal-capable (exit 1) |
 
 **“Advisory” is a property of the WIRING, not of the exit code.** The tool exits **3** when it finds
-something — that is how a caller knows. It is advisory because **nothing mounts it**, and because any
-step that ever does owes `continue-on-error: true`; `tests/test_issue_process_lint.py` parses the
-workflow YAML per step to enforce that rather than trusting the string to appear somewhere in the file.
+something — that is how a caller knows. **Two arms are unmounted**, and both are advisory because of
+that; any step that ever mounts them owes `continue-on-error: true`.
+`tests/test_issue_process_lint.py` parses the workflow YAML per step to enforce that rather than
+trusting the string to appear somewhere in the file.
+
+⚠️ **The third arm IS mounted** (#13946): `closes-coherence.yml` runs `--arm pr-partial-close` on
+every PR under that same `continue-on-error: true` pin, so it warns and never refuses. `--arm` is why
+the mount is safe — the default runs BOTH PR-side arms, and `pr-unclaimed-issue`'s measured
+false-positive population is the reason it was never put on an every-PR surface. ⛔ **And the arm's
+dominant verdict is `UNANSWERABLE`**: measured at `#13946`'s head, 0 of the 30 newest open issues
+carry a `## Satisfies` checklist and 1 declares ≥2 row headings, so a green step is never read as
+"every close was checked" — the `::notice` line carries the counts.
 
 ```bash
 uv run python tools/issue_process_lint.py --pr 11027            # one PR
+uv run python tools/issue_process_lint.py --pr 13886 --arm pr-partial-close   # the row-scope arm alone
 uv run python tools/issue_process_lint.py --issue 4282          # one issue
 uv run python tools/issue_process_lint.py --sweep               # the newest 50 open PRs (a CAP)
 uv run python tools/issue_process_lint.py --sweep-issues --label P0-blocker   # open issues, filtered

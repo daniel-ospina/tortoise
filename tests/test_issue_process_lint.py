@@ -3601,3 +3601,312 @@ def test_the_ascii_hyphen_is_an_appositive_dash_too():
     # The no-`#` guard is what keeps the widening contained.
     assert [f.arm for f in L.classify_pr("Refs #100 — not closing it - #300 must land first.\n", 1)] \
         == [L.ARM_PR]
+
+
+# --- arm 3: a row-scoped `Closes` closes the programme-scoped issue (#13946) ---------------
+#
+# THE MEASURED DEFECT. PR #13886 opened with `Closes #13036 (row V2 only).` and GitHub closed the
+# six-row capstone one second after the squash-merge (`bd020ff45b`, `closedAt 06:36:50Z`) with five
+# rows never measured and the evidence document the issue requires absent from `origin/main`. It was
+# reopened by hand. GitHub's closing grammar has no notion of partial scope, so ANY qualifier
+# surrounding a `Closes` still fires — the fix is a READER, not a grammar over the qualifier.
+#
+# The arm compares the rows a PR CLAIMS against the rows the ISSUE declares (its `## Satisfies` tick
+# state, or its row HEADINGS). A row id only counts when the ISSUE uses that exact token, so the arm
+# cannot invent a row the issue does not have.
+#
+# ⛔ EVERY ARM-3 TERMINATION HAS ITS CONTROL PAIR, because this arm has FOUR outcomes and folding
+# either of the two "could not answer" ones into `clean` is the false PASS this module ranks worst:
+#     flagged:  claims a PROPER SUBSET of the issue's rows   <->  control: claims all of them
+#     flagged:  the issue's `## Satisfies` has unticked boxes <->  control: all ticked
+#     abstained: the issue declares NO rows                   (recorded as a count, never a pass)
+#     ambiguous: the issue declares rows, the PR names none    (a complete close and a silent
+#                                                                partial are indistinguishable)
+
+EMPTY_SATISFIES = {"measured": False, "ticked": 0, "total": 0, "unticked": 0, "unticked_labels": []}
+
+
+def _scope(rows=(), satisfies=None):
+    return {"rows": list(rows), "satisfies": satisfies or dict(EMPTY_SATISFIES)}
+
+
+def _sat(ticked, unticked_labels):
+    total = ticked + len(unticked_labels)
+    return {"measured": True, "ticked": ticked, "total": total,
+            "unticked": len(unticked_labels), "unticked_labels": list(unticked_labels)}
+
+
+# `#13036`'s own six rows, read from its body: `### V1 · …` … `### V6 · …`
+CAPSTONE_BODY = """## Capstone verification
+
+## The bar — all six must be measured, not asserted
+
+### V1 · The targets are met
+### V2 · Every one of the 27 tools actually answers
+### V3 · The retired names still answer
+### V4 · No capability was silently dropped
+### V5 · The ontology holds
+### V6 · Docs and the declaration cannot drift
+"""
+
+
+def test_the_measured_instance_is_flagged_and_names_the_rows_it_did_not_claim():
+    """#13886's own first line, against #13036's own row list. This is the whole arm."""
+    rows = L.row_ids([CAPSTONE_BODY])
+    assert rows == ["V1", "V2", "V3", "V4", "V5", "V6"], rows
+    findings, stats = L.classify_partial_close(
+        "Closes #13036 (row V2 only).\n", 500, {13036: _scope(rows)}, "daniel-ospina/tortoise")
+    assert len(findings) == 1
+    assert findings[0].arm == L.ARM_PARTIAL
+    assert findings[0].evidence["claimed"] == ["V2"]
+    assert findings[0].evidence["unclaimed"] == ["V1", "V3", "V4", "V5", "V6"]
+    assert stats == {"closes": 1, "clean": 0, "finding": 1,
+                     "abstained": 0, "ambiguous": 0, "unread": 0}
+    # The finding has to be ACTABLE: the replacement form is named, with the ids already filled in.
+    assert "Satisfies #13036: V2" in findings[0].detail
+    assert "V1, V3, V4, V5, V6" in findings[0].detail
+
+
+def test_a_pr_that_claims_every_row_is_not_flagged():
+    """CONTROL for the arm's only finding path: all six named on the closing line's own line."""
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(
+        "Closes #13036 (rows V1, V2, V3, V4, V5, V6)\n", 500, {13036: _scope(rows)},
+        "daniel-ospina/tortoise")
+    assert findings == []
+    assert stats["clean"] == 1
+
+
+def test_naming_every_row_ANYWHERE_is_a_complete_close():
+    """#13886's own body carries a full row TABLE and a one-row qualifier — the QUALIFIER wins.
+
+    The closing line's claim is authoritative: if the whole body were consulted instead, #13886's
+    table (which lists all six rows) would read as a complete close and the defect would be missed.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    body = ("Closes #13036 (row V2 only).\n\n"
+            "| Row | Subject |\n|---|---|\n| V1 | a |\n| V2 | b |\n| V3 | c |\n| V4 | d |\n"
+            "| V5 | e |\n| V6 | f |\n")
+    findings, _ = L.classify_partial_close(body, 500, {13036: _scope(rows)})
+    assert [f.evidence["claimed"] for f in findings] == [["V2"]]
+    # …while a body that names all six and puts NO row id on the closing line is clean.
+    findings, stats = L.classify_partial_close(
+        "Closes #13036\n\nEvery row is proved: V1, V2, V3, V4, V5, V6.\n", 500, {13036: _scope(rows)})
+    assert findings == [] and stats["clean"] == 1
+
+
+def test_an_issue_that_declares_no_rows_is_abstained_and_counted():
+    """THE COMMON CASE, MEASURED: 0 of the 30 newest open issues carry a `## Satisfies` checklist and
+    1 declares >=2 row headings — so ABSTAINED is the dominant outcome and must be a COUNT, never a
+    silent pass. A "NOTHING FLAGGED" over an unanswerable population is the defect this guards."""
+    findings, stats = L.classify_partial_close("Closes #999\n", 500, {999: _scope([])})
+    assert findings == []
+    assert stats == {"closes": 1, "clean": 0, "finding": 0,
+                     "abstained": 1, "ambiguous": 0, "unread": 0}
+
+
+def test_a_single_row_heading_is_not_a_row_list():
+    """One heading is a section title, not a decomposition — there is nothing to be partial about."""
+    assert L.row_ids(["### V1 · only row\n"]) == ["V1"]
+    findings, stats = L.classify_partial_close("Closes #7 (V1)\n", 500, {7: _scope(["V1"])})
+    assert findings == [] and stats["abstained"] == 1
+
+
+def test_a_bare_closes_on_a_multi_row_issue_is_ambiguous_never_a_pass():
+    """Flagging this would put bureaucracy on every CORRECT complete close; passing it silently is
+    the defect. It is therefore neither — AMBIGUOUS, and counted."""
+    findings, stats = L.classify_partial_close(
+        "Closes #14715\n", 500, {14715: _scope(["R1", "R2", "R3"])})
+    assert findings == []
+    assert stats["ambiguous"] == 1 and stats["clean"] == 0 and stats["abstained"] == 0
+
+
+def test_a_fully_ticked_satisfies_checklist_is_clean():
+    findings, stats = L.classify_partial_close(
+        "Closes #1\n", 500, {1: _scope([], _sat(3, []))})
+    assert findings == [] and stats["clean"] == 1
+
+
+def test_an_unticked_satisfies_checklist_is_flagged_and_names_the_criteria():
+    findings, stats = L.classify_partial_close(
+        "Closes #1\n", 500, {1: _scope([], _sat(1, ["the second row", "the third row"]))})
+    assert len(findings) == 1
+    assert findings[0].evidence["source"] == "satisfies"
+    assert "2 of its 3" in findings[0].detail
+    assert "the second row" in findings[0].detail
+    assert stats["finding"] == 1
+
+
+def test_the_tick_state_wins_over_the_row_headings():
+    """A TICK is proof-or-not of a row; a heading is only a declaration. Where both exist the tick
+    state is the answer, so a fully-ticked checklist clears issue whose rows a bare `Closes` names."""
+    findings, stats = L.classify_partial_close(
+        "Closes #13036\n", 500, {13036: _scope(["V1", "V2", "V3"], _sat(3, []))})
+    assert findings == [] and stats["clean"] == 1
+
+
+def test_the_latest_satisfies_section_wins_rather_than_the_union():
+    """A re-posted, fully-ticked checklist must not inherit the unticked boxes of the comment it
+    supersedes — read as a union, that flags a FINISHED issue."""
+    early = "## Satisfies\n\n- [ ] a\n- [ ] b\n"
+    later = "## Satisfies\n\n- [x] a\n- [x] b\n"
+    assert L.criteria_state([early, later])["unticked"] == 0
+    assert L.criteria_state([early])["unticked"] == 2
+    # …and the order a body+comments list arrives in is body-first, so the LAST element is newest.
+    assert L.criteria_state([later, early])["unticked"] == 2
+
+
+def test_row_ids_reads_the_BODY_only_never_a_comment():
+    """A `### R1` inside a COMMENT is a quotation of some other issue's layout; reading it would let
+    a comment manufacture rows the issue does not have."""
+    body = "## R1 — first\n## R2 — second\n"
+    comment = "## R3 — quoted from elsewhere\n## R4 — also quoted\n"
+    assert L.row_ids([body]) == ["R1", "R2"]
+    assert L.row_ids([body, comment]) == ["R1", "R2"]
+
+
+def test_row_ids_ignores_a_fenced_example_and_a_bare_number_heading():
+    body = ("## R1 — real\n## R2 — real\n\n```\n## R3 — an example of the layout\n```\n"
+            "## 1. Introduction\n## V2\n")
+    assert L.row_ids([body]) == ["R1", "R2", "V2"]
+
+
+def test_a_row_id_matches_as_a_whole_token_only():
+    """`R1` must not be found inside `R10`, and a stated `R10` must not be read as `R1`."""
+    assert L._ids_in("R10 and AR1", ["R1"]) == set()
+    assert L._ids_in("R10 only", ["R1", "R10"]) == {"R10"}
+    # End to end: claiming R10 on a 3-row issue is not claiming R1.
+    findings, _ = L.classify_partial_close("Closes #14715 (R10 only)\n", 500,
+                                           {14715: _scope(["R1", "R2", "R3"])})
+    assert findings == []
+
+
+def test_a_quoted_closing_line_does_not_claim_rows():
+    """The fence grammar is `closes_landing`'s, imported — a quoted `(row R1 only)` is a mention."""
+    findings, stats = L.classify_partial_close(
+        "Closes #14715\n\n```\nCloses #14715 (row R1 only)\n```\n", 500,
+        {14715: _scope(["R1", "R2", "R3"])})
+    assert findings == [] and stats["ambiguous"] == 1
+
+
+def test_refs_with_a_row_qualifier_is_not_a_closing_target():
+    """`Refs #N (row V2 only)` is EXACTLY the form the arm asks authors to write — flagging it would
+    demand a closing keyword from the PR that followed the process."""
+    assert L.closing_targets("Refs #13036 (row V2 only)\n", 500) == []
+    assert L.closing_targets("Satisfies #13036: V2\nRefs #13036\n", 500) == []
+    assert L.closing_targets("Closes #13036 (row V2 only)\n", 500) == [13036]
+
+
+def test_an_unreadable_issue_is_recorded_unread_never_a_pass(monkeypatch):
+    """One issue that cannot be read must not silently drop out of the population, and must not abort
+    a `--sweep` over the rest of it."""
+    def boom(number, repo):
+        raise L.Unmeasurable("gh: simulated failure")
+
+    monkeypatch.setattr(L, "fetch_issue", boom)
+    scopes = L.read_scope([7], None, notes := [])
+    assert scopes == {7: None}
+    assert notes and "#7 could NOT be read" in notes[0]
+    findings, stats = L.classify_partial_close("Closes #7\n", 500, scopes)
+    assert findings == [] and stats["unread"] == 1
+
+
+def test_read_scope_reads_each_issue_once(monkeypatch):
+    calls = []
+
+    def fake(number, repo):
+        calls.append(number)
+        return "## R1 — a\n## R2 — b\n", ["## Satisfies\n\n- [x] a\n"]
+
+    monkeypatch.setattr(L, "fetch_issue", fake)
+    scopes = L.read_scope([5, 5, 6], None)
+    assert calls == [5, 6]
+    assert scopes[5]["rows"] == ["R1", "R2"]
+    assert scopes[5]["satisfies"]["ticked"] == 1
+
+
+# --- arm 3 at the CLI and in the workflow --------------------------------------------------
+def test_cli_pr_mode_flags_the_measured_shape_end_to_end(monkeypatch):
+    """The whole path: fetch the PR, fetch the issue it closes, classify, report rc 3."""
+    def fake_gh(args, timeout=60):
+        if args[:2] == ["pr", "view"]:
+            return json.dumps({"body": "Closes #13036 (row V2 only).\n", "labels": []})
+        if args[:2] == ["issue", "view"]:
+            return json.dumps({"body": CAPSTONE_BODY, "comments": []})
+        if args[:2] == ["repo", "view"]:
+            return json.dumps({"nameWithOwner": "daniel-ospina/tortoise"})
+        raise AssertionError(args)
+
+    monkeypatch.setattr(L, "_gh", fake_gh)
+    assert L.main(["--pr", "13886", "--repo", "daniel-ospina/tortoise", "--arm", "pr-partial-close"]) \
+        == L.RC_FINDINGS
+
+
+def test_cli_offline_says_arm_3_did_not_run(tmp_path):
+    """⛔ A `--body-file` run CANNOT answer arm 3, and must say so — a green offline run that is
+    silent about the arm reads as a verdict about it."""
+    body = tmp_path / "body.md"
+    body.write_text("Closes #13036 (row V2 only).\n", encoding="utf-8")
+    r = _run("--body-file", str(body))
+    assert r.returncode == L.RC_CLEAN
+    assert "closing-scope arm did NOT RUN" in r.stdout
+
+
+def test_cli_refuses_an_arm_the_mode_cannot_run(tmp_path):
+    body = tmp_path / "body.md"
+    body.write_text("Closes #1\n", encoding="utf-8")
+    # offline cannot read the closed issue's checklist
+    r = _run("--body-file", str(body), "--arm", "pr-partial-close")
+    assert r.returncode == 2 and "does not carry" in r.stderr
+    # an ISSUE arm on a PR mode, and a PR arm on an ISSUE mode
+    r = _run("--pr", "1", "--arm", "wip-no-satisfies")
+    assert r.returncode == 2 and "ISSUE-side" in r.stderr
+    r = _run("--issue", "1", "--arm", "pr-partial-close")
+    assert r.returncode == 2 and "PR-side" in r.stderr
+
+
+def test_cli_wip_still_reaches_the_issue_arm_when_it_is_selected(monkeypatch):
+    """`--wip` is consumed by `wip-no-satisfies`, so it must still work when that arm is the one
+    selected — and an arm/mode mismatch is refused BEFORE the verdict can be dropped."""
+    monkeypatch.setattr(L, "fetch_issue", lambda n, r: ("body", ["IN FLIGHT: 3.2c — branch x"]))
+    assert L.main(["--issue", "1", "--arm", "wip-no-satisfies"]) == L.RC_FINDINGS
+    monkeypatch.setattr(L, "fetch_issue", lambda n, r: ("## Satisfies\n\n- [ ] a\n", []))
+    assert L.main(["--issue", "1", "--arm", "wip-no-satisfies"]) == L.RC_CLEAN
+    # …and the same flags on a mode that cannot run that arm are refused, not silently dropped.
+    r = _run("--pr", "1", "--arm", "wip-no-satisfies", "--wip")
+    assert r.returncode == 2 and "answer ONE issue" in r.stderr
+
+
+def test_cli_json_does_not_report_an_arm_that_never_ran(tmp_path):
+    """`None` is NOT SELECTED; a selected-but-unrunnable arm carries a line and null stats. The two
+    are different claims and a machine consumer must be able to tell them apart."""
+    body = tmp_path / "body.md"
+    body.write_text("Closes #1\n", encoding="utf-8")
+    selected = json.loads(_run("--body-file", str(body), "--json").stdout)
+    assert selected["closing_scope"]["stats"] is None
+    assert "did NOT RUN" in selected["closing_scope"]["line"]
+    not_selected = json.loads(_run("--body-file", str(body), "--json", "--arm", "pr-unclaimed-issue").stdout)
+    assert not_selected["closing_scope"] is None
+
+
+def _workflow_steps(name):
+    doc = yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8"))
+    return doc, [s for job in (doc.get("jobs") or {}).values() for s in (job.get("steps") or [])]
+
+
+def test_arm_3_is_mounted_warn_only_on_the_workflow_that_runs():
+    """⛔ THE ARM MUST ACTUALLY RUN, OR IT IS AN ENFORCER WHOSE CONDITION NEVER FIRES. It is mounted on
+    `closes-coherence.yml` — the advisory host #10634 chose because `drift-guard.yml` is
+    `disabled_manually` and a step there is inert while the PR reads green — with
+    `continue-on-error: true`, and it selects `--arm pr-partial-close` explicitly so arm 1 (36 %
+    false-positive population) is not published on every PR."""
+    doc, steps = _workflow_steps("closes-coherence.yml")
+    mounts = [s for s in steps if "issue_process_lint" in json.dumps(s)]
+    assert len(mounts) == 1, [s.get("name") for s in steps]
+    mount = mounts[0]
+    assert mount.get("continue-on-error") is True
+    assert "--arm pr-partial-close" in json.dumps(mount)
+    # the token this step needs to read the CLOSED ISSUE's body/comments
+    assert doc["permissions"]["issues"] == "read"
+    # and the UNMEASURED arm, so a traceback cannot go green
+    assert "UNMEASURED" in json.dumps(mount)
