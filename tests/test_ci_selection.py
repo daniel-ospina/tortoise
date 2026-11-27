@@ -9215,9 +9215,9 @@ _EMISSION_RATIO_RE = re.compile(
 #: (`watchdog_minutes: twenty-eight`) is not read by the READER, but the backstop catches it — by
 #: design, since an unread figure must RED rather than pass as absence.
 _EMISSION_MINUTES_KEY_RE = re.compile(
-    r"\bwatchdog_minutes\b\W{0,8}(?P<minutes>\d+)", re.IGNORECASE)
+    r"\bwatchdog_minutes\b[^\w()]{0,8}(?P<minutes>\d+)", re.IGNORECASE)
 _EMISSION_HEADROOM_KEY_RE = re.compile(
-    r"\bwatchdog_headroom\b\W{0,8}(?P<headroom>\d+(?:\.\d+)?)", re.IGNORECASE)
+    r"\bwatchdog_headroom\b[^\w()]{0,8}(?P<headroom>\d+(?:\.\d+)?)", re.IGNORECASE)
 #: ⛔ THE SHAPE BACKSTOP for the two keys — the sibling of `_EMISSION_RATIO_SHAPE_RE` below, and the
 #: half the round-36 arm was missing. Every occurrence of EITHER key must be consumed by the reader
 #: anchored at the same offset; a re-spelling that is not REDs as a figure nobody reads instead of
@@ -9228,7 +9228,7 @@ _EMISSION_HEADROOM_KEY_RE = re.compile(
 #: `watchdog_headroom: 2.03`), so the cost is not paid here. No count is quoted beyond that: a
 #: spelling of the count is still a count nothing grades.
 _EMISSION_KEY_SHAPE_RE = re.compile(
-    r"\bwatchdog_(?P<which>minutes|headroom)\b\W{0,8}", re.IGNORECASE)
+    r"\bwatchdog_(?P<which>minutes|headroom)\b[^\w()]{0,8}(?=\w)", re.IGNORECASE)
 _EMISSION_RATIO_SHAPE_RE = re.compile(
     # Anchored on an unambiguous DIVISION SIGN (`/`, `÷`) rather than on a relation glyph: a stated
     # headroom ratio IS a quotient, so this catches a division statement the reader did not consume
@@ -9947,10 +9947,13 @@ def _emission_block_claims(
                 f"{governing_minutes} for its governing estimate ({governing_est} s) — the printed key "
                 "is a carried figure, and the block's own claim is that a carried figure reds a "
                 "required leg rather than shipping. Re-emit it with the verb.")
-        for stated_headroom in _EMISSION_HEADROOM_KEY_RE.findall(header):
+        for headroom_match in _EMISSION_HEADROOM_KEY_RE.finditer(header):
+            stated_headroom = headroom_match.group("headroom")
             expected_headroom = round(cs.watchdog_headroom(governing_est, governing_minutes), 2)
             assert abs(float(stated_headroom) - expected_headroom) < 1e-9, (
-                f"the block prints `watchdog_headroom: {stated_headroom}` but "
+                # ⛔ QUOTE THE MATCHED SPAN, not a reconstruction (#14623 round 38, P3): rebuilding
+                # `watchdog_headroom: {value}` printed a line that may not be in the manifest at all.
+                f"the block prints {headroom_match.group(0)!r} but "
                 f"`round(ci_selection.watchdog_headroom({governing_est}, {governing_minutes}), 2)` is "
                 f"{expected_headroom} — the printed key is a carried figure graded by nothing else in "
                 "the tree (`rg 'watchdog_headroom: 2'` outside this file finds no reader). Re-emit it "
@@ -9971,8 +9974,10 @@ def _emission_block_claims(
             f"the block states `{shaped.group(0).strip()}` in a spelling the emission reader does "
             "not consume, so that figure is graded by nothing — the same no-op-gate class as a "
             "ratio-shaped parenthetical nobody reads. Spell it `watchdog_minutes: <int>` / "
-            "`watchdog_headroom: <decimal>` (case-insensitive, whitespace around the colon "
-            "admitted), or delete the figure: an ABSENT figure is legal, an ungraded one is not.")
+            "`watchdog_headroom: <decimal>` (case-insensitive, and `=`, quotes or `:` accepted as "
+            "the separator), or delete the WHOLE `key: value` span — an ABSENT figure is legal, an "
+            "ungraded one is not. Deleting only the value keeps the key, which is still an unread "
+            "claim.")
     # ⛔ A FIGURE NOBODY READS IS NOT AN ABSENT FIGURE. Every ratio-SHAPED parenthetical must be
     # CONSUMED by the reader below; one that is not is a live claim graded by nothing, which is this
     # block's whole subject. This is what makes the widening above safe rather than one more
@@ -10233,7 +10238,13 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
 
     for legal_keys in ("`watchdog_minutes: 28` with `watchdog_headroom: 2.03`",
                        "`Watchdog_Minutes: 28` with `WATCHDOG_HEADROOM: 2.03`",
-                       "`watchdog_minutes : 28` with `watchdog_headroom:2.03`"):
+                       "`watchdog_minutes : 28` with `watchdog_headroom:2.03`",
+                       # ⛔ THE SEPARATORS THIS ROUND ADDED, fixtured (#14623 round 38, P2).
+                       # Reverting `[^\w()]{0,8}` to `\s*:\s*` left the WHOLE FILE green, because
+                       # every spelling below a colon was already pinned and none of these was.
+                       "`watchdog_minutes` = 28 with `watchdog_headroom` = 2.03",
+                       '"watchdog_minutes": 28 with "watchdog_headroom": 2.03',
+                       "`watchdog_minutes`=28 with `watchdog_headroom`=2.03"):
         # ASSERT THE READ first: a fixture whose spelling the reader never consumes pins nothing
         # about grading it (`_emission_block_claims` still returns non-None, because absence is
         # legal) — the exact non-discriminating shape round 32 filed against this arm's sibling.
@@ -10252,7 +10263,13 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
             ("`Watchdog_minutes: 29` with `watchdog_headroom: 2.03`", "watchdog_minutes"),
             ("`watchdog_minutes : 29` with `watchdog_headroom: 2.03`", "watchdog_minutes"),
             ("`watchdog_minutes: 28` with `watchdog_headroom: 2.04`", "watchdog_headroom"),
-            ("`watchdog_minutes: 28` with `Watchdog_Headroom : 2.04`", "watchdog_headroom")):
+            ("`watchdog_minutes: 28` with `Watchdog_Headroom : 2.04`", "watchdog_headroom"),
+            # ⛔ AND UNDER THE `=` / JSON SEPARATORS (#14623 round 38, P2). Measured before this
+            # fixture existed: `watchdog_headroom = 2.04` and `"watchdog_headroom": 2.04` were read
+            # by NEITHER the reader nor the backstop, so a falsified figure passed as absence.
+            ("`watchdog_minutes` = 28 with `watchdog_headroom` = 2.04", "watchdog_headroom"),
+            ('"watchdog_minutes": 28 with "watchdog_headroom": 2.04', "watchdog_headroom"),
+            ("`watchdog_minutes` = 29 with `watchdog_headroom` = 2.03", "watchdog_minutes")):
         try:
             _emission_block_claims(_key_header(wrong_keys))
         except AssertionError as exc:
