@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""issue_process_lint — two ADVISORY checks that make an issue's own process visible.
+"""issue_process_lint — three ADVISORY checks that make an issue's own process visible.
 
 The defect this exists for (measured 2026-11-05)
 ------------------------------------------------
@@ -12,30 +12,60 @@ They are produced by scoping, which happens *after* the issue is filed (owner ru
 So the design is two-stage — the **body** carries the process, and scoping posts a **`## Satisfies`
 comment** that is the finish line. See `docs/ops/ISSUE-WORKING-PROCESS.md`.
 
-Which makes exactly two shapes defects, and this tool flags only those:
+Which makes exactly three shapes defects, and this tool flags only those:
 
-=========================  =========================================================================
-arm                        flagged when
-=========================  =========================================================================
-``pr-unclaimed-issue``     a PR **claims** an issue (a ``#N`` — optionally ``owner/repo#N`` —
-                           attached to a **claiming word**: ``Refs`` / ``Part of`` / ``serves`` /
-                           ``addresses`` and the closing/satisfies words — ``Related`` and
-                           ``See also`` are NOT claiming words (they say the PR does NOT serve the
-                           issue, which is the form ``skills/code-review/SKILL.md`` mandates for a
-                           non-closing reference);
-                           a comma-continued list after that word is claimed in FULL, but only the
-                           **first** ref of a RESOLVING word resolves — GitHub's documented
-                           multi-issue form repeats the keyword (``Resolves #10, resolves #123``),
-                           so a continuation is CLAIMED, never resolved) and that issue is resolved
-                           by **neither** ``Satisfies #N`` **nor** a closing keyword
-                           (``Closes``/``Fixes``/``Resolves``). A bare ``#N`` with no claiming word
-                           is a MENTION and is never flagged — that distinction is what took the
-                           measured false-positive population from 68 % to 36 %. Measured (#10534):
-                           of 18 PRs naming a P0/P1, 18 used ``Refs`` and 5 of 29 used a closing
-                           keyword — so delivered work never closed and the count never moved.
-``wip-no-satisfies``       an issue has WIP but **no ``## Satisfies`` checklist** anywhere in its
-                           body or comments — work started before the completion criteria existed.
-=========================  =========================================================================
+===========================  =========================================================================
+arm                          flagged when
+===========================  =========================================================================
+``pr-unclaimed-issue``       a PR **claims** an issue (a ``#N`` — optionally ``owner/repo#N`` —
+                             attached to a **claiming word**: ``Refs`` / ``Part of`` / ``serves`` /
+                             ``addresses`` and the closing/satisfies words — ``Related`` and
+                             ``See also`` are NOT claiming words (they say the PR does NOT serve the
+                             issue, which is the form ``skills/code-review/SKILL.md`` mandates for a
+                             non-closing reference);
+                             a comma-continued list after that word is claimed in FULL, but only the
+                             **first** ref of a RESOLVING word resolves — GitHub's documented
+                             multi-issue form repeats the keyword (``Resolves #10, resolves #123``),
+                             so a continuation is CLAIMED, never resolved) and that issue is resolved
+                             by **neither** ``Satisfies #N`` **nor** a closing keyword
+                             (``Closes``/``Fixes``/``Resolves``). A bare ``#N`` with no claiming word
+                             is a MENTION and is never flagged — that distinction is what took the
+                             measured false-positive population from 68 % to 36 %. Measured (#10534):
+                             of 18 PRs naming a P0/P1, 18 used ``Refs`` and 5 of 29 used a closing
+                             keyword — so delivered work never closed and the count never moved.
+``wip-no-satisfies``         an issue has WIP but **no ``## Satisfies`` checklist** anywhere in its
+                             body or comments — work started before the completion criteria existed.
+``pr-partial-close``         a PR uses a **closing keyword** for an issue whose own ``## Satisfies``
+                             checklist still has UNTICKED criteria — i.e. the PR is resolving a scope
+                             it has not finished. Flagged per issue, naming the unticked criteria.
+===========================  =========================================================================
+
+ARM 3 — the row-scoped PR that closes the programme-scoped issue (#13946)
+---------------------------------------------------------------------
+Measured 2026-11-20: PR #13886 opened with ``Closes #13036 (row V2 only).``, and GitHub closed the
+six-row capstone ``#13036`` one second after the squash-merge (``bd020ff45b``, ``closedAt
+06:36:50Z``) with five rows never measured and the evidence document the issue requires absent from
+``origin/main``. **GitHub's closing grammar has no notion of partial scope** — any qualifier
+surrounding a ``Closes`` still fires — and no surface read the qualifier, so a partial close was
+indistinguishable from a correct one until a human read the body.
+
+The fix this arm takes is **not** a fourth prose grammar over that parenthetical. The repo already
+recorded the machine-readable field the issue says is missing: SCOPING posts a ``## Satisfies``
+comment with one ``- [ ]`` per acceptance criterion, the lane TICKS each as it proves it, and
+``Closes`` is written only on the last one (``docs/ops/ISSUE-WORKING-PROCESS.md`` §3/§7/§9, #11077,
+2026-11-05). A tick state answers "which of this issue's rows are measured" exactly, so arm 3 reads
+THAT and reports the unticked criteria **by label** — the rows the PR did not claim, named.
+
+⛔ **IT ABSTAINS WHERE THE FIELD IS ABSENT, AND SAYS SO WITH A COUNT.** ``#13036`` itself carried no
+``## Satisfies`` comment (3 comments, none with the heading), so arm 3 would NOT have flagged #13886:
+the issue predates the checklist discipline. Every run of the arm therefore prints how many closing
+refs carried a checklist and how many carried NONE, because an abstention reported as health is the
+false PASS this module ranks worst. An issue with no checklists is UNMEASURABLE for this question —
+never "finished".
+
+``--arm`` exists so a consumer mounts ONE arm. ``.github/workflows/closes-coherence.yml`` mounts
+``pr-partial-close`` on every PR; mounting ``all`` there would also publish arm 1, whose measured
+false-positive population is why it was never put on an every-PR surface.
 
 A CLAIM, NOT A MENTION — and why that distinction is the whole arm
 ------------------------------------------------------------------
@@ -60,12 +90,19 @@ defect. That is the whole reason this tool is advisory.
 
 ADVISORY, NEVER A GATE — and the exit codes say so honestly
 ------------------------------------------------------------
-``0`` nothing flagged · ``3`` findings · ``2`` unmeasurable. There is no ``--fail`` mode; nothing
-mounts it; it is not in ``python-ci-gate.needs`` and not in ``.mergify.yml``. Any workflow step that
-ever mounts it must carry ``continue-on-error: true`` — the shape of ``tools/closes_landing.py`` +
+``0`` nothing flagged · ``3`` findings · ``2`` unmeasurable. There is no ``--fail`` mode; it is not
+in ``python-ci-gate.needs`` and not in ``.mergify.yml``. Any workflow step that ever mounts it must
+carry ``continue-on-error: true`` — the shape of ``tools/closes_landing.py`` +
 ``.github/workflows/closes-coherence.yml`` (#10597: "not a new gate"), and
 ``tests/test_issue_process_lint.py`` parses the workflow YAML to enforce it per-step rather than
 trusting the string to appear somewhere in the file.
+
+⚠️ **ONE ARM IS NOW MOUNTED** (#13946): ``closes-coherence.yml`` runs ``--arm pr-partial-close`` on
+every PR, warn-only, under that same ``continue-on-error: true`` pin. That is not a gate — the step
+exits 0 whatever the arm says — but it does mean arm 3's silence is visible on every PR while arms 1
+and 2 remain unmounted. ⛔ **Which is why ``--arm`` exists**: mounting ``all`` there would publish
+arm 1's findings too, and arm 1's measured false-positive population is the reason it was never put
+on an every-PR surface. A selection the chosen mode cannot evaluate is REFUSED, never dropped.
 
 WHAT THIS TOOL DOES **NOT** CONSULT — declared, so its silence is not read as health
 ---------------------------------------------------------------------------------
@@ -112,6 +149,7 @@ sweeps, rather than only in the offline ones.
 Usage
 -----
     uv run python tools/issue_process_lint.py --pr 11027
+    uv run python tools/issue_process_lint.py --pr 13886 --arm pr-partial-close   # the #13946 arm alone
     uv run python tools/issue_process_lint.py --issue 4282
     uv run python tools/issue_process_lint.py --issue 4282 --wip        # issue arms only
     uv run python tools/issue_process_lint.py --sweep                  # newest 50 open PRs (a CAP)
@@ -635,6 +673,15 @@ SATISFIES_HEADING_RE = re.compile(
 # scoping). Not imported verbatim because that pattern also requires trailing whitespace after the
 # bracket, which would miss a bare `- [ ]` at end of line.
 CHECKBOX_RE = re.compile(r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[ xX]\]", re.MULTILINE)
+# The SAME task-list marker set as `CHECKBOX_RE`, plus the two groups arm 3 needs: the TICK STATE and
+# the criterion's own LABEL. `CHECKBOX_RE` is deliberately left alone — it answers "is this a task
+# item", which is arm 2's question, and widening it would let arm 2 start depending on a tick's
+# mark. This one is arm 3's: a tick is only meaningful next to the criterion it ticks, and the
+# label is what the finding has to NAME ("the rows it did not claim"), so a predicate with no label
+# would leave the reader unable to act on the finding.
+CRITERION_RE = re.compile(
+    r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[(?P<mark>[ xX])\][ \t]*(?P<label>.*)$",
+    re.MULTILINE)
 # ⛔ `TICKED_RE` USED TO SIT HERE and is deliberately NOT replaced (review round 26, P2). Its only
 # reader was `has_satisfies_checklist`'s "tick in a LATER comment" arm, which is where the false PASS
 # was: any finished task list anywhere after the heading cleared a `## Satisfies` with no criteria.
@@ -677,6 +724,8 @@ RELEASE_ANYWHERE_RE = re.compile(
 
 ARM_PR = "pr-unclaimed-issue"
 ARM_ISSUE = "wip-no-satisfies"
+ARM_PARTIAL = "pr-partial-close"
+ARM_NAMES = (ARM_PR, ARM_ISSUE, ARM_PARTIAL)
 
 
 @dataclass
@@ -1319,6 +1368,238 @@ def classify_issue(comment_bodies: list[str], number: int | str,
                     evidence={**measured, "populations_not_consulted": populations})], measured
 
 
+# --- arm 3: a CLOSING keyword on an issue whose own criteria are not all ticked ----------------
+# A row id is a short capitalised group plus a number — `V2`, `R1`, `D5`, `E6`, `P7`. It is the token
+# `#13036` uses for its six rows (`### V1 · …`) and `#14715` for its three (`## R1 — …`), i.e. the
+# shape `#13946` calls "the row table". Grounded deliberately: an id only counts when the ISSUE itself
+# uses it as a heading, so the arm can never invent a row the issue does not declare.
+ROW_ID = r"[A-Z]{1,3}\d{1,2}"
+# The issue's own row DECLARATION: an ATX heading whose first token is a row id. Not `#`/`##` (those
+# are titles and sections); `### V1 · …` / `## R1 — …` are the measured shapes.
+ROW_HEADING_RE = re.compile(rf"^[ \t]{{0,3}}#{{2,4}}[ \t]+(?P<id>{ROW_ID})(?![A-Za-z0-9])",
+                            re.MULTILINE)
+# The documented PARTIAL form, `Satisfies #<N>: <ids>` (`docs/ops/ISSUE-WORKING-PROCESS.md` §7) — the
+# one place the process already asks a lane to write the ids it claims.
+SATISFIES_IDS_RE = re.compile(r"Satisfies\s*#(?P<num>\d{1,7})\s*:(?P<ids>[^\n]*)", re.IGNORECASE)
+_CLOSING_WORD_RE = re.compile(r"\b(?:" + "|".join(CLOSING_WORDS) + r")\b", re.IGNORECASE)
+
+
+def row_ids(issue_bodies: list[str]) -> list[str]:
+    """The issue's own decomposable ROWS, in document order — the enumerable set #13946 says is absent.
+
+    ⛔ THE BODY ONLY, AND IT IS READ THROUGH `strip_code`. A row declaration is the issue AUTHOR's
+    structure; a `### R1` inside a fenced example in a comment is a quotation of some other issue's
+    layout, and reading it would let a comment manufacture rows the issue does not have.
+
+    ⛔ AND THIS IS *NOT* A NEW CONVENTION — IT IS THE ONE THE MEASURED ISSUES ALREADY USE. Measured at
+    this head over the 30 newest OPEN issues (`gh issue list --state open --limit 30`):
+    ``## Satisfies`` checklists **0 of 30**; a body with a task list **0 of 30**; **≥2 row headings
+    1 of 30** (`#14715`: `R1`, `R2`, `R3`). So the field that actually exists on a multi-row issue is
+    its row HEADINGS — `#13036`'s `### V1 ·` … `### V6 ·` are the same shape — and an arm keyed only
+    on ``## Satisfies`` would be an enforcer whose condition never fires. This reads the shape that is
+    there.
+
+    ⚠️ THE ``0 of 30`` IS THE HONEST HEADLINE, NOT A FOOTNOTE: adopt this arm and almost every closing
+    ref still abstains (see `classify_partial_close`), because most issues declare no rows at all. The
+    arm is designed to be quiet and to SAY it was quiet — never to look like coverage it does not have.
+    """
+    out: list[str] = []
+    for body in issue_bodies[:1]:
+        text = strip_code(body, indented_code=True)[0]
+        for match in ROW_HEADING_RE.finditer(text):
+            row = match.group("id")
+            if row not in out:
+                out.append(row)
+    return out
+
+
+def _ids_in(text: str, rows: list[str]) -> set[str]:
+    """Which of `rows` this text NAMES, as whole tokens (so `R1` is not found inside `R10`/`AR1`)."""
+    return {row for row in rows
+            if re.search(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", text)}
+
+
+def claimed_row_ids(pr_body: str, issue: int, rows: list[str]) -> set[str]:
+    """Which of the ISSUE's own rows this PR NAMES as its claim — the only set the arm compares against.
+
+    Two sources, and both are GROUNDED in the issue's declared rows, so a token the issue does not use
+    can never count as a claim:
+
+    * a ``Satisfies #<issue>: <ids>`` clause — the documented partial form;
+    * the **qualifier on the closing keyword's own line**. That is the measured shape: #13886 wrote
+      ``Closes #13036 (row V2 only).`` and the row it claimed sat in the parenthetical, one line
+      away from the keyword that fired. This is the ONE prose-adjacent read in the arm, and it is
+      deliberately narrow: the line must carry a CLOSING word, must name THIS issue, and a token only
+      counts when the issue declares that exact row id.
+
+    ⛔ AN EMPTY RESULT IS NOT "NO CLAIM" — it is "this PR did not say on this line", which is why the
+    caller falls back to the WHOLE body before deciding, and reports a body that names nothing as
+    AMBIGUOUS rather than as either a finding or a pass (see `classify_partial_close`).
+    """
+    text, _hidden = strip_code(pr_body, strict=True)
+    named: set[str] = set()
+    for match in SATISFIES_IDS_RE.finditer(text):
+        if int(match.group("num")) == issue:
+            named |= _ids_in(match.group("ids"), rows)
+    ref = re.compile(rf"#{issue}(?!\d)")
+    for line in text.splitlines():
+        if ref.search(line) and _CLOSING_WORD_RE.search(line):
+            named |= _ids_in(line, rows)
+    return named
+
+
+def criteria_state(comment_bodies: list[str]) -> dict:
+    """The tick state of the issue's OWN `## Satisfies` criteria — `measured` says whether there are any.
+
+    This is NOT the field #13946 says is missing (that claim is measured FALSE and `row_ids` carries
+    the correction) — but it IS the field the process doc already mandates for the same question
+    (`docs/ops/ISSUE-WORKING-PROCESS.md` §3: SCOPING posts one ``- [ ]`` per acceptance criterion; §9:
+    tick as proved, close only when all are ticked). So the arm reads it too, and it wins where it
+    exists: a TICK is proof-or-not of a row, while a heading is only a declaration of one.
+
+    ⚠️ ADOPTION IS MEASURED NEAR-ZERO (0 of the 30 newest open issues carry the heading at this head),
+    which is why it cannot be the arm's only source and why the abstention is counted and printed.
+
+    ⛔ THE **LATEST** SECTION THAT CARRIES BOXES WINS, not the union of every section. Read as a
+    union, a re-posted checklist that is fully ticked inherits the unticked boxes of the comment it
+    supersedes and the arm flags a finished issue — the false positive this whole file ranks second
+    worst. `comment_bodies` arrives body-first then chronologically (`fetch_issue`), so the last
+    section in reversed order is the newest state.
+
+    `measured` FALSE IS NOT A PASS: the question is UNANSWERABLE from artifacts rather than answered
+    YES, and the caller counts those.
+    """
+    for body in reversed(comment_bodies):
+        # `indented_code=True` — not `strict` — for the reason `has_satisfies_checklist` gives: a
+        # 4-space line inside a list item is a real criterion, while a top-level indented block is a
+        # QUOTED example of the format. This is the same read as arm 2's, deliberately: two arms that
+        # disagreed about what a checklist IS would disagree about whether one exists.
+        text = strip_code(body, indented_code=True)[0]
+        boxes: list[tuple[str, str]] = []
+        for section in _satisfies_sections(text):
+            for match in CRITERION_RE.finditer(section):
+                boxes.append((match.group("mark"), match.group("label").strip()))
+        if not boxes:
+            continue
+        unticked = [label for mark, label in boxes if mark not in "xX"]
+        return {"measured": True, "ticked": len(boxes) - len(unticked),
+                "total": len(boxes), "unticked": len(unticked), "unticked_labels": unticked}
+    return {"measured": False, "ticked": 0, "total": 0, "unticked": 0, "unticked_labels": []}
+
+def closing_targets(body: str, number: int | str, repo: str | None) -> list[int]:
+    """The issues this body RESOLVES with a closing keyword — the refs a `Closes` will actually fire on.
+
+    Read through `_claims_in`, the same reader arm 1 uses, so the two arms cannot disagree about
+    which refs a body closes (a second grammar here is the drift this file keeps re-discovering).
+    `Satisfies #N: <ids>` is deliberately NOT in this set: it is the PARTIAL form, and flagging it
+    would demand a closing keyword from exactly the PR that followed the process.
+    """
+    own = number if isinstance(number, int) and number > 0 else None
+    text, _hidden = strip_code(body, strict=True)
+    c = _claims_in(text, own, repo)
+    return [n for n in c["closing"] if n not in set(c["declined"])]
+
+
+def classify_partial_close(body: str, number: int | str,
+                           scope_by_issue: dict[int, dict | None],
+                           repo: str | None = None) -> tuple[list[Finding], dict[str, int]]:
+    """ARM 3 — a PR closes an issue as a WHOLE while naming only SOME of its rows.
+
+    THE MEASURED DEFECT (#13946, 2026-11-20). PR #13886 opened with `Closes #13036 (row V2 only).`
+    and GitHub closed the six-row capstone `#13036` one second after the squash-merge (`bd020ff45b`,
+    `closedAt 06:36:50Z`) with five rows never measured and the evidence document the issue requires
+    absent from `origin/main`. It was reopened by hand. **GitHub's closing grammar has no notion of
+    partial scope** — any qualifier surrounding a `Closes` still fires — and `tools/closes_landing.py`
+    reads the keyword, never the qualifier.
+
+    TWO SOURCES OF "THE ROWS", ONE QUESTION. Both are the ISSUE's own artifacts, so the arm never
+    compares against a vocabulary it invented:
+
+    1. a ``## Satisfies`` tick state — a TICK is proof-or-not of a row, so it wins where it exists;
+    2. the issue's declared row HEADINGS (``### V1 ·``, ``## R1 —``) — the shape measured on the real
+       multi-row population (`#13036`'s six, `#14715`'s three). A row HEADING is only a declaration,
+       so this source fires only when the PR NAMES at least one row and NOT all of them.
+
+    ⛔ IT ABSTAINS, LOUDLY, WHERE NEITHER EXISTS — AND THAT IS THE COMMON CASE. Measured at this head
+    over the 30 newest open issues: 0 carry a ``## Satisfies`` checklist and 1 declares ≥2 row
+    headings. So a closing ref will usually be UNMEASURABLE, and the arm's job there is to say so in a
+    COUNT rather than look clean. **`#13036` itself is in that population**: it declared rows as
+    headings but the PR that closed it named `V2` in prose and the issue carried no tick state, so
+    this arm DOES flag #13886's shape whenever the issue declares rows — and abstains where the issue
+    declares none.
+
+    ⛔ AND "NAMES NO ROW" IS AMBIGUOUS, NOT CLEAN. A 3-row issue closed by a bare `Closes #N` may be a
+    complete close or a silent partial; the two are indistinguishable from artifacts, so it is
+    reported as AMBIGUOUS and neither flagged nor passed. Flagging it would put bureaucracy on every
+    correct complete close; passing it silently is the defect.
+    """
+    findings: list[Finding] = []
+    stats = {"closes": 0, "clean": 0, "finding": 0, "abstained": 0, "ambiguous": 0, "unread": 0}
+    for issue in closing_targets(body, number, repo):
+        stats["closes"] += 1
+        scope = scope_by_issue.get(issue)
+        if scope is None:
+            stats["unread"] += 1
+            continue
+        rows = scope["rows"]
+        satisfies = scope["satisfies"]
+        if satisfies.get("measured"):
+            if satisfies["unticked"] <= 0:
+                stats["clean"] += 1
+                continue
+            labels = [lbl or "(unnamed criterion)" for lbl in satisfies["unticked_labels"]]
+            named = "; ".join(labels[:3])
+            if len(labels) > 3:
+                named += f"; … +{len(labels) - 3} more"
+            detail = (
+                f"closes #{issue} with a closing keyword while {satisfies['unticked']} of its "
+                f"{satisfies['total']} `## Satisfies` criteria are still UNTICKED ({named}). A "
+                f"closing keyword resolves the WHOLE issue whatever qualifier surrounds it, so the "
+                f"criteria this PR does not claim are closed unmeasured. Tick each criterion as it "
+                f"is proved and write `Closes #{issue}` only on the last one; use "
+                f"`Satisfies #{issue}: <ids>` + `Refs #{issue}` before that "
+                f"(docs/ops/ISSUE-WORKING-PROCESS.md §7/§9).")
+            findings.append(Finding(arm=ARM_PARTIAL, subject=_subject("PR", number), detail=detail,
+                                    evidence={"issue": issue, "source": "satisfies", **satisfies}))
+            stats["finding"] += 1
+            continue
+        if len(rows) < 2:
+            # No tick state and no row DECLARATION: nothing machine-readable says how many rows this
+            # issue has, so "did this PR close part of it" is UNANSWERABLE. Never a pass.
+            stats["abstained"] += 1
+            continue
+        named_rows = claimed_row_ids(body, issue, rows) & set(rows)
+        if not named_rows:
+            # ⛔ THE FALLBACK IS NOT A PASS EITHER. A PR that never puts a row id on its closing line
+            # may still be claiming every row in a TABLE further down (#13886's own body carries such
+            # a table), so "names all of them ANYWHERE" is a complete close — but "names none of them
+            # anywhere" is indistinguishable from a silent partial, and is reported as AMBIGUOUS.
+            # The closing-line read takes PRIORITY precisely because #13886 has both: a table naming
+            # all six rows AND a qualifier naming one, and it is the qualifier that is the claim.
+            if set(rows) <= _ids_in(strip_code(body, strict=True)[0], rows):
+                stats["clean"] += 1
+                continue
+            stats["ambiguous"] += 1
+            continue
+        unclaimed = [r for r in rows if r not in named_rows]
+        if not unclaimed:
+            stats["clean"] += 1
+            continue
+        detail = (
+            f"closes #{issue} with a closing keyword while claiming only "
+            f"{', '.join(sorted(named_rows))} of its {len(rows)} declared rows — "
+            f"{', '.join(unclaimed)} would be closed UNMEASURED. A closing keyword resolves the "
+            f"WHOLE issue whatever qualifier surrounds it (`(row V2 only)` included: #13886 closed "
+            f"the six-row #13036 that way, `bd020ff45b`). Use `Satisfies #{issue}: "
+            f"{', '.join(sorted(named_rows))}` + `Refs #{issue}`, and keep the closing keyword for "
+            f"the PR that claims all {len(rows)} (docs/ops/ISSUE-WORKING-PROCESS.md §7).")
+        findings.append(Finding(arm=ARM_PARTIAL, subject=_subject("PR", number), detail=detail,
+                                evidence={"issue": issue, "source": "rows", "rows": rows,
+                                          "claimed": sorted(named_rows), "unclaimed": unclaimed}))
+        stats["finding"] += 1
+    return findings, stats
+
+
 # --- measurement (gh) ---------------------------------------------------------------------
 def _gh(args: list[str], timeout: int = 60) -> str:
     try:
@@ -1357,6 +1638,33 @@ def fetch_issue(number: int, repo: str | None) -> tuple[str, list[str]]:
         args += ["--repo", repo]
     data = json.loads(_gh(args))
     return data.get("body") or "", [(c.get("body") or "") for c in data.get("comments") or []]
+
+
+def read_scope(numbers: list[int], repo: str | None,
+               notes: list[str] | None = None) -> dict[int, dict | None]:
+    """The two things arm 3 compares against, per issue — `None` where the issue could not be read.
+
+    A failed read is an abstention, never a pass: `fetch_issue` raises `Unmeasurable` on a `gh`
+    failure, and letting that escape one issue would abort a whole `--sweep` over a single deleted or
+    transferred ref — so it is caught HERE, per issue, and the caller prints how many went unread.
+    The alternative (drop it and carry on silently) is the shape this module refuses everywhere.
+
+    One `gh issue view` per DISTINCT issue, and only for refs the body actually CLOSES: a `--pr` run
+    therefore costs one extra call for the ordinary single-issue PR, and a `--sweep` costs one per
+    closed issue across its (capped) population. The population is the CALLER's, so the caller
+    declares the cost rather than this function growing a cache nobody asked for.
+    """
+    out: dict[int, dict | None] = {}
+    for number in dict.fromkeys(numbers):
+        try:
+            body, bodies = fetch_issue(number, repo)
+        except Unmeasurable as exc:
+            out[number] = None
+            if notes is not None:
+                notes.append(f"#{number} could NOT be read, so its criteria are UNMEASURED: {exc}")
+            continue
+        out[number] = {"rows": row_ids([body]), "satisfies": criteria_state([body, *bodies])}
+    return out
 
 
 def sweep_prs(repo: str | None, limit: int) -> list[tuple[int, str, list[str]]]:
@@ -1423,9 +1731,9 @@ def _comments_from_file(path: Path) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="Advisory: flag a PR claiming an issue that nothing resolves, and an issue with "
-                    "WIP but no `## Satisfies` checklist. Never a gate (rc 0 clean / 3 findings / "
-                    "2 unmeasured).")
+        description="Advisory: flag a PR claiming an issue that nothing resolves, a PR closing an "
+                    "issue whose own criteria are not all ticked, and an issue with WIP but no "
+                    "`## Satisfies` checklist. Never a gate (rc 0 clean / 3 findings / 2 unmeasured).")
     which = ap.add_mutually_exclusive_group(required=True)
     which.add_argument("--pr", type=int, help="classify one PR by number")
     which.add_argument("--issue", type=int, help="classify one issue by number")
@@ -1443,6 +1751,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--repo", default=None,
                     help="owner/name (default: resolved from gh in the LIVE modes only; pass it "
                          "explicitly to count owner/repo#N claims in the offline file modes)")
+    ap.add_argument("--arm", choices=[*ARM_NAMES, "all"], default="all",
+                    help="which arm(s) to run (default: all). ⛔ WHY THIS EXISTS: a consumer mounts "
+                         "ONE arm and must not inherit another's findings — "
+                         "`.github/workflows/closes-coherence.yml` mounts `pr-partial-close` on "
+                         "every PR, and running `all` there would also publish arm 1's findings, "
+                         "whose measured false-positive population (36% of live open PRs) is exactly "
+                         "why it was never mounted on an every-PR surface. An arm this mode cannot "
+                         "run is REFUSED, never silently dropped.")
     ap.add_argument("--comments-file", type=Path, default=None,
                     help="offline issue mode: comment bodies (JSON list, gh-shaped, or markdown)")
     ap.add_argument("--wip", action="store_true",
@@ -1522,10 +1838,56 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--json and --annotate are mutually exclusive: --json emits one JSON document, "
                  "--annotate emits ::warning/::notice lines — passing both silently dropped the "
                  "annotations")
+    # `--arm` selects a SUBSET, so a selection the chosen mode cannot evaluate is refused rather than
+    # dropped — the same doctrine as `--wip`/`--label`/`--limit` above. `all` never needs this.
+    issue_mode = args.issue is not None or args.sweep_issues or args.issue_body_file is not None
+    pr_mode = args.pr is not None or args.sweep or args.body_file is not None
+    if args.arm == ARM_ISSUE and pr_mode:
+        ap.error(f"--arm {ARM_ISSUE} is an ISSUE-side arm; this mode reads a PR body, so the "
+                 "selection would be dropped in silence")
+    if args.arm in (ARM_PR, ARM_PARTIAL) and issue_mode:
+        ap.error(f"--arm {args.arm} is a PR-side arm; this mode reads an issue, so the selection "
+                 "would be dropped in silence")
+    run_arm_pr = args.arm in ("all", ARM_PR)
+    run_arm_issue = args.arm in ("all", ARM_ISSUE)
+    # A `--body-file` run cannot reach arm 3's input, so it does not RUN it — and then says so in its
+    # output. Selection is not the same question as execution.
+    run_arm_partial = args.arm in ("all", ARM_PARTIAL) and args.body_file is None
+    arm_partial_selected = args.arm in ("all", ARM_PARTIAL)
+    if args.body_file is not None and args.arm == ARM_PARTIAL:
+        # ⛔ OFFLINE IS OFFLINE. Arm 3 reads the CLOSED ISSUE's own checklist, which a body file does
+        # not carry, so this mode cannot answer it — and a run that reported "NOTHING FLAGGED" over an
+        # arm it never evaluated is exactly how a silence gets read as health. An EXPLICIT selection
+        # of an arm this mode cannot run is REFUSED; the default `all` runs arm 1 and prints a line
+        # saying arm 3 did not run, so a bare `--body-file` keeps working and still cannot be read as
+        # a verdict about arm 3.
+        ap.error(f"--arm {ARM_PARTIAL} reads the CLOSED ISSUE's own `## Satisfies` checklist, which a "
+                 "`--body-file` does not carry; run it with `--pr <N> --repo <owner/name>` (an "
+                 "explicit selection here would be dropped in silence)")
+    if wip is not None and not run_arm_issue:
+        ap.error(f"--wip/--no-wip are consumed by --arm {ARM_ISSUE} alone, which this run does not "
+                 "execute — the verdict would be dropped in silence")
 
     findings: list[Finding] = []
     measured_rows: list[dict] = []
     notes: list[str] = []
+    # Arm 3's own population counters. `None` means THE ARM DID NOT RUN, which is a different claim
+    # from "it ran and found nothing" — the distinction this module refuses to blur anywhere else.
+    closing_scope: dict | None = None
+
+    def run_closing_scope(body: str, number: int, repo2: str | None) -> list[Finding]:
+        """Arm 3 for one PR body, accumulating its population counters as a side effect."""
+        nonlocal closing_scope
+        if closing_scope is None:
+            closing_scope = {"closes": 0, "clean": 0, "finding": 0,
+                             "abstained": 0, "ambiguous": 0, "unread": 0}
+        targets = closing_targets(body, number, repo2)
+        scopes = read_scope(targets, repo2, notes)
+        found, stats = classify_partial_close(body, number, scopes, repo2)
+        for key, value in stats.items():
+            closing_scope[key] += value
+        return found
+
     try:
         # Resolve the repo through `gh` ONLY in the modes that reach GitHub. The `--body-file` and
         # `--issue-body-file` modes are documented as OFFLINE, and making an unannounced network
@@ -1544,7 +1906,8 @@ def main(argv: list[str] | None = None) -> int:
             "the repo is unknown offline; pass --repo to count them")
         if args.body_file is not None:
             body = args.body_file.read_text(encoding="utf-8")
-            findings += classify_pr(body, "body-file", repo, notes=notes, repo_unknown=repo_unknown)
+            if run_arm_pr:
+                findings += classify_pr(body, "body-file", repo, notes=notes, repo_unknown=repo_unknown)
             population = "1 body (offline)"
         elif args.issue_body_file is not None:
             bodies = _comments_from_file(args.comments_file) if args.comments_file else []
@@ -1556,7 +1919,10 @@ def main(argv: list[str] | None = None) -> int:
             population = f"1 issue body + {len(bodies)} comment(s) (offline)"
         elif args.pr is not None:
             body, labels = fetch_pr(args.pr, repo)
-            findings += classify_pr(body, args.pr, repo, labels, notes=notes, repo_unknown=repo_unknown)
+            if run_arm_pr:
+                findings += classify_pr(body, args.pr, repo, labels, notes=notes, repo_unknown=repo_unknown)
+            if run_arm_partial:
+                findings += run_closing_scope(body, args.pr, repo)
             population = "1 PR"
         elif args.issue is not None:
             # The body is a comment-shaped input on the LIVE path too — the offline sibling twelve
@@ -1570,7 +1936,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.sweep:
             rows = sweep_prs(repo, limit)
             for number, body, labels in rows:
-                findings += classify_pr(body, number, repo, labels, notes=notes, repo_unknown=repo_unknown)
+                if run_arm_pr:
+                    findings += classify_pr(body, number, repo, labels, notes=notes, repo_unknown=repo_unknown)
+                if run_arm_partial:
+                    findings += run_closing_scope(body, number, repo)
             population = f"{len(rows)} open PR(s)"
             _note_truncation(notes, rows, limit, "open PR")
         else:  # --sweep-issues
@@ -1587,6 +1956,29 @@ def main(argv: list[str] | None = None) -> int:
 
     marker_reads = sum(1 for m in measured_rows if m["marker_count"])
     markerless = sum(1 for m in measured_rows if not m["marker_count"] and m["wip_source"] == "comment-marker")
+
+    # ONE sentence, printed by all three surfaces, so the human/JSON/annotation runs cannot describe
+    # the same arm three different ways (the F7 shape this module already paid for once).
+    # `closing_scope is None` under a selected arm means the arm did not run, which is stated as such
+    # — never as "nothing found".
+    if not arm_partial_selected:
+        closing_line: str | None = None
+    elif closing_scope is None:
+        closing_line = ("closing-scope arm did NOT RUN in this mode (it reads the closed issue's own "
+                        "`## Satisfies` checklist) — so there is no verdict from it here")
+    else:
+        # ⛔ THE COUNTERS ARE THE ARTIFACT (measured: 0 of 30 newest open issues carry a `## Satisfies`
+        # checklist and 1 declares ≥2 row headings, so ABSTAINED is the DOMINANT outcome here). A line
+        # that printed only findings would make "this arm cannot answer that question about most
+        # issues" look like "nothing is wrong", which is the false PASS the arm exists to refuse.
+        closing_line = (
+            f"closing-scope arm: {closing_scope['closes']} closing ref(s) read — "
+            f"{closing_scope['clean']} clean, {closing_scope['finding']} flagged; "
+            f"UNANSWERABLE for {closing_scope['abstained']} (no `## Satisfies` tick state and fewer "
+            f"than 2 declared row headings, so the issue does not say how many rows it has — NEVER "
+            f"read as complete), {closing_scope['ambiguous']} declared rows but the PR named none "
+            f"(a complete close and a silent partial are indistinguishable there), "
+            f"{closing_scope['unread']} unread")
 
     if args.json:
         # ⛔ NO `wip_read` FOR AN ARM THAT NEVER RAN (review round 28, P3). The docstring says a
@@ -1607,10 +1999,16 @@ def main(argv: list[str] | None = None) -> int:
                                                m["wip_source"] == "injected" for m in measured_rows)
                                             else ["branches", "worktrees", "ref-claims"])}
                                        if measured_rows else None),
+                          # `None` = the arm was NOT SELECTED. A selected arm that could not run
+                          # carries its `line` and a null `stats` — the two are different claims.
+                          "closing_scope": (None if closing_line is None
+                                            else {"stats": closing_scope, "line": closing_line}),
                           "findings": [f.as_dict() for f in findings]}, indent=2))
     elif args.annotate:
         for note in notes:
             print(f"::notice title=issue-process-lint::{note}")
+        if closing_line is not None:
+            print(f"::notice title=issue-process-lint::{closing_line}")
         for f in findings:
             print(f.annotate())
         if measured_rows:
@@ -1631,6 +2029,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"issue_process_lint (advisory) — population: {population}")
         for note in notes:
             print(f"  ! {note}")
+        if closing_line is not None:
+            print(f"  {closing_line}")
         if measured_rows and all(m["wip_source"] == "injected" for m in measured_rows):
             # ⛔ NO MARKER COUNT UNDER AN INJECTED VERDICT (review round 29, P3). `markerless` counts
             # only rows read from a `<!-- p01-status -->` COMMENT, so with an injected `--wip` verdict
