@@ -1412,7 +1412,7 @@ class _ScopeBlindCursor:
     isolation gate (`record_allocator._assert_read_committed`) opens its own
     cursor and `close()`s it in a `finally` BEFORE `_apply_tenant_scope` runs.
     (The gate is `record_allocator.require_read_committed`, called from
-    `record_projection.py:9082`; a first version of this note cited
+    `record_projection.py:9092`; a first version of this note cited
     `_assert_read_committed`, a symbol that does not exist — #11783 round 28 P3.)
     A fake with no `close()` therefore died in that `finally` with
     `AttributeError: '_ScopeBlindCursor' object has no attribute 'close'` — so

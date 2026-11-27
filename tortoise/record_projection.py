@@ -3800,9 +3800,10 @@ def _split_properties(
     REACH: `patch=True` is passed by the whole `NodePatch` feed and by the
     `EntityMutated` patch arm, so EIGHT record types reach it — `PointRevised`,
     `EntityMutated`, `OperatorAnnotated`, `BatchIdStamped`, `PointRetracted`,
-    `PointSuperseded`, `PointInvalidated`, `ObjectSuperseded`. Only two can
-    carry a MAPPING-valued flatten key: `PointRevised` (verbatim caller props,
-    `from_payload=None`) and `EntityMutated` (the whole applied `state` map).
+    `PointSuperseded`, `PointInvalidated`, `ObjectSuperseded`. Only THREE can
+    carry a MAPPING-valued flatten key: `PointRevised` and `OperatorAnnotated`
+    (both `from_payload=None`, so the caller's props ride verbatim) and
+    `EntityMutated` (the whole applied `state` map).
     `OperatorAnnotated` rides the same `from_payload is None` branch but its
     fold writes annotator dims by direct `SET`, so there this CLEARS what the
     node keeps; the other five declare their keys (`from_payload` / `renames` /
