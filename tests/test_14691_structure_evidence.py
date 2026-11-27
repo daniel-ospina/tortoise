@@ -1882,6 +1882,29 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
     assert sorted(end_sweep) == list(range(1, span + 1)), (
         f"the end sweep covers offsets {min(end_sweep)}..{max(end_sweep)} while the docstring "
         f"states `1..span`, i.e. 1..{span} on the span-{span} site")
+    # ⛔ AND REPORT §8.23'S COPY OF THAT EXTENT IS THE SAME EXTENT (#14723, round 29). Round 27
+    # established that EVERY copy of a derived figure must be graded, not whichever one a fix
+    # happens to reach; the end sweep's extent has two homes — the predicate's docstring and
+    # §8.23's normative "It is now swept the same way: every end offset `1..span` … must be
+    # refused" — and round 28 graded only the first. Measured at this head: §8.23's `1..span`
+    # -> `1..span + 1` left all **103 passed** while the sentence claimed a sweep the loop does
+    # not run (REPORT.md restored byte-for-byte, `sha256sum` compared).
+    sections = re.split(r"(?m)^### ", _report())
+    section_823 = next((s for s in sections if s.startswith("8.23 ")), None)
+    assert section_823, (
+        "REPORT no longer carries a §8.23 heading — the sentence that states the END sweep's "
+        "extent is graded inside THAT section, so it may not be renumbered away silently")
+    reported_end = re.search(
+        r"every end offset `1\.\.span(?:\s*\+\s*(\d+))?` past a site",
+        re.sub(r"\s+", " ", section_823))
+    assert reported_end, (
+        "REPORT §8.23 no longer states the END sweep's extent as \"every end offset `1..span` "
+        "past a site\" — the swept set is graded against that sentence")
+    reported_max = span + int(reported_end.group(1) or 0)
+    assert reported_max == max(end_sweep), (
+        f"REPORT §8.23 states the END sweep reaches 1..{reported_max} while the loop sweeps "
+        f"1..{max(end_sweep)} on the span-{span} site — the docstring's copy of this extent is "
+        "graded, so the evidence document's copy may not drift from it")
     # …and REPORT's copies, which are the ones a reader of the EVIDENCE doc actually meets. The
     # slack copy is a REGEX, not a needle, because it is the same figure the docstring copy is
     # graded on and it sits one line below §8.20's allowance needle (#14723, round 28: measured

@@ -1151,8 +1151,9 @@ artifact, pin, row or predicate moved.
 ### 8.23 Round 25 — the END of a wider span was graded by nothing below the site's whole span
 
 Shape 3 requires a wider citation to end EXACTLY on the artifact's end, and the predicate's
-docstring says so. Nothing graded it below the site's own span: the table's only end-padded row
-pads by the FULL span, so a tolerance narrower than that was free. Measured at `c6c3439cb5e8`, each
+docstring says so. Nothing graded it below the site's own span: at `c6c3439cb5e8` the table's only
+end-padded row padded by the FULL span, so a tolerance narrower than that was free. Measured at
+that head, each
 mutant applied alone and the file restored byte-for-byte (`sha256sum` compared): widening
 `hi - other_hi == 0` to `<= 5` — and to `<= 1` — left **103 passed**, while the sentence "requires
 it to end at EXACTLY the artifact's end" became false at the tree it describes.
@@ -1195,6 +1196,30 @@ Mutants, each applied alone, file restored byte-for-byte: start sweep → `span 
 **103 passed**. Every red is exactly
 `test_the_citation_shape_table_is_the_predicate_the_docstring_states`. No artifact, pin, row or
 predicate changed; no new test file, so no `config/ci-surfaces.yml` row is needed.
+
+### 8.25 Round 29 — the extent's OTHER copy (REPORT §8.23) was still free
+
+Round 28 graded the two sweeps' extents against the sentences that state them, and graded the copy
+that lives in the predicate's docstring. The same extent has a second home — §8.23's normative
+sentence, *"It is now swept the same way: every end offset `1..span` past a site, at the site's own
+start, must be refused"* — and that copy was graded by nothing, which is the defect round 27 closed
+for the allowance and slack figures one home at a time.
+
+Measured at `9e49da657a0e`, the mutant applied alone and REPORT.md restored byte-for-byte
+(`sha256sum` compared): §8.23's `every end offset \`1..span\`` → `1..span + 1` left **103 passed**
+while the sentence claimed a sweep the loop does not run.
+
+So the arm now parses §8.23's stated extent (spacing-normalised, so a re-wrap cannot hide it) and
+requires it to equal the swept set's maximum — the same value the docstring's copy is graded
+against. A missing sentence reds rather than silently grading nothing.
+
+§8.23 also described the PRE-fix table in the present tense ("the table's only end-padded row pads
+by the FULL span"), which has been false since round 25 added the sweep: it is now scoped to
+`c6c3439cb5e8`, the head it was measured at.
+
+Mutants, each applied alone at this head: §8.23's extent → `1..span + 1` RED · the §8.23 sentence
+deleted RED · control **103 passed**. Every red is exactly
+`test_the_citation_shape_table_is_the_predicate_the_docstring_states`.
 
 ---
 
