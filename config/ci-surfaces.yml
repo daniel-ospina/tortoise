@@ -65,20 +65,26 @@ version: 1
 # ones before them. ⛔ NO POOL SIZE, NO ROW COUNT AND NO FOLD LIST here either — the rule the
 # paragraph below states, and the reason it is stated twice: an earlier spelling of THIS sentence
 # named a fold as "the newest" that was not, and credited another with a splice its file never
-# took. What a reader needs is PER-COMMIT fact, not a window: `e2a9c695adfb` is the fold this head
-# LAST de-spliced — the splice the paragraph below resolves by a fresh RE-DERIVATION, not by
-# provenance (that resolution belongs to `ff10fb328891`'s fold `24493da53136`, which is the one
-# that produced DUPLICATE `durations` keys) — and `ff10fb328891` changed ONE `durations` ROW and
+# took. What a reader needs is PER-COMMIT fact, not a window: the splice that was de-spliced HERE
+# arrived on THIS branch's OWN union fold `0bb030fad1` — `git show 0bb030fad1:config/ci-surfaces.yml`
+# states the `watchdog_minutes: 28` derivation TWICE while `cd440fc70a` and this head state it ONCE —
+# so the de-splice is
+# `cd440fc70a`'s, and it is not an act any `origin/main` commit performed: `e2a9c695adfb` and
+# `a0cea310786d` are single-parent commits carrying ONE derivation each, so neither is a fold and
+# neither spliced anything. The `durations` splice is a DIFFERENT fold's: that resolution belongs
+# to `ff10fb328891`'s fold `24493da53136`, which produced DUPLICATE `durations` keys — and
+# `ff10fb328891` changed ONE `durations` ROW and
 # no line of this block. ⛔ AND NOT "the folds after X touched nothing": that window was FALSE
 # here. `bf16c791a489`, the fold cited in the next sentence, is itself after `a0cea310786d` and
 # moved seventeen lines INSIDE this block; and an earlier fold, `f2d4f2408cf5`, spliced a SECOND
-# derivation in it (`de311a35a2da`), so `e2a9c695adfb` — not `a0cea310786d` — is the last fold
-# this head found splicing a second DERIVATION — not the only fold to splice anything, since `ff10fb328891` spliced `durations`.
+# derivation in it (`de311a35a2da`) — so "the last fold to splice anything" is itself a window
+# this head DECLINES to state, `ff10fb328891` having spliced `durations`.
 # ⛔ AND MEASURED, NOT with `git show --stat` — that prints NO diff for a MERGE commit unless it
 # is given `-m` (it falls back to the combined `--cc` form, which lists a file only when it
 # differs from EVERY parent), and this block's whole subject is
 # merges, so it reads "untouched" over a spliced file: measured on `bf16c791a489`, a two-parent
-# fold in THIS branch's history that moved seventeen lines of this block, and
+# fold that is NOT on this head's chain (another lane's branch) and that moved seventeen lines of
+# this block, and
 # `git show --stat bf16c791a489 -- config/ci-surfaces.yml` printed nothing. The safe form is
 # `git diff <sha>^1 <sha> -- config/ci-surfaces.yml`, run PER FOLD — never as "empty since X",
 # which is the same census rot one level down. Each splice's figures live on the commit that
