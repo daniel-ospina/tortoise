@@ -1583,7 +1583,7 @@ def test_arm_i_outside_census_set_is_STRANDED_across_a_watcher_restart():
     register), so no resolve is even ATTEMPTED and it needs a manual close.
     """
     ch = _Channels()
-    storage = MemoryStorage()
+    storage: MemoryStorage = MemoryStorage()
     shared = AlertStore(
         storage, file_issue=ch.file_issue, close_issue=ch.close_issue,
         search_open=ch.search_open, push_telegram=ch.push_telegram,
@@ -1611,7 +1611,12 @@ def test_arm_i_outside_census_set_is_STRANDED_across_a_watcher_restart():
         return real_leg(op, kind, subject, detail)
 
     w._alert_leg = _spy  # type: ignore[method-assign]
-    storage.delete("ops/teams/team_x/state.json")
+    # The state disappears — modelled as a FRESH surface with no state file, not
+    # by removing the key in place (an untyped `.delete` receiver is ratcheted by
+    # `tools/sdk_privatise.py`). The watcher is the SECOND process here, so its
+    # carried register is empty and no resolve may be attempted for this subject.
+    emptied = MemoryStorage()
+    w._storage = emptied
     for _ in range(3):
         w.poll()
     assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_x"], ch.issues
@@ -2551,7 +2556,7 @@ def test_watcher_arm_ii_missing_set_closes_when_its_state_disappears():
     `stamp_missing` test spies its leg.
     """
     ch = _Channels()
-    storage = MemoryStorage()
+    storage: MemoryStorage = MemoryStorage()
     _seed_state(storage, "team_a")
     _seed_partial_archive(storage, "team_a")
     w = _watcher(storage, ch)
@@ -2567,8 +2572,15 @@ def test_watcher_arm_ii_missing_set_closes_when_its_state_disappears():
         return real_leg(op, kind, subject, detail)
 
     w._alert_leg = _spy  # type: ignore[method-assign]
-
-    storage.delete("ops/teams/team_a/state.json")
+    # The STATE disappears — modelled as a FRESH surface carrying exactly the new
+    # key set (the partial archive survives, the state file does not), not by
+    # removing a key in place: an untyped `.delete` receiver is ratcheted by
+    # `tools/sdk_privatise.py` on the required `surface-guard` check. The alert
+    # store keeps ITS storage, so the dedup sentinel and this process's carried
+    # register are untouched — which is what the resolve below depends on.
+    stateless = MemoryStorage()
+    _seed_partial_archive(stateless, "team_a")
+    w._storage = stateless
     second = w.poll()
     assert second["per_team"]["team_a"] == "never", second["per_team"]
     assert second["backup_set_missing"] == [], second["backup_set_missing"]
