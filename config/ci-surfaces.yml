@@ -143,8 +143,8 @@ version: 1
 # head carries”, so the RULE survives and the label is re-pointed by hand on each fold — a residual
 # named on the artifact, which is the convention this block uses BELOW for the row-exemption class.
 # ⛔ EVERY file named above EXISTS on `main` — the claim is that none is a file this change ADDS,
-# not that none is touched: `tests/test_14560_operator_vectors.py` IS edited here (its section
-# banner stops claiming "no database needed" over an arm that needs one), so the bare "is `main`'s
+# not that none is touched: `tests/test_expansion_fusion_14344.py` IS edited here (a docstring
+# address inside it is re-cut, `search_engine.py:5075` to `:5079`), so the bare "is `main`'s
 # at this head" the earlier wording carried was false on the face of this diff.
 # ⛔ Not claiming "and every one is `core`": registration status is a THIS-HEAD fact, and `#14544`
 # is the proof it moves (the sentence below records that file leaving `core`) — which is why the
@@ -224,7 +224,9 @@ version: 1
 # selector untouched, so the pool and the parse on this tree compare EQUAL to `main`'s — every
 # surface list, every `durations` row, every `durations_floors` entry and `tier1`, value by value,
 # zero differing — and a comment-only `durations` rewrite on either side moves no member of the
-# pool. ⛔ NO POOL SIZE AND NO ROW COUNT IS STATED HERE as a claim about this head, on purpose:
+# pool. ⛔ NO POOL SIZE AND NO ROW COUNT IS STATED HERE as a claim about this head, on purpose —
+# the ONE exception is the pool size recorded above BESIDE the fold delta, which exists to name
+# what that delta IS (this change's own suite) rather than to grade a size:
 # written as figures they owe a re-measurement to whoever next moves one and nothing grades them,
 # which is exactly the rot this block's own doctrine names — the invariant above is what holds.
 # ⛔ That zero is a READING of this head, never a promise about the next fold: `fast_pool()` takes
@@ -247,12 +249,12 @@ version: 1
 # CARRIED HERE: how many of the branch's last N folds were one-sided is a window that the NEXT fold
 # renumbers, so this paragraph states the RULE, and any enumeration belongs on the commit that
 # measured it (`git log`) — which is what the "NO WINDOW IS STATED HERE" sentence below MEANS, and
-# why no count stands beside this one. Measured on the
-# `a0cea310786d` fold: two copies arrived, one naming `origin/main` `bbef0b8840d7` with this
-# branch's derivation (827.4/827.5), one naming `origin/main` `bbef0b8840`
-# with `#14726`'s (827.6). They DISAGREED on the bins, and neither describes this head AS WRITTEN —
-# the second copy gets the figures right by coincidence and the ATTRIBUTION wrong, calling
-# `#14726`'s row "this change's own" when on this tree it arrived with the fold. Neither side is
+# why no count stands beside this one. ⛔ NO FOLD'S COPIES ARE QUOTED HERE, and the reason is
+# measured rather than stylistic: the fold that motivated this paragraph carried two copies, one of
+# them attributing `#14726`'s row to "this change's own" when on this tree it arrived WITH the
+# fold — and no surviving ref reproduces that pair, because the de-splice which resolved it rewrote
+# the text. So the figures live on the commit that took them (`git log`), where they cannot re-stale
+# here; neither side is
 # picked: both are DELETED, and the derivation above is a fresh re-derivation on this merged
 # tree.
 
