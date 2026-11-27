@@ -57,7 +57,11 @@ and **retains** the older claim as terminal. Closed, never deleted (§2.0: the
 record is truth), never folded (⛔ D12/O4's loss asymmetry is untouched — this
 is not a merge). The *source* is carried by the declaration itself: the
 successor point is the document that asserted it, and its session/provenance
-ride the point.
+ride the point. ⚠️ `_supersede_point` also TRANSFERS the predecessor's
+structural edges (`extractedFrom` among them) to the successor, so the still-live
+claim inherits the closed claim's provenance — correct in the one direction this
+arm emits (the newer document supersedes the older one) and the reason the
+backfill direction is DECLINED rather than folded backwards (§6.5).
 
 **Both lookup arms, one representation.** The #14592 receipt was recorded on a
 `partial` identity lookup, and the two arms take different internal routes to
@@ -206,17 +210,18 @@ the *surviving* claims to rank first) is neither implemented nor needed here.
 | **positive** | the declared cross-capture `NAND` writes 1 supersession; older claim retained, `valid_to=2026-03-05`, `expired_at` stamped, `valid_from` kept; newer interval open; `get_historical_knowledge` returns the old claim through `CORRECTS` | ❌ `assert 0 == 1` | ✅ |
 | **positive (other lookup arm)** | the same declaration on a `resolved` lookup closes the same interval (pre-fix this arm wrote the NAND and closed nothing) | ❌ `assert 0 == 1` | ✅ |
 | **positive (other emission order)** | the SAME declaration with the older claim emitted first closes the same claim (`src`-keyed arm: `assert 0 == 1`) | ❌ | ✅ |
-| **positive (backfill)** | a later capture carrying an EARLIER world date closes the claim world time says is older, at the prior's start (capture-keyed arm emits an inverted window the consumer refuses: `assert 0 == 1`) | ❌ | ✅ |
+| **negative (backfill)** | a later capture carrying an EARLIER world date **DECLINES and says so**. World time says the prior is the newer fact, and this channel cannot express that direction: the record's `superseded` side must already be a graph id (`commit_ops.remap_supersession_point_refs` remaps only `supersedes_by`, deliberately — the `pt_` prefix is the lane discriminator), so a payload id there is skipped FAIL-OPEN and both claims stay live while the warning claimed a closure. The declared edge is kept; no interval is closed | ✅ | ✅ |
 | **positive (read)** | a current-scope query for the old claim's own wording no longer answers with it; the terminal scope still does | ❌ | ✅ |
 | **negative (support)** | the *same* two documents with the model declaring `IMPL` (support) close **nothing**; the older claim keeps its open interval and stays current | ✅ | ✅ |
-| **negative (event side)** | a NAND whose emitted side is an Event closes nothing AND does not claim it did (no `recorded as a supersession` warning) | ❌ | ✅ |
+| **negative (event side)** | a NAND whose emitted side is an Event closes nothing AND does not claim it did (no `recorded as a supersession` warning). ⚠️ It passes on the base commit too — it pins the guard against the MUTATION that reverts it, and is labelled a pin, not coverage | ✅ | ✅ |
 | **negative (minted successor)** | a `NAND` whose newer side is named only INSIDE the edge closes nothing and claims nothing — the `#2552` mint would be pruned once the operator is suppressed, so the closure would name a point that was never written and the document's own claim would vanish (measured in review as the arm's worst shape: `supersessions_written: 0`, "the contradiction is recorded …" still warned) | ✅ | ✅ |
-| **negative (second refuter)** | 2 refuters of one claim → 1 closure, and the SECOND refuter KEEPS its `NAND` (the consumer would skip it silently as an idempotent no-op, so suppressing both would erase that evidence) — REDS pre-fix as `1 operator, 0 closures` | ❌ | ✅ |
+| **negative (second refuter)** | 2 refuters of one claim → 1 closure, and the SECOND refuter KEEPS its `NAND` (the consumer would skip it silently as an idempotent no-op, so suppressing both would erase that evidence) — pre-fix: `2 operators, 0 closures` | ❌ | ✅ |
 | **negative (undeclared)** | a corpus that reverses itself in **wording** but declares no edge gains no contradiction. ⛔ A PIN, not coverage: no mutation of the arm can red it (the `none` shape emits no operator at all) | ✅ | ✅ |
 
 Suite: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_14198_contradiction_closure.py -q`
-→ **10 passed**, 6 of them RED on the base commit (the four positives plus the
-second-refuter negative). The emission-order, backfill and event-side cases were
+→ **11 passed**, 6 of them RED on the base commit (FIVE positives — cross-capture,
+other lookup arm, other emission order, the read/composition case, and the
+backfill-decline's warning — plus the second-refuter negative). The emission-order, backfill and event-side cases were
 each measured RED under the mutation that reverts their gate — the `src`-only
 guard, the arrival-order direction, and the missing point-only guard — and the
 minted-successor and second-refuter shapes were produced by review, measured
@@ -253,15 +258,29 @@ Regression surface run alongside, all green: `test_extractor_v2`,
    doc-05 candidates went unchecked. When the older endpoint is *not* in the S3
    prior set, this change correctly fails open (a warning, no closure) — a
    contradiction that was never retrieved cannot be closed.
-5. **An unknown world-time start falls back to arrival order.** The prior's
-   `when` reaches the arm through S3's `_enrich_point_priors` (best-effort: a
-   failed enrichment, or a caller that builds the prior set by hand, leaves it
-   absent), and the new claim's is its own `when` on the payload point. When
-   either is missing or unparseable there is no instant to compare, so the arm
-   orders the pair by capture membership — the pre-fix order, meaning a
-   BACKFILL still emits the inverted window, which the consumer refuses with a
-   warning and a skip. The closed shape is in place; the input it needs is the
-   graph's own `when`, which this change does not newly require.
-6. **The replay's prior set is a reconstruction, not a recording** (§3). It
+5. **A BACKFILL is declined, not closed.** When world time says the PRIOR is the
+   newer fact, the closure would have to read `superseded = <this capture's
+   claim>` — and the record's `superseded` side must already be a GRAPH id,
+   because `commit_ops.remap_supersession_point_refs` remaps only
+   `supersedes_by` (deliberately: the `pt_` prefix is the record's lane
+   discriminator). A payload id there is skipped fail-open, so emitting it would
+   produce exactly the false success this change exists to remove. The arm
+   declines with a warning that names the two world dates and says no interval
+   was closed; the declared edge is kept. Closing a backfill needs a producer of
+   the other shape (a graph-id `superseded`), which is a different change.
+6. **An unknown world-time start falls back to arrival order.** The prior's
+   `when` reaches the arm through S3's `_enrich_point_priors` (best-effort), and
+   the new claim's is its own `when` on the payload point. When either is
+   missing or unparseable there is no instant to compare, so the arm orders by
+   capture membership — the pre-fix order. For a backfill whose dates are
+   unknown this means it does NOT decline (the dates are absent) and the
+   consumer refuses the inverted window with its own warning and skip. Stated
+   rather than hidden: the decline is only as good as the dates.
+7. **Provenance in the declined direction is not touched** — because nothing is
+   folded there. `_supersede_point`'s edge transfer (which moves
+   `extractedFrom` and the other structural edges to the successor) therefore
+   only ever runs on the arrival-order shape, where the successor is the
+   document that asserted the newer claim.
+8. **The replay's prior set is a reconstruction, not a recording** (§3). It
    proves the arm fires on the receipt's own declaration; it does not prove the
    shipped pipeline closes that corpus, which needs a fresh-graph re-ingest.

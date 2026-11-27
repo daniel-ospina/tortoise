@@ -330,38 +330,57 @@ def test_the_other_emission_order_closes_the_same_claim(make_graph):
     assert _pid(CERT) not in live_ids
 
 
-def test_a_backfill_closes_the_claim_world_time_says_is_older(make_graph):
+def test_a_backfill_DECLINES_and_says_so(make_graph):
     """A later capture carrying an EARLIER world date (the backfill shape).
 
-    REDS PRE-FIX (review F2, measured): the direction was decided by CAPTURE
-    MEMBERSHIP, so the arm emitted `superseded = prior (2026-03-05),
-    supersedes_by = new (2026-02-03)`. `sdk._supersede_point` refuses a
-    successor whose resolved start sorts strictly before the predecessor's
-    (#4021, `ValueError`), `commit_ops.apply_supersessions` counts it as a
-    failed fold, and BOTH claims stay live — the #14198 defect arriving through
-    the backfill door, warned as a generic failure.
-
     `#14198`'s recorded decision is *"Facts are compared on world-time dates,
-    not arrival order"*, and it is what the SOTA in that issue does (Zep /
-    Graphiti retire the edge with the EARLIER `valid_at`). So the newly
-    ingested claim — the older fact — is the one whose interval closes, at the
-    prior's own start, and the prior stays current.
+    not arrival order"* — so here world time says the PRIOR is the newer fact and
+    the newly-ingested claim is the one whose interval should close.
+
+    ⛔ AND THIS CHANNEL CANNOT EXPRESS THAT (review round 2, measured on the
+    capture seam): the supersession record's `superseded` side must ALREADY be a
+    graph id — `commit_ops.remap_supersession_point_refs` remaps only
+    `supersedes_by`, and that asymmetry is deliberate (the `pt_` prefix is the
+    record's LANE DISCRIMINATOR downstream). A payload id on that side names no
+    node, `apply_supersessions` skips it FAIL-OPEN ("point supersession ref …
+    not found — skipped (fail-open)"), both claims stay live — while the
+    extractor's own warning claimed the interval was closed. That is precisely
+    the false-success class this arm exists to remove, so the arm now DECLINES
+    the backfill direction and says what it did and did not do.
+
+    The test that this replaced asserted a closure the CONSUMER could not
+    perform: the eval lane hides the gap because its writer creates points with
+    `id=pid` verbatim, so payload id == graph id there by construction.
     """
     sdk, stats = make_graph("nand", cert_when="2026-03-05",
                             audit_when="2026-02-03")
-    assert stats["supersessions_written"] == 1, (
-        "a backfilled contradiction must still close a claim — an inverted "
-        "window is refused by the consumer and leaves both live")
-    ended = [r for r in _scan(sdk, include_terminal=True)
-             if r["id"] == _pid(AUDIT)]
-    assert ended, "the newly ingested (older) claim must be retained"
-    assert ended[0]["status"] in ("outdated", "superseded")
-    assert ended[0].get("valid_to") == "2026-03-05", (
-        "the older world-time interval ends where the newer claim starts")
-    assert ended[0].get("valid_from") == "2026-02-03"
+    assert stats["supersessions_written"] == 0, (
+        "the backfill direction must be DECLINED, not emitted as a record the "
+        "consumer will skip while the extractor claims success")
+    # both claims are untouched: nothing closed, nothing deleted. The graph is
+    # the assertion because the DECLINE must leave the record exactly as it was.
     live_ids = {r["id"] for r in _scan(sdk)}
-    assert _pid(CERT) in live_ids, "the newer fact stays current"
-    assert _pid(AUDIT) not in live_ids
+    assert _pid(CERT) in live_ids, "the prior claim stays current"
+    assert _pid(AUDIT) in live_ids, "the newly ingested claim stays current"
+    # the warning that explains the decline is asserted in the pure-function
+    # test below, which can read the payload's own `warnings` — this test exists
+    # for what only a graph can show: nothing was folded and nothing was lost.
+
+
+def test_a_backfill_declines_in_the_payload_and_names_the_reason():
+    """The same decline, read where the payload's own warnings are visible."""
+    out, payload = _shape_run({
+        "entities": [], "events": [],
+        "points": [_statement(AUDIT, when="2026-02-03")],
+        "operators": [{"op_type": "NAND", "src": AUDIT, "dst": CERT}],
+    }, _RESOLVED, prior_when="2026-04-01")  # the PRIOR is the newer fact
+    assert out.get("supersessions") == [], (
+        "the backfill direction cannot be expressed by this channel")
+    said = [w for w in out.get("warnings") or [] if "not closed" in w]
+    assert said and "cannot express that direction" in said[0]
+    # the declared edge is kept as it was — the decline costs no evidence
+    assert payload.get("operators"), (
+        "declining the closure must not also drop the declared edge")
 
 
 def test_an_event_side_is_dropped_not_recorded_as_a_supersession(make_graph):
@@ -475,9 +494,12 @@ def test_the_closure_does_not_depend_on_which_lookup_arm_ran(make_graph):
     This is the asymmetry that would otherwise make the representation a
     function of lookup quality: measured on the #14592 receipt's own shape, a
     `partial` lookup produced `operators: []` and a `resolved` one produced the
-    NAND edge, and pre-fix neither closed anything. Both now close; the resolved
-    arm additionally keeps its NAND because that edge carries EP weight and
-    nothing in this change may subtract it.
+    NAND edge, and pre-fix neither closed anything. Both now produce the SAME
+    payload — one supersession record, NO operator — because `_supersede_point`
+    re-points (and, for a self-edge, deletes) the incident `IMPL|NAND` rows when
+    it terminalises the predecessor, so an emitted NAND would be an edge the
+    commit immediately removes. The `CORRECTS` edge is the representation on
+    both arms.
     """
     sdk, stats = make_graph("nand", "resolved")
     assert stats["supersessions_written"] == 1, (
@@ -501,11 +523,11 @@ _RESOLVED = {"derived": {"points": 25}, "ran": {"points": 25},
              "failed": {"points": 0}}
 
 
-def _shape_run(embed_list, coverage):
+def _shape_run(embed_list, coverage, prior_when="2026-02-03"):
     from tortoise.extractor_v2 import execute_embed
 
     search = {"points": [{"id": PRIOR_ID, "content": CERT,
-                          "kind": "statement", "when": "2026-02-03"}],
+                          "kind": "statement", "when": prior_when}],
               "query_coverage": coverage}
     out = execute_embed(embed_list, search, session_id="shape",
                         session_date="2026-03-05")

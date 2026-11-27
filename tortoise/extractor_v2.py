@@ -12494,15 +12494,36 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         older_when = _prior_start(older_id, older_row)
         if (_valid_iso_date(new_when) and _valid_iso_date(older_when)
                 and new_when[:10] < older_when[:10]):
-            # BACKFILL: the claim just ingested names an EARLIER world date
-            # than the prior it contradicts, so the PRIOR is the newer fact.
-            # It is the successor, and the newly-ingested claim's interval is
-            # the one that closes — at the prior's own start.
-            superseded, supersedes_by = new_id, older_id
-            order = "world-time-backfill"
-        else:
-            superseded, supersedes_by = older_id, new_id
-            order = "arrival-order"
+            # BACKFILL, and this channel CANNOT express it (#14198 review 2).
+            # World time says the PRIOR is the newer fact, so the closure would
+            # have to read `superseded = <this capture's claim>, supersedes_by =
+            # <prior>`. `superseded` is a GRAPH id BY CONTRACT —
+            # `commit_ops.remap_supersession_point_refs` remaps only
+            # `supersedes_by`, and says why ("`superseded` … is already a graph
+            # id"; it is also the record's LANE DISCRIMINATOR, so mapping a
+            # `pt_` payload id onto a non-`pt_` node would flip the record into
+            # the entity fold). A payload id on that side therefore names NO
+            # node: `apply_supersessions` skips it fail-open
+            # (`point supersession ref … not found — skipped (fail-open)`),
+            # both claims stay live, and — measured on the capture seam — the
+            # extractor's own warning would still have claimed the interval was
+            # closed. That is the false-success class this arm exists to
+            # remove, so the arm DECLINES and says so instead: the declared
+            # NAND is emitted (or dropped) exactly as before, and no interval
+            # is closed. A truthful non-closure beats a false closure; the
+            # backfill direction needs a producer of the other shape (a
+            # graph-id `superseded`), which is a different change.
+            warnings.append(
+                "NAND contradiction ACROSS CAPTURES not closed (#14198): world "
+                f"time says the prior point {older_id[:20]!r} is the NEWER fact "
+                f"({older_when[:10]!r} vs this capture's {new_when[:10]!r}), and "
+                "the point-supersede channel cannot express that direction — "
+                "`superseded` must already be a graph id, so this capture's "
+                "claim cannot be the closed side. The declared edge is kept as "
+                "it was; neither interval is closed")
+            return False
+        superseded, supersedes_by = older_id, new_id
+        order = "arrival-order"
         if (superseded, supersedes_by) not in pt_record_pairs:
             pt_record_pairs.add((superseded, supersedes_by))
             supersessions.append({
@@ -12571,18 +12592,25 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if op_type == "NAND" and src != dst:
             # The OTHER lookup state (measured on the same receipt): a RESOLVED
             # lookup folds the older ref onto its graph id (#4716 mint-vs-E7),
-            # so the edge WIRES instead of dropping — doc-05's NAND lands
-            # against doc-01's point and both claims stay live. The declaration
-            # is not lost there, but the reader still gets two live truths, so
-            # the same closure applies; the edge is left in place because a
-            # NAND carries EP weight of its own and nothing this change does
-            # may subtract it.
+            # so the edge WIRES instead of dropping and both claims stay live.
+            # The declaration is not lost there, but the reader still gets two
+            # live truths, so the same closure applies (and, as on the drop
+            # route, the operator is not also emitted — see the `continue`).
             _older = (dst if dst not in _capture_ids
                       else src if src not in _capture_ids else "")
             _newer = src if _older == dst else dst if _older else ""
+            # The EVIDENCE TRAIL must name the side the direction actually
+            # chose (review 2): the two orders put the prior in different
+            # fields, and labelling both `dst` reported the in-capture claim as
+            # the prior that was searched for — two audit rows in one payload
+            # then said the same text was "not found, created" AND "found as a
+            # prior", with a note that a claim was contradicted by itself.
+            _older_ref = (str(o.get("dst") or "") if _older == dst
+                          else str(o.get("src") or ""))
+            _older_side = "dst" if _older == dst else "src"
             if _older and _newer and _close_prior_contradiction(
-                    _newer, _older, str(o.get("dst") or "")[:120],
-                    f"NAND dst {str(o.get('dst', ''))[:60]!r}"):
+                    _newer, _older, _older_ref[:120],
+                    f"NAND {_older_side} {_older_ref[:60]!r}"):
                 # The edge is NOT also emitted: `_supersede_point` re-points
                 # (or, for a self-edge, DELETES) the incident IMPL/NAND rows
                 # when the predecessor is terminalised — measured shape of the
