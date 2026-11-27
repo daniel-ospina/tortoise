@@ -63,26 +63,6 @@ version: 1
 # ⛔ this head's own fold touched no row here — `git show --stat a0be10ac456b --
 # config/ci-surfaces.yml` is empty — so it renumbers the chain without moving the derivation),
 # carrying
-# ⛔ THAT LABEL IS HAND-CHECKED, and it is stated here rather than left implied: it has been wrong
-# REPEATEDLY inside this issue (`90c125a736a0c`, `d6a2104518762`, `cc7b1f3f2c6a3`, `e182b8b8b0cb3`,
-# and `dc479c6f` — the last of which is the correction this head carries), each time caught by a
-# reader rather than by a gate. ⛔ NO NUMERAL AND NO EXHAUSTIVE ENUMERATION: earlier spellings of
-# this sentence were falsified by their own count (a spelled-out number is still a count, as the
-# paragraph below says — and an earlier draft of THIS note carried a count of its own drafts,
-# which nothing in the tree can verify and which is the same graded-or-absent rule one level
-# in), and a walk of the label transitions since `origin/main` finds more than the list names.
-# The claim a reader needs is that it has rotted repeatedly.
-# ⛔ A MECHANICAL PIN WAS TRIED AND REJECTED, and the reason is a measurement rather than a
-# preference: asserting the label prefixes `git rev-parse origin/main` is TRUE only for a tree that
-# has itself just folded the tip. ⛔ THAT SNAPSHOT IS PAST TENSE ON PURPOSE: it was MEASURED while
-# this change was under review, and landing it moves `origin/main` past the label, so a present-tense
-# form would be false from the moment it merges. On `main` — the tree this block LANDS IN — the label
-# WAS `bbef0b8840` while `origin/main` was `a0be10ac456b`, so that assertion REDS there by
-# construction; and where `origin/main` does not resolve (a depth-1 CI checkout) it can only SKIP. A
-# gate that is red where it lands and absent where it gates is not a gate. On a branch whose own
-# first-parent history carries self-merges there is no sound mechanical reading of “the fold this
-# head carries”, so the RULE survives and the label is re-pointed by hand on each fold — a residual
-# named on the artifact, which is the convention this block uses BELOW for the row-exemption class.
 # `#14597`'s expansion fusion over the residue RATCHET
 # (`tests/test_expansion_fusion_14344.py`, `core`, carrying a `durations` row),
 # `#14415`'s `tests/test_14219_batch_ingest.py` row and `tests/test_14219_batches_api.py` row,
@@ -103,6 +83,26 @@ version: 1
 # `ceil(827.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
 # the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
 # (1680 / 827.6 = 2.0300), so the two agree by construction rather than by a hand re-read.
+# ⛔ THAT LABEL IS HAND-CHECKED, and it is stated here rather than left implied: it has been wrong
+# REPEATEDLY inside this issue (`90c125a736a0c`, `d6a2104518762`, `cc7b1f3f2c6a3`, `e182b8b8b0cb3`,
+# and `dc479c6f` — the last of which is the correction this head carries), each time caught by a
+# reader rather than by a gate. ⛔ NO NUMERAL AND NO EXHAUSTIVE ENUMERATION: earlier spellings of
+# this sentence were falsified by their own count (a spelled-out number is still a count, as the
+# paragraph below says — and an earlier draft of THIS note carried a count of its own drafts,
+# which nothing in the tree can verify and which is the same graded-or-absent rule one level
+# in), and a walk of the label transitions since `origin/main` finds more than the list names.
+# The claim a reader needs is that it has rotted repeatedly.
+# ⛔ A MECHANICAL PIN WAS TRIED AND REJECTED, and the reason is a measurement rather than a
+# preference: asserting the label prefixes `git rev-parse origin/main` is TRUE only for a tree that
+# has itself just folded the tip. ⛔ THAT SNAPSHOT IS PAST TENSE ON PURPOSE: it was MEASURED while
+# this change was under review, and landing it moves `origin/main` past the label, so a present-tense
+# form would be false from the moment it merges. On `main` — the tree this block LANDS IN — the label
+# WAS `bbef0b8840` while `origin/main` was `a0be10ac456b`, so that assertion REDS there by
+# construction; and where `origin/main` does not resolve (a depth-1 CI checkout) it can only SKIP. A
+# gate that is red where it lands and absent where it gates is not a gate. On a branch whose own
+# first-parent history carries self-merges there is no sound mechanical reading of “the fold this
+# head carries”, so the RULE survives and the label is re-pointed by hand on each fold — a residual
+# named on the artifact, which is the convention this block uses BELOW for the row-exemption class.
 # ⛔ EVERY file named above is `main`'s at this head. ⛔ Not claiming "and every one is `core`":
 # registration status is a THIS-HEAD fact no arm in this block's family reads, and `#14544` is the
 # proof it moves (the sentence below records that file leaving `core`) — the fold's own doctrine is
