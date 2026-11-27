@@ -4527,9 +4527,20 @@ def write_live_record(record: Mapping[str, Any], *,
                             _bounded_cause(rollback_exc),
                         )
                 _count_write_failure("write_failed")
+                # ⛔ FLAG-CONDITIONED, not exempt: `live_write` never passes this
+                # combination, but a DIRECT caller can (`seq=9` with
+                # `journal_skipped=True` is what the suite drives), and on that
+                # write the journal holds nothing — so the provenance clause is
+                # computed rather than asserted.
+                position_provenance = (
+                    "the write reached NEITHER store (the caller did not "
+                    "append, so there is no journal position)"
+                    if journal_skipped
+                    else f"the journal holds the record at position {seq}"
+                )
                 _logger.warning(
-                    "the record write was REFUSED (position_divergence) — the "
-                    "journal holds the record at position %s and the ORDINAL "
+                    "the record write was REFUSED (position_divergence) — %s "
+                    "and the ORDINAL "
                     "ALLOCATOR issued %s, so the two allocators disagree about "
                     "this record's number. Writing it would put the journal line "
                     "and its position row at different numbers, which no replay "
@@ -4561,7 +4572,7 @@ def write_live_record(record: Mapping[str, Any], *,
                     "procedural: do not arm across a seal, halt the graph first "
                     "(#13050 owns segment-aware numbering). "
                     "record=%s %s",
-                    seq, allocated_first, record.get("type"),
+                    position_provenance, allocated_first, record.get("type"),
                     _record_identity(record),
                 )
                 return _refused("write_failed", seq)
@@ -4691,16 +4702,19 @@ def write_live_record(record: Mapping[str, Any], *,
             # (`allocator_journal_clause`), the generic `write_failed` arm below,
             # and this one — so it is the FLAG, not the arm, that selects the
             # sentence; an unqualified copy left behind in any of them is the
-            # defect this note exists to stop. ⛔ TWO OTHER arms name the journal's
-            # provenance UNCONDITIONALLY and are exempt because they cannot fire
-            # there: `journal_collision` and `position_divergence` are unreachable
-            # when `journal_skipped` is set — that flag forces `allocate`
-            # (:4273), an allocated plan writes the position through
+            # defect this note exists to stop. ⛔ THE OTHER ARMS that name the
+            # journal's provenance, each for its own reason: `journal_collision`
+            # cannot fire on this arm at all — the flag forces `allocate`
+            # (:4273) and an allocated plan writes the position through
             # `ALLOCATION_SQL` rather than the journal INSERT the collision guard
-            # keys on (`record_projection.py:9122`), and `position_divergence` is
-            # additionally guarded by `allocate and seq is not None` (:4423),
-            # which a skipped append never has. Do not "fix" them; grep for arms
-            # that BOTH name the provenance AND are reachable on this flag.
+            # keys on (`record_projection.py:9122`); `position_unverifiable` is
+            # exempt by its OWN guard (`and not journal_skipped`, :4281) rather
+            # than by reachability; and `position_divergence` is unreachable FROM
+            # `live_write`, which passes `seq=None` whenever it sets this flag
+            # (`live_write.py:650`) — but NOT from a direct caller that passes
+            # both, which the suite itself does, so its clause is
+            # flag-conditioned below instead of being exempt. grep for arms that
+            # BOTH name the provenance AND are reachable on this flag.
             journal_clause = (
                 "the record reached NEITHER store (the caller did not append: "
                 "this graph was cut over, so the journal holds no line); "
@@ -4768,13 +4782,17 @@ def write_live_record(record: Mapping[str, Any], *,
             # `IsolationRefused`, the cutover guard, a store/config failure. On
             # most of those the allocator is HEALTHY, so naming it as the thing to
             # wait on sends the operator to a subsystem that cannot be the cause
-            # (the allocator's own refusals are intercepted one arm earlier by
+            # (the TWO refusals that arm maps — `CursorNotActive` and
+            # `PositionCollision` — are intercepted one arm earlier by
             # `_allocator_refusal_cause`, and `plan_refused` takes the build-time
-            # ones); the `%s` cause already names the failure that actually
-            # occurred. Only the statement that provably holds here is made.
+            # ones; ⛔ NOT every allocator-module refusal is: `IsolationRefused`
+            # and `RetryableAllocationFailure` are raised under `allocate` but are
+            # not in that map, so they land HERE); the `%s` cause already names the
+            # failure that actually occurred. Only the statement that provably
+            # holds here is made.
             remedy = (
-                "re-emit the record — with no journal line there is nothing to "
-                "replay"
+                "re-emit the record once the cause the message names is fixed — "
+                "with no journal line there is nothing to replay"
             )
         elif not allocate:
             # ⛔ THE DISCRIMINATOR IS THE CURSOR ROW, NOT THE ARM. `allocate`
