@@ -1435,6 +1435,42 @@ def _bound_comment() -> str:
     return "\n".join(reversed(block))
 
 
+def _end_clause() -> str:
+    """The END condition shape 3 actually applies, read from the predicate's own AST.
+
+    REPORT.md's §8.20 states the rule in prose as "pins the END (`<condition>`)", and a prose
+    tolerance the code does not apply is how round 25's hole opened (`hi - other_hi == 0` widened
+    to `<= 5` with every copy of the sentence still reading "exactly"). So the clause is READ from
+    the predicate rather than restated: mutate the comparison and the sentence must move with it.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    function = next((n for n in ast.walk(tree)
+                     if isinstance(n, ast.FunctionDef) and n.name == "_cites_a_site_in"), None)
+    assert function is not None, (
+        "`_cites_a_site_in` is gone from this file — the arm below would grade nothing")
+    # Shape 3 is the only branch whose condition names the allowance, so find THAT `if` and take
+    # its `hi`/`other_hi` conjunct — shape 1's `hi == other_hi` (the same-range test) is not it.
+    for node in ast.walk(function):
+        if not isinstance(node, ast.If):
+            continue
+        conjuncts = node.test.values if isinstance(node.test, ast.BoolOp) else [node.test]
+        if not any("_CITATION_WIDEN_BOUND" in ast.unparse(c) for c in conjuncts):
+            continue
+        for conjunct in conjuncts:
+            if not isinstance(conjunct, ast.Compare):
+                continue
+            # The END conjunct is `hi - other_hi <op> <n>`; the containment conjunct
+            # (`other_hi <= hi`) also names both ends, so the SUBTRACTION is the discriminator.
+            left = conjunct.left
+            if not isinstance(left, ast.BinOp):
+                continue
+            if {ast.unparse(left.left), ast.unparse(left.right)} == {"hi", "other_hi"}:
+                return ast.unparse(conjunct)
+    raise AssertionError(
+        "no `hi`/`other_hi` comparison inside the allowance's `if` in `_cites_a_site_in` — shape 3 "
+        "has no END condition left for REPORT §8.20's sentence to name")
+
+
 def _cites_a_site_in(cited: tuple[str, int, int], sites) -> bool:
     """Is `cited` the SAME site as one of `sites`?
 
@@ -1831,6 +1867,37 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
     assert (int(rep_slack.group(1)), int(rep_slack.group(2))) == (derived_slack, 0), (
         f"REPORT §8.20 states the slack as {rep_slack.group(1)}/"
         f"{rep_slack.group(2)} while the documents derive {derived_slack}/0")
+    # …and the copies round 27/28 left free (#14723, round 29). Rounds 27 and 28 graded the
+    # §8.20/§8.21 statements they had measured and stopped there; the SAME two figures — and the
+    # END condition the rule is named for — stayed textually free in the copies a reader meets
+    # FIRST: §8.20's OPENING paragraph (the live rule, not a round record) and §8.22's
+    # cross-reference to it. Measured at `bf95c20ff515`, each applied alone, file restored
+    # byte-for-byte (`sha256sum` compared), every one left all **103 passed**:
+    #
+    #   §8.20 "keeping the 20-line START allowance"          -> 19-line       103 passed
+    #   §8.20 "the one honest wider span needs (18)"         -> (17)          103 passed
+    #   §8.20 "pins the END (`hi - other_hi == 0`)"          -> `<= 5`        103 passed
+    #   §8.22 "the sentences that state it say **20**"       -> **19**        103 passed
+    #   §8.22 "§8.20's `20-line START allowance`"            -> 19-line       103 passed
+    #
+    # The END clause is DERIVED from the predicate's AST (`_end_clause`), never restated here: a
+    # tolerance the prose does not name is exactly how round 25's `<= 5` hole opened.
+    flat_report = re.sub(r"\s+", " ", report_txt)
+    for needle, why in (
+            (f"pins the END (`{_end_clause()}`)",
+             "the END condition shape 3 actually applies (§8.20)"),
+            (f"keeping the {_CITATION_WIDEN_BOUND}-line START allowance the one honest "
+             f"wider span needs ({derived_slack})",
+             "the allowance and the honest slack together, in §8.20's opening paragraph"),
+            (f"the sentences that state it say **{_CITATION_WIDEN_BOUND}**",
+             "§8.22's cross-reference to those same sentences"),
+            (f"§8.20's `{_CITATION_WIDEN_BOUND}-line START allowance`",
+             "§8.22's quotation of §8.20's figure"),
+    ):
+        assert needle in flat_report, (
+            f"REPORT.md no longer states {why} as {needle!r} — it is graded against "
+            "`_CITATION_WIDEN_BOUND`, the documents' derived slack and the predicate's own END "
+            "clause, so it may not drift from any of them")
     for needle, why in (
             (f"most **{_CITATION_WIDEN_BOUND} lines** before",
              "the allowance's figure in §8.20"),
