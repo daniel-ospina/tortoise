@@ -131,8 +131,8 @@ version: 1
 # rows it carries — a second spelling of the bins is the splice this block refuses.
 # ⛔ THAT `origin/main` FOLD LABEL IS HAND-CHECKED, and it is stated here rather than left
 # implied: it has been wrong REPEATEDLY, each time caught by a reader rather than by a gate. ⛔ THE
-# COMMITS THAT SHOWED IT ARE NOT LISTED HERE, and that is a correction: an earlier spelling cited
-# five of them as this issue's own history, and they were measured on a SIBLING branch's folds —
+# COMMITS THAT SHOWED IT ARE NOT LISTED HERE, and that is a correction: an earlier spelling listed
+# them as this issue's own history, and they were measured on a SIBLING branch's folds —
 # every one fails `git merge-base --is-ancestor <sha> HEAD` on this branch — which is the carried
 # provenance this block exists to prevent, one level in. The history is
 # `git log --first-parent --merges` on the branch, never a list restated here; that is also why no
@@ -141,7 +141,7 @@ version: 1
 # (a spelled-out number is still a count, as the paragraph below says — and an earlier draft of
 # THIS note carried a count of its own drafts, which nothing in the tree can verify and which
 # is the same graded-or-absent rule one level in), and a walk of the label transitions since
-# `origin/main` finds more than the list names.
+# `origin/main` finds more transitions than that earlier spelling named.
 # The claim a reader needs is that it has rotted repeatedly.
 # ⛔ A MECHANICAL PIN WAS TRIED AND REJECTED, and the reason is a measurement rather than a
 # preference: asserting the label prefixes `git rev-parse origin/main` is TRUE only for a tree that
@@ -263,8 +263,9 @@ version: 1
 # ⛔ IT ARRIVED SPLICED ONCE MORE ON THIS LANE'S REBASE ONTO `origin/main` `c1c8df1a3817` — the same
 # driver, the same failure. ⛔ WHAT THE TWO COPIES STATED IS NOT CLAIMED, because a pair that
 # DISAGREED on the bins cannot both have stated one partition: an earlier spelling of this sentence
-# said BOTH copies stated the 827.2/827.3 partition and a `fast_pool()` of 1339, and the paragraph
-# below measured that claim FALSE. The figures that ARE true here are the PRE-FOLD BASE
+# said BOTH copies stated the 827.2/827.3 partition and a `fast_pool()` of 1339, and is refuted by
+# the sentence itself — a pair that disagreed cannot both have stated one partition — which is why
+# that spelling was DELETED rather than re-pointed. The figures that ARE true here are the PRE-FOLD BASE
 # `c1c8df1a3817`'s own emission — measured by loading `git show c1c8df1a3817:config/ci-surfaces.yml`
 # through `fast_pool()` and `push_legs()` — not either copy's, and not the fold's: a fold carries
 # this lane's row as well, so its pool is strictly larger by construction. Neither copy was picked;
