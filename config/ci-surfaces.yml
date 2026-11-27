@@ -58,8 +58,10 @@ version: 1
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
 # reader of the prose can see. On THIS tree — `origin/main` `0204a219aa90` folded in, over
-# `a0cea310786d`'s de-splice of this very block; the rows below landed across the folds and the
-# ones before them. ⛔ NO NUMERAL AND NO EXHAUSTIVE ENUMERATION here either — the rule the
+# `a0cea310786d`, the fold THIS BRANCH de-spliced (the de-splice is a commit of this branch's own,
+# not an act that fold performed — the possessive spelling credited it with an edit it never made);
+# the rows below landed across the folds and the
+# ones before them. ⛔ NO POOL SIZE, NO ROW COUNT AND NO FOLD LIST here either — the rule the
 # paragraph below states, and the reason it is stated twice: an earlier spelling of THIS sentence
 # named a fold as "the newest" that was not, and credited another with a splice its file never
 # took. What a reader needs is PER-COMMIT fact, not a window: `a0cea310786d` is the fold this head
@@ -207,9 +209,9 @@ version: 1
 # quantifier matters: `union` fires on a CONFLICTING hunk, so a fold with this block changed on ONE
 # side applies that one derivation and cannot splice it. ⛔ THE ONE-SIDED-FOLD MEASUREMENT IS NOT
 # CARRIED HERE: how many of the branch's last N folds were one-sided is a window that the NEXT fold
-# renumbers — measured, it read four of the last eight after the `ff10fb328891` fold and five of the
-# last eight before it, with a sha the window no longer contained — so this paragraph states the
-# RULE, and any enumeration belongs on the commit that measured it (`git log`). Measured on the
+# renumbers, so this paragraph states the RULE, and any enumeration belongs on the commit that
+# measured it (`git log`) — which is what the "NO WINDOW IS STATED HERE" sentence below MEANS, and
+# why no count stands beside this one. Measured on the
 # `a0cea310786d` fold: two copies arrived, one naming `origin/main` `bbef0b8840d7` with this
 # branch's derivation (827.4/827.5), one naming `origin/main` `bbef0b8840`
 # with `#14726`'s (827.6). They DISAGREED on the bins, and neither describes this head AS WRITTEN —
