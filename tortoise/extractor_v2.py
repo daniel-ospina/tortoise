@@ -12381,11 +12381,59 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     for _ev in payload_events:
         _capture_ids.add(str(_ev.get("id") or ""))
     _capture_ids.discard("")
+    #: The points of THIS capture, and each one's WORLD-TIME start. The
+    #: supersession's direction is decided from these, never from capture
+    #: membership alone — see `_close_prior_contradiction`.
+    _capture_point_when: dict[str, str] = {
+        str(p.get("id") or ""): str(p.get("when") or "")
+        for p in payload_points if p.get("id")}
+
+    def _prior_start(prior_id: str, prior_row: dict | None) -> str:
+        """The prior claim's world-time window start, '' when unknown.
+
+        On the DROP route the resolved row already carries it (S3's
+        `_enrich_point_priors` copies the stored `p.when`), so no read is
+        added. On the WIRING route the older id is the fold's own graph id and
+        the row was not kept — but the same prior set is in `search`, so the
+        start is read from there rather than re-queried. Both are best-effort:
+        an empty answer is a fact about the input, and the caller falls back to
+        arrival order.
+        """
+        if isinstance(prior_row, dict) and prior_row.get("when"):
+            return str(prior_row.get("when") or "")
+        for _row in (search or {}).get("points") or []:
+            if isinstance(_row, dict) and str(_row.get("id") or "") == prior_id:
+                return str(_row.get("when") or "")
+        return ""
 
     def _close_prior_contradiction(new_id: str, older_id: str,
-                                   older_content: str, where: str) -> bool:
-        """Append the supersession that closes ``older_id``; True when one was
-        recorded (or already was). The older claim is never deleted."""
+                                   older_content: str, where: str,
+                                   older_row: dict | None = None) -> bool:
+        """Append the supersession that closes the older claim; True when one
+        was recorded (or already was). The older claim is never deleted.
+
+        ⛔ THREE GATES, each measured against a corpus shape (review of #14794):
+        * the EMITTED side must be a POINT (`pt_`). `_resolve` hands back
+          `event_ids` as readily as `point_ids`, and an Event is a legal NAND
+          endpoint — but there is no point-supersede channel to an Event
+          successor: the consumer dispatches on the `pt_` prefix of the OLD id
+          and then refuses the successor (`_assert_lifecycle_guard`), so
+          emitting the record would lose the closure *and* claim it was
+          recorded. An event side falls through to the drop warning instead.
+        * the direction is decided by WORLD TIME, not by which side happened to
+          be in this capture (#14198's recorded decision: "Facts are compared
+          on world-time dates, not arrival order", which is also what
+          Zep/Graphiti do — the edge with the earlier `valid_at` is retired).
+          Capture membership alone emitted `superseded = prior,
+          supersedes_by = new` for a BACKFILL (a later capture carrying an
+          earlier world date); `sdk._supersede_point` refuses that inverted
+          window (#4021), so the fold failed and BOTH claims stayed live — the
+          #14198 defect through the backfill door, warned as a generic failure.
+          With no parseable start on either side there is no instant to
+          compare, so arrival order stands (the prior set IS what existed
+          before this capture); a tie keeps it too, since a zero-length
+          predecessor window is legal.
+        """
         if not new_id or not older_id or new_id == older_id:
             return False
         if older_id in _capture_ids:
@@ -12397,24 +12445,42 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # window can even sort before the predecessor's (the #4021 refusal).
         if new_id not in _capture_ids:
             return False
-        if (older_id, new_id) not in pt_record_pairs:
-            pt_record_pairs.add((older_id, new_id))
+        if not new_id.startswith("pt_"):
+            return False
+        new_when = str(_capture_point_when.get(new_id) or "")
+        older_when = _prior_start(older_id, older_row)
+        if (_valid_iso_date(new_when) and _valid_iso_date(older_when)
+                and new_when[:10] < older_when[:10]):
+            # BACKFILL: the claim just ingested names an EARLIER world date
+            # than the prior it contradicts, so the PRIOR is the newer fact.
+            # It is the successor, and the newly-ingested claim's interval is
+            # the one that closes — at the prior's own start.
+            superseded, supersedes_by = new_id, older_id
+            order = "world-time-backfill"
+        else:
+            superseded, supersedes_by = older_id, new_id
+            order = "arrival-order"
+        if (superseded, supersedes_by) not in pt_record_pairs:
+            pt_record_pairs.add((superseded, supersedes_by))
             supersessions.append({
-                "superseded": older_id, "supersedes_by": new_id,
-                "evidence": "declared NAND contradiction against a claim from "
-                            "an earlier capture (cross-session reversal; the "
-                            "older claim is retained with a closed interval)"})
+                "superseded": superseded, "supersedes_by": supersedes_by,
+                "evidence": "declared NAND contradiction across captures — "
+                            "the older claim's interval is closed (retained, "
+                            "never deleted)" +
+                            ("" if order == "arrival-order"
+                             else f"; ordered by {order}")})
             link_before_create.append({
                 "searched_for": f"prior claim '{older_content[:60]}'",
                 "found": True,
-                "note": f"contradicted by new point {new_id} — the older "
+                "note": f"contradicted by point {supersedes_by} — the older "
                         "claim's interval is closed (CORRECTS, retained)"})
         warnings.append(
             f"operator endpoint is an EARLIER-CAPTURE claim (#14198): {where} "
             f"resolved to prior point {older_id[:20]!r} outside this capture — "
-            "the contradiction is recorded as a supersession (CORRECTS + "
-            "closed interval), so the older claim is retained and closed "
-            "rather than left as a second live truth")
+            f"the contradiction is recorded as a supersession (closed interval "
+            f"{superseded[:20]!r} ← {supersedes_by[:20]!r}, {order}), so the "
+            "older claim is retained and closed rather than left as a second "
+            "live truth")
         return True
 
     for op in _all_ops:
@@ -12429,13 +12495,32 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         src = _resolve(str(o.get("src", "")))
         dst = _resolve(str(o.get("dst", "")))
         if not src or not dst or src == dst:
-            if op_type == "NAND" and src and not dst:
+            # ── #14198: a DECLARED contradiction whose OLDER side is in a PRIOR
+            # capture CLOSES that claim's interval instead of being dropped.
+            # `_resolve` reads only THIS capture's ids, so the older side of a
+            # cross-capture NAND cannot resolve here.
+            #
+            # ⛔ SYMMETRIC (review F3 of #14794): EXACTLY ONE side resolved, and
+            # the unresolved side is the prior candidate. The first cut keyed on
+            # `src` alone, so the model's other emission order (older claim
+            # first) left `src` empty, the guard was false, and the operator
+            # fell through to `operator dropped: src/dst did not resolve` — the
+            # contradiction lost on a corpus whose only difference is emission
+            # order. `_canonicalize_nand_direction` cannot repair it (it returns
+            # None for an existing-graph endpoint, which a cross-capture NAND
+            # always has), and the receipt this PR replays carries two
+            # `NAND direction canonicalized` lines from the same corpus.
+            if op_type == "NAND" and bool(src) != bool(dst):
+                prior_side = "dst" if src else "src"
+                prior_ref = str(o.get(prior_side, "") or "")
                 prior_row = _resolve_point_supersede(
-                    str(o.get("dst", "") or ""), search, warnings=warnings)
+                    prior_ref, search, warnings=warnings)
                 if _close_prior_contradiction(
-                        src, str((prior_row or {}).get("id") or "").strip(),
+                        src or dst,
+                        str((prior_row or {}).get("id") or "").strip(),
                         str((prior_row or {}).get("content") or ""),
-                        f"NAND dst {str(o.get('dst', ''))[:60]!r}"):
+                        f"NAND {prior_side} {prior_ref[:60]!r}",
+                        prior_row):
                     continue
             warnings.append(f"operator dropped: src/dst did not resolve to an "
                             f"emitted point/event ({o.get('src')!r} → {o.get('dst')!r})")

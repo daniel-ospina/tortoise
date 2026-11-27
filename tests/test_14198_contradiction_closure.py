@@ -27,13 +27,23 @@ persisted), and then dropped. Two of doc-05's three drops were that shape.
 
 WHAT THE FIX IS, AND WHAT IT IS NOT
 -----------------------------------
-A declared `NAND` whose NEW side resolved in this capture and whose OLDER side
-resolves in the S3 prior set now emits the SAME record a declared point-level
-`supersedes` ref emits (`commit_ops.apply_supersessions` →
-`sdk._supersede_point`): the `CORRECTS` edge, the older claim's `validTo`
-stamped from the successor's window start, `expiredAt` stamped from ingestion
-time, and the older claim **retained as terminal** — closed, never deleted
-(§2.0: the record is truth) and never merged (⛔ no fold).
+A declared `NAND` with exactly one side resolved in this capture and the OTHER
+side resolving in the S3 prior set — or folded onto its graph id by a RESOLVED
+identity lookup — now emits the SAME record a declared point-level `supersedes`
+ref emits (`commit_ops.apply_supersessions` → `sdk._supersede_point`): the
+`CORRECTS` edge, the older claim's `validTo` stamped from the successor's window
+start, `expiredAt` stamped from ingestion time, and the older claim **retained
+as terminal** — closed, never deleted (§2.0: the record is truth) and never
+merged (⛔ no fold).
+
+⛔ THREE gates keep that honest, each pinned by a case below that REDS when it
+is removed: the arm is SYMMETRIC on emission order (the model may write the pair
+either way, and `_canonicalize_nand_direction` cannot repair a cross-capture
+NAND), the emitted side must be a POINT (an Event is a legal NAND endpoint but
+has no point-supersede channel — the consumer refuses it), and the two rivals
+are ordered by WORLD TIME rather than capture membership (#14198: *"facts are
+compared on world-time dates, not arrival order"*), so a backfill does not emit
+an inverted window the consumer refuses.
 
 ⛔ It is NOT a lexical contradiction detector. The issue's own ruling is that
 the MODEL labels a contradiction and code does the interval arithmetic; the
@@ -57,18 +67,36 @@ from tortoise.ids import content_hash
 
 CERT = "ColdPath Logistics holds a validated cold-chain certificate"
 AUDIT = "The cold-chain audit failed ColdPath Logistics last week"
+#: The audit's own event text. An Event is a legal operator endpoint, but there
+#: is no point-supersede channel to an Event successor — the arm must decline
+#: and let the drop warning tell the truth (review F5 of #14794).
+AUDIT_EVENT = "ColdPath Logistics ran its cold-chain audit last week"
+
+#: World-time defaults: the certificate claim precedes the audit that refutes it.
+CERT_WHEN = "2026-02-03"
+AUDIT_WHEN = "2026-03-05"
 
 
 def _pid(content: str) -> str:
     return f"pt_{content_hash(content)[:62]}"
 
 
-def _embed_for(blob: str, *, relationship: str) -> dict:
+def _embed_for(blob: str, *, relationship: str, inverted: bool = False,
+               event_side: bool = False,
+               cert_when: str = CERT_WHEN,
+               audit_when: str = AUDIT_WHEN) -> dict:
     """The model's S2/S4 map, keyed on the transcript blob.
 
-    ``relationship`` is the one thing the three tests vary: ``nand`` is the
+    ``relationship`` is what the three declarations vary: ``nand`` is the
     corpus's declared contradiction, ``impl`` is a declared SUPPORT edge over
     the same pair (the over-fire negative), ``none`` declares nothing at all.
+
+    ``inverted`` emits the SAME NAND in the other order (older claim first) —
+    the emission order `_canonicalize_nand_direction` cannot repair across a
+    capture boundary (review F3). ``event_side`` makes the contradiction's NEW
+    side an Event (review F5). ``cert_when``/``audit_when`` are the world-time
+    starts, so a test can invert ARRIVAL order relative to world time — the
+    backfill shape (review F2).
     """
     cert_session = "certificate" in blob and "audit" not in blob
     audit_session = "audit" in blob
@@ -79,14 +107,24 @@ def _embed_for(blob: str, *, relationship: str) -> dict:
             "events": [], "operators": [],
             "points": [{"content": CERT, "pointKind": "statement",
                         "about_entities": ["ColdPath Logistics"], "tier": "B",
-                        "when": "2026-02-03",
+                        "when": cert_when,
                         "quote": CERT,
                         "search_keys": ["cold-chain certificate"]}],
         }
     if audit_session:
         operators = []
+        events: list[dict] = []
         if relationship == "nand":
-            operators = [{"op_type": "NAND", "src": AUDIT, "dst": CERT,
+            if event_side:
+                events = [{"content": AUDIT_EVENT,
+                           "about_entities": ["ColdPath Logistics"],
+                           "when": audit_when}]
+                src, dst = AUDIT_EVENT, CERT
+            elif inverted:
+                src, dst = CERT, AUDIT
+            else:
+                src, dst = AUDIT, CERT
+            operators = [{"op_type": "NAND", "src": src, "dst": dst,
                           "stated_predicate": "refutes"}]
         elif relationship == "impl":
             operators = [{"op_type": "IMPL", "src": AUDIT, "dst": CERT,
@@ -94,10 +132,10 @@ def _embed_for(blob: str, *, relationship: str) -> dict:
         return {
             "entities": [{"name": "ColdPath Logistics", "kind": "core:organization",
                           "lifecycle": "created", "supersedes": None}],
-            "events": [], "operators": operators,
+            "events": events, "operators": operators,
             "points": [{"content": AUDIT, "pointKind": "statement",
                         "about_entities": ["ColdPath Logistics"], "tier": "B",
-                        "when": "2026-03-05",
+                        "when": audit_when,
                         "quote": AUDIT,
                         "search_keys": ["cold-chain audit"]}],
         }
@@ -112,7 +150,7 @@ def _story_for(transcript: str) -> str:
     return "The team discusses the delivery partner."
 
 
-def _model(relationship: str):
+def _model(relationship: str, **shape):
     def respond(system: str, user: str) -> str:
         if "STORY SUMMARIZER" in system:
             return _story_for(user)
@@ -121,7 +159,8 @@ def _model(relationship: str):
                                "operators": [], "retractions": [],
                                "chain_notes": [], "link_before_create": []})
         if "GRAPH MAPPER" in system:
-            return json.dumps(_embed_for(user, relationship=relationship))
+            return json.dumps(
+                _embed_for(user, relationship=relationship, **shape))
         raise AssertionError(f"unexpected system prompt: {system[:60]}")
 
     class _M:
@@ -145,13 +184,20 @@ def _fake_search(sdk, embed_list, story, *, coverage: str = "partial", **kw):
     rows = proj.g.query(
         "MATCH (p:Point {pointKind:'statement'}) "
         "WHERE (p.status IS NULL OR NOT (p.status IN $terminal)) "
-        "RETURN p.id, p.content LIMIT 25",
+        "RETURN p.id, p.content, p.when LIMIT 25",
         params={"terminal": ["retracted", "superseded", "archived",
                              "outdated"]},
     ).result_set
     return {"mode": "real", "degraded": False, "reason": None,
             "entities": [], "events": [],
-            "points": [{"id": r[0], "content": r[1], "kind": "statement"}
+            # ⛔ `when` IS PART OF THE REAL PRIOR ROW: `_enrich_point_priors`
+            # copies the stored `p.when` onto every candidate, and the arm reads
+            # it to order the two rivals by WORLD TIME (#14198: "facts are
+            # compared on world-time dates, not arrival order"). A fixture that
+            # omitted it exercised only the arrival-order fallback and could not
+            # see the backfill gate at all (review F2 of #14794).
+            "points": [{"id": r[0], "content": r[1], "kind": "statement",
+                        "when": r[2]}
                        for r in rows],
             "queries_run": 1,
             "query_coverage": {"derived": {"points": 25},
@@ -189,7 +235,7 @@ def make_graph(tmp_path, monkeypatch):
 
     made = []
 
-    def _make(relationship: str, coverage: str = "partial"):
+    def _make(relationship: str, coverage: str = "partial", **shape):
         monkeypatch.setattr(
             "tortoise.extractor_v2.search_graph",
             lambda sdk, embed_list, story, **kw: _fake_search(
@@ -197,7 +243,7 @@ def make_graph(tmp_path, monkeypatch):
         sdk = TortoiseSDK(str(tmp_path / f"t14198-{relationship}-{coverage}.db"))
         made.append(sdk)
         stats = ingest_haystack_v2(sdk, _question(),
-                                   model=_model(relationship))
+                                   model=_model(relationship, **shape))
         return sdk, stats
 
     yield _make
@@ -256,6 +302,92 @@ def test_declared_cross_capture_contradiction_closes_the_older_claim(make_graph)
     assert [e["id"] for e in hist["chain"]] == [_pid(AUDIT), _pid(CERT)]
 
 
+# ── the same declaration, in the shapes a real corpus reaches ────────────────
+def test_the_other_emission_order_closes_the_same_claim(make_graph):
+    """The SAME declared contradiction, emitted older-claim-first.
+
+    REDS PRE-FIX (review F3, measured): the drop route keyed on `src` alone —
+    with the model's NAND written `src = CERT, dst = AUDIT` the resolved side
+    was `dst`, `src` was empty, the guard was false and the operator fell
+    through to `operator dropped: src/dst did not resolve`. The contradiction
+    was still lost on a corpus whose ONLY difference is emission order, and the
+    module cannot repair it: `_canonicalize_nand_direction` returns `None` for
+    an existing-graph endpoint, which a cross-capture NAND always has.
+
+    The receipt this PR replays carries two `NAND direction canonicalized`
+    lines from the same corpus, so the inverted emission is the observed shape,
+    not a hypothetical one.
+    """
+    sdk, stats = make_graph("nand", inverted=True)
+    assert stats["supersessions_written"] == 1, (
+        "an inverted emission must close the same claim — the arm is symmetric")
+    ended = [r for r in _scan(sdk, include_terminal=True)
+             if r["id"] == _pid(CERT)]
+    assert ended and ended[0]["status"] in ("outdated", "superseded")
+    assert ended[0].get("valid_to") == AUDIT_WHEN
+    live_ids = {r["id"] for r in _scan(sdk)}
+    assert _pid(AUDIT) in live_ids
+    assert _pid(CERT) not in live_ids
+
+
+def test_a_backfill_closes_the_claim_world_time_says_is_older(make_graph):
+    """A later capture carrying an EARLIER world date (the backfill shape).
+
+    REDS PRE-FIX (review F2, measured): the direction was decided by CAPTURE
+    MEMBERSHIP, so the arm emitted `superseded = prior (2026-03-05),
+    supersedes_by = new (2026-02-03)`. `sdk._supersede_point` refuses a
+    successor whose resolved start sorts strictly before the predecessor's
+    (#4021, `ValueError`), `commit_ops.apply_supersessions` counts it as a
+    failed fold, and BOTH claims stay live — the #14198 defect arriving through
+    the backfill door, warned as a generic failure.
+
+    `#14198`'s recorded decision is *"Facts are compared on world-time dates,
+    not arrival order"*, and it is what the SOTA in that issue does (Zep /
+    Graphiti retire the edge with the EARLIER `valid_at`). So the newly
+    ingested claim — the older fact — is the one whose interval closes, at the
+    prior's own start, and the prior stays current.
+    """
+    sdk, stats = make_graph("nand", cert_when="2026-03-05",
+                            audit_when="2026-02-03")
+    assert stats["supersessions_written"] == 1, (
+        "a backfilled contradiction must still close a claim — an inverted "
+        "window is refused by the consumer and leaves both live")
+    ended = [r for r in _scan(sdk, include_terminal=True)
+             if r["id"] == _pid(AUDIT)]
+    assert ended, "the newly ingested (older) claim must be retained"
+    assert ended[0]["status"] in ("outdated", "superseded")
+    assert ended[0].get("valid_to") == "2026-03-05", (
+        "the older world-time interval ends where the newer claim starts")
+    assert ended[0].get("valid_from") == "2026-02-03"
+    live_ids = {r["id"] for r in _scan(sdk)}
+    assert _pid(CERT) in live_ids, "the newer fact stays current"
+    assert _pid(AUDIT) not in live_ids
+
+
+def test_an_event_side_is_dropped_not_recorded_as_a_supersession(make_graph):
+    """A NAND whose emitted side is an Event closes nothing — and says so.
+
+    REDS PRE-FIX (review F5, measured): `_resolve` returns `event_ids` as
+    readily as `point_ids`, the arm accepted the event id as the successor, and
+    the consumer then dispatched on the `pt_` prefix of the OLD id and refused
+    the event SUCCESSOR (`_assert_lifecycle_guard(target)`). Net effect: the
+    older claim was NOT closed (the contradiction lost) while the warning
+    claimed *"the contradiction is recorded as a supersession"*. There is no
+    point-supersede channel to an Event, so the arm must decline and let the
+    drop warning tell the truth.
+    """
+    sdk, stats = make_graph("nand", event_side=True)
+    assert stats["supersessions_written"] == 0, (
+        "an Event is not a point successor — nothing may be recorded")
+    live_ids = {r["id"] for r in _scan(sdk)}
+    assert _pid(CERT) in live_ids, "nothing was closed, so it stays current"
+    sample = " ".join(stats["warnings"]["sample"])
+    assert "operator dropped" in sample, (
+        "the honest outcome is the pre-existing drop warning")
+    assert "recorded as a supersession" not in sample, (
+        "the run must not claim a closure the consumer refused")
+
+
 # ── negatives: nothing is invented ───────────────────────────────────────────
 def test_declared_support_across_captures_closes_nothing(make_graph):
     """Over-fire negative: the SAME two documents, with the model declaring
@@ -294,6 +426,15 @@ def test_undeclared_reversal_invents_no_contradiction(make_graph):
     live_ids = {r["id"] for r in _scan(sdk)}
     assert _pid(CERT) in live_ids
     assert _pid(AUDIT) in live_ids
+
+    # ⛔ THIS CASE CANNOT FALSIFY THE ARM, and it is kept as a PIN, not as
+    # coverage (review F6 of #14794, measured): `_embed_for` emits NO operator
+    # at all for the `none` relationship, so no edit to the arm's guard,
+    # direction or warning can change these three assertions. They pin the
+    # pre-existing lexical machinery (`classify_consolidation` / `_boundary`),
+    # which this change does not touch, and they are honest only when read that
+    # way. The arm's OVER-fire is graded by the `impl` case above and its
+    # UNDER-fire by the positive cases.
 
 
 # ── the boundary with #14721/#14737: the closed interval is VISIBLE to a read ─

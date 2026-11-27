@@ -24,8 +24,29 @@ builds exactly those three inputs:
   * `embed_list["operators"]` = the dropped NAND, with the two refs the
     receipt's own warning names
   * `search["points"]`      = doc-01's emitted points, verbatim from the receipt
-    (this is what S3 returns as PRIORS: the claims that existed before this
-    capture — `_resolve_point_supersede`'s own docstring says so)
+
+WHAT THE PRIOR SET IS, AND WHAT IT THEREFORE PROVES
+---------------------------------------------------
+`search["points"]` is a **RECONSTRUCTION**, not a recording. ⛔ The receipt does
+NOT carry doc-05's S3 prior set — its `result` keys are
+`points, turns, warnings, stats, surfaced, graph_ops, …`, with no search/prior
+dump — and doc-05's own warning says the identity lookup was PARTIAL
+(`S3 identity partial: 25 candidates, 11 did not run`, `held_reasons:
+{"partial": 6}`). doc-01 is prior to doc-05 by the corpus's own order, so its
+emitted points are the only evidence of what that prior set held.
+
+So the replay demonstrates *"IF the prior set contains the certificate claim,
+the closure now happens"* — a strictly WEAKER statement than *"the shipped
+pipeline closes this corpus's contradiction"*. A hold is not a closure, and
+where the prior set was partial the endpoint can still be HELD. The shipped
+number requires a fresh-graph re-ingest (the #14198 owner comment's 5-document
+run, reading doc-05's `supersessions`), and this file does not stand in for it.
+
+⚠️ It also cannot exercise the WORLD-TIME order: the receipt's point rows carry
+no `when` (props are `quote`/`search_keys`/`source_turn_id`), so the arm takes
+its arrival-order fallback here —
+`test_a_backfill_closes_the_claim_world_time_says_is_older` covers the other
+branch, and this file does not.
 
 Nothing is invented: every content string and id below is read out of the
 receipt by id, and the run refuses rather than substituting a value it could not
@@ -126,11 +147,35 @@ def build_inputs(receipt: dict, *, coverage: str = "partial") \
     return embed_list, search, str(new["id"]), str(old["id"])
 
 
+def _arm_is_fixed() -> bool:
+    """Does the IMPORTED ``extractor_v2`` carry the #14198 arm?
+
+    ⛔ ``--arm`` used to be a printed LABEL: it named the tree but did not read
+    it, so `--arm before` on the fixed tree printed a "before" banner over an
+    "after" run (review F4 of #14794). The label is now checked against the
+    module actually imported, and a disagreement REFUSES rather than mislabels.
+    """
+    from tortoise import extractor_v2
+
+    src = Path(extractor_v2.__file__).read_text()
+    return "_close_prior_contradiction" in src
+
+
 def main(argv: list[str]) -> int:
     arm = "this-worktree"
     if "--arm" in argv:
         arm = argv[argv.index("--arm") + 1]
     from tortoise.extractor_v2 import execute_embed  # the arm under test
+
+    if arm in ("before", "after"):
+        fixed = _arm_is_fixed()
+        if fixed != (arm == "after"):
+            raise SystemExit(
+                f"replay REFUSED: --arm {arm} names an arm the imported module "
+                f"is not (the cross-capture arm is "
+                f"{'present' if fixed else 'absent'} in "
+                f"{__import__('tortoise').extractor_v2.__file__}) — point "
+                "PYTHONPATH at the tree you mean instead of relabelling it")
 
     receipt = json.loads(RECEIPT.read_text())
     coverage = "partial"

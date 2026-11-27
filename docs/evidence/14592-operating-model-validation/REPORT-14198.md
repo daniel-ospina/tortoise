@@ -76,6 +76,36 @@ terminalises the predecessor: emitting it would declare an edge the commit
 immediately removes, and would hand that door a repoint it can refuse. The
 `CORRECTS` edge is the representation.
 
+**Three gates on the closure, each pinned by a test that reds when removed.**
+The shapes below are not hypothetical — each one was measured against a corpus
+or a contract this PR already names:
+
+1. **SYMMETRIC on emission order.** Either side may be the one this capture
+   emitted. The drop route keyed on `src` alone for its first cut, so the
+   model's other emission order (`src = older, dst = new`) left `src` empty and
+   the operator fell through to `operator dropped: src/dst did not resolve`.
+   `_canonicalize_nand_direction` cannot repair that: it returns `None` for an
+   existing-graph endpoint, which a cross-capture NAND always has — and the
+   receipt this PR replays carries two `NAND direction canonicalized` lines
+   from the same corpus.
+2. **POINT-ONLY on the emitted side.** An Event is a legal operator endpoint,
+   but there is no point-supersede channel to an Event successor: the consumer
+   dispatches on the `pt_` prefix of the old id and then refuses the successor
+   (`_assert_lifecycle_guard`). Emitting the record would lose the closure
+   *and* claim it was recorded; an event side now falls through to the drop
+   warning, which is the truth.
+3. **WORLD TIME, not arrival order.** #14198's recorded decision is *"Facts
+   are compared on world-time dates, not arrival order"*, and it is what
+   Zep/Graphiti do (the edge with the earlier `valid_at` is the one retired).
+   Capture membership alone emitted an **inverted window** for a BACKFILL — a
+   later capture carrying an earlier world date — which `_supersede_point`
+   refuses (#4021), so the fold failed and both claims stayed live: the #14198
+   defect arriving through the backfill door. The pair is now ordered by the
+   claims' own window starts, falling back to arrival order only when either
+   start is unknown or unparseable (the prior set IS what existed before this
+   capture, so that is the honest fallback; equality keeps it too, since a
+   zero-length predecessor window is legal).
+
 No new node kind, no new relation vocabulary, no MCP/SDK surface change.
 
 ### What was deliberately NOT built
@@ -109,17 +139,39 @@ VERDICT: the cross-document contradiction is NOT RECORDED
 ```text
 $ python docs/evidence/14592-operating-model-validation/replay_14198.py --arm after
 # extractor_v2 from: <this change>
+# new claim (this capture) : pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5
+# older claim (prior)      : pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078
 
 supersessions recorded      : 1
 supersessions naming the pair: 1
   superseded=pt_fc8b3e47…  supersedes_by=pt_9af28546…
-  evidence='declared NAND contradiction against a claim from an earlier capture (cross-session reversal; the older claim is retained with a closed interval)'
+  evidence="declared NAND contradiction across captures — the older claim's interval is closed (retained, never deleted)"
+
+warnings naming the pair:
+  - operator endpoint is an EARLIER-CAPTURE claim (#14198): NAND dst 'ColdPath Logistics holds a validated cold-chain certificate' resolved to prior point 'pt_fc8b3e47bb7e05993' outside this capture — the contradiction is recorded as a supersession (closed interval 'pt_fc8b3e47bb7e05993' ← 'pt_9af28546e85d11f41', arrival-order), so the older claim is retained and closed rather than left as a second live truth
+
+operators naming the pair : 0
 
 VERDICT: the cross-document contradiction is RECORDED
 ```
 
 The `before` warning is **byte-identical** to the one the recorded run wrote —
-that is the check that the replay is a replay, not a different run.
+that is the check that the replay is a replay, not a different run. ⛔ `--arm`
+is now CHECKED against the imported module and refuses when the label and the
+tree disagree; it is no longer a printed label over whatever tree `import`
+resolved.
+
+⚠️ **What this artifact proves, exactly.** The prior set here is a
+**RECONSTRUCTION**: the receipt does not record doc-05's S3 prior set (its
+`result` carries no search/prior dump), and doc-05's own warning says the
+identity lookup was PARTIAL (`25 candidates, 11 did not run`). So the run
+demonstrates *"IF the prior set contains the certificate claim, the closure now
+happens"* — not *"the shipped pipeline closes this corpus's contradiction"*. A
+hold is not a closure. The shipped number still requires a fresh-graph
+re-ingest (the 5-document run in #14198's owner comment, reading doc-05's
+`supersessions`), and this file is not a substitute for it. It also cannot
+exercise gate 3: the receipt's point rows carry no `when`, so the replay takes
+the arrival-order fallback (the backfill test covers the other branch).
 
 ## 4. Compose with retrieval — what a reader sees now
 
@@ -144,12 +196,18 @@ the *surviving* claims to rank first) is neither implemented nor needed here.
 |---|---|---|---|
 | **positive** | the declared cross-capture `NAND` writes 1 supersession; older claim retained, `valid_to=2026-03-05`, `expired_at` stamped, `valid_from` kept; newer interval open; `get_historical_knowledge` returns the old claim through `CORRECTS` | ❌ `assert 0 == 1` | ✅ |
 | **positive (other lookup arm)** | the same declaration on a `resolved` lookup closes the same interval (pre-fix this arm wrote the NAND and closed nothing) | ❌ `assert 0 == 1` | ✅ |
+| **positive (other emission order)** | the SAME declaration with the older claim emitted first closes the same claim (`src`-keyed arm: `assert 0 == 1`) | ❌ | ✅ |
+| **positive (backfill)** | a later capture carrying an EARLIER world date closes the claim world time says is older, at the prior's start (capture-keyed arm emits an inverted window the consumer refuses: `assert 0 == 1`) | ❌ | ✅ |
 | **positive (read)** | a current-scope query for the old claim's own wording no longer answers with it; the terminal scope still does | ❌ | ✅ |
 | **negative (support)** | the *same* two documents with the model declaring `IMPL` (support) close **nothing**; the older claim keeps its open interval and stays current | ✅ | ✅ |
-| **negative (undeclared)** | a corpus that reverses itself in **wording** but declares no edge gains no contradiction | ✅ | ✅ |
+| **negative (event side)** | a NAND whose emitted side is an Event closes nothing AND does not claim it did (no `recorded as a supersession` warning) | ❌ | ✅ |
+| **negative (undeclared)** | a corpus that reverses itself in **wording** but declares no edge gains no contradiction. ⛔ A PIN, not coverage: no mutation of the arm can red it (the `none` shape emits no operator at all) | ✅ | ✅ |
 
 Suite: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_14198_contradiction_closure.py -q`
-→ **5 passed** (3 red on `HEAD~1`, 2 negatives green on both).
+→ **8 passed**. The three added cases (other emission order, backfill, event
+side) were each measured RED under the mutation that reverts their gate — the
+`src`-only guard, the arrival-order direction, and the missing point-only
+guard — so each row above is falsifiable by an edit to this change.
 
 Regression surface run alongside, all green: `test_extractor_v2`,
 `test_consolidation_4way`, `test_never_across_fold_5080`, `test_10997_i3_partial_run`,
@@ -181,3 +239,15 @@ Regression surface run alongside, all green: `test_extractor_v2`,
    doc-05 candidates went unchecked. When the older endpoint is *not* in the S3
    prior set, this change correctly fails open (a warning, no closure) — a
    contradiction that was never retrieved cannot be closed.
+5. **An unknown world-time start falls back to arrival order.** The prior's
+   `when` reaches the arm through S3's `_enrich_point_priors` (best-effort: a
+   failed enrichment, or a caller that builds the prior set by hand, leaves it
+   absent), and the new claim's is its own `when` on the payload point. When
+   either is missing or unparseable there is no instant to compare, so the arm
+   orders the pair by capture membership — the pre-fix order, meaning a
+   BACKFILL still emits the inverted window, which the consumer refuses with a
+   warning and a skip. The closed shape is in place; the input it needs is the
+   graph's own `when`, which this change does not newly require.
+6. **The replay's prior set is a reconstruction, not a recording** (§3). It
+   proves the arm fires on the receipt's own declaration; it does not prove the
+   shipped pipeline closes that corpus, which needs a fresh-graph re-ingest.

@@ -7799,6 +7799,20 @@ surfaces:
   # (the durations-row case-count arm reads durations rows only).
   - test_14357_fallback_thinking.py
   - test_extractor_embed_coerce_5060.py  # #5060: execute_embed must not raise on a non-string name/content (whole-session payload loss)
+  # #14198: a DECLARED contradiction whose older side lives in a PRIOR capture
+  # CLOSES that claim's interval (CORRECTS + `validTo`/`expiredAt`, the claim
+  # RETAINED as terminal — §2.0, never deleted, never folded) instead of being
+  # dropped at `execute_embed`'s operator pass, where `_resolve` reads only
+  # THIS capture's ids. Its subject is `tortoise/extractor_v2.py` — the
+  # default `core` surface — and it sits beside the other `execute_embed`
+  # guards for the same reason. ⛔ It was in NO surface when the PR opened it
+  # (review P0, measured): `tools/ci_selection.py --integrity` reported
+  # `manifest drift: ['test_14198_contradiction_closure.py']`, which reds the
+  # REQUIRED `manifest-integrity` leg, and `select()` never emits the file for
+  # a diff — so the regression the PR fixes could return with no red. Hermetic:
+  # a fake model and the eval ingest path on a throwaway embedded graph
+  # (redirected to the lane server under `TORTOISE_DB_URI`), no network.
+  - test_14198_contradiction_closure.py
   # #10311: the S2/S4 prompt BODIES frame session text as untrusted DATA — the
   # clause, the body-derived boundary, and the parsing contract that must not
   # move. `core` for the same reason as the rest of the extractor guards: its
