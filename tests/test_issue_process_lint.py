@@ -4089,11 +4089,41 @@ def test_the_measured_instance_is_flagged_from_the_REAL_issue_artifacts(monkeypa
     assert findings[0].evidence["unclaimed"] == ["V1", "V3", "V4", "V5", "V6"]
 
 
-@pytest.mark.parametrize("spelling", ["V1–V6", "V1—V6", "V1-V6", "V1..V6", "V1 through V6", "V1 to V6"])
+def test_a_disclosure_on_its_OWN_line_refuses_the_whole_body_fallback():
+    """The careful author's shape: a bare keyword on one line, the disclosure on the NEXT.
+
+    `Closes #N` alone names no row; the following line names the one proved row AND the five it left
+    unmeasured. Reading disclaimers only from CLOSING lines missed that entirely, so the whole-body
+    fallback saw six row ids as six claims and reported `clean` — on the exact class the arm exists to
+    catch, and in the direction that matters (a false PASS). The more carefully a PR disclosed, the
+    more reliably it passed. `ambiguous` is the correct non-answer here, never `clean`.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    body = ("Closes #13036\n\n"
+            "V2 (the tool-count row) is proved. V1, V3, V4, V5, V6 remain unmeasured and are "
+            "follow-ups.\n")
+    findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
+    assert findings == []
+    assert stats["clean"] == 0, "a disclosed partial close must never read as a pass"
+    assert stats["ambiguous"] == 1
+    # …and the converse control: a body that names every row with NO negative cue is still clean,
+    # so the new read is a disclaimer detector and not a blanket refusal of the fallback.
+    findings, stats = L.classify_partial_close(
+        "Closes #13036\n\nV1, V2, V3, V4, V5, V6 are all proved.\n", 500, {13036: _scope(rows)})
+    assert findings == [] and stats["clean"] == 1
+
+
+@pytest.mark.parametrize("spelling", ["V1–V6", "V1—V6", "V1-V6", "V1..V6", "V1...V6", "V1…V6",
+                                     "V1 through V6", "V1 to V6"])
 def test_every_dash_and_word_spelling_of_a_full_range_is_a_complete_claim(spelling):
-    """The en dash is the STANDARD range mark and is what an author actually types; an em dash and the
-    two words are the same sentence. A complete close must read as complete in all six, because
-    flagging it is a false positive on the behaviour this arm exists to encourage."""
+    """The en dash is the STANDARD range mark and is what an author actually types; an em dash, the
+    two words and the ellipsis are the same sentence. A complete close must read as complete in all
+    eight, because flagging it is a false positive on the behaviour this arm exists to encourage.
+
+    The three-dot ellipsis and its single-character form (`…`) are pinned because reading only `..`
+    made `V1...V6` name its two ENDPOINTS — a finding telling the author to claim four rows they had
+    just claimed.
+    """
     rows = L.row_ids([CAPSTONE_BODY])
     findings, stats = L.classify_partial_close(
         f"Closes #13036 (rows {spelling})\n", 500, {13036: _scope(rows)})

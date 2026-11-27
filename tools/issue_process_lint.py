@@ -1423,7 +1423,10 @@ def row_ids(issue_bodies: list[str]) -> list[str]:
 # `V1 to V6` (and `from V1 to V6`). The en dash is the standard mark for a range and reads "to" or
 # "through" (The Punctuation Guide, *En dash*), which is how an author writes "all of them" without
 # spelling out six ids — the CORRECT complete close this arm must not flag.
-_RANGE_JOIN = r"(?:\s*(?:--?|–|—|\.\.)\s*|\s+(?:through|to)\s+)"
+# `\.{2,}` covers BOTH the two-dot form and the three-dot ellipsis an author actually types for
+# "and so on through", and `…` is the single-character spelling: reading only `\.\.` left `V1...V6`
+# naming its two endpoints, so a COMPLETE close reported a finding on four rows it had claimed.
+_RANGE_JOIN = r"(?:\s*(?:--?|–|—|\.{2,}|…)\s*|\s+(?:through|to)\s+)"
 
 
 def _row_range_span(text: str, rows: list[str]) -> set[str]:
@@ -1539,6 +1542,15 @@ def _closing_line_claim(pr_body: str, issue: int,
     ref = re.compile(rf"#{issue}(?!\d)")
     for line in text.splitlines():
         if not (ref.search(line) and _CLOSING_WORD_RE.search(line)):
+            # ⛔ NOT a closing line, but it can still DISCLAIM. A disclosure written on its OWN line
+            # is the shape the careful author produces — `Closes #N` on one line, then `V2 is proved;
+            # V1, V3–V6 remain unmeasured and are follow-ups` on the next — and reading disclaimers
+            # only from closing lines let the whole-body fallback see those six ids as claims and
+            # report `clean` on a close that disclaimed five. A row-naming line with a negative cue
+            # therefore refuses the fallback too; over-detecting here costs an `ambiguous` (never a
+            # pass), while under-detecting costs a false PASS on the arm's headline question.
+            if _ids_in(line, rows) and _DISCLAIMER_RE.search(line):
+                disclaimed = True
             continue
         for clause in _clauses(line, rows):
             if _DISCLAIMER_RE.search(clause):
