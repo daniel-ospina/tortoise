@@ -60,8 +60,11 @@ version: 1
 # reader of the prose can see. On THIS tree — `origin/main` folds carried, newest first:
 # `8fd022fdd1c5f`, `a0be10ac456b`, `ff10fb328891`, `a0cea310786d` and `bbef0b8840d7`;
 # the rows below landed across them and the folds before them; ⛔ measured, and NOT with
-# `git show --stat` — that prints NO diff for a MERGE commit unless it is given `-m`, and this
-# block's whole subject is merges, so it reads "untouched" over a spliced file: the safe form is
+# `git show --stat` — that prints NO diff for a MERGE commit unless it is given `-m` (it falls
+# back to the combined `--cc` form, which lists a file only when it differs from EVERY parent), and
+# this block's whole subject is merges, so it reads "untouched" over a spliced file: measured on
+# `bf16c791a489`, a two-parent fold in THIS branch's history that moved seventeen lines of this file,
+# and `git show --stat bf16c791a489 -- config/ci-surfaces.yml` printed nothing. The safe form is
 # `git diff <sha>^1 <sha> -- config/ci-surfaces.yml`. Measured that way, it is empty for THREE of
 # the five — `8fd022fdd1c5f`, `a0be10ac456b` (the two newest) and `bbef0b8840d7` — so those touched
 # nothing here and renumber the chain without moving the derivation; `ff10fb328891` changed ONE
