@@ -57,7 +57,7 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `a0be10ac456b` folded in, plus THIS
+# reader of the prose can see. On THIS tree — the `#14645` fold (`a0be10ac456b`) merged in, plus THIS
 # lane's own row (`tests/test_14691_structure_evidence.py`, `core`, at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) — the verb packs nine shards at 827.8 s (a, b, e, f, g, h, i, j, k) and
 # two at 827.7 s (c, d), so `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is
@@ -65,8 +65,9 @@ version: 1
 # `watchdog_headroom: 2.03` (1680 / 827.8 = 2.0295), so the two agree by construction rather than
 # by a hand re-read.
 # ⛔ THE PARTITION is stated here, not only the minute, because at this base the move is INVISIBLE
-# to arithmetic: `origin/main` `a0be10ac456b` re-derives to all ELEVEN shards at one figure and this
-# tree splits them NINE and TWO, while the minute is 28 m and the headroom 2.03 on BOTH sides — so
+# to arithmetic: that folded `origin/main` (`a0be10ac456b`) re-derived to all ELEVEN shards at one
+# figure, and this tree splits them NINE and TWO, while the minute is 28 m and the headroom 2.03
+# on BOTH sides — so
 # a check that read only `28 m` would call the move cosmetic and let a figure nobody emits stand.
 # ⛔ The parent's split is described here by COUNT and by direction on purpose: restating either
 # side as a shard-figure sentence would put a SECOND partition in a block whose guard reads ONE (the
@@ -76,8 +77,8 @@ version: 1
 # ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
 # own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
 # figures stay on the commit that measured them. The delta is measurable and small: `fast_pool()`
-# holds 1342 files at this head against 1341 on `origin/main` `a0be10ac456b`, read by running the
-# verb on one manifest per side (`origin/main`'s blob and this tree's), and the ONE addition THIS
+# holds 1342 files at this head against 1341 on the `origin/main` it folded in (`a0be10ac456b`), read
+# by running the verb on one manifest per side (`origin/main`'s blob and this tree's), and the ONE addition THIS
 # lane brings is `tests/test_14691_structure_evidence.py`, the row registered by the commit that
 # added the T6 bundle's falsifiers. With nothing `main` carries missing from this tree, that one
 # row is the whole delta: measured, `set(fast_pool(head)) - set(fast_pool(main))` returns exactly
@@ -97,11 +98,14 @@ version: 1
 # corrected here (#14691 review 9th cycle P3). The name lists above are what the guard COMPARES
 # against the live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so
 # they are a graded claim about THIS head — a fold re-derives them with the verb, it never carries
-# them. ⛔ THE BASE NAMED IN THIS BLOCK IS THE COMMIT THIS HEAD FOLDED, and it went stale ONCE
-# between the review and the merge: the reviewed head named `a0cea31078`, the `#14645` fold then
-# landed `a0be10ac456b` on top, and NOTHING grades the base token — both arms read the shard
-# figures, and the pool counts beside them are prose. So the name is re-derived on the merged tree
-# by the same rule as the figures, and what it describes is unchanged: one row, this lane's own.
+# them. ⛔ EVERY BASE SHA ABOVE IS A HISTORICAL FACT ABOUT A FOLD, never a present-tense claim
+# that "the base IS this" — because NOTHING grades a base token: the two header arms read the shard
+# FIGURES only, while the pool counts beside them are prose. It rotted ONCE exactly that way,
+# between the review and the merge: the reviewed head stated `a0cea31078` in the present tense, the
+# `#14645` fold then landed `a0be10ac456b` on top, and that sentence was FALSE with nothing to red.
+# A past tense cannot rot in that way — "that fold merged `a0be10ac456b`" stays true of this head
+# for good, and the next fold brings its own — so no lane owes this block a base re-derivation.
+# What it describes is unchanged: one row, this lane's own.
 # ⛔ THIS BLOCK ARRIVES SPLICED, REPEATEDLY, and that is mechanical rather than mysterious:
 # `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
 # derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. It has now
