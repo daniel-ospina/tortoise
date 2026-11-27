@@ -111,8 +111,10 @@ version: 1
 # same way differs by exactly ONE entry: this change's suite, present only here.
 # (`tests/test_14582_creation_hook.py` was the second entry in an earlier spelling of this
 # sentence; `main` has folded it since, so the difference is one row. Every other row this tree
-# carries — `#14700`'s, `#14621`'s, `#14548`'s residue RATCHET (the one `core` row whose weight is
-# not the flat 2.0 s) and `#14607`'s — is `main`'s at this head, so reading one as this change's
+# carries — `#14700`'s, `#14621`'s, `#14548`'s residue RATCHET
+# `tests/test_sdk_privatise_sweep.py` (the one `core` row whose weight is
+# not the flat 2.0 s) and `#14607`'s registrations (`tests/test_mcp_selfcheck.py`,
+# `tests/test_recall_neighborhood.py`) — is `main`'s at this head, so reading one as this change's
 # delta would attribute a partition move to a row that did not cause it.)
 # ⛔ THAT `origin/main` FOLD LABEL IS HAND-CHECKED, and it is stated here rather than left
 # implied: it has been wrong REPEATEDLY inside this issue (`90c125a736a0c`, `d6a2104518762`,
