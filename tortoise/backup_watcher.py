@@ -289,6 +289,7 @@ def compute_status(
     measured age > threshold,   ``stale``                  ``stale``
       state PRESENT
     measured age ANY, no state  ``stamp_missing``          ``stamp_missing``
+      AND org still in census
     measured age <= threshold,  ``ok``                     ``ok``
       state PRESENT
     org the sweep skips         ``not_eligible``           (key omitted)
