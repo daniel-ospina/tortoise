@@ -130,10 +130,13 @@ version: 1
 # partition is the re-derivation above (this lane's own row is in the pool), and this list is the
 # rows it carries — a second spelling of the bins is the splice this block refuses.
 # ⛔ THAT `origin/main` FOLD LABEL IS HAND-CHECKED, and it is stated here rather than left
-# implied: it has been wrong REPEATEDLY inside this issue (`90c125a736a0c`, `d6a2104518762`,
-# `cc7b1f3f2c6a3`, `e182b8b8b0cb3`, and `dc479c6f` — ⛔ NOT the correction this head carries: that
-# label was re-pointed again after `dc479c6f`, which is exactly why no sha in this list claims to
-# be current), each time caught by a reader rather than by a gate. ⛔ NO NUMERAL AND NO
+# implied: it has been wrong REPEATEDLY, each time caught by a reader rather than by a gate. ⛔ THE
+# COMMITS THAT SHOWED IT ARE NOT LISTED HERE, and that is a correction: an earlier spelling cited
+# five of them as this issue's own history, and they were measured on a SIBLING branch's folds —
+# every one fails `git merge-base --is-ancestor <sha> HEAD` on this branch — which is the carried
+# provenance this block exists to prevent, one level in. The history is
+# `git log --first-parent --merges` on the branch, never a list restated here; that is also why no
+# sha in this note claims to be current. ⛔ NO NUMERAL AND NO
 # EXHAUSTIVE ENUMERATION: earlier spellings of this sentence were falsified by their own count
 # (a spelled-out number is still a count, as the paragraph below says — and an earlier draft of
 # THIS note carried a count of its own drafts, which nothing in the tree can verify and which
@@ -258,12 +261,17 @@ version: 1
 # on the commit that measured them — `git log` holds them, and restating one here is what produced
 # the duplicated spellings in the first place.
 # ⛔ IT ARRIVED SPLICED ONCE MORE ON THIS LANE'S REBASE ONTO `origin/main` `c1c8df1a3817` — the same
-# driver, the same failure — and this time NEITHER copy described the folded tree: both stated the
-# 827.2/827.3 partition and a `fast_pool()` of 1339, and those are the PRE-FOLD BASE's own emission
-# (measured by loading `git show c1c8df1a3817:config/ci-surfaces.yml` through `fast_pool()` and
-# `push_legs()`), not the fold's — a fold carries this lane's row as well, so its pool is strictly
-# larger by construction. Neither copy was picked either; the re-derivation above is a third fresh
-# one.
+# driver, the same failure. ⛔ WHAT THE TWO COPIES STATED IS NOT CLAIMED, because a pair that
+# DISAGREED on the bins cannot both have stated one partition: an earlier spelling of this sentence
+# said BOTH copies stated the 827.2/827.3 partition and a `fast_pool()` of 1339, and the paragraph
+# below measured that claim FALSE. The figures that ARE true here are the PRE-FOLD BASE
+# `c1c8df1a3817`'s own emission — measured by loading `git show c1c8df1a3817:config/ci-surfaces.yml`
+# through `fast_pool()` and `push_legs()` — not either copy's, and not the fold's: a fold carries
+# this lane's row as well, so its pool is strictly larger by construction. Neither copy was picked;
+# the re-derivation above is a third fresh one. ⛔ WHICH ONE IT COUNTS AS IS NOT STATED, and neither
+# copy's figures are quoted inline: that ordinal is a window the NEXT fold renumbers, and restating
+# a fold's numbers here is the carry the paragraph above refuses — the measurement lives on the
+# commit that took it (`git log`).
 # ⛔ THIS BLOCK ARRIVES SPLICED, REPEATEDLY, and that is mechanical rather than mysterious:
 # `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
 # derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. ⛔ NOT on
@@ -277,15 +285,6 @@ version: 1
 # and the re-derivation above is computed with `--emit-push-matrix` on the merged tree. Each
 # earlier fold's figures live on the commit that measured them (`git log`), which is where a
 # spliced copy belongs.
-# driver, the same failure — and this time the two copies DISAGREED on the bins, so AT MOST ONE of
-# them could describe that tree. ⛔ WHICH ONE IS NOT STATED AND NEITHER COPY'S FIGURES ARE QUOTED:
-# restating a fold's numbers inline is the carry the paragraph above refuses, and the measurement
-# lives on the commit that took it (`git log`). An earlier spelling of this sentence claimed
-# "NEITHER copy described this tree: both stated" a single partition — which cannot be true of a
-# pair that disagreed, and was measured false. Neither copy was picked; the paragraph above is
-# re-derived fresh on this merged tree, and WHICH ONE IT COUNTS AS IS NOT STATED: that ordinal
-# is a window the NEXT fold renumbers — the same reason the paragraph below states no window — so
-# it is left unstated rather than stated and re-staled, on the schedule the figures above refuse.
 # ⛔ NO WINDOW IS STATED HERE, and the reason is a measurement: "the folds after `a0cea310786d`
 # touched nothing" was FALSE in this very paragraph — a later fold moved seventeen lines of this
 # block. ⛔ THAT FOLD IS NOT NAMED HERE ON PURPOSE: three shas measured on a SIBLING branch's folds
