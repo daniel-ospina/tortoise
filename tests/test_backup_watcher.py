@@ -2505,6 +2505,18 @@ def test_watcher_stamp_missing_does_not_resolve_a_stale_it_never_measured():
     assert status["per_team"]["team_a"] == "stale", status["per_team"]
     assert any("STALE — team_a" in t for t in ch.issues.values()), ch.issues
 
+    # Spy on the watcher's OWN decision point as well as its outcome: the
+    # invariant is that the STALE resolve is not even ATTEMPTED, so the
+    # assertion holds at the mechanism and not only at the store's reaction.
+    legs: list[tuple[str, str]] = []
+    real_leg = w._alert_leg
+
+    def _spy(op, kind, subject="", detail=None):
+        legs.append((op, kind))
+        return real_leg(op, kind, subject, detail)
+
+    w._alert_leg = _spy  # type: ignore[method-assign]
+
     # The team mirror disappears. The class becomes `stamp_missing`, which
     # OVERRIDES the age — but the archive above is STILL 200m old, so the STALE
     # is still true and must survive. (A fresh surface, not an untyped
@@ -2514,6 +2526,8 @@ def test_watcher_stamp_missing_does_not_resolve_a_stale_it_never_measured():
     w._storage = without_state
     status = w.poll()
     assert status["per_team"]["team_a"] == "stamp_missing", status["per_team"]
+    assert ("resolve_incident", "STALE") not in legs, (
+        f"a class change may not close a STALE nobody re-measured: {legs}")
     assert any("STALE — team_a" in t for t in ch.issues.values()), (
         "a class change may not close a STALE nobody re-measured", ch.issues)
     assert any("METADATA_LOST — team_a" in t for t in ch.issues.values()), ch.issues
