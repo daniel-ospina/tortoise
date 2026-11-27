@@ -256,7 +256,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2299 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2303 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on THIS fold of `origin/main` `2cccf90f4dd4`: both sides' prose blocks are
     kept (this PR's fold note and `main`'s `recorded.update(keep)` note), so the figure is
     RE-MEASURED by this walk on the RESOLVED file at 2047 rather than inherited from either side —
@@ -272,7 +272,14 @@ def _residue_block() -> str:
     figure. ⛔ AND RE-WALKED ONCE MORE for the `#14583` review's P3 (the carried-parent label below):
     restating `KEPT VERBATIM` as `CARRIED IN SUBSTANCE rather than verbatim` added four `#:` lines
     INSIDE the run, so the figure above is RE-MEASURED by this walk (`2295` -> `2299`) rather than
-    adjusted by arithmetic on the last reading. ⛔ THOSE NUMBERS ARE A
+    adjusted by arithmetic on the last reading. ⛔ AND RE-WALKED AGAIN for the branch-namespace
+    parenthetical below (`2299` -> `2303`): the sentence that cites its evidence command now shows
+    `git for-each-ref --contains … refs/remotes/origin/` instead of `git branch -r --contains`, and
+    names why (`branch -r` reads a PR-checkout ref's first path segment as a REMOTE NAME, so a kept
+    `refs/remotes/pull/<n>/merge` prints as a branch) — measured on this PR's own `test (d)`, where
+    that command returned `pull/14108/merge` while no origin BRANCH contained the commit. The four
+    `#:` lines it added are inside the run, so the figure is RE-MEASURED by this walk, never
+    adjusted by arithmetic. ⛔ THOSE NUMBERS ARE A
     MEASUREMENT, NOT A MEMORY: each is `_residue_block()`'s own walk at that commit (`git show
     <sha>:tools/sdk_privatise.py`, then the same contiguous `#:` climb this function does), and each
     re-takes. An earlier cut of this sentence carried 2006 as the RESOLVED file's figure and 1989 as
@@ -504,30 +511,6 @@ def _git(*args: str) -> str:
     return done.stdout
 
 
-def _remote_branches_containing(rev: str) -> list[str]:
-    """`origin`'s BRANCH refs that contain `rev` — ⛔ never `refs/remotes/pull/*`.
-
-    The block's narrow claim is about BRANCHES, and `git branch -r --contains` is the
-    wrong instrument for it: `git branch -r` lists EVERY ref under `refs/remotes/`,
-    including GitHub's MERGE refs. Measured red on run 45556103584 / job 139014092267:
-    the arm printed `pull/14108/merge` — a merge ref for the very PR the block is
-    ABOUT — so the premise read as false while the claim it grades was true.
-
-    Why that ref exists on a CI runner: `actions/checkout` writes
-    `refs/remotes/pull/<n>/merge`, and a SELF-HOSTED runner reuses its workspace, so
-    merge refs from EARLIER jobs survive into this one (`pull/14108/merge` came from
-    another PR's run). A merge ref is not a branch; grading it made this arm's verdict
-    a function of which PRs that runner had served.
-
-    Restricted to `refs/remotes/origin/` (this repo's branch namespace) and excluding
-    `origin/HEAD`, which is a symbolic alias for a branch already listed.
-    """
-    out = _git("for-each-ref", "--contains", rev, "--format=%(refname)",
-               "refs/remotes/origin/")
-    return [line.strip() for line in out.splitlines()
-            if line.strip() and not line.strip().endswith("/HEAD")]
-
-
 def _ref_sha(ref: str) -> str | None:
     """The sha `ref` resolves to in THIS clone, or None when it is not fetched here.
 
@@ -544,6 +527,31 @@ def _ref_sha(ref: str) -> str | None:
     done = subprocess.run(
         ["git", "rev-parse", "--verify", "-q", ref], cwd=ROOT, capture_output=True, text=True)
     return done.stdout.strip() if done.returncode == 0 else None
+
+
+def _origin_branches_containing(rev: str) -> set[str]:
+    """The BRANCHES of `origin` whose history contains `rev` — `refs/remotes/origin/` only.
+
+    ⛔ NOT `git branch -r --contains` (measured, `test (d)` on this PR's own CI). `branch -r`
+    lists every ref under `refs/remotes/`, and it reads the FIRST path segment as the remote
+    name — so the ref `refs/remotes/pull/14108/merge`, which `actions/checkout` writes for a PR
+    checkout (`+refs/pull/<n>/merge:refs/remotes/pull/<n>/merge`), is printed as the branch
+    `pull/14108/merge`. On a REUSED self-hosted runner workspace that ref OUTLIVES the job that
+    fetched it, and it contains `83e94826a8a` by construction (the PR head it merges does), so
+    the premise arm reds forever against a BRANCH it never measured — a checkout artifact read
+    as a branch. `refs/remotes/origin/*` is the browser-visible branch set the block's narrow claim
+    is about — on a clone whose `remote.origin.fetch` maps all of `refs/heads/*`. ⛔ A NARROWED
+    refspec (a single-branch fetch, which a CI checkout commonly performs) narrows this answer to
+    that one ref, and the non-vacuity probe below is satisfied by `origin/main` alone — so the probe
+    grades the NAMESPACE being readable, never the branch set being complete. `remotes/pull/*` is
+    not that set, and a "remote" a checkout invented is not one of the repo's remotes.
+
+    `refs/remotes/origin/HEAD` is dropped: it is a SYMREF onto a branch already in the set, so
+    keeping it would only make one containment read as two.
+    """
+    out = _git("for-each-ref", "--format=%(refname)", "--contains", rev, "refs/remotes/origin/")
+    return {line.strip() for line in out.splitlines()
+            if line.strip() and line.strip() != "refs/remotes/origin/HEAD"}
 
 
 #: Where each addressed rev is FETCHABLE from — the refspec a skip's re-arm line prints.
@@ -1192,12 +1200,12 @@ def test_the_branch_containment_arm_reads_branches_only(monkeypatch):
                 "refs/remotes/origin/fix/13450-ep-position-axis\n")
 
     monkeypatch.setattr(sys.modules[__name__], "_git", _fake_git)
-    found = _remote_branches_containing(RESIDUE_ABBREV)
+    found = _origin_branches_containing(RESIDUE_ABBREV)
     assert "refs/remotes/origin/" in seen["args"], (
         "the arm must restrict git to this repo's BRANCH namespace; a bare "
         "`branch -r --contains` also lists `refs/remotes/pull/*` merge refs")
     assert seen["args"][0] == "for-each-ref"
-    assert found == ["refs/remotes/origin/fix/13450-ep-position-axis"], (
+    assert found == {"refs/remotes/origin/fix/13450-ep-position-axis"}, (
         f"expected origin branches only (no alias, no merge ref), got {found}")
 
 
@@ -1222,9 +1230,15 @@ def test_the_history_clause_premises_hold_in_this_clone():
     claim written against it goes stale without a red.
 
     ⛔ IT READS THE CLONE'S REMOTE-TRACKING REFS, so a clone whose `refs/remotes/origin/*` are
-    stale (a deleted branch never pruned) reds the `branch -r --contains` arm until
+    stale (a deleted branch never pruned) reds the containment arm until
     `git fetch origin --prune`. That is the premise being stale, not the block being wrong —
     which is why it lives here and not in the prose arm, which runs everywhere.
+
+    ⛔ THE CONTAINMENT ARM IS SCOPED TO `origin`'s BRANCH NAMESPACE (measured: this PR's own
+    `test (d)`). `git branch -r --contains` also lists `refs/remotes/pull/<n>/merge`, the PR
+    checkout ref `actions/checkout` fetches, and reads `pull` as a remote name — on a reused
+    self-hosted runner a leftover `pull/14108/merge` contains this commit by construction, so
+    that arm redded against a ref that is not a branch. See `_origin_branches_containing`.
     """
     _requires(RESIDUE_ABBREV, RESIDUE_PR_HEAD, "origin/main")
     head_ref = _ref_sha("refs/pull/14108/head")
@@ -1246,9 +1260,17 @@ def test_the_history_clause_premises_hold_in_this_clone():
     assert on_main.returncode == 1, (
         "premise: the commit is NOT on `origin/main` (rc 1 = not an ancestor; anything else "
         "means the measurement did not run)")
-    assert _remote_branches_containing(RESIDUE_ABBREV) == [], (
-        "premise: no remote BRANCH contains it — which is the only part of the block's "
-        "narrow claim that is about branches")
+    # ⛔ NON-VACUITY FIRST: the query must be able to say YES. `origin/main` contains its own
+    # tip, so a well-formed scoped query always names it — if it does not, the empty answer
+    # below is the query failing to read anything, not the commit being absent from branches.
+    main_tip = _git("rev-parse", "origin/main").strip()
+    assert "refs/remotes/origin/main" in _origin_branches_containing(main_tip), (
+        "non-vacuity: the scoped query must report `origin/main` for main's own tip — an empty "
+        "answer from a query that cannot read the namespace is UNMEASURED, not a pass")
+    holders = _origin_branches_containing(RESIDUE_ABBREV)
+    assert holders == set(), (
+        "premise: no `origin` BRANCH contains it — which is the only part of the block's "
+        f"narrow claim that is about branches; containing branch(es): {sorted(holders)}")
 
 
 def test_the_history_clause_is_only_quoted_as_falsified():

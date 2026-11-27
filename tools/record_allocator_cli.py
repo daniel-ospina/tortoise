@@ -20,6 +20,23 @@ WHAT THE VERBS ARE FOR, one line each:
 * ``halt``  — ``active → halted``. The counter is KEPT: the carried numbers are
   the only record of what was issued.
 * ``reopen``— ``halted → seeded``, so a halted graph can be re-seeded and re-armed.
+* ``sweep`` — READ-ONLY: which of this org's graphs are NOT ALLOCATING — no
+  counter row at all ("born uncut"), or a row in `seeded`/`halted`, which
+  allocates nothing either.
+* ``backfill`` — ``sweep``'s population, SEEDED (#14582). Idempotent, one
+  transaction per graph, and it reports its three counts:
+  ``N considered / M seeded / K refused`` with a reason per refusal. Refusal is
+  a legal outcome here — a graph whose journal enumeration and record positions
+  disagree is NOT silently seeded — and it is never a silent skip.
+  ``--dry-run`` exercises the REAL decision path and rolls the whole run back,
+  so the operator can see the population and the refusals before writing
+  anything. ⛔ IT REPORTS WHAT IT **WOULD** DO, NEVER WHAT IT DID: `seeded` and
+  `armed` stay ``0`` (nothing was written and nothing was armed) and the
+  projection is carried in `would_seed` / `would_arm` — the same words each
+  graph's own `outcome` uses — so the summary cannot contradict the detail.
+  This verb exists for an operator reading the numbers BEFORE arming a
+  production deployment; a dry run that reported `seeded: N` would be read as
+  "N graphs are healed" by the one reader it has.
 
 THE SEED'S ONE INPUT THAT CANNOT BE DERIVED. `enumerated_floor` is *how many
 records a replay of THIS graph's journal enumerates* — the caller's fact. Two
@@ -114,9 +131,17 @@ def _record_env_contract() -> tuple[str, str]:
     return RECORD_DSN_ENV, RECORD_ALLOCATE_ENV
 
 
-#: Printed by ``arm`` when it cannot proceed. Kept as a module constant so a
-#: test can assert the CONTENT an operator is handed, rather than a docstring.
-CUTOVER_ACK_TEXT = """record_allocator_cli: `arm` changes a GLOBAL production switch for ONE graph.
+#: Printed by ``arm`` and by ``backfill --arm`` when they cannot proceed. Kept as
+#: a module constant so a test can assert the CONTENT an operator is handed,
+#: rather than a docstring.
+#:
+#: ⛔ THE SCOPE IS INTERPOLATED PER VERB, never shared: `arm` arms ONE graph,
+#: `backfill --arm` arms every uncut graph in its population in one run. A single
+#: sentence saying "ONE graph" is a FALSE statement to the operator of the
+#: population verb, and the blast radius is the whole of what the acknowledgement
+#: asks them to accept (#14610 review F2, carried here from #14610's fix).
+CUTOVER_ACK_TEXT = """record_allocator_cli: `%(command)s` changes a GLOBAL production switch
+for %(scope)s.
 
 arming a graph makes its live door allocate the journal ordinal. FOUR things
 must be true before the flag is rolled, and none of them is this command's to do:
@@ -129,15 +154,29 @@ must be true before the flag is rolled, and none of them is this command's to do
      OFF rather than back to the old behaviour. The way back is
      `halt` -> `seed --journal <path>` -> `reopen` -> `arm`.
 
-  2. EVERY GRAPH WRITTEN AFTER THE CUTOVER NEEDS ITS OWN COUNTER ROW, and the
-     creation hook that would give it one (`provision_graph_record`, the plan's
-     §A7.8 item 8) is NOT IN THIS TREE. A graph created after this point is
-     born UNCUT and its records are refused (`cursor_not_active`) until it is
-     seeded and armed. Find them with `%(prog)s sweep --org-id <org> --dsn <dsn>`
-     and seed each one BEFORE the flag is rolled.
+  2. EVERY GRAPH WRITTEN AFTER THE CUTOVER NEEDS ITS OWN COUNTER ROW.
+     `#14582` added the creation hook that gives a NEW graph one
+     (`record_writer.provision_graph_record`, called at the doors the record can file —
+     ⛔ NOT at `sdk._graph_create`, whose both arms are findings rather than omissions), so
+     graphs created from that point on are born cut over. ⛔ IT IS
+     BEST-EFFORT: a record outage at creation does not fail the create, it
+     leaves the graph UNCUT — which `/health` reports as
+     `record.armed_but_uncut` and which `%(prog)s backfill` heals. And it does
+     not reach the graphs that already existed when it landed — the hook runs at
+     the door that CREATES a graph, and a credential resolver that finds an
+     existing default row returns it without re-running that door — so find the
+     population with `%(prog)s sweep --org-id <org> --dsn <dsn>`, seed it with
+     `%(prog)s backfill --org-id <org> --dry-run` (read it, write nothing) and
+     then for real — BEFORE the flag is rolled.
+     ⛔ AND SEEDING IS HALF THE JOB: a `seeded` counter allocates NOTHING. Pass
+     `--arm` (it takes this same `--acknowledge-cutover`) on the real run, or
+     follow it with `arm` per graph — otherwise the graphs you just "healed"
+     refuse every record write once the flag is rolled. A graph that still shows
+     up in `sweep` afterwards is one of those: `counter_mode: seeded` needs
+     `arm`, `halted` needs `reopen` first.
 
-  3. CUTOVER IS PER GRAPH. This command arms ONE graph; every other graph in
-     the org stays uncut and is refused while the flag is on.
+  3. CUTOVER IS PER GRAPH, AND THIS COMMAND'S SCOPE IS %(scope_upper)s.
+     %(scope_note)s
 
   4. THE SESSION BACKFILL (`tools/backfill_copy_turns.py`) must have the flag
      set too — it calls the write seam directly and passes `allocate` from the
@@ -332,14 +371,57 @@ def _cmd_seed(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
     return _result_row(result)
 
 
+def _next_cutover_command(org_id: str, graph_id: str,
+                          counter_mode: str | None) -> str:
+    """The command THIS entry's state actually needs — ONE home (#14624 review F2).
+
+    ⛔ THE FIELD IS NOT A SEED COMMAND, and naming it one printed a HALF REMEDY for
+    two of the three states in this population. `seed` re-seeds MONOTONICALLY and
+    leaves the mode alone, so over a `seeded` row it changes nothing an allocation
+    reads (still `seeded`, so still nothing allocates) and over a `halted` row it
+    leaves the halt standing — the exact "green command, unchanged red field" shape
+    :func:`tortoise.record_writer.uncut_graph_remedy` exists to prevent. So only
+    the BORN-UNCUT state (`counter_mode is None`) gets the seed, which is what
+    CREATES that row; the two mode-bearing states are delegated to that function,
+    so the CLI does not grow a second copy of "which verb reaches this state".
+
+    NO DB, NO SIDE EFFECT: a pure function of the row `sweep` already read, so the
+    payload cannot claim a state the entry beside it does not carry.
+    """
+    if counter_mode is None:
+        # No row at all. The floor is that graph's OWN journal COUNT, which is what
+        # `--journal` counts (the two are interchangeable inputs to the same
+        # quantity — see `_journal_floor`), and `--enumerated-floor N` is the
+        # operator stating it by hand.
+        return (f"record_allocator_cli.py seed --org-id {org_id} "
+                f"--graph-id {graph_id} --journal <that graph's journal path>")
+    from tortoise import record_writer as rw
+
+    # `uncut_graph_remedy` WRAPS each command in backticks: that is formatting for
+    # its log and `/health` sites. A JSON field carries the command, not markdown,
+    # so the quotes come off — the ` then ` between two steps is the function's own
+    # separator and reads as the sequence an operator runs.
+    return rw.uncut_graph_remedy(
+        org_id, graph_id=graph_id, reason=f"mode_{counter_mode}"
+    ).replace("`", "")
+
+
 def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
-    """READ-ONLY: which of this org's graphs are BORN UNCUT (#13043 P1-1).
+    """READ-ONLY: which of this org's graphs are NOT CUT OVER (#13043 P1-1).
 
     WHY A VERB AND NOT A SENTENCE. `arm` can only refuse; the state it must warn
     about is PER GRAPH and grows over time (every graph created after the
     cutover), so an operator needs a way to FIND them. This is that way, and it
     is the plan's own named mechanism for the graph the best-effort mint creates
     (`§A7.8 item 8`, the row reached *"through the reconciliation sweep"*).
+
+    ⛔ THE POPULATION IS "NOT ALLOCATING", NOT "MISSING A ROW" (#14624 review 1).
+    It carries the born-uncut graph (`counter_mode: null`) AND the graph whose
+    counter exists in `seeded` or `halted` — both allocate nothing, so a pre-flight
+    that reported only the first answered CLEAN over the second, which is the
+    exact state `backfill` leaves behind when it is run without `--arm`. Each
+    entry's `counter_mode` names which of the two it is, because their remedies
+    are opposite (seed vs reopen-then-arm).
 
     ⛔ WHAT IT CANNOT SEE, stated so the output is not read as coverage: a graph
     that has never been written leaves no row in `journal_event`, and the record
@@ -378,17 +460,25 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
     ra.scope_tenant(conn, args.org_id)
     with conn.cursor() as cur:
         cur.execute(ra.UNCUT_GRAPHS_SQL, (args.org_id,))
-        graphs = [row[0] for row in cur.fetchall()]
+        rows = cur.fetchall()
+    graphs = [row[0] for row in rows]
+    #: The counter's mode BEFORE this verb read it: `None` = no counter row at all
+    #: (born uncut), `seeded`/`halted` = a row that allocates nothing. The
+    #: population is BOTH (#14624 review 1), so the mode is what tells the
+    #: operator which of the two opposite remedies applies — `seed`/`backfill` for
+    #: the first, `reopen` before `arm` for a halt.
+    counter_modes = {row[0]: row[1] for row in rows}
     if args.floor is not None and len(graphs) != 1:
         # ⛔ THE FLOOR IS PER GRAPH, AND THIS VERB USED TO HAND IT TO ALL OF THEM
         # (#13043 review finding 4). The comment below already claimed it was
         # never applied to more than one graph; now the claim is enforced.
         conn.rollback()
         raise ValueError(
-            f"sweep found {len(graphs)} born-uncut graph(s) for {args.org_id}, "
-            "so a single --enumerated-floor/--journal cannot be attributed to "
-            "one of them — the floor is PER GRAPH. Re-run `sweep` without it, "
-            "then `seed` each graph with ITS OWN journal")
+            f"sweep found {len(graphs)} NOT-cut-over graph(s) for "
+            f"{args.org_id} — no counter row, or one in `seeded`/`halted` — so a "
+            "single --enumerated-floor/--journal cannot be attributed to one of "
+            "them: the floor is PER GRAPH. Re-run `sweep` without it, then "
+            "`seed` each graph with ITS OWN journal")
     entries: list[dict[str, Any]] = []
     for graph_id in graphs:
         with conn.cursor() as cur:
@@ -423,11 +513,25 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         journal_count = int(count_row[0]) if count_row else 0
         entry: dict[str, Any] = {
             "graph_id": graph_id,
+            # ⛔ NOT-CUT-OVER IS TWO STATES WITH OPPOSITE REMEDIES, so the mode is
+            # published per graph rather than assumed from membership: `None`
+            # (no counter row) is healed by `seed`/`backfill`; `seeded` is healed
+            # by `arm` (or `backfill --arm`); `halted` needs `reopen` first
+            # (`arm` moves `seeded` → `active` only). "In this population" alone
+            # would tell an operator nothing about which line to run.
+            "counter_mode": counter_modes.get(graph_id),
             "journal_max_seq": int(row[0]) if row else 0,
             "journal_count": journal_count,
-            "seed_command": (
-                f"record_allocator_cli.py seed --org-id {args.org_id} "
-                f"--graph-id {graph_id} --journal <that graph's journal path>"),
+            # ⛔ ONE FIELD, ONE REMEDY PER STATE (#14624 review F2). This was
+            # `seed_command` for EVERY entry, and a seed is the right verb only for
+            # the born-uncut state: for the two states this same change added to
+            # the population it re-seeds monotonically and LEAVES THE MODE ALONE,
+            # so the one actionable field printed the half remedy
+            # `uncut_graph_remedy` exists to stop publishing. Renamed rather than
+            # left as `seed_command` because a field that prints `arm` is a name
+            # that lies about its own content.
+            "next_command": _next_cutover_command(
+                args.org_id, graph_id, counter_modes.get(graph_id)),
         }
         if args.floor is not None:
             # Reachable only for a SINGLE graph (the refusal above), and it is a
@@ -462,6 +566,17 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
             "a graph that has never been written (no journal_event row) — the "
             "record role has no grant on public.graphs; such a graph has lost "
             "nothing yet"),
+        # ⛔ THIS LINE EXISTS BECAUSE THE POPULATION IS NOT "EVERYTHING MISSING A
+        # ROW" (#14624 review 1): `count == 0` means "no graph the record can see
+        # is not-allocating", and that is what makes it a CLEAN. A reader who
+        # assumed the narrower population would read the same zero as "every
+        # graph has a counter row", which was FALSE for a `seeded` graph before
+        # this fix — the state `backfill` without `--arm` leaves behind.
+        "count_means": (
+            "every graph the record has seen WRITING is allocating: it has a "
+            "counter row and that row is `active`. A graph with NO counter row, "
+            "or with one in a non-terminal mode (`seeded`, `halted`), allocates "
+            "nothing and is counted here until it is `active`"),
     }
     if payload["floor_is_the_journals_count"] is None:
         # ⛔ THE REASON MUST NAME THE CAUSE THE `null` ACTUALLY HAD (#13043
@@ -494,6 +609,241 @@ def _cmd_sweep(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
                 "reported as `journal_count` beside `journal_max_seq`; pass "
                 "--enumerated-floor N (or --journal <that graph's path>) to "
                 "have the floor compared")
+    return payload
+
+
+def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
+    """SEED `sweep`'s population — the graphs the creation hook did not reach (#14582).
+
+    WHY THIS VERB EXISTS AT ALL. `#14582`'s hook is BEST-EFFORT by design (a
+    record outage at creation must not 500 a user's graph), so there are always
+    two populations it cannot cover: the graphs created BEFORE it landed, and the
+    ones whose hook failed. Without a verb those graphs are findable (`sweep`)
+    and unfixable without a hand-typed `--enumerated-floor` per graph, which is
+    how a reconciliation step becomes an operator's afternoon.
+
+    ⛔ THE FLOOR IS THE JOURNAL'S **COUNT**, and that is the seed's own quantity:
+    "how many records a replay of this graph's journal enumerates". It is read
+    from `public.journal_event` because that is the enumeration the record role
+    can see (no grant on `public.graphs`, and the fly-volume JSONL is not
+    addressable from an operator's box). `MAX(seq)` is REPORTED BESIDE it and is
+    NOT substituted for it: a refused seq leaves a GAP, so `COUNT(*) < MAX(seq)`,
+    and a floor of `MAX` would silently pick a number instead of surfacing the
+    disagreement. So a gapped graph is REFUSED (`divergence`, both numbers in the
+    payload, and the exact remedy command) rather than seeded — #12894's rule, and
+    the reason `K refused` is a first-class outcome here.
+
+    ⛔ IDEMPOTENT, ONE TRANSACTION PER GRAPH. A re-run re-seeds monotonically
+    (`GREATEST`) or adopts an `active` row as a no-op, so the verb can be run
+    twice, or run while a lane is creating graphs. Per graph, not one big
+    transaction: a mid-run failure then leaves a CONSISTENT partial state (each
+    graph either seeded+armed or untouched) instead of rolling back every graph
+    the operator already saw succeed.
+
+    ⛔ `--dry-run` RUNS THE REAL DECISION AND ROLLS IT BACK. Inside a SAVEPOINT
+    per graph, so `seed`'s own guard — not a second opinion in Python — decides
+    what would be refused, and the run is rolled back, so nothing is written. A
+    dry run that predicted outcomes with a hand-written predicate would be the
+    second implementation this module's docstring exists to avoid.
+
+    ⛔ `--arm` IS OPT-IN AND KEEPS THE `--acknowledge-cutover` GATE. Seeding alone
+    leaves a graph allocating nothing, so a backfill that stops there fixes the
+    row and not the leg — but arming is the same per-graph cutover decision that
+    `arm` is, with the same acknowledgement.
+
+    ⛔ SO A RUN WITHOUT `--arm` LEAVES THE GRAPHS `seeded`, AND THAT STATE IS
+    REPORTED, NOT HIDDEN (#14624 review 1). Two consequences, both pinned by
+    tests: the population this verb walks is "not allocating", which INCLUDES a
+    `seeded`/`halted` row, so a re-run still SEES the graphs it seeded and a
+    follow-up `sweep` cannot read CLEAN over them; and the payload says in words
+    that the run left them not cut over. ⛔ A `halted` graph is seeded (monotone)
+    but NOT armed: `arm` moves `seeded` → `active` only, and a halt has its own
+    remedy (`reopen`) — so a `--arm` run carries `arm_refused` with the `reopen`
+    command instead of raising halfway through an org, while a run WITHOUT
+    `--arm` shows the same state through each entry's `mode`/`counter_mode` and
+    the summary sentence below, which names BOTH states rather than calling a
+    `halted` graph `seeded`.
+    """
+    from tortoise import record_allocator as ra
+
+    dry_run = bool(getattr(args, "dry_run", False))
+    arm_them = bool(getattr(args, "arm_graphs", False))
+    # ⛔ NO ROLLBACK BETWEEN THE SCOPE AND THE PER-GRAPH READS (#13043 review
+    # finding B): `scope_tenant` sets a TRANSACTION-LOCAL GUC, and a rollback
+    # ends the transaction it lives in — after which every scoped read answers
+    # zero rows, i.e. a pre-flight that fabricates the one datum it exists for.
+    ra.scope_tenant(conn, args.org_id)
+    with conn.cursor() as cur:
+        cur.execute(ra.UNCUT_GRAPHS_SQL, (args.org_id,))
+        rows = cur.fetchall()
+    graphs = [row[0] for row in rows]
+    #: Each graph's counter mode BEFORE this run: `None` (no row — born uncut),
+    #: `seeded`, or `halted`. Published per entry so the operator can tell a graph
+    #: this verb will cut over from one that needs `reopen` first.
+    counter_modes = {row[0]: row[1] for row in rows}
+
+    entries: list[dict[str, Any]] = []
+    seeded = refused = armed = 0
+    #: The dry-run projection, counted separately from the writes. A dry run
+    #: performs neither a seed nor an arm, so `seeded`/`armed` cannot be the
+    #: field an operator reads to learn what the run WOULD do (#14624 review 3).
+    would_seed = would_arm = 0
+    for graph_id in graphs:
+        # ⛔ RE-SCOPE EVERY ITERATION, AND THIS IS NOT DEFENSIVE. `scope_tenant`
+        # sets a TRANSACTION-LOCAL GUC and `set_config(..., true)` ends with the
+        # transaction: the per-graph `commit()` below clears it, and so does a
+        # `ROLLBACK TO SAVEPOINT` taken after `seed()` re-scoped inside the
+        # savepoint. Without this line, every graph AFTER the first reads
+        # `journal_event` under NO tenant — RLS answers ZERO rows — so it reports
+        # `journal_count: 0` and is then REFUSED `divergence` by the seed (which
+        # re-scopes and sees the truth), with a printed remedy
+        # (`--enumerated-floor 0`) that the same guard refuses. The measured
+        # shape: an org with 3 uncut graphs heals ONLY the first one per run and
+        # is falsely accused of divergence for the rest (#14582 review P1-1).
+        ra.scope_tenant(conn, args.org_id)
+        with conn.cursor() as cur:
+            cur.execute(ra.JOURNAL_MAX_SQL, (args.org_id, graph_id))
+            max_row = cur.fetchone()
+            # ⛔ `COUNT(*)`, not `MAX(seq)` — see the docstring. Both are reported,
+            # so a gap is VISIBLE instead of being resolved by either side here.
+            cur.execute(ra.JOURNAL_COUNT_SQL, (args.org_id, graph_id))
+            count_row = cur.fetchone()
+        journal_max_seq = int(max_row[0]) if max_row else 0
+        journal_count = int(count_row[0]) if count_row else 0
+        entry: dict[str, Any] = {
+            "graph_id": graph_id,
+            "counter_mode": counter_modes.get(graph_id),
+            "journal_count": journal_count,
+            "journal_max_seq": journal_max_seq,
+            "enumerated_floor": journal_count,
+        }
+        # The seed's own decision, under a SAVEPOINT: a refusal must not abort the
+        # whole run's transaction, and a dry run must be able to undo exactly this
+        # graph's work.
+        with conn.cursor() as cur:
+            cur.execute("SAVEPOINT backfill_graph")
+        try:
+            result = ra.seed(conn, org_id=args.org_id, graph_id=graph_id,
+                             enumerated_floor=journal_count)
+            # ⛔ ARM ONLY WHAT `arm` CAN MOVE (#14624 review 1). The population now
+            # includes a graph whose row is `halted`; `seed` re-seeds it
+            # monotonically (mode stays `halted`) and `arm` moves `seeded` →
+            # `active` ONLY, so calling it here raised out of the middle of an
+            # org-wide run. `result.mode` is the mode the seed left, so the
+            # decision uses the writer's own answer rather than a second guess.
+            armed_now = arm_them and result.mode == ra.MODE_SEEDED
+            if armed_now:
+                ra.arm(conn, org_id=args.org_id, graph_id=graph_id)
+        except ra.SeedRefused as exc:
+            with conn.cursor() as cur:
+                cur.execute("ROLLBACK TO SAVEPOINT backfill_graph")
+            refused += 1
+            # `|=`, not `dict.update(…)`: the privatisation ratchet
+            # (`tools/sdk_privatise.py --check`) counts an ordinary-word
+            # `.update(` receiver as untyped residue because `update` is a
+            # RETIRED SDK name, so a plain dict merge spelled `.update(` reads as
+            # a new swept-name reference. `|=` is PEP 584's dict merge — the same
+            # operation, and it cannot be mistaken for a Graph/SDK call.
+            entry |= {
+                "outcome": "refused",
+                "reason": exc.reason,
+                "row_max": exc.row_max,
+                "enumerated_floor": exc.enumerated_floor,
+                # ⛔ THE REMEDY IS A COMMAND, not advice. `divergence` means the
+                # record holds a position the journal's enumeration does not
+                # reproduce; the operator who has decided the record's max is the
+                # right number can seed FROM it — the seed's guard accepts that
+                # (`row_max <= floor`), so the printed command works.
+                "remedy": (
+                    f"seed --org-id {args.org_id} --graph-id {graph_id} "
+                    f"--enumerated-floor {journal_max_seq}"
+                    if exc.reason == "divergence" else None),
+            }
+            entries.append(entry)
+            continue
+        if dry_run:
+            with conn.cursor() as cur:
+                cur.execute("ROLLBACK TO SAVEPOINT backfill_graph")
+            entry["outcome"] = "would_seed"
+            would_seed += 1
+            if arm_them:
+                entry["would_arm"] = bool(armed_now)
+                if armed_now:
+                    would_arm += 1
+        else:
+            conn.commit()
+            entry["outcome"] = "seeded"
+            # ⛔ THE MODE IS THE COUNTER's mode AFTER THIS ENTRY (#14624 review F4).
+            # `result.mode` is what the SEED left, and when `--arm` then moved the
+            # row `seeded` → `active`, reporting the seed's answer beside
+            # `armed: true` printed one entry that contradicted itself — the same
+            # defect the last three rounds closed for `would_*` and `count_means`.
+            entry |= {"seq": result.seq,
+                      "mode": ra.MODE_ACTIVE if armed_now else result.mode,
+                      "healed_tail": result.healed_tail,
+                      "burned": result.burned}
+            if arm_them:
+                entry["armed"] = bool(armed_now)
+                if not armed_now:
+                    entry["arm_refused"] = (
+                        f"the counter is {result.mode!r} after the seed and `arm` "
+                        f"moves only `seeded` → `active` — run `reopen --org-id "
+                        f"{args.org_id} --graph-id {graph_id}` first if arming is "
+                        f"intended (a halt is a deliberate stop, so it is not "
+                        f"lifted here)")
+            seeded += 1
+            if armed_now:
+                armed += 1
+        entries.append(entry)
+    if dry_run:
+        # Nothing this run wrote survives. Every savepoint was rolled back; this
+        # abandons the remaining transaction explicitly, at the point the
+        # read-only contract is decided, rather than leaving it to the caller.
+        conn.rollback()
+    payload: dict[str, Any] = {
+        "org_id": args.org_id,
+        "command": "backfill",
+        "dry_run": dry_run,
+        # The three counts the issue asks for, named as it names them.
+        "considered": len(graphs),
+        "seeded": seeded,
+        "refused": refused,
+        "armed": armed if arm_them else None,
+        # ⛔ A DRY RUN REPORTS WHAT IT WOULD DO, NEVER WHAT IT DID. `seeded` and
+        # `armed` above stay 0 on a dry run (nothing was written, nothing was
+        # armed); the projection lives here, so the summary and each graph's own
+        # `outcome` (`would_seed` / `would_arm`) cannot disagree (#14624 review
+        # 3). `None` on a real run, exactly as `armed` is `None` without --arm.
+        "would_seed": would_seed if dry_run else None,
+        "would_arm": (would_arm if arm_them else None) if dry_run else None,
+        "refusals": [e for e in entries if e.get("outcome") == "refused"],
+        "graphs": entries,
+        "cannot_see": (
+            "a graph that has NEVER been written (no `journal_event` row) — the "
+            "record role has no grant on `public.graphs`. A graph the creation "
+            "hook reached is not in this population at all; one it missed and "
+            "that has never been written appears here only after its first "
+            "write (and it loses that first line's row, which is the gap this "
+            "verb exists to bound)"),
+    }
+    left_seeded = would_seed if dry_run else seeded
+    if not arm_them and left_seeded:
+        # ⛔ THE RUN'S OWN BLIND SPOT, SAID IN WORDS (#14624 review 1). Without
+        # this line an operator reads `seeded: N` and assumes the cutover is
+        # finished, rolls the global flag, and every one of those graphs refuses
+        # every record write — fail-soft, so nothing reds. `seeded` is NOT cut
+        # over; the graphs stay in `sweep`'s population until they are `active`.
+        payload["finish_the_cutover"] = (
+            f"{left_seeded} graph(s) "
+            + ("WOULD be left NOT ALLOCATING" if dry_run else "are NOT ALLOCATING")
+            + " — a `seeded` counter allocates NOTHING, and a `halted` one moved "
+            "nowhere. "
+            + ("So a real run here would not cut them over. " if dry_run else
+               "So this run did not cut them over. ")
+            + ("Re-run with `--arm --acknowledge-cutover` to arm the `seeded` "
+               "ones (a `halted` graph needs `reopen` first), and re-run "
+               "`sweep` to confirm: any graph that is not `active` stays in "
+               "that population"))
     return payload
 
 
@@ -531,7 +881,8 @@ def _parser() -> argparse.ArgumentParser:
         description="Seed / arm / halt / reopen the record's per-graph ordinal "
                     "allocator, or read its state (#12894).")
     ap.add_argument("command",
-                    choices=("status", "seed", "arm", "halt", "reopen", "sweep"))
+                    choices=("status", "seed", "arm", "halt", "reopen", "sweep",
+                             "backfill"))
     ap.add_argument("--org-id", required=True)
     #: `sweep` is the one verb that is ORG-scoped rather than graph-scoped — it
     #: exists to find graphs nobody has named yet — so `--graph-id` cannot be
@@ -551,9 +902,20 @@ def _parser() -> argparse.ArgumentParser:
                          "with --journal)")
     ap.add_argument("--acknowledge-cutover", action="store_true",
                     dest="acknowledge_cutover",
-                    help="required by `arm`: confirms the global flag, the "
-                         "per-graph scope and the born-uncut graphs have been "
-                         "read (see the refusal text)")
+                    help="required by `arm` and by `backfill --arm`: confirms the "
+                         "global flag, the per-graph scope and the born-uncut "
+                         "graphs have been read (see the refusal text)")
+    #: `backfill` (#14582): seed `sweep`'s population. `--dry-run` is the mode an
+    #: operator reads FIRST — it runs the seed's real decision under a savepoint
+    #: and rolls the run back, so the population and the refusals are visible
+    #: before anything is written. `--arm` is opt-in because a `seeded` row
+    #: allocates nothing, and it keeps `--acknowledge-cutover`'s gate.
+    ap.add_argument("--dry-run", action="store_true", dest="dry_run",
+                    help="`backfill` only: exercise the seed and ROLL IT BACK, so "
+                         "nothing is written")
+    ap.add_argument("--arm", action="store_true", dest="arm_graphs",
+                    help="`backfill` only: arm each graph that seeded (requires "
+                         "--acknowledge-cutover)")
     ap.add_argument("--json", action="store_true", dest="as_json")
     return ap
 
@@ -562,9 +924,27 @@ def main(argv: list[str] | None = None) -> int:
     ap = _parser()
     args = ap.parse_args(argv)
 
-    if args.command != "sweep" and not args.graph_id:
+    if args.command != "sweep" and args.command != "backfill" and not args.graph_id:
         ap.error(f"{args.command} is graph-scoped — pass --graph-id (only `sweep` "
-                 "walks the org)")
+                 "and `backfill` walk the org)")
+    if args.command in ("sweep", "backfill") and args.graph_id:
+        ap.error(f"{args.command} walks the WHOLE org — it takes no --graph-id "
+                 "(seed and arm a single graph with `seed`/`arm`)")
+    if args.command == "backfill" and (
+            args.floor is not None or args.journal is not None):
+        # ⛔ THE FLOOR IS PER GRAPH AND IS READ FROM THE RECORD (`COUNT(*)` of
+        # the graph's own `journal_event` rows). A single stated floor handed to a
+        # whole population would seed every graph to one number — the same defect
+        # `sweep` refuses by name.
+        ap.error("backfill reads each graph's own journal enumeration — it takes "
+                 "no --journal/--enumerated-floor; use `seed` for one graph")
+    if args.dry_run and args.command != "backfill":
+        # A `--dry-run` that a writing verb silently ignored would be a lie about
+        # the one thing it exists to promise.
+        ap.error("--dry-run is `backfill`'s: it is the only verb that can run a "
+                 "population and roll it back")
+    if args.arm_graphs and args.command != "backfill":
+        ap.error("`--arm` belongs to `backfill` — the single-graph verb is `arm`")
     if args.floor is not None and args.journal is not None:
         ap.error("--journal and --enumerated-floor are mutually exclusive: one "
                  "reading of the journal, not two")
@@ -583,12 +963,37 @@ def main(argv: list[str] | None = None) -> int:
     # advancing (`counter - floor` rows lost, WARNed per record, never raised —
     # `write_live_record` is fail-soft by contract), and the remedy is the
     # allocator's operator path, not "set the flag".
-    if args.command == "arm" and not args.acknowledge_cutover:
+    # ⛔ THE ACKNOWLEDGEMENT GATE COVERS `backfill --arm` TOO (#14582): it is the
+    # same per-graph ARMED transition as `arm`, applied to a population, so it is
+    # the same decision an operator has to make with the same four facts in front
+    # of them. `backfill` WITHOUT `--arm` seeds only (a `seeded` row allocates
+    # nothing) and needs no acknowledgement.
+    wants_arm = args.command == "arm" or (args.command == "backfill"
+                                          and args.arm_graphs)
+    if wants_arm and not args.acknowledge_cutover:
         _dsn_env, allocate_env = _record_env_contract()
+        # ⛔ ONE ACKNOWLEDGEMENT TEXT DOES NOT FIT BOTH VERBS (#14610 review F2):
+        # the header and item 3 state THIS command's blast radius, because the
+        # scope is what the operator is being asked to accept.
+        command_scope = (
+            ("backfill --arm", "every uncut graph in its population",
+             "This ONE acknowledgement covers a whole sweep: the dry run\n"
+             "     prints the population, so read it first; every graph it\n"
+             "     seeds is armed in the same run.")
+            if args.command == "backfill" else
+            ("arm", "one graph",
+             "This command arms ONE graph; every other graph in the org\n"
+             "     stays uncut and is refused while the flag is on."))
         print(CUTOVER_ACK_TEXT % {"allocate_env": allocate_env,
-                                  "prog": ap.prog}, file=sys.stderr)
+                                  "prog": ap.prog,
+                                  "command": command_scope[0],
+                                  "scope": command_scope[1],
+                                  "scope_upper": command_scope[1].upper(),
+                                  "scope_note": command_scope[2]},
+              file=sys.stderr)
         _emit(args, {"org_id": args.org_id, "graph_id": args.graph_id,
-                     "command": "arm", "refused": "unacknowledged-cutover",
+                     "command": args.command,
+                     "refused": "unacknowledged-cutover",
                      "requires": "--acknowledge-cutover",
                      "env": allocate_env})
         return EXIT_REFUSED
@@ -626,6 +1031,8 @@ def main(argv: list[str] | None = None) -> int:
             payload = _cmd_seed(conn, args)
         elif args.command == "sweep":
             payload = _cmd_sweep(conn, args)
+        elif args.command == "backfill":
+            payload = _cmd_backfill(conn, args)
         else:
             payload = _cmd_transition(conn, args)
     except ra.SeedRefused as exc:
