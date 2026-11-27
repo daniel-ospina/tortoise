@@ -2042,7 +2042,7 @@ def extractor_arm_readback() -> dict:
         vet_toggle = bool(ev2._vet_enabled())          # TORTOISE_VET | seam
         seam = bool(ev2._s2_seam_armed())
         value_gate = bool(vg.value_gate_enabled())     # ON unless told otherwise
-    except Exception as exc:  # noqa: BLE001 — recorded, never swallowed silently
+    except Exception as exc:  # recorded, never swallowed silently
         return {
             "env": raw,
             "readable": False,
@@ -2082,12 +2082,11 @@ def _validate_arm_block(arm: dict) -> list[str]:
             "receipt.arm.readable: expected a bool, got "
             f"{arm.get('readable')!r}"
         )
-    elif arm["readable"]:
-        if not isinstance(arm.get("vet_enabled"), bool):
-            issues.append(
-                "receipt.arm.vet_enabled: a readable arm requires a bool, got "
-                f"{arm.get('vet_enabled')!r}"
-            )
+    elif arm["readable"] and not isinstance(arm.get("vet_enabled"), bool):
+        issues.append(
+            "receipt.arm.vet_enabled: a readable arm requires a bool, got "
+            f"{arm.get('vet_enabled')!r}"
+        )
     return issues
 
 

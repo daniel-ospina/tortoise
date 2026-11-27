@@ -7649,7 +7649,7 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     _derived_figures = [
         f"{r['survived']}/{r['total']} = {_pct_1dp(r['survived'], r['total'])}"
         for r in on + off]
-    for arm, runs in (("flags-on", on), ("flags-off", off)):
+    for runs in (on, off):
         mean_survived = sum(r["survived"] for r in runs) / len(runs)
         mean_total = sum(r["total"] for r in runs) / len(runs)
         _derived_figures.append(
