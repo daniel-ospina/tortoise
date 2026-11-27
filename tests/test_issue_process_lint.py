@@ -3798,6 +3798,16 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
         "Closes #13036 — V1, V2, V3, V4, V5, V6 remain unmeasured\n", 500, {13036: _scope(rows)})
     assert findings == []
     assert stats["ambiguous"] == 1 and stats["clean"] == 0, stats
+    # ⛔ THE ROW THAT MAKES THE `if disclaimed:` REFUSAL REACHABLE (review round 11, F2). At the head
+    # before it, deleting that guard changed NO verdict in the whole suite: the body above is already
+    # blocked by the affirmative-clause requirement (no completion verb AND all six ids in one
+    # clause). Here the second paragraph DOES carry the verb and all six — so the guard is the only
+    # thing standing between a disclosed partial close and a false PASS, and removing it reddens this.
+    findings, stats = L.classify_partial_close(
+        "Closes #13036\n\nV1, V3, V4, V5, V6 remain unmeasured.\n\n"
+        "All six rows V1, V2, V3, V4, V5, V6 are proved.\n", 500, {13036: _scope(rows)})
+    assert findings == []
+    assert stats["clean"] == 0 and stats["ambiguous"] == 1, stats
 
 
 def test_naming_every_row_ANYWHERE_is_a_complete_close():
@@ -4300,6 +4310,17 @@ def test_an_empty_sweep_says_it_read_nothing_not_that_the_arm_did_not_run(capsys
     "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 are separate PRs.",
     "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 are tracked elsewhere.",
     "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 land in later PRs.",
+    # …and the SAME narrowing written with a COMPLETION verb (review round 11, F1): a sibling that
+    # says the other rows were done elsewhere must not be promoted into a claim. Claims come only
+    # from a structural marker, so these stay findings.
+    "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 landed in later PRs.",
+    "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 are covered by other PRs.",
+    "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 are verified elsewhere.",
+    "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 are satisfied by other PRs.",
+    "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 shipped separately.",
+    "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 are measured in other PRs.",
+    "Closes #13036\n\nV1, V2, V3, V4, V5, V6 are covered by other PRs.",
+    "Closes #13036\n\nAll six rows V1, V2, V3, V4, V5, V6 are proved in the predecessor PR.",
 ])
 def test_a_disclosed_partial_close_never_reads_as_a_pass(body):
     """The three shapes a lane actually writes — a TODO list, a NEGATION of the close, a row table.

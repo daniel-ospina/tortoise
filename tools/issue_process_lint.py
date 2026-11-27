@@ -1593,6 +1593,16 @@ _AFFIRM_RE = re.compile(
     r"\b(?:prov(?:e|es|ed|en|ing)|measur\w+|done|complet\w+|deliver\w+|cover(?:s|ed)?|verif\w+"
     r"|satisf\w+|landed|shipped|closed|all\s+six|every\s+row)\b",
     re.IGNORECASE)
+# ⛔ AND "PROVED … IN OTHER PRs" IS NOT A CLAIM ON THESE ROWS (review round 11): the whole-body
+# fallback asks "does this body affirmatively name every row", and a disclosure saying the other rows
+# were done ELSEWHERE satisfies it word for word — `All six rows V1 … V6 are proved in the predecessor
+# PR` is a complete claim on somebody else's work. A clause that points at another PR, issue, branch or
+# predecessor is a mention, whatever verb it carries.
+_ELSEWHERE_RE = re.compile(
+    r"\b(?:other|separate|another|elsewhere|predecessor|successor|subsequent|upstream|downstream"
+    r"|follow[\s-]?up|later|previous|prior)\b"
+    r"|\b(?:in|by|via|under)\s+#\d+",
+    re.IGNORECASE)
 # Where one CLAIM can end and a disclaimer can begin. A SPACED dash is a boundary (`#N — only V2 is
 # claimed`), but one sitting BETWEEN two declared row ids is a RANGE (`V1 — V6`) and must NOT split:
 # separating a range's endpoints would silently turn a complete claim into a partial one (`_clauses`).
@@ -1744,8 +1754,14 @@ def _closing_line_claim(pr_body: str, issue: int,
                 claimable.add(i)
                 if i + 1 < len(spans):
                     claimable.add(i + 1)
-            elif _AFFIRM_RE.search(clause):
-                claimable.add(i)
+            # ⛔ A SIBLING CLAUSE MAY ONLY NARROW, NEVER ADD (review round 11). Promoting a sibling
+            # that carries a completion verb made a DISCLOSURE a claim — `(row V2 only); V1 … V6
+            # landed in later PRs` read `clean` on a one-row close, and six one-word variants of the
+            # pinned false-PASS family did too, because `landed`/`covered`/`verified`/`shipped` are
+            # exactly the verbs a careful partial close uses about the rows it is NOT closing. Claims
+            # now come only from a STRUCTURAL marker: the closing verb with its attached qualifier,
+            # or the documented `Satisfies #N:` form. `_AFFIRM_RE` survives for the WHOLE-BODY
+            # fallback, where there is no closing verb to attach to.
         chars = list(line)
         for i, (a, b) in enumerate(spans):
             if _DISCLAIMER_RE.search(line[a:b]):
@@ -1949,6 +1965,7 @@ def classify_partial_close(body: str, number: int | str,
                 for a, b in _clause_spans(line, rows):
                     clause = line[a:b]
                     if (_AFFIRM_RE.search(clause) and not _DISCLAIMER_RE.search(clause)
+                            and not _ELSEWHERE_RE.search(clause)
                             and set(rows) <= _ids_in(clause, rows)):
                         affirmative_all = True
                         break
@@ -2228,7 +2245,6 @@ def main(argv: list[str] | None = None) -> int:
         ap.error(f"--arm {args.arm} is a PR-side arm; this mode reads an issue, so the selection "
                  "would be dropped in silence")
     run_arm_pr = args.arm in ("all", ARM_PR)
-    run_arm_issue = args.arm in ("all", ARM_ISSUE)
     # A `--body-file` run cannot reach arm 3's input, so it does not RUN it — and then says so in its
     # output. Selection is not the same question as execution.
     run_arm_partial = args.arm in ("all", ARM_PARTIAL) and args.body_file is None
@@ -2243,9 +2259,12 @@ def main(argv: list[str] | None = None) -> int:
         ap.error(f"--arm {ARM_PARTIAL} reads the CLOSED ISSUE's own `## Satisfies` checklist, which a "
                  "`--body-file` does not carry; run it with `--pr <N> --repo <owner/name>` (an "
                  "explicit selection here would be dropped in silence)")
-    if wip is not None and not run_arm_issue:
-        ap.error(f"--wip/--no-wip are consumed by --arm {ARM_ISSUE} alone, which this run does not "
-                 "execute — the verdict would be dropped in silence")
+    # ⛔ NO `--wip`-ON-A-NON-ISSUE-ARM GUARD HERE (review round 11, F3): the one that stood on this
+    # line could not fire. `wip` is non-None only for `--issue`/`--issue-body-file` (the mode refusals
+    # above reject every other mode first), and on those modes `--arm pr-*` is already refused by the
+    # arm/mode check above, while `--arm all` sets `run_arm_issue`. A probe of 6 modes × 5 arms ×
+    # {--wip} emitted its message in 0 of 60 combinations: an enforcer whose condition can never hold
+    # while it appears to protect something. The refusals that DO fire are the mode and arm/mode ones.
 
     findings: list[Finding] = []
     measured_rows: list[dict] = []
