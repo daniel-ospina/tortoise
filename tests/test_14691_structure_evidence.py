@@ -1896,6 +1896,40 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
         f"`1..span + {stated_past.group(1)}`, i.e. 1..{deepest} on the span-{span} site — a "
         f"sweep that stops early, in its bound OR in the rows it emits, grades nothing past "
         f"where it stops")
+    # ⛔ AND THE REFUSAL RANGE'S OWN UPPER BOUND IS GRADED TOO (#14723, round 31). Round 22
+    # replaced the expired literal ("start offsets 1..18 inside return False", "19 GREEN") with
+    # `span - 1` — the very off-by-one this arm exists for — and graded it by NOTHING: rounds 25
+    # to 30 then hardened the sweep's UPPER extent (`1..span + n`) and every copy of the
+    # allowance, while the boundary that separates a refused inside start from the admitted last
+    # line stayed free. Measured at this head, each applied alone and the file restored
+    # byte-for-byte (`sha256sum` compared): the docstring's ```1` through `span - 1` ``` ->
+    # ``span - 2`` left all **103 passed**, and so did the same edit in this arm's own docstring,
+    # while the sentence claimed the offset the predicate refuses for that same site is admitted.
+    # It is not a figure to restate: it is the MAXIMUM of the inside offsets the emitted rows
+    # REFUSE, so it is derived from `table` on the same principle as the extent above.
+    stated_inside = re.search(
+        r"start offsets `(\d+)` through `span\s*-\s*(\d+)` inside return False", doc_all)
+    assert stated_inside, (
+        "`_cites_a_site_in`'s docstring no longer states the refused inside starts as "
+        "\"start offsets `<n>` through `span - <n>` inside return False\" — that boundary is "
+        "graded against the rows the sweep emits, so it may not be dropped silently")
+    row = {k: table.get(start_key.format(k=k, span=span)) for k in start_sweep}
+    inner_refused = sorted(k for k in start_sweep
+                           if k < span and row[k] is not None and row[k][1] is False)
+    assert inner_refused, (
+        "the start sweep refuses no inside offset at all on a span-{span} site, so the "
+        "docstring's refused-inside range has nothing to be graded against")
+    assert (int(stated_inside.group(1)),
+            span - int(stated_inside.group(2))) == (min(inner_refused), max(inner_refused)), (
+        f"`_cites_a_site_in`'s docstring refuses inside starts "
+        f"{stated_inside.group(1)}..span - {stated_inside.group(2)} on a span-{span} site, "
+        f"while the rows the sweep emits refuse {min(inner_refused)}..{max(inner_refused)} — "
+        f"an offset the predicate refuses is stated as admitted, and nothing past this sentence "
+        f"would red (measured: `span - 1` -> `span - 2` left 103 passed)")
+    assert inner_refused == list(range(1, span)), (
+        f"the start sweep's refused inside offsets are {inner_refused} while the stated rule "
+        f"refuses every offset strictly inside a span-{span} site, i.e. 1..{span - 1} — a hole "
+        f"in the middle leaves an offset graded by nothing")
     assert re.search(r"every end offset `1\.\.span` past the artifact's end", doc_all), (
         "`_cites_a_site_in`'s docstring no longer names the end sweep as \"every end offset "
         "`1..span` past the artifact's end\" — its extent is graded against that sentence")

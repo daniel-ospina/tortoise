@@ -1185,10 +1185,12 @@ alone and the file restored byte-for-byte (`sha256sum` compared):
 A sweep that stops early is the same defect the sweeps were added to remove, one level down: it grades
 nothing past the offset where it stops, and the sentence keeps claiming it does.
 
-**Fix (extent derived from the table that actually ran, not restated).** Both sweeps are now built as
-data before their rows are emitted, so their extent is a value the arm can read; the stated start
-bound is parsed from the docstring and compared against the swept maximum, and the stated end range
-against the swept set. Mutating the loop and mutating the sentence now each red the same arm.
+**Fix (extent derived from the data the rows are generated from, not restated).** Both sweeps
+are now built as data before their rows are emitted, so their extent is a value the arm can read;
+the stated start bound is parsed from the docstring and compared against the swept maximum, and the
+stated end range against the swept set. Mutating the loop and mutating the sentence now each red the
+same arm. Round 30 below tightens this one level further: the graded set is the rows the table
+actually carries, not the data that feeds them.
 
 Mutants, each applied alone, file restored byte-for-byte: start sweep → `span + 1` RED · start sweep
 → `span + 3` (one short) RED · end sweep → `span` RED · end sweep → `span + 2` RED · docstring `+ 3`
@@ -1252,6 +1254,48 @@ start extent `+ 3` → `+ 2` RED · docstring end extent → `1..span - 1` RED �
 `1..span + 1` RED · §8.23's sentence deleted RED · control **103 passed**. Every red is exactly
 `test_the_citation_shape_table_is_the_predicate_the_docstring_states`. No artifact, pin, row or
 predicate changed; no new test file, so no `config/ci-surfaces.yml` row is needed.
+
+### 8.27 Round 31 — the boundary round 22 introduced was graded by nothing
+
+Rounds 25–30 hardened the start sweep's UPPER extent (`1..span + 3`), the end sweep's extent, and
+every copy of the allowance and the honest slack. The boundary that separates a REFUSED inside
+start from the ADMITTED last line was left free — and it is the figure round 22 exists for: that
+round replaced the expired literal (*"start offsets 1..18 inside return False"*, *"19 GREEN"*)
+with *"start offsets `1` through `span - 1` inside return False … the one offset that is not
+refused is `span` itself"*, and nothing derived it. The arm graded the sentence's existence, never
+the value it states.
+
+Measured at `b6ca61743b82`, each mutant applied alone and the file restored byte-for-byte
+(`sha256sum` compared):
+
+| mutant | result | what became false |
+|---|---|---|
+| predicate docstring `` `1` through `span - 1` `` → `` `span - 2` `` | **103 passed** | an inside start the predicate REFUSES is stated as admitted (offset `19` on the span-20 site) |
+| the same figure's lower bound `` `1` `` → `` `2` `` | **103 passed** | offset `1` is stated as admitted |
+| the sentence deleted outright | **103 passed** | nothing — the rule's only statement of the refused range is gone |
+
+This is the class round 27 named (*"a figure is graded when a DERIVATION checks it, not when one of
+its copies happens to be asserted"*), one level across from where rounds 28–30 were looking: those
+went after the sweep's far end, this is its near boundary.
+
+**Fix (derived from the refusing ROWS, both ends).** The docstring's refused inside range is parsed
+as two figures and compared against the offsets the emitted rows actually refuse:
+`(stated_lo, span - stated_hi) == (min(refused), max(refused))`, and the refused set must be the
+contiguous `1..span - 1` — so an interior hole (a row that admits an offset the rule refuses)
+reds as well as a wrong boundary. A missing sentence reds rather than silently grading nothing.
+
+Mutants, each applied alone at this head, file restored byte-for-byte: docstring `span - 1` →
+`span - 2` RED · `` `1` `` → `` `2` `` RED · the sentence deleted RED · the sweep admitting `k == 5`
+as well as `k == span` RED · the sweep refusing nothing inside RED · and round 28–30's own claims
+re-measured on the edited arm: start bound → `span + 1` RED · start emission stopping at `span`
+RED · docstring start extent `+ 3` → `+ 2` RED · §8.23's extent → `1..span + 1` RED · control
+**103 passed**. Every red is exactly
+`test_the_citation_shape_table_is_the_predicate_the_docstring_states`. No artifact, pin, row or
+predicate changed; no new test file, so no `config/ci-surfaces.yml` row is needed.
+
+Stated residual: the arm's OWN function docstring (not `_cites_a_site_in`'s) carries a second copy
+of the same figure and stays free — it is arm commentary, not the rule's normative home, and
+whether an arm's prose is graded is a separate question from whether the RULE it documents is.
 
 ---
 
