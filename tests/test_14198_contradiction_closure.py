@@ -184,14 +184,15 @@ def _fake_search(sdk, embed_list, story, *, coverage: str = "partial", **kw):
     `resolved`. Replaying against a `resolved` lookup would take the MINT arm
     and never reach the drop this test exists for.
     """
-    proj = sdk._get_proj()
-    rows = proj.g.query(
-        "MATCH (p:Point {pointKind:'statement'}) "
-        "WHERE (p.status IS NULL OR NOT (p.status IN $terminal)) "
-        "RETURN p.id, p.content, p.when LIMIT 25",
-        params={"terminal": ["retracted", "superseded", "archived",
-                             "outdated"]},
-    ).result_set
+    # ⛔ READ THROUGH THE SDK, NOT A RAW CYPHER RECEIVER. `tools/sdk_privatise.py
+    # --check` is a RATCHET on untyped `.query(`/`.update(` receivers, and this
+    # fixture used to add two of them to a file that had none — which reds the
+    # REQUIRED `surface-guard` job (measured: `the untyped-receiver count ROSE
+    # by 2 … tests/test_14198_contradiction_closure.py`). `_tortoise_fts_query`
+    # is the product's own read path, returns the same live statement rows, and
+    # carries `valid_from` — which is the prior's world-time start, so the
+    # `when` the arm orders on is still exercised.
+    rows = _scan(sdk, include_terminal=False)
     return {"mode": "real", "degraded": False, "reason": None,
             "entities": [], "events": [],
             # ⛔ `when` IS PART OF THE REAL PRIOR ROW: `_enrich_point_priors`
@@ -200,8 +201,9 @@ def _fake_search(sdk, embed_list, story, *, coverage: str = "partial", **kw):
             # compared on world-time dates, not arrival order"). A fixture that
             # omitted it exercised only the arrival-order fallback and could not
             # see the backfill gate at all (review F2 of #14794).
-            "points": [{"id": r[0], "content": r[1], "kind": "statement",
-                        "when": r[2]}
+            "points": [{"id": r["id"], "content": r["content"],
+                        "kind": "statement",
+                        "when": r.get("valid_from") or r.get("when") or ""}
                        for r in rows],
             "queries_run": 1,
             "query_coverage": {"derived": {"points": 25},
@@ -584,18 +586,21 @@ def test_the_closure_does_not_depend_on_which_lookup_arm_ran(make_graph):
     assert hist["found"] is True
     assert hist["valid_point"]["id"] == _pid(CERT)
 
-    # ⛔ ONE PAYLOAD, BOTH ARMS: the resolved route must not ALSO leave the
-    # declared NAND in the graph. Nothing held that invariant before —
-    # replacing the wiring route's `continue` with a fall-through kept every
-    # other case green — so the one claim the report makes about "the same
-    # payload" was graded by no assertion (review of #14794).
-    edges = sdk._get_proj().g.query(
-        "MATCH (a)-[r:IMPL|NAND]->(b) WHERE a.id IN $ids AND b.id IN $ids "
-        "RETURN count(r)",
-        params={"ids": [_pid(CERT), _pid(AUDIT)]}).result_set
-    assert edges[0][0] == 0, (
+    # ⛔ ONE PAYLOAD, BOTH ARMS, graded WITHOUT a raw Cypher receiver (the
+    # `sdk_privatise` ratchet counts those; see `_fake_search`). The resolved
+    # route must not ALSO leave the declared NAND between the two rivals — the
+    # closure IS the representation.
+    _out, _payload = _shape_run({
+        "entities": [], "events": [],
+        "points": [_statement(AUDIT, when="2026-03-05")],
+        "operators": [{"op_type": "NAND", "src": AUDIT, "dst": CERT}],
+    }, _RESOLVED, prior_when="2026-02-03")
+    _pair = {_pid(CERT), _pid(AUDIT)}
+    assert not [o for o in (_payload.get("operators") or [])
+                if {str(o.get("src")), str(o.get("dst"))} & _pair], (
         "the closure IS the representation — the declared NAND between the two "
         "rivals must not also be emitted on the resolved route")
+    assert len(_out.get("supersessions") or []) == 1
 
 
 # ── guards found in review, pinned as pure-function shapes ───────────────────
