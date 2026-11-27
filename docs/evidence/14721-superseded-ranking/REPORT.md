@@ -312,7 +312,7 @@ that block were re-run after rebasing this pass onto it (`-k "fast_shards or der
 surface_claims or header_block or shard"`, below). So the measurements here are statements about
 the tree this document ships in, not about a stale base.
 
-**Re-run at this head, and what moved**
+### Re-run at this head, and what moved
 
 | row | pre-fold | at `34345ffd36` | why it moved |
 |---|---|---|---|
