@@ -1355,10 +1355,12 @@ class BackupWatcher:
                 "org from `state_orgs` regardless of census membership, and arm "
                 "(ii) becomes arm (i) once its prefix goes, so the subject stays "
                 "in this kind's set and the incident stays open. (Leaving the "
-                "ELIGIBLE set is the exception that does close it: the "
-                "state-only census drops the org, no `per_team` key is "
-                "computed for it, and the cross-poll diff resolves the "
-                "incident.)"),
+                "ELIGIBLE set is the exception that does close it, by one "
+                "of two mechanisms: an org STILL IN THE CENSUS reads "
+                "`not_eligible` — a `per_team` key, resolved by that "
+                "branch, which is why the cross-poll diff excludes it — "
+                "while an org that has also LEFT the census has no key "
+                "at all and the diff resolves it.)"),
         }
 
     def _measured_fresh(self, org: str,
