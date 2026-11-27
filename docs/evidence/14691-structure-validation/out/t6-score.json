@@ -1833,7 +1833,7 @@
           "Jonas Bauer": 0,
           "Tomas Ferreira": 0
         },
-        "code_path": "mcp_server.tortoise_get(type='governance') -> sdk._get_owned_entities: MATCH (s)<-[:ownedBy]-(e) (sdk.py:62762-62782), i.e. the DECLARED orientation \u2014 the edges point the other way"
+        "code_path": "mcp_server.tortoise_get(type='governance') -> sdk._get_owned_entities: MATCH (s)<-[:ownedBy]-(e) (sdk.py:62819-62839), i.e. the DECLARED orientation \u2014 the edges point the other way"
       }
     },
     {
