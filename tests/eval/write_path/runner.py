@@ -2097,7 +2097,14 @@ def extractor_arm_readback() -> dict:
 
 
 def _validate_arm_block(arm: dict) -> list[str]:
-    """Shape-validate the additive ``arm`` block (present-only)."""
+    """Shape-validate the additive ``arm`` block (present-only).
+
+    Shape **plus env-vs-booleans consistency**: a readable block must record every
+    switch in ``ARM_SWITCHES``, and its booleans must be what that recorded env
+    resolves to through the production resolvers (see the recompute below).
+    WHICH arm a receipt belongs to is the consumer's verdict
+    (``test_state_value_verbatim_10360.py`` §25), not this function's.
+    """
     issues: list[str] = []
     if not isinstance(arm, dict):
         return ["receipt.arm: expected an object"]
@@ -2111,6 +2118,21 @@ def _validate_arm_block(arm: dict) -> list[str]:
                 "receipt.arm.env: unknown switches "
                 f"{unknown} — ARM_SWITCHES is the arming surface; a new switch "
                 "must be added there or it is recorded nowhere"
+            )
+        # ⛔ …AND A READABLE BLOCK MUST RECORD EVERY ONE OF THEM (#14774 review,
+        # P3). Refusing only the UNKNOWN keys let a receipt drop the known ones:
+        # MEASURED, an `arm.env` of `{"TORTOISE_VALUE_GATE": "0"}` alone validated
+        # `[]`, i.e. a receipt that no longer says what its survival number was
+        # measured on. `extractor_arm_readback` always writes all four, so the
+        # producer already satisfies this; the check exists to stop a hand-edited
+        # or future-narrowed block from passing as `readable`.
+        missing = sorted(set(ARM_SWITCHES) - set(env))
+        if missing:
+            issues.append(
+                "receipt.arm.env: missing switches "
+                f"{missing} — a readable arm block must record every switch in "
+                "ARM_SWITCHES, or the receipt no longer says what its survival "
+                "number was measured on"
             )
     if not isinstance(arm.get("readable"), bool):
         issues.append(
@@ -2900,9 +2922,12 @@ def validate_receipt(receipt: dict) -> list[str]:
                 f"{extractor.get('real')!r}"
             )
     # #10360 additive ARM readback — validated only when present, for the same
-    # back-compat reason (pre-#10360 receipts carry no arm block at all). SHAPE
-    # only: whether the arm is the one the filename claims is the consumer's
-    # verdict (`test_state_value_verbatim_10360.py` §25), not a shape check.
+    # back-compat reason (pre-#10360 receipts carry no arm block at all). Shape
+    # PLUS env-vs-booleans consistency: the recorded booleans are recomputed from
+    # the recorded env through the production resolvers, so a block that claims an
+    # arm it did not produce is refused here. Whether the arm is the one the
+    # FILENAME claims is the consumer's verdict (`test_state_value_verbatim_10360.py`
+    # §25), not this check.
     arm = receipt.get("arm")
     if arm is not None:
         issues.extend(_validate_arm_block(arm))

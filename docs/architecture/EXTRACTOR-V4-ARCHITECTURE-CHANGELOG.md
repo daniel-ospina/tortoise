@@ -1301,7 +1301,7 @@ render the carve-out; the two master renders additionally carry the vocabulary i
 template never points at it). Two consequences were measured rather than inferred: the carve-out's
 own retention bar sits short of baseline (49.4% strict verbatim survival on the flags-on arm against
 a 49/90 = 54.4% committed baseline ⛔ **SUPERSEDED by `#10360`** — re-measured over four flags-on
-runs, still short of the 54.4% bar on the mean, against a control arm measured with the S2.2 pass
+runs, still short of that bar on the mean, against a control arm measured with the S2.2 pass
 actually disarmed (`TORTOISE_VALUE_GATE=0`); the receipts are committed under
 `tests/eval/write_path/receipts/`, the figures live in the `state_value_carve_out` row's clause (b2)
 and are re-derived from those receipts by `tests/test_state_value_verbatim_10360.py` on every check,
@@ -1543,7 +1543,7 @@ classifier). Still outside it, each stated in the row with its trade: a value th
 (the capstone E2a class, upstream of selection); 50 of the 112 value-bearing points in the committed
 census receipts failing open on slot layout, so the rule judges 62 and refuses 0 today; strict verbatim
 survival short of target (⛔ **SUPERSEDED by `#10360`** — MEASURED, not `UNMEASURED`: four flags-on
-runs, still short of the 54.4% bar on the mean; the per-run and per-arm figures are published in
+runs, still short of the bar on the mean; the per-run and per-arm figures are published in
 clause (b2) of the `state_value_carve_out` row and DERIVED from the committed receipts on every
 check, so this page names them no digits of its own — a second copy here is a copy nothing
 re-derives); clock/ISO

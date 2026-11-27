@@ -7470,6 +7470,32 @@ def _e2_arm_receipts(arm: str) -> list[pathlib.Path]:
     return found
 
 
+def _assert_arm_block_consistent(blob: dict, name: str) -> None:
+    """Apply `validate_receipt`'s ARM verdict to an artifact of record.
+
+    ⛔ (#14774 review, P2 — MEASURED.) The env-vs-booleans recompute lives in
+    `runner._validate_arm_block`, which is reachable only through
+    `runner.validate_receipt` — and this module read the six committed JSONs
+    directly, so the guard was correct and **unreachable for the receipts it
+    exists to police**. Measured on `off-1`: setting
+    `arm.env.TORTOISE_VALUE_GATE = null` (which is the ON spelling, `#10996`)
+    while leaving `value_gate`/`vet_enabled` False left §25 GREEN, while
+    `validate_receipt` returned two `…contradicts itself…` issues on the same
+    blob. The validator is production code; the artifacts of record go through
+    it here.
+    """
+    from tests.eval.write_path import runner as wp_runner
+
+    arm_issues = [
+        issue for issue in wp_runner.validate_receipt(blob)
+        if issue.startswith("receipt.arm")
+    ]
+    assert not arm_issues, (
+        f"{name}: the receipt's own arm block is refused by "
+        f"`validate_receipt` — {arm_issues}. A receipt that fails it records an "
+        "arm it did not produce, so its survival number is not attributable")
+
+
 def _e2_arm_runs(arm: str) -> list[dict]:
     """Re-derive one arm's runs from its receipts.
 
@@ -7484,6 +7510,7 @@ def _e2_arm_runs(arm: str) -> list[dict]:
         assert blob["run_status"] == "completed", (
             f"{path.name} is not a completed run — a failed run cannot carry a "
             "survival figure")
+        _assert_arm_block_consistent(blob, path.name)
         sessions = blob["session_results"]
         survived = sum(r["strict"]["survived"] for r in sessions)
         total = sum(r["strict"]["total"] for r in sessions)
@@ -7497,6 +7524,10 @@ def _e2_arm_runs(arm: str) -> list[dict]:
             "survived": survived,
             "total": total,
             "classes": classes,
+            # per-session survivors, so a between-run SPREAD claim in the arms
+            # record can be derived instead of restated (#14774 review, P3)
+            "session_survived": {
+                r["session_id"]: r["strict"]["survived"] for r in sessions},
             "metrics_value": blob["metrics"]["salient_unit_survival_strict"],
             "corpus_hash": blob["corpus_hash"],
             "judge_pin": blob["judge_pin"],
@@ -7513,6 +7544,51 @@ def _e2_arm_runs(arm: str) -> list[dict]:
             "extractor": blob.get("extractor"),
         })
     return runs
+
+
+def _max_session_spread(runs: list[dict]) -> int:
+    """The WIDEST per-session between-run swing across these runs, in units.
+
+    The arms record justified its draw counts with *"a session swings by 2–3
+    units between runs on identical code"*, which the receipts refute: measured
+    across the six runs, `wp01_quarry_debug` swings 7→12 and `wp02_lumen_refactor`
+    4→9, a range of **5** (#14774 review, P3). It is conservative in the safe
+    direction (it understates the noise), but it is a measured sentence the
+    artifacts contradict and the sole stated justification for the arm's sample
+    sizes — so it is derived here and pinned against the record rather than
+    restated.
+    """
+    per_session: dict[str, list[int]] = {}
+    for run in runs:
+        for session_id, survived in run["session_survived"].items():
+            per_session.setdefault(session_id, []).append(survived)
+    return max(max(values) - min(values) for values in per_session.values())
+
+
+def _figures_in(text: str) -> list[str]:
+    """Every `N/M = P%` figure in `text`, admitting SPACED spellings.
+
+    ⛔ (#14774 review, P3.) Both scans required the `%` adjacent to the number, so
+    a decoy appended to clause (b2) as `and 42 / 90 = 46.7 %.` matched nothing and
+    left every assertion GREEN — the closed-set claim was narrower than its
+    message. The covered grammar is: an optional-spaces `N/M`, `=`, `P` and an
+    optional-spaces `%`. A figure spelled `42 of 90` is still outside it (there is
+    no arithmetic token to anchor on), which is why 6d also scans bare `N%` and
+    the clause is required to spell every figure this way.
+    """
+    return re.findall(
+        r"\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?\s*=\s*\d+(?:\.\d+)?\s*%", text)
+
+
+def _pct_tokens(text: str) -> list[str]:
+    """Every percentage token in `text`, admitting `46.7 %` as well as `46.7%`.
+
+    ⛔ (#14774 review, P3.) The bare-percentage scan required the `%` adjacent,
+    so `(For the record the pooled mean reads 51.7 %.)` escaped a set the message
+    described as covering the clause's percentages. Covered grammar: `P` then an
+    optional-spaces `%`.
+    """
+    return re.findall(r"\d+(?:\.\d+)?\s*%", text)
 
 
 def _pct_1dp(numerator: float, denominator: float) -> str:
@@ -7818,8 +7894,7 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
             f"{_pct_1dp(mean_survived, mean_total)}")
     _derived_figures.append(
         f"{base_survived}/{base_total} = {_pct_1dp(base_survived, base_total)}")
-    _scan = re.findall(
-        r"\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?\s*=\s*\d+(?:\.\d+)?%", flattened)
+    _scan = _figures_in(flattened)
     assert _scan.count(_retired_figure) == 1, (
         f"clause (b2) must quote the retired `{_retired_figure}` reading EXACTLY "
         f"once — found {_scan.count(_retired_figure)}. Zero means the history this "
@@ -7844,11 +7919,13 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     #     above).
     _derived_pct = {figure.split(" = ")[1] for figure in _derived_figures}
     _unexpected_pct = sorted(
-        set(re.findall(r"\d+(?:\.\d+)?%", flattened)) - _derived_pct - {"49.4%"})
+        set(_pct_tokens(flattened)) - _derived_pct - {"49.4%"})
     assert not _unexpected_pct, (
         "clause (b2) states percentages the receipts do not derive: "
         f"{_unexpected_pct} — a bare figure is the one a reader quotes, so it is "
-        "held to the same closed set as the `N/M = P%` form (#14774 review P2)")
+        "held to the same closed set as the `N/M = P%` form (#14774 review P2). "
+        "Covered grammar: `N/M = P%` and bare `P%`, each with an optional space "
+        "before the `%`; a figure spelled `42 of 90` is outside both scans")
 
     # 7. THE VERDICT THE ROW RECORDS, held to the artifacts. Three clauses, each
     #    a different claim, so each gets its own assertion:
@@ -7960,6 +8037,77 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     assert "SURVIVAL is now MEASURED on the flags-on arm" in flattened, (
         "the row must state that the figure is now measured on the flags-on "
         "arm — that is Indicator (2) of this issue")
+
+    # 9. THE ARMS RECORD'S BETWEEN-RUN SPREAD, DERIVED (#14774 review, P3).
+    #    The record justified "four draws on one arm, two on the other" with
+    #    "a session swings by 2–3 units between runs on identical code" — a
+    #    MEASURED sentence the receipts refute: the widest per-session range
+    #    across these six runs is 5 (`wp01_quarry_debug` 7→12,
+    #    `wp02_lumen_refactor` 4→9). The error is conservative, so it rescued no
+    #    claim, but it was the sole stated justification for the sample sizes and
+    #    nothing derived it. It is derived here now, so it cannot drift again.
+    _spread = _max_session_spread(on + off)
+    _arms_doc = " ".join(_E2_ARMS_DOC.read_text(encoding="utf-8").split())
+    assert f"swings by up to {_spread} units" in _arms_doc, (
+        "the arms record's between-run spread claim must be the DERIVED widest "
+        f"per-session range across these six runs ({_spread} units) — it stated "
+        "'2–3 units', which the receipts refute")
+
+
+def test_the_arm_block_guard_reaches_the_RECEIPTS_OF_RECORD(tmp_path, monkeypatch):
+    """(#14774 review, P2) §25's arm verdict must come from `validate_receipt`.
+
+    The env-vs-booleans recompute is production code behind `validate_receipt`,
+    and reading the six JSONs directly made it UNREACHABLE for the artifacts it
+    exists to police. MEASURED pre-fix: the tampered blob below — an `-off-`
+    receipt whose env UNSETS `TORTOISE_VALUE_GATE` (the ON spelling since
+    `#10996`) while its booleans still say the pass was disarmed — passed every
+    §25 assertion, while `validate_receipt` refused it with two
+    `…contradicts itself…` issues.
+
+    Both halves are pinned: the helper refuses the tampered blob, AND
+    `_e2_arm_runs` — the function §25 reads every receipt through — refuses it when
+    the receipt provider hands it over. Deleting the call from `_e2_arm_runs`
+    leaves the first assertion green and reds the second, so the WIRING has the
+    row rather than the helper alone.
+    """
+    path = _e2_arm_receipts("off")[0]
+    blob = json.loads(path.read_text(encoding="utf-8"))
+    # the committed artifact is clean here, so the refusal below is attributable
+    # to the tampering and not to a guard that refuses every receipt
+    _assert_arm_block_consistent(blob, path.name)
+    tampered = json.loads(json.dumps(blob))
+    tampered["arm"]["env"]["TORTOISE_VALUE_GATE"] = None
+    tampered["arm"]["value_gate"] = False
+    tampered["arm"]["vet_enabled"] = False
+    with pytest.raises(AssertionError, match="refused by"):
+        _assert_arm_block_consistent(tampered, path.name)
+
+    # …and the derivation path §25 ACTUALLY reads through must call it.
+    tampered_path = tmp_path / path.name
+    tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+    monkeypatch.setattr(
+        sys.modules[__name__], "_e2_arm_receipts", lambda arm: [tampered_path])
+    with pytest.raises(AssertionError, match="refused by"):
+        _e2_arm_runs("off")
+
+
+def test_the_figure_scans_admit_no_SPACED_decoy():
+    """(#14774 review, P3) a figure written `42 / 90 = 46.7 %.` must be caught.
+
+    Both closed-set scans required the `%` ADJACENT to the number, so a decoy in
+    either spelling matched nothing and every assertion stayed GREEN — the claim
+    was narrower than the message it printed. MUTANT: revert `\\s*%` to `%` in
+    `_figures_in`/`_pct_tokens` and both spaced cases below go empty.
+    """
+    assert _pct_tokens("reads 51.7 %.") == ["51.7 %"], (
+        "a spaced percentage is exactly the shape the bare-`%` scan exists to catch")
+    assert _figures_in("and 42 / 90 = 46.7 %.") == ["42 / 90 = 46.7 %"], (
+        "a spaced figure is exactly the shape the `N/M = P%` scan exists to catch")
+    # …and the canonical spellings the row actually uses still match, so the
+    # tightening did not trade one narrowing for another.
+    assert _pct_tokens("48.9%") == ["48.9%"]
+    assert _figures_in("44/90 = 48.9%") == ["44/90 = 48.9%"]
 
 
 def test_the_e2_off_arm_definition_uses_the_REAL_kill_switch(monkeypatch):
@@ -8310,6 +8458,12 @@ def test_the_arming_scan_reads_a_switch_reached_through_a_module_ATTRIBUTE():
         # a switch the runner's own surface does not know: recorded nowhere
         ({"env": {"TORTOISE_UNKNOWN": "1"}, "readable": True, "vet_enabled": True},
          "unknown switches"),
+        # a readable block that DROPS a known switch: refusing only UNKNOWN keys
+        # let a receipt stop saying what its survival number was measured on
+        # (#14774 review, P3)
+        ({"env": {"TORTOISE_VET": "0", "TORTOISE_VALUE_GATE": "0"},
+          "readable": True, "vet_toggle": False, "s2_seam": False,
+          "value_gate": False, "vet_enabled": False}, "missing switches"),
         # `readable` is the honesty flag itself, so it must be a real bool
         ({"env": {}, "readable": "yes"}, "expected a bool"),
         # a readable arm that does not say WHICH arm it resolved
