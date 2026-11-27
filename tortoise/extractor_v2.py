@@ -12390,6 +12390,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             return False
         if older_id in _capture_ids:
             return False
+        # The superseder must be a claim of THIS capture. Without this, two
+        # endpoints that BOTH folded onto prior graph ids would close one prior
+        # claim using another prior claim as its successor — a supersession
+        # between two records that both predate this capture, whose successor
+        # window can even sort before the predecessor's (the #4021 refusal).
+        if new_id not in _capture_ids:
+            return False
         if (older_id, new_id) not in pt_record_pairs:
             pt_record_pairs.add((older_id, new_id))
             supersessions.append({
@@ -12445,10 +12452,16 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             _older = (dst if dst not in _capture_ids
                       else src if src not in _capture_ids else "")
             _newer = src if _older == dst else dst if _older else ""
-            if _older and _newer:
-                _close_prior_contradiction(
+            if _older and _newer and _close_prior_contradiction(
                     _newer, _older, str(o.get("dst") or "")[:120],
-                    f"NAND dst {str(o.get('dst', ''))[:60]!r}")
+                    f"NAND dst {str(o.get('dst', ''))[:60]!r}"):
+                # The edge is NOT also emitted: `_supersede_point` re-points
+                # (or, for a self-edge, DELETES) the incident IMPL/NAND rows
+                # when the predecessor is terminalised — measured shape of the
+                # `tid == new_id` branch — so emitting it would declare an edge
+                # the commit then removes, and would hand the door a repoint it
+                # can refuse. The CORRECTS edge is the representation.
+                continue
         if op_type in ("IMPL", "NAND", "COHERENCE"):
             if op_type == "NAND":
                 # #2552 (op_02): canonicalize the NAND direction so the

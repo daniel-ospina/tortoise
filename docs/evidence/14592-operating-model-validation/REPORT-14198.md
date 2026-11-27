@@ -68,9 +68,13 @@ the same declaration — measured on the receipt's own shape:
 | `partial` (the recorded state) | `operators: []` — the endpoint is HELD, then the edge is dropped |
 | `resolved` | `operators: [NAND new→prior]` — `#4716`'s mint-vs-E7 fold puts the ref on its graph id, so the edge *wires* |
 
-Both now close the interval, so the representation is **not** a function of
-lookup quality. On the `resolved` arm the NAND edge is left in place as well — it
-carries EP weight of its own and nothing here subtracts it.
+Both now close the interval **and produce the same payload** — one
+`supersessions` record, no NAND — so the representation is not a function of
+lookup quality. The NAND is not also emitted because `_supersede_point`
+re-points (and, for a self-edge, deletes) the incident `IMPL|NAND` rows when it
+terminalises the predecessor: emitting it would declare an edge the commit
+immediately removes, and would hand that door a repoint it can refuse. The
+`CORRECTS` edge is the representation.
 
 No new node kind, no new relation vocabulary, no MCP/SDK surface change.
 
