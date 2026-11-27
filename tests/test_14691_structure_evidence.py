@@ -3785,8 +3785,13 @@ _PROSE_ALLOWED = (
 
 def _prose_tokens() -> set[str]:
     text = (_report() + "\n\n" + (BUNDLE / "VERIFICATION-independent.md").read_text())
-    # ⛔ THE REVIEW LOG IS `### 8.1`..`### 8.19`, NOT the whole of §8 (#14691 review, round
-    # 15, finding 2). The bound used to START at `### 8.1` and run to §9 — excluding 8.2–8.16
+    # ⛔ THE REVIEW LOG IS `### 8.1` UP TO `## 9.` — every round's `### 8.x` section — NOT the
+    # whole of §8 (#14691 review, round 15, finding 2). ⛔ ITS UPPER END NAMES THE NEXT
+    # TOP-LEVEL HEADING, NEVER A SECTION NUMBER: it read `..### 8.19` in the commit that added
+    # 8.19, and the NEXT commit added 8.20, so the sentence was false one commit after it was
+    # written — the rot the paragraph below says an unexplained exclusion invites, one round
+    # later. A log section is added every round, so a numbered end rots by construction.
+    # The bound used to START at `### 8.1` and run to §9 — excluding 8.2–8.16
     # as well, under a reason that named only the mutant tables. Bounding at `## 8.` fixed that
     # and WIDENED the hole in the same move: it also swallowed `## 8. Artifacts`, the bundle's
     # own artifact INVENTORY (`809,812 bytes`, `39 tools`, `5 transcripts, 4,295 chars`,

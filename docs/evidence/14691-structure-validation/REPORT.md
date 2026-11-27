@@ -1066,6 +1066,33 @@ the next lane could only "fix" by un-excluding a log full of historical mutants.
 the arm's own subject: a rule a reader cannot reconstruct from the text is a rule the next lane
 will undo.
 
+### 8.21 What the fix lane verified at `2cd46746e1b1`, and the one claim it reddened
+
+⛔ **This is a fix lane's measurement, not a review round**, and it mints no attestation. Every
+closure the rounds above record was re-measured here, independently, because a fixer's own claim is
+a claim: **18 mutants, 17 RED and the single GREEN the bound exists to keep green**, each applied
+ALONE to the cell that owns the figure (or, for the two anchor probes, to the heading the arm reads),
+REPORT.md restored between runs and its sha256 compared (`fcda6e02…` before and after every one).
+Round 15's six P1/P2 figures (D4's `0 rows` and `19 real neighbours`, D2's `5/5`, §3/A2 finding 5's
+`(0 edges)`, §7's `(11 + 27 + 3 + 9 = 50)`, §3/A4's `12 of the 50`) each RED; the §8-exclusion mutant
+(adding `scored across 1,234 checks` to the artifacts table's `out/t6-score.json` row) RED; the four
+§3/A4 band figures RED; renaming the `## 9.` heading so the exclusion's lookahead no longer matches
+RED (the arm fails loud rather than silently grading nothing); and the citation bound RED in all
+five refused shapes (`61000-61019`, `61000-62758`, `1-99999`, `62739-99999`, `62718-62758`) while
+`62720-62758` — 19 lines of start slack, inside the 20-line allowance — stayed GREEN, which is what
+makes the allowance a live bound rather than a blanket.
+
+The one defect this pass found was in the rule's own description, not the rule. `_prose_tokens()`'s
+comment stated the excluded population as `### 8.1` to `### 8.19`; it was written when 8.19 was the
+last round, and §8.20 was added one commit later, so the sentence was false at the head that carries
+it. A reader taking it as the bound would write a regex ending at 8.19 and silently un-exclude this
+section. The comment now names the NEXT TOP-LEVEL HEADING (`## 9.`) instead of a section number, so
+it cannot rot again as rounds are added. No assertion changed: this is a description of a bound the
+code already implements, and it is graded the only way a description can be — by a reader being able
+to reconstruct the rule from it.
+
+---
+
 ## 9. Mandate-preflight disclosure
 
 The dispatch brief carried a `[mandate-preflight]` block naming two files this lane was ordered to
