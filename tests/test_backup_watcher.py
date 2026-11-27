@@ -2440,6 +2440,46 @@ def test_a_confirmed_no_manifest_org_that_HAS_state_is_not_called_never():
     # as exhaustive (#9940), so an incident closed by the org leaving the DR
     # surface looks like the watcher invented a resolve.
     assert "not_eligible" in body, body
+    # …and it names the ONE sub-case of "the state disappears" where nothing is
+    # filed at all: an arm-(i) org that has ALREADY left the census has no
+    # `per_team` key, so the cross-poll diff is the only closer
+    # (`test_watcher_backup_set_missing_closes_when_the_state_disappears` pins
+    # that end to end). Unqualified, the sentence claimed `never` +
+    # NEVER_BACKED_UP for an org the code computes no class for (#9938 round 8).
+    assert "ALREADY outside the census" in body, body
+    assert "no `per_team` key at all" in body, body
+
+
+def test_watcher_arm_ii_missing_set_closes_when_its_state_disappears():
+    """The `closes_when` payload enumerates three sub-cases of "the team state
+    disappears", so each is MEASURED here rather than asserted as prose (#9938
+    round 8).
+
+    Arm (ii) — state + a live prefix + no manifest — becomes `never` once the
+    state goes (a CONFIRMED listing still finds no manifest, so nothing ever
+    dumped), which is what the payload says. NEVER_BACKED_UP is then the only
+    kind open, and the set is closed by the cross-poll diff: the `never` arm
+    resolves STALE/METADATA_LOST only, so exactly ONE resolve is pushed in the
+    poll that closes it (#3146 hysteresis: a second call would close on the
+    first healthy poll).
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_state(storage, "team_a")
+    _seed_partial_archive(storage, "team_a")
+    w = _watcher(storage, ch)
+    first = w.poll()
+    assert first["per_team"]["team_a"] == "backup_set_missing", first["per_team"]
+    assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_a"], ch.issues
+
+    storage.delete("ops/teams/team_a/state.json")
+    second = w.poll()
+    assert second["per_team"]["team_a"] == "never", second["per_team"]
+    assert second["backup_set_missing"] == [], second["backup_set_missing"]
+    assert list(ch.issues.values()) == ["[DR] NEVER_BACKED_UP — team_a"], ch.issues
+    resolves = [m for m in ch.telegram
+                if "resolved" in m.lower() and "BACKUP_SET_MISSING" in m]
+    assert len(resolves) == 1, ch.telegram
 
 
 def test_status_confirmed_state_org_without_manifest_is_backup_set_missing():
