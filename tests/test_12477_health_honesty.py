@@ -406,9 +406,12 @@ def test_the_probe_epoch_is_a_float_and_not_the_identity_string():
     source` is satisfied by that indented copy, so the module-level definition — the
     one the verdict reads, outside every `try` — could be deleted or renamed with this
     test still green. Measured: renaming only the module-level definition left
-    `pytest tests/test_12477_health_honesty.py` at 16 passed. A member of
-    `source.splitlines()` is a start-of-line match, so the indented assignment cannot
-    stand in for it.
+    this leg GREEN and the file's run moved by ZERO — stated as the per-mutant
+    delta, not as a whole-file total, because a total re-stales the moment any
+    round adds a leg to this file (the `journal_collision` pin above did exactly
+    that to the `16 passed` this note used to carry). A member of
+    `source.splitlines()` is a start-of-line match, so the indented assignment
+    cannot stand in for it.
     """
     import inspect
 
@@ -627,6 +630,29 @@ def test_the_journal_collision_bullet_names_what_a_replay_heals_and_re_refuses()
     assert "cannot heal THIS" in bullet, (
         "the sentence exists to say a replay cannot heal a journal COLLISION "
         f"— got: {bullet[-600:]!r}")
+    # ⛔ AND THE POINTER'S REFERENTS MUST SAY IT (#14746, fixer round 30). The
+    # order assertion above catches a bullet that MOVED or was renamed; it does
+    # not catch one that kept its name and lost its claim. The sentence promises
+    # "(the two bullets above)", so those two bullets must carry the claims it
+    # attributes to them — otherwise the pointer dangles and nothing reds.
+    # MEASURED: deleting `a replay re-refuses until the CAUSE is fixed` from
+    # `plan_refused`, or `a replay heals an outage` from `write_failed`, reds
+    # exactly its own row here and nothing else. Whitespace-normalized, because
+    # this docstring is re-wrapped routinely (round 29 re-wrapped one line).
+    for referred_reason, claim in (
+        ("write_failed", "a replay heals an outage"),
+        ("plan_refused", "a replay re-refuses until the CAUSE is fixed"),
+    ):
+        referred_start = doc.find(f"* ``{referred_reason}``")
+        referred_end = doc.find("\n    * ``", referred_start + 1)
+        referred = " ".join(
+            doc[referred_start:referred_end if referred_end != -1 else len(doc)]
+            .split())
+        assert claim in referred, (
+            f"`journal_collision`'s sentence points at `{referred_reason}` — "
+            f"'the two bullets above' — but that bullet no longer states "
+            f"{claim!r}: got {referred[:400]!r}; re-point the sentence or "
+            "restore the claim")
     for stale in ("heals every other failure", "heals the record"):
         assert stale not in bullet, (
             f"the blanket claim {stale!r} is back: a replay re-fails a STATEMENT "
