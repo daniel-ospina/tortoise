@@ -10620,8 +10620,15 @@ def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
 #: reliably.
 _H_14544_EXEMPTION_OPEN_RE = re.compile(r"The one cause this paragraph does NOT claim")
 #: `neither of which` AT ALL, plus the paraphrase a fold would reach for instead — `#14544` never
-#: touched it. The anaphor form was the shipped defect; the paraphrase is the same claim spelled
-#: without the pronoun, so banning only the pronoun would grade the wording rather than the claim.
+#: touched THAT ROW / THE WEIGHT. The anaphor form was the shipped defect; the paraphrase is the
+#: same claim spelled without the pronoun, so banning only the pronoun would grade the wording
+#: rather than the claim. ⛔ ITS OBJECT IS A RESIDUAL, stated rather than implied (#14623 review):
+#: both negated-change arms end on a ROW NOUN (`rows?` / `entr(?:y|ies)` / `weight`), so the
+#: PRONOUN spelling — "… and `#14544` never touched it" — is UNGRADED here (measured GREEN), and
+#: this comment previously over-claimed it as banned. It is left ungraded deliberately: a pronoun
+#: object bound to a DIFFERENT head ("the row's own note … never touched it") is TRUE prose, so
+#: widening the alternation to `it|them` would trade a silent pass for a false block. Spell the
+#: claim with a row-noun object, or it is not graded.
 #: ⛔ THE BAN IS APPLIED TO THE WHOLE BLOCK, and that half is load-bearing (measured at
 #: `d1f14298`, #14623 review round 4). The pre-fix form required `#14544` within 80 characters AFTER
 #: `which`, so the claim shipped GREEN in two shapes: label-first — “And `#14544`'s cut touched

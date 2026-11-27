@@ -57,20 +57,23 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` folds carried, newest first:
-# `8fd022fdd1c5f`, `a0be10ac456b`, `ff10fb328891`, `a0cea310786d` and `bbef0b8840d7`;
-# the rows below landed across them and the folds before them; ⛔ measured, and NOT with
-# `git show --stat` — that prints NO diff for a MERGE commit unless it is given `-m` (it falls
-# back to the combined `--cc` form, which lists a file only when it differs from EVERY parent), and
-# this block's whole subject is merges, so it reads "untouched" over a spliced file: measured on
-# `bf16c791a489`, a two-parent fold in THIS branch's history that moved seventeen lines of this file,
-# and `git show --stat bf16c791a489 -- config/ci-surfaces.yml` printed nothing. The safe form is
-# `git diff <sha>^1 <sha> -- config/ci-surfaces.yml`. Measured that way, it is empty for THREE of
-# the five — `8fd022fdd1c5f`, `a0be10ac456b` (the two newest) and `bbef0b8840d7` — so those touched
-# nothing here and renumber the chain without moving the derivation; `ff10fb328891` changed ONE
-# `durations` ROW and no line of this block; and `a0cea310786d` is the only one of the five that
-# spliced THIS BLOCK — the splice the paragraph below resolves by provenance. Each splice's figures
-# live on the commit that measured them — never carried into this derivation), carrying
+# reader of the prose can see. On THIS tree — `origin/main` `0204a219aa90` folded in, over
+# `a0cea310786d`'s de-splice of this very block; the rows below landed across the folds and the
+# ones before them. ⛔ NO NUMERAL AND NO EXHAUSTIVE ENUMERATION here either — the rule the
+# paragraph below states, and the reason it is stated twice: an earlier spelling of THIS sentence
+# named a fold as "the newest" that was not, and credited another with a splice its file never
+# took. The two facts a reader needs are measured: `a0cea310786d` is the ONLY fold that spliced
+# THIS BLOCK — the splice the paragraph below resolves by provenance — and `ff10fb328891` changed
+# ONE `durations` ROW and no line of this block. Every fold that landed after the de-splice
+# touched no line here. ⛔ AND MEASURED, NOT with `git show --stat` — that prints NO diff for a
+# MERGE commit unless it is given `-m` (it falls back to the combined `--cc` form, which lists a
+# file only when it differs from EVERY parent), and this block's whole subject is merges, so it
+# reads "untouched" over a spliced file: measured on `bf16c791a489`, a two-parent fold in THIS
+# branch's history that moved seventeen lines of this file, and `git show --stat bf16c791a489 --
+# config/ci-surfaces.yml` printed nothing. The safe form is
+# `git diff <sha>^1 <sha> -- config/ci-surfaces.yml`, and it is empty for every fold after
+# `a0cea310786d` — a RULE, not a census that the next fold renumbers. Each splice's figures live
+# on the commit that measured them — never carried into this derivation), carrying
 # `#14597`'s expansion fusion over the residue RATCHET
 # (`tests/test_expansion_fusion_14344.py`, `core`, carrying a `durations` row),
 # `#14415`'s `tests/test_14219_batch_ingest.py` row and `tests/test_14219_batches_api.py` row,
@@ -209,9 +212,9 @@ version: 1
 # picked: both are DELETED and the paragraph above is a fresh re-derivation with
 # `--emit-push-matrix` on this merged tree. Each earlier fold's figures live on the commit that
 # measured them (`git log`), which is where a spliced copy belongs.
-# ⛔ THE TWO MOST RECENT FOLDS THIS HEAD CARRIES (`8fd022fdd1c5f`, then `a0be10ac456b`) TOUCHED
-# NOTHING HERE — the derivation still reads ONCE and `durations` is untouched, so they spliced
-# nothing at all. ⛔ THEIR ATTRIBUTION IS NOT CARRIED FROM THE FOLD THAT DID: the `ff10fb328891`
+# ⛔ NO FOLD SINCE THE `a0cea310786d` DE-SPLICE HAS TOUCHED THIS BLOCK — the derivation still
+# reads ONCE and they left `durations` untouched here, so they spliced nothing in it. ⛔ THEIR
+# ATTRIBUTION IS NOT CARRIED FROM THE FOLD THAT DID: the `ff10fb328891`
 # fold before them spliced this block on NEITHER side — it left the derivation reading once — and
 # spliced `durations` instead: under the same `merge=union` driver
 # `test_14560_operator_vectors.py` and `test_13098_cypher_inventory.py` each arrived as a DUPLICATE
