@@ -4984,6 +4984,35 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     assert _restart_cue_order_violation(doc_lower) is not None, doc_lower
 
 
+def test_3232_the_row_table_has_no_duplicate_rows():
+    """No sentence may appear twice in the table, with either verdict.
+
+    ⛔ THE TABLE'S CURRENCY IS ITS ROW COUNT, so a duplicate silently overstates
+    coverage — and a duplicate with a DIFFERENT verdict would make the file assert
+    both orders for one sentence, which is the one defect a denylist cannot
+    survive. Both were live: consecutive reviews each found the class by hand (one
+    found three, the next found the fourth), and each fix removed the instance and
+    left the class. This is the class, asserted rather than re-reviewed.
+
+    The rows are read off the grading test's own `parametrize` mark, so there is no
+    second copy of the table to drift from the one that grades.
+    """
+    table: list[tuple[str, bool]] = []
+    for mark in test_3232_restart_order_pin_grades_the_forms_it_claims.pytestmark:
+        if mark.name == "parametrize" and mark.args[0] == "line, inverted":
+            table = [tuple(v) if isinstance(v, tuple) else tuple(v.values)
+                     for v in mark.args[1]]
+    assert len(table) > 700, f"read {len(table)} rows off the grading mark"
+    seen: dict[str, bool] = {}
+    dupes: list[str] = []
+    for line, inverted in table:
+        key = " ".join(str(line).split())
+        if key in seen:
+            dupes.append(f"{key!r} ({seen[key]} vs {inverted})")
+        seen[key] = bool(inverted)
+    assert not dupes, f"duplicate table rows: {'; '.join(dupes[:5])}"
+
+
 @pytest.mark.parametrize("line, inverted", [
     # ── forward: restart first, the confirmation follows ────────────────────
     ("Restart your client, then confirm the tools are actually there — "
@@ -7610,16 +7639,9 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     #    list that NO row or probe could reach, so deleting either changed nothing
     #    (`841 passed` either way) — rot, not protection, by this file's own rule.
     ("Restart its client after confirming the tools are actually there.", True),
-    #    ⛔ THE `validate` ROW IS DELIBERATELY ABSENT (#14679 review at `76646c7b`,
-    #    measured). A `validate` row CANNOT pin `_CONFIRM_PREDICATE`'s member:
-    #    `_PRE_CUE_VERB` already covers the spelling, so deleting
-    #    `validat(?:e|es|ed|ing)` from the predicate leaves the row PASSING (measured:
-    #    both copies of the row grade RED with the member gone). What pins that member
-    #    is the loop `test_3232_pre_cue_verb_carries_every_morphology_the_other_copies_do`
-    #    (removing it reds that loop, measured `1 failed, 864 passed`). The row that
-    #    used to be here was byte-identical to the one at `:6560` and tested nothing
-    #    new — the same "row that cannot fail" class the sibling commit `6cd72e7`
-    #    fixed, one round later.
+    #    (the `validate` member's row is the one already at ~:6589 — a second copy
+    #    here tested nothing, and `test_3232_the_row_table_has_no_duplicate_rows`
+    #    below now refuses the class rather than a reviewer having to find it.)
     # ── arm (f.4): a BARE pre-cue object whose clause ends at the cue
     #    (#14679 review at `3e4dd16d`). Every other form (f) arm needs a predicate
     #    or a locative after the object, so the shortest spelling of the inversion
