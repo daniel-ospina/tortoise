@@ -1299,11 +1299,27 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
                     "from the same number, and the retry heals a conflict or a "
                     "one-shot cancel while a PERSISTING cause (a budget, a held "
                     f"lock) re-fails it: {needle!r} absent from {text[-400:]!r}")
-            assert "nothing to fix" not in text, (
-                "the ARMED arm is back to telling a `57014` population that "
-                "there is nothing to fix — a `statement_timeout` this write "
-                "does not fit, or a lock still held, re-fails on the identical "
-                f"replay, so the blanket claim is false for that member: {text[-400:]!r}")
+            # ⛔ THE NEGATIVE PIN IS SCOPED, NOT CLASS-WIDE (round-37). A bare
+            # `assert "nothing to fix" not in text` forbids a phrase that is TRUE
+            # for the conflict half — the paragraph above the shipped sentence
+            # says so in as many words, and the shipped clause itself says the
+            # retry IS the remedy there — so a later fixer writing the correct
+            # conflict clause ("retry it … nothing to fix beyond that") would red
+            # a leg whose sentence is right. That is this PR's own defect class
+            # pointing the other way (a pin whose claim does not match the
+            # sentence it guards), and an over-block is still a defect. What
+            # must never come back is the BLANKET form — the claim attached to
+            # the whole retryable class, which is how round 33 shipped it
+            # ("… SUCCEEDS — nothing to fix; a statement that EXECUTED …"). Both
+            # historical spellings are banned; the conflict-half phrasing is not.
+            for blanket in ("SUCCEEDS — nothing to fix", "nothing to fix;"):
+                assert blanket not in text, (
+                    "the ARMED arm is back to telling the WHOLE retryable "
+                    "class there is nothing to fix — a `57014` whose cause "
+                    "persists (a `statement_timeout` this write does not fit, "
+                    "a lock still held) re-fails on the identical replay, so "
+                    f"the blanket claim is false for that member: {blanket!r} "
+                    f"in {text[-400:]!r}")
             assert "statement that EXECUTED and failed on its own data or a constraint" in text, (
                 "the ARMED arm still promises a heal to a statement that "
                 "executed and failed — any replay RE-EXECUTES it and re-fails "
