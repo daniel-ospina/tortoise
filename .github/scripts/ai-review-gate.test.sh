@@ -1454,6 +1454,53 @@ else
     bad "(t9) could not read PATCH_PROBE_CAP from the run block — the bound is unassertable"
 fi
 
+# ── (t10) ONE SIGNATURE VERIFIER, AND TWO DIFFERENT SIGNATURE DIAGNOSES ───
+# Two P3 follow-ups from the review at 5ed119f05dbe, both MEASURED here rather than
+# left as prose. Neither can produce a wrong verdict today; both can mislead the
+# next reader, which is how a guard's coverage claim stops being true.
+#
+# F1: the comment above `marker_sig_ok` claims ONE verifier "shared by the rule-(c)
+#     probe and the acceptance loop below", while the acceptance loop carried its own
+#     inline copy of the HMAC pipeline. The copies agreed, so no verdict moved — but a
+#     future edit to the function would have covered only the probe. The fix makes the
+#     claim TRUE (the loop calls the function); this row is what keeps it true: a
+#     second HMAC pipeline anywhere in the run block reddens it.
+_h1="$(grep -c 'openssl dgst -sha256 -hmac' "$RUN_BLOCK" || true)"
+if [ "$_h1" = "1" ]; then
+    ok "(t10) exactly ONE HMAC verification site in the run block (the probe and the acceptance loop share it)"
+else
+    bad "(t10) $_h1 HMAC verification site(s) in the run block — the \"one verifier\" claim is false again, and an edit to marker_sig_ok would cover only the probe"
+fi
+
+# F2: `patch_sig_rejected` counted EVERY unverifiable marker and the diagnostic
+#     advised "the recording KEY is the problem — not the diff". For a STALE marker
+#     that also carries `diff=` that is right: a correct key would have made it
+#     probeable. For a LEGACY marker (no `diff=`) rule (c) has no digest to anchor on,
+#     so no key could ever have made it probeable — the advice sent the operator to
+#     re-mint a key that was fine. Both halves are pinned: the probeable case MUST
+#     name the key, the unprobeable one MUST NOT.
+BAD_SIG="$(printf 'f%.0s' $(seq 1 64))"
+{
+    printf 'review recorded: reviews/%s.json verdict=clean @ %s diff=%s (%s) sig=%s\n' \
+        "$PR_NUMBER" "$STALE" "$PB_REVIEWED" "$REPO_NAME" "$BAD_SIG"
+} > "$T/body-t10-probeable"
+STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t10-probeable"
+assert_rc 1 "(t10) a STALE diff= marker with an UNVERIFIABLE signature fails closed"
+assert_contains "(t10) …and names the recording KEY as the problem (a correct key WOULD have made it probeable)" \
+    "the recording KEY is the problem"
+{
+    printf 'review recorded: reviews/%s.json verdict=clean @ %s (%s) sig=%s\n' \
+        "$PR_NUMBER" "$STALE" "$REPO_NAME" "$BAD_SIG"
+} > "$T/body-t10-legacy"
+STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t10-legacy"
+assert_rc 1 "(t10) a LEGACY stale marker with an UNVERIFIABLE signature fails closed"
+assert_not_contains "(t10) …and does NOT blame the key for a marker rule (c) could never probe" \
+    "the recording KEY is the problem"
+assert_contains "(t10) …and tells the operator to re-record instead" \
+    "re-record on the current head"
+
 
 # ── (u) END TO END ON REAL GIT BYTES: a base advance that rewrites hunk context ──
 # ⛔ WHY THIS SECTION EXISTS. Every case above feeds the gate a HAND-WRITTEN diff, so

@@ -824,10 +824,13 @@ jobs:
           # here mints or extends evidence, and rule (a) still governs every
           # head-bound marker.
           marker_sig_ok() { # <marker line> -> 0 iff its trailing HMAC verifies
-            # ONE verifier, shared by the rule-(c) probe and the acceptance loop
-            # below: the two must never disagree about what "signed" means, or a
-            # marker could be probed as signed and then rejected as unsigned (or
-            # the reverse). Pure local work — no API call, no secret printed.
+            # ONE verifier, and its ONLY caller set is every place that decides
+            # "is this marker signed": the rule-(c) probe below AND the acceptance
+            # loop that follows it (which CALLS this function rather than repeating
+            # the pipeline). If the two carried separate copies they could drift, and
+            # an edit here would silently cover only one of them — a marker probed as
+            # signed and then rejected as unsigned (or the reverse).
+            # Pure local work — no API call, no secret printed.
             local line="$1" sig computed
             [[ "$line" == *" sig="* ]] || return 1
             sig="${line##* sig=}"
@@ -881,6 +884,7 @@ jobs:
             return 0
           }
           patch_sig_rejected=0
+          patch_shape_rejected=0
           patch_probe_capped=0
           if [ -z "$candidates" ] && [ -n "$all_markers" ]; then
             patch_probes=0
@@ -895,7 +899,21 @@ jobs:
               # ⛔ SIGNATURE BEFORE THE PROBE (the fan-out bound above). A marker
               # that cannot verify is not evidence and must cost ZERO API calls.
               if ! marker_sig_ok "$line"; then
-                patch_sig_rejected=$((patch_sig_rejected + 1))
+                # ⛔ TWO DIFFERENT DIAGNOSES — do not conflate them. Only a marker
+                # carrying BOTH the 40-hex `@ sha` and the 64-hex `diff=` is one a
+                # probe could ever anchor on, so only for THAT marker is a correct
+                # key the thing that would have made it probed. A legacy marker has
+                # no digest to anchor on (no key helps: it must be re-recorded), and
+                # a HEAD-BOUND one is rule (a)'s, not rule (c)'s. Counting either as
+                # a key failure sends the operator to re-mint a key that is fine.
+                p_sha_bad="$(printf '%s' "$line" | sed -nE 's/^.* @ ([0-9a-f]{40}).*$/\1/p')"
+                p_diff_bad="$(printf '%s' "$line" | sed -nE 's/^.* diff=([0-9a-f]{64}) \(.*$/\1/p')"
+                if [ "${#p_sha_bad}" -eq 40 ] && [ "${#p_diff_bad}" -eq 64 ] \
+                   && [ "$p_sha_bad" != "$expected" ]; then
+                  patch_sig_rejected=$((patch_sig_rejected + 1))
+                else
+                  patch_shape_rejected=$((patch_shape_rejected + 1))
+                fi
                 continue
               fi
               # De-duplicate on the (sha,diff) pair: the same record repeated in
@@ -933,9 +951,9 @@ jobs:
           accepted_via_patch=0
           while IFS= read -r line; do
             [ -z "$line" ] && continue
-            sig="$(printf '%s' "${line##* sig=}")"
-            computed="$(printf '%s' "${line% sig=*}" | openssl dgst -sha256 -hmac "$GATE_SECRET" | awk '{print $NF}')"
-            if [ "$computed" = "$sig" ]; then
+            # SAME verifier as the probe above — one HMAC pipeline, one meaning of
+            # "signed" (see marker_sig_ok). Not re-derived here on purpose.
+            if marker_sig_ok "$line"; then
               marker="$line"
               marker_chan="$(marker_channel "$line")"
               m_sha="$(printf '%s' "$line" | sed -E 's/^review recorded: .* @ ([0-9a-f]{40}).*$/\1/')"
@@ -982,10 +1000,17 @@ jobs:
             # key". Priority: unsigned → wrong repo → malformed → stale.
             if [ "${patch_sig_rejected:-0}" -gt 0 ]; then
               # Rule (c) probes SIGNED markers only (the fan-out bound above), so
-              # a stale-sha diff= marker with a BAD signature reaches this branch
+              # a STALE-sha diff= marker with a BAD signature reaches this branch
               # instead of the HMAC-mismatch diagnostic. Name it, or the stale
               # verdict below blames the DIFF for what is a KEY problem.
-              echo "::error::${patch_sig_rejected} stale-sha evidence marker(s) carried a diff= but their signature did NOT verify against AI_REVIEW_GATE_KEY, so rule (c) did not probe them. If the authored change is unchanged since the review, the recording KEY is the problem — not the diff."
+              echo "::error::${patch_sig_rejected} STALE-sha evidence marker(s) carried BOTH the 40-hex @ sha and the diff= that rule (c) anchors on, but their signature did NOT verify against AI_REVIEW_GATE_KEY — so rule (c) did not probe them. If the authored change is unchanged since the review, the recording KEY is the problem — not the diff."
+            fi
+            if [ "${patch_shape_rejected:-0}" -gt 0 ]; then
+              # The other class, and it must NOT get the key advice: without a
+              # `diff=` there is no digest to anchor on, so no key would have made
+              # these probeable. Telling the operator to fix the key here costs a
+              # key rotation and still leaves the gate red.
+              echo "::error::${patch_shape_rejected} evidence marker(s) failed the signature check AND lack the shape rule (c) could anchor on (a 40-hex @ sha that is NOT this head, plus a 64-hex diff=) — no recording key would have made them probeable. Fixing the key cannot carry these: re-record on the current head."
             fi
             # Union both channels here too (#1224): the classification below
             # (unsigned / wrong-repo / malformed / stale) must work when the
