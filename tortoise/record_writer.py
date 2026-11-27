@@ -4704,9 +4704,30 @@ def write_live_record(record: Mapping[str, Any], *,
         # is false exactly where it now gets read most; the sibling allocator and
         # `position_unverifiable` arms were fixed for this, and this arm is the
         # one that catches every remaining failure on that path.
-        _logger.warning(
-            "the record write did not happen (write_failed) — the journal has "
-            "the record; %s: record=%s %s: %s",
+        # ⛔ AND ON THE RECORD-ONLY ARM THERE IS NOTHING TO REPLAY (#14002).
+        # `journal_skipped` means the CALLER did not append — a cut-over graph —
+        # so "the journal has the record" is false AND every replay remedy below
+        # is a dead end: there is no line, and therefore no enumerated record to
+        # re-refuse. `live_write.py:709` states the rule for its own arm
+        # ("a raise here means the write reached NEITHER store"); this arm is the
+        # pre-existing copy of that shape, and the `plan_refused` arm above
+        # applies it too. `journal_skipped` is checked FIRST because it implies
+        # `allocate`, so the two `allocate` sentences would otherwise both claim a
+        # journal this write never had. The remedy on this arm is a RE-EMIT, which
+        # is what the sibling module already prescribes.
+        journal_clause = (
+            "the record reached NEITHER store (the caller did not append: this "
+            "graph was cut over, so the journal holds no line)"
+            if journal_skipped
+            else "the journal has the record"
+        )
+        if journal_skipped:
+            remedy = (
+                "re-emit the record once the allocator is healthy — with no "
+                "journal line there is nothing to replay, and "
+                "`record_allocator_cli.py status` names the counter's mode"
+            )
+        elif not allocate:
             # ⛔ THE DISCRIMINATOR IS THE CURSOR ROW, NOT THE ARM. `allocate`
             # says which write arm ran; `_refuse_an_enumerated_replay` refuses by
             # the ROW, and the two are INDEPENDENT — a graph cut over and then
@@ -4718,17 +4739,26 @@ def write_live_record(record: Mapping[str, Any], *,
             # now true in BOTH states instead of wrong in one: it names the row
             # as the condition, so an operator on either arm can tell which case
             # they are in. `record_allocator_cli.py status` reports the row.
-            "a replay heals the record UNLESS this graph has a `record_cursor` "
-            "row (cut over), in which case an enumerated replay is refused — "
-            "and the remedy is the one the refusal below names for the row's "
-            "MODE, not a chain that assumes `active`: `replay(allocate=True)` "
-            "needs mode='active' (and is a CODE call — no CLI verb ships), "
-            "`halt` is scoped to 'active', `reopen` to "
-            "'halted'. Run `record_allocator_cli.py status` for the mode"
-            if not allocate else
-            "repair it with an ALLOCATING replay (`replay(allocate=True)`, a "
-            "CODE call — no CLI verb ships), not "
-            "a plain one, which a cut-over graph refuses",
+            remedy = (
+                "a replay heals the record UNLESS this graph has a "
+                "`record_cursor` row (cut over), in which case an enumerated "
+                "replay is refused — and the remedy is the one the refusal "
+                "below names for the row's MODE, not a chain that assumes "
+                "`active`: `replay(allocate=True)` needs mode='active' (and is "
+                "a CODE call — no CLI verb ships), `halt` is scoped to "
+                "'active', `reopen` to 'halted'. Run "
+                "`record_allocator_cli.py status` for the mode"
+            )
+        else:
+            remedy = (
+                "repair it with an ALLOCATING replay (`replay(allocate=True)`, "
+                "a CODE call — no CLI verb ships), not a plain one, which a "
+                "cut-over graph refuses"
+            )
+        _logger.warning(
+            "the record write did not happen (write_failed) — %s; %s: "
+            "record=%s %s: %s",
+            journal_clause, remedy,
             record.get("type"), _record_identity(record), exc,
         )
         return _refused("write_failed", seq)
