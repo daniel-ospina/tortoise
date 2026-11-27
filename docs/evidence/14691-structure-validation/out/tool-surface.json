@@ -1,0 +1,543 @@
+{
+  "tortoise_adjust_relationship": {
+    "description": "Adjust an existing epistemic link. Dispatches on the ADJUSTMENT: reason=/strength=/credibility= \u2192 mitigate the edge (a graded dampener, strength 0.10-0.50); bias/precision/consistency/directness \u2192 annotate its four epistemic dimensions; action=mitigate|annotate keeps the legacy spelling. Annotating a link is `update_knowledge` on it \u2014 this verb is the one for STRENGTH. \u26d4 The mitigation arm is idem",
+    "required": [
+      "id"
+    ],
+    "params": [
+      "id",
+      "reason",
+      "strength",
+      "credibility",
+      "bias",
+      "precision",
+      "consistency",
+      "directness",
+      "action",
+      "graph"
+    ]
+  },
+  "tortoise_approve_merge": {
+    "description": "Review a dedup/temporal candidate \u2014 action=merge|reject. Wiring deferred to promotion for live priors. WRITES review flags + wires edges. NOT idempotent for every branch: a repeat of a DEDUP review records its event again, so it is visible twice to poll_events (the temporal branch does guard one).",
+    "required": [
+      "candidate_id"
+    ],
+    "params": [
+      "candidate_id",
+      "action",
+      "graph"
+    ]
+  },
+  "tortoise_calibrate_summary": {
+    "description": "Audit graph calibration state. Returns per-point guidance.",
+    "required": [],
+    "params": [
+      "graph"
+    ]
+  },
+  "tortoise_check_confidence": {
+    "description": "How confident the graph is \u2014 the confidence view, its recompute, and its recall (#4282 row 5). Dispatch is by argument: claim_id = one claim's EP posterior {mean,variance,alpha,beta}, and include_provenance adds the chain behind it; topic = the dated belief chain for a topic; session = what happened last session, including its confidence changes; calibrate (or no selector) = the graph-wide calibra",
+    "required": [],
+    "params": [
+      "claim_id",
+      "topic",
+      "session",
+      "calibrate",
+      "include_provenance",
+      "limit",
+      "require_calibration",
+      "recompute",
+      "factors",
+      "evidence",
+      "anchors",
+      "max_hops",
+      "rel_filter",
+      "direction",
+      "recall",
+      "mode",
+      "query",
+      "kind",
+      "include_superseded",
+      "min_confidence",
+      "relevance_exp",
+      "confidence_exp",
+      "centrality_weight",
+      "seed",
+      "depth",
+      "completeness",
+      "min_load",
+      "max_support",
+      "max_nodes",
+      "graph"
+    ]
+  },
+  "tortoise_check_connection": {
+    "description": "What does this credential reach? (#4282 row 40 \u2014 programmatic, returns a result, NOT a wizard). Omit key_id: connectivity, the resolved graph + namespace, and this caller's own account. Pass key_id: one credential's declared reach (graph, scopes, delegation depth, revocation, expiry). Read-only. A key belonging to another account and a key that does not exist give the SAME answer, so this cannot b",
+    "required": [],
+    "params": [
+      "key_id",
+      "graph"
+    ]
+  },
+  "tortoise_check_structure": {
+    "description": "Check Gate 0\u21924 chain integrity (orphans, dangling refs).",
+    "required": [],
+    "params": [
+      "graph"
+    ]
+  },
+  "tortoise_create_entity": {
+    "description": "Create an entity \u2014 type: subject|object|event|document|point|diary. Event entities wire about* edges from aboutSubject/aboutObject/aboutPoint/aboutDocument props. Returns {node, nudges, advisories?} \u2014 nudges suggest IMPL/NAND/mitigate connections to related Points; advisories notes a write that declared no source and no provenance (advisory only, never a block). For type='document', declaring extr",
+    "required": [
+      "type",
+      "name"
+    ],
+    "params": [
+      "type",
+      "name",
+      "props",
+      "goalState",
+      "graph"
+    ]
+  },
+  "tortoise_delete_knowledge": {
+    "description": "Delete one item by id \u2014 a Point, a relation (operators are Points), a Source, an Object, a Subject, or an Event. DESTRUCTIVE and PERMANENT: cannot be undone. The FIRST call changes nothing: it previews which node resolves and every edge that would go with it, and returns a confirmation token. Call again with confirmation=<token> to delete. When the item is wrong rather than unwanted, supersede it ",
+    "required": [
+      "id"
+    ],
+    "params": [
+      "id",
+      "dry_run",
+      "confirmation",
+      "graph"
+    ]
+  },
+  "tortoise_diary_read": {
+    "description": "Read recent diary entries for an agent, newest first.",
+    "required": [
+      "agent_name"
+    ],
+    "params": [
+      "agent_name",
+      "last_n",
+      "wing",
+      "graph"
+    ]
+  },
+  "tortoise_expand_relationships": {
+    "description": "Full relationship payload for ONE Point, incl. each related point's content (the expand side of the #1353 list/expand split \u2014 search returns bounded state entries; use this to read a neighbor's full text on demand).",
+    "required": [
+      "point_id"
+    ],
+    "params": [
+      "point_id",
+      "graph"
+    ]
+  },
+  "tortoise_explore_connections": {
+    "description": "Walk outward from a node through its links (#4282 row 8). node_id = the entity-centric BFS from that node, neighbours categorised by layer; node_id + include_content = the full payload for one Point, every neighbour's text included; query = resolve a natural-language query to the node it names, then walk from it. hops bounds the walk (default 2).",
+    "required": [],
+    "params": [
+      "node_id",
+      "query",
+      "hops",
+      "include_content",
+      "point_kind",
+      "confidence_min",
+      "graph"
+    ]
+  },
+  "tortoise_get_entity": {
+    "description": "Get any entity by ID, eventId, or url. `type` selects the node kind (point | entity | operator | event | session | events | governance), dispatching exactly as the retired per-type getters did; omit it to look the entity up by id. The canonical fetch-by-id tool.",
+    "required": [],
+    "params": [
+      "id",
+      "type",
+      "limit",
+      "graph"
+    ]
+  },
+  "tortoise_get_historical_knowledge": {
+    "description": "Point-in-time read: what was true at `at_date`. Walks the CORRECTS chain from `point_id` (a current or superseded Point) to the point whose [validFrom, validTo] window covers the date. EVERY reply carries `status` (found | ambiguous | absent) and `found`; branch on `status`, never on `found` alone \u2014 `ambiguous` carries `found: true` with two or more `candidates` and NO `valid_point`. A `found` rep",
+    "required": [
+      "point_id",
+      "at_date"
+    ],
+    "params": [
+      "point_id",
+      "at_date",
+      "graph"
+    ]
+  },
+  "tortoise_graph_overview": {
+    "description": "What is in this memory graph and how it is shaped \u2014 ONE orientation call (#4282 row 6). section: taxonomy|structure|structure_check|pointkinds|tags|sources|namespaces|graphs|topics|health|status|stale (the consolidated list_*/status/health zoo); validate_domain (requires domain); audit (optional point_kinds); dream_health. Omit section \u2192 a compact combined summary in the same envelope this family ",
+    "required": [],
+    "params": [
+      "section",
+      "entity_id",
+      "days",
+      "limit",
+      "domain",
+      "point_kinds",
+      "graph"
+    ]
+  },
+  "tortoise_graph_set_recording": {
+    "description": "Set or clear a graph's session-recording override (#2302) \u2014 the MCP twin of PATCH /v1/graphs/{graph_id} (recording), sharing the same hosted_api core so the surfaces never drift. recording: true/false sets the per-graph override, null removes it (inherit the team default \u2014 never flips a team ON). Requires hosted mode + a team:manage-scoped key (or legacy full-access) \u2014 the capture 409 ('Session re",
+    "required": [
+      "recording"
+    ],
+    "params": [
+      "recording",
+      "graph_id"
+    ]
+  },
+  "tortoise_index_sources_from_directory": {
+    "description": "Register a directory's files as sources \u2014 NOTHING is extracted (#4282 row 15). The three older per-kind indexing doors redirect here: `file_type='agent_session'` files a session transcript and `file_type='doc'` a document corpus. `extract_metadata` defaults PER ARM to the absorbed door's own value (`true` for `agent_session` only) and `llm_model` is forwarded on the arms that had it. `file_type`: ",
+    "required": [
+      "directory"
+    ],
+    "params": [
+      "directory",
+      "file_type",
+      "corpus_name",
+      "extract_metadata",
+      "llm_model",
+      "progress_file",
+      "graph"
+    ]
+  },
+  "tortoise_ingest": {
+    "description": "Heterogeneous bulk write (epic #888 W4) \u2014 one call writes points + entities + sources + connections coherently (nodes first, then connections). Connections carrying 'operator' (IMPL/NAND) create operator Points per the reification rule (v3.5 \u00a78); connections carrying 'relation' stay plain structural edges. Local refs address bundle items. Endpoint typing (#7925): connections on BOTH routes \u2014 opera",
+    "required": [],
+    "params": [
+      "bundle",
+      "granularity",
+      "promotion_policy",
+      "graph"
+    ]
+  },
+  "tortoise_link_entities": {
+    "description": "Connect two nodes \u2014 the relation decides HOW. One linking verb for five writers: `wasDerivedFrom` \u2192 the derivation writer; `IMPL`/`NAND` without operator=true \u2192 a bare direct edge; `supports`/`refutes`/`mutuallySupportive`/`mutuallyExclusive` or operator=true \u2192 a carrying operator Point; `references` + entity_label \u2192 the provenance writer (the only arm with the sourceVersion anchor); anything else",
+    "required": [
+      "relation",
+      "from_id"
+    ],
+    "params": [
+      "relation",
+      "from_id",
+      "to_id",
+      "target_ids",
+      "operator",
+      "direction",
+      "semantics",
+      "confidence",
+      "weight",
+      "label",
+      "batch_id",
+      "entity_label",
+      "source_kind",
+      "promote_source",
+      "graph"
+    ]
+  },
+  "tortoise_list_batches": {
+    "description": "Batch discovery \u2014 the most recent distinct ingest batch_ids with their point/direct-edge counts (ordered by newest stamp, capped at limit, default 20).",
+    "required": [],
+    "params": [
+      "limit",
+      "graph"
+    ]
+  },
+  "tortoise_list_knowledge": {
+    "description": "One list method; kind selects the collection (#4282 row 4). Browse and filter WITHOUT a text search. kind: claim (default) = Points by pointKind/property filters, paged over a total order with {results,total,hasMore}; source = every provenance Source with its point count; source_reliability = one Source's derived reliability (url required \u2014 recomputes and caches the derivation); batch = one bundle",
+    "required": [],
+    "params": [
+      "kind",
+      "point_kind",
+      "id",
+      "url",
+      "entity_id",
+      "agent",
+      "wing",
+      "limit",
+      "offset",
+      "include_retracted",
+      "graph"
+    ]
+  },
+  "tortoise_list_namespaces": {
+    "description": "List installed pack namespaces.",
+    "required": [],
+    "params": [
+      "graph"
+    ]
+  },
+  "tortoise_manage_source_trust": {
+    "description": "Set how far a source is trusted (#4282 row 18). Dispatch is BY ARGUMENT: `tier=` (T0-T4) sets the credibility tier; `score=` with `assessor=` and `rationale=` records an assessment (a reputation-weighted Statement Point). Passing both is refused \u2014 they are different writes. The one trust door \u2014 both former arms (set a tier, or record a scored assessment) live here. Reads: tortoise_graph_overview(s",
+    "required": [
+      "url"
+    ],
+    "params": [
+      "url",
+      "tier",
+      "assessor",
+      "score",
+      "rationale",
+      "graph"
+    ]
+  },
+  "tortoise_manage_sources": {
+    "description": "Configure the memory sources this team uses (the ones Tortoise reads FROM). action: list|enable|disable; source: github_issues|github_documents|agent_sessions. list returns EVERY source with its current state and its default, in one call. enable/disable act only within the caller's own permission for this team \u2014 a key without graphs:write is REFUSED, never self-granted \u2014 and no action accepts, ret",
+    "required": [
+      "action"
+    ],
+    "params": [
+      "action",
+      "source"
+    ]
+  },
+  "tortoise_mine_knowledge_from_directory": {
+    "description": "Mine a FOLDER of files, each by its own content type (#4282 row 17) \u2014 the batch form of tortoise_mine_knowledge_from_session, not a kind of indexing: this call EXTRACTS, tortoise_index_sources_from_directory does not. It absorbs the retired conversations-mining door. EXCLUDED from tenant HTTP \u2014 walks the server filesystem.",
+    "required": [
+      "directory"
+    ],
+    "params": [
+      "directory",
+      "extract_entities",
+      "graph"
+    ]
+  },
+  "tortoise_mine_knowledge_from_session": {
+    "description": "Mine ONE session (#4282 row 16). Dispatch is BY ARGUMENT: `conversation=` files an agent session (turns become episodic Points, LLM extraction produces epistemic Points; the backend is the target graph's configuration) \u2014 same door and gates as the retired session-capture shim, whose `machine_id=`/`model=` attribution claims are forwarded too; `conversation=` as a raw transcript STRING (with `sourc",
+    "required": [],
+    "params": [
+      "conversation",
+      "session_id",
+      "harness",
+      "machine_id",
+      "model",
+      "source_id",
+      "extract_entities",
+      "content_dedup",
+      "session_date",
+      "participants",
+      "items",
+      "agent_name",
+      "threshold",
+      "graph"
+    ]
+  },
+  "tortoise_org_create": {
+    "description": "Create isolated team graph via FalkorDB select_graph. EXCLUDED from tenant HTTP \u2014 provisioning belongs to /internal/provision behind FASTAPI_INTERNAL_KEY.",
+    "required": [
+      "name"
+    ],
+    "params": [
+      "name"
+    ]
+  },
+  "tortoise_poll_events": {
+    "description": "Poll graph/claim events after an opaque cursor (at-least-once). Returns {events, next_cursor}. Event types: 12 registered claim types (PointAdded, OperatorAdded, PointRetracted, PointSuperseded, OperatorAnnotated, PointPromoted, OperatorPromoted, DedupeRecorded, DedupeRejected, ObjectSuperseded, PointInvalidated, PointRevised). PointRevised reaches the store, and the response adds `changes` (per-c",
+    "required": [],
+    "params": [
+      "after",
+      "types",
+      "limit",
+      "graph"
+    ]
+  },
+  "tortoise_query": {
+    "description": "Query points by pointKind and/or property filters \u2014 structural exact-match retrieval for known shapes (Epic #888: paginated_query + query_points_by_tag merged in). BOTH the structural read and the `tag=` arm return at most `limit` rows \u2014 default 100, or 20 when you page (`offset=`/`page=`) without an explicit `limit`. The RESPONSE is what is bounded (and a truncated answer is not distinguishable f",
+    "required": [],
+    "params": [
+      "kind",
+      "filters",
+      "text",
+      "order_by",
+      "min_confidence",
+      "entity_type",
+      "tag",
+      "include_retracted",
+      "offset",
+      "limit",
+      "page",
+      "graph"
+    ]
+  },
+  "tortoise_record_decision": {
+    "description": "Record that a question was resolved \u2014 a human approval of a planning artifact: an Event (eventKind humanApproval) with full provenance, a decision Point carrying an EP evidence prior, and unidirectional IMPL (approvedBy) edges to the approved claims so dependent claims strengthen. Returns {event_id, decision_point_id, impl_operator_ids, confidence_delta}.",
+    "required": [
+      "approver_id",
+      "artifact_id",
+      "point_ids"
+    ],
+    "params": [
+      "approver_id",
+      "artifact_id",
+      "point_ids",
+      "decision_content",
+      "graph"
+    ]
+  },
+  "tortoise_refresh_confidence": {
+    "description": "Recompute or seed a belief's confidence. Dispatches on SCOPE: scope='dirty' (default) \u2192 dream the accumulated dirty subgraph; scope='full' \u2192 whole-graph stabilization; scope='promote' \u2192 the reviewer-gated draft\u2192live promotion of point_id; scope='baseline' \u2192 set point_id's Beta prior (alpha, beta). The two scopes are stated as a parameter, never chosen silently.",
+    "required": [],
+    "params": [
+      "scope",
+      "point_id",
+      "full",
+      "dirty_only",
+      "max_hops",
+      "require_calibration",
+      "mode",
+      "budget",
+      "alpha",
+      "beta",
+      "graph"
+    ]
+  },
+  "tortoise_register_source": {
+    "description": "Declare a source exists \u2014 the URL is its identity (#4282 row 14). The one declaring door: the retired per-kind entry points redirect here. `tier` (T0-T4) overrides the tier the source KIND derives; `sourceDate` is the evidence-age clock. An existing Source (URL collision) is never re-kinded.",
+    "required": [
+      "url",
+      "sourceKind"
+    ],
+    "params": [
+      "url",
+      "sourceKind",
+      "tier",
+      "sourceDate",
+      "props",
+      "graph"
+    ]
+  },
+  "tortoise_review_link_candidates": {
+    "description": "Connections found but not made \u2014 READ-ONLY (#4282 row 10). kind: connections (default) = related-but-missing suggestions and illogical/stale links, mode=add|prune|both with an optional scope; dedup = the deduplication review queue (candidate_type=content|entity); cross_lens = unverified cross-source candidate pairs. Nothing here writes: accept a candidate by calling link_entities with its two endp",
+    "required": [],
+    "params": [
+      "kind",
+      "mode",
+      "scope",
+      "candidate_type",
+      "limit",
+      "threshold",
+      "graph"
+    ]
+  },
+  "tortoise_search": {
+    "description": "Hybrid semantic search \u2014 FTS + vector + structural RRF fusion with EP confidence annotation. Use when matching by MEANING (natural-language query); for exact structural/filter queries use tortoise_query. Full-scan mode: omit query, set kind \u2192 all Points of kind.",
+    "required": [],
+    "params": [
+      "query",
+      "kind",
+      "threshold",
+      "limit",
+      "min_confidence",
+      "order_by",
+      "entity_type",
+      "relationship_filter",
+      "traversal_path",
+      "graph"
+    ]
+  },
+  "tortoise_search_knowledge": {
+    "description": "Find things by text \u2014 ONE search door (#4282 row 3). mode selects which question: hybrid (default) = meaning-ranked RRF fusion of full-text + vector + structural, EP-annotated (omit query and set kind to enumerate a kind); full_text = exact pointKind/property matching with NO ranking, paged over a total order and returning {results,total,hasMore}; tag = the Points reachable through one Tag (page s",
+    "required": [],
+    "params": [
+      "query",
+      "mode",
+      "kind",
+      "tag",
+      "entity_type",
+      "limit",
+      "offset",
+      "include_retracted",
+      "min_confidence",
+      "order_by",
+      "threshold",
+      "relationship_filter",
+      "traversal_path",
+      "agent",
+      "topics",
+      "after",
+      "before",
+      "title",
+      "body",
+      "repo",
+      "graph"
+    ]
+  },
+  "tortoise_search_sessions": {
+    "description": "Search indexed agent sessions. Returns Events with narrative_arc snippets.",
+    "required": [
+      "query"
+    ],
+    "params": [
+      "query",
+      "agent",
+      "topics",
+      "after",
+      "before",
+      "limit",
+      "offset",
+      "graph"
+    ]
+  },
+  "tortoise_suggest_entry_points": {
+    "description": "Entity resolution \u2014 NL query \u2192 matching entities from the graph.",
+    "required": [
+      "query"
+    ],
+    "params": [
+      "query",
+      "limit",
+      "kind_filter",
+      "graph"
+    ]
+  },
+  "tortoise_supersede_knowledge": {
+    "description": "Replace a node with a successor, keeping the history. The arm follows the OLD node's label: a Point gets a full supersede \u2014 CORRECTS edge, outdated flag, and every edge moved from old to new; an Object/Subject gets the family supersede \u2014 status='superseded' + supersededBy (the successor's NAME) + supersededAt, no edge transfer. transfer_edges=None (default, not supplied) takes that label-driven ar",
+    "required": [
+      "old_id",
+      "new_id"
+    ],
+    "params": [
+      "old_id",
+      "new_id",
+      "transfer_edges",
+      "dry_run",
+      "graph"
+    ]
+  },
+  "tortoise_update_knowledge": {
+    "description": "Change what a stored thing says \u2014 ONE revise verb for a Point, an entity or an epistemic link \u2014 or retract it. Dispatches on WHICH FIELDS are set: props \u2192 a property update (point-lifecycle for a Point, plain properties for an entity); annotation={bias,precision,consistency,directness} \u2192 annotate the link; invalid_at=/valid_until= (+ corrected_by_id=) \u2192 retract, or invalidate against a successor. ",
+    "required": [
+      "id"
+    ],
+    "params": [
+      "id",
+      "props",
+      "annotation",
+      "valid_until",
+      "invalid_at",
+      "corrected_by_id",
+      "dry_run",
+      "graph"
+    ]
+  },
+  "tortoise_write_question": {
+    "description": "File a QUESTION with its options and the evidence behind them \u2014 not a decision. Creates the question, its option Points, the evidence Points and the IMPL edges atomically. options: option descriptions; evidence: evidence statements; choice: 0-indexed preferred option. Returns {decision_id, option_ids, evidence_ids}.",
+    "required": [
+      "options",
+      "evidence",
+      "choice"
+    ],
+    "params": [
+      "options",
+      "evidence",
+      "choice",
+      "graph"
+    ]
+  }
+}

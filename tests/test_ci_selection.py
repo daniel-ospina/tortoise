@@ -13180,6 +13180,97 @@ def test_the_fast_shards_header_block_carries_no_half_deleted_parenthetical():
         "subject does not own")
 
 
+#: A claim that this tree's pool, surface lists and weights are IDENTICAL to `main`'s. It is FALSE on
+#: any tree whose lane REGISTERS a row, and it there CONTRADICTS the block's own re-derivation, which
+#: states the pool delta as exactly this lane's file. `2e9c5cdfbbdf` carried the sentence in from a
+#: fold where it was TRUE of the PR that wrote it (#14612/#14623 touched no surface list and no
+#: selector), and no arm read it — the carried-claim class this block exists to prevent, one level in.
+#: Matched on masked text (`_unquoted_block`), so the QUOTED record of the deleted spelling is not
+#: read as the live claim it corrects.
+_ZERO_DELTA_CLAIM_RE = re.compile(
+    r"zero\s+differing"
+    r"|compare\s+EQUAL\s+to\s+`main`'s", re.IGNORECASE)
+#: A claim that this tree's delta against `main` is NON-empty — the registration family the block's
+#: own re-derivation states. A block may carry either family or neither; carrying BOTH is the defect.
+_DELTA_CLAIM_RE = re.compile(
+    r"puts\s+ONE\s+more\s+file\s+in\s+`fast_pool\(\)`"
+    r"|returns\s+exactly\s+ONE\s+entry"
+    r"|the\s+row\s+this\s+lane\s+registers", re.IGNORECASE)
+
+
+def _zero_delta_contradiction(header: str) -> str | None:
+    """The context of a block asserting BOTH a zero delta and a stated delta, or `None`.
+
+    Both families are read on the MASKED block, because this block records a DELETED spelling in
+    double quotes: a reader bound to the raw text grades the RECORD of the correction as the claim
+    it corrects, which is the failure the parenthetical arm's own note names (`a `_unquoted_block`
+    regression … would leave assertion 1 GREEN`).
+    """
+    text = _unquoted_block(header)
+    zero = _ZERO_DELTA_CLAIM_RE.search(text)
+    delta = _DELTA_CLAIM_RE.search(text)
+    if zero is None or delta is None:
+        return None
+    return text[max(0, zero.start() - 60): delta.end() + 60]
+
+
+def test_the_header_block_does_not_claim_a_zero_delta_it_cannot_have():
+    """A block that states a delta cannot also state that nothing differs — and this one did.
+
+    MEASURED at `8748d236b050`, by reading the block rather than by any arm: the note carried
+    "this PR adds no test file and leaves the selector untouched, so the pool and the parse on this
+    tree compare EQUAL to `main`'s — every surface list, every `durations` row, every
+    `durations_floors` entry and `tier1`, value by value, zero differing", four paragraphs above the
+    re-derivation that states `set(fast_pool(head)) - set(fast_pool(main))` returns ONE entry. Both
+    cannot hold. The per-key reading was the true half (`durations_floors` and `tier1` DO compare
+    equal); the blanket word was the false one, because this lane registers a `core` row and a
+    `durations` row that `main` does not carry.
+
+    ⛔ DECLARED RESIDUAL — the arm grades SELF-CONSISTENCY, not the measured delta. Measuring the
+    delta needs `origin/main`'s manifest, and the `test` job checks out at the default
+    `fetch-depth: 1` (`.github/workflows/ci.yml`), where a history-dependent assertion reds on a
+    grafted history that is not a defect. The two families are read from ONE text instead, so this
+    arm is depth-independent: it reds when the block claims both, and says nothing when it claims
+    either alone — which is why the acceptance directions below are part of the arm and not a note.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    residue = _zero_delta_contradiction(header)
+    assert residue is None, (
+        "the `fast_shards` block states BOTH that this tree's surface map and weights are "
+        "`main`'s (`zero differing` / `compare EQUAL to `main`'s`) and that this lane's row is in "
+        f"the pool — both cannot hold, and the second one is measured: …{residue}… Delete the "
+        "zero-delta sentence rather than the delta one: the delta is the reading, and a tree that "
+        "registers a row cannot also be identical to the tree it registers against")
+    # …and the checker READS that shape. The block's own pre-fix spelling, quoted verbatim from
+    # `8748d236b050`, REDs; without this the arm is decoration — a `_unquoted_block` regression, or
+    # a matcher pointed at the wrong noun, would leave assertion 1 GREEN over every recurrence.
+    pre_fix = (
+        "this PR adds no test file and leaves the selector untouched, so the pool and the parse on "
+        "this tree compare EQUAL to `main`'s — every surface list, every `durations` row, every "
+        "`durations_floors` entry and `tier1`, value by value, zero differing — and a comment-only "
+        "`durations` rewrite moves no member of the pool. This lane registers one `core` row, "
+        "which puts ONE more file in `fast_pool()`.\nfast_shards: 11\n"
+    )
+    assert _zero_delta_contradiction(_emission_block_header(pre_fix)) is not None, (
+        "the contradiction checker does not read the SHIPPED pre-fix block, so it is grading "
+        "something other than this class — a recurrence would ship GREEN")
+    # …and NEITHER family alone is refused, which is what stops the arm being solved by deleting the
+    # block's delta sentence (a true reading) instead of its zero-delta one. The zero-only direction
+    # is a real tree: a lane that registers nothing has a genuinely identical map.
+    for accepted in (
+        "This lane registers one `core` row, which puts ONE more file in `fast_pool()`.\nfast_shards: 11\n",
+        "On this tree the pool and the parse compare EQUAL to `main`'s, value by value, zero "
+        "differing.\nfast_shards: 11\n",
+        # the QUOTED record of the deleted spelling is not a live claim — `_unquoted_block` masks it
+        "It read \"every surface list, every `durations` row, value by value, zero differing\", "
+        "which was that fold's reading. This lane registers one `core` row.\nfast_shards: 11\n",
+    ):
+        assert _zero_delta_contradiction(_emission_block_header(accepted)) is None, (
+            f"the checker REFUSES a block it must accept: {accepted!r} — it is reading a claim "
+            "this block does not make, and a guard that reds on true prose pushes the repair onto "
+            "the wrong sentence")
+
+
 #: The ISSUE shorthand a row item may be spelled with — `` `#14560`'s `` — and the rule the block
 #: states for it: "Every row item above is therefore spelled with its path beside the word", so
 #: inside the row LIST every issue label must carry its own path. `[\s#]*` spans the block's
@@ -14934,7 +15025,7 @@ ROWED_BY_THIS_FOLD = (
     # Listed here for the reason every row above states: the ENTRY-RULE pin iterates this
     # EXPLICIT tuple, so a file nobody listed has no row and nothing reds. ⛔ The missing
     # registration was the more expensive half: `select()` computes `test_files` FROM the
-    # surfaces, so an unregistered file is never SELECTED, and its 11 falsifiers would have
+    # surfaces, so an unregistered file is never SELECTED, and its falsifiers would have
     # been dead weight even after the red check was silenced.
     "test_13826_write_gate.py",
     # #13036 row V2 (PR #13886) - the capstone payload contract for the live MCP
@@ -15173,6 +15264,19 @@ ROWED_BY_THIS_FOLD = (
     # named here, which a review caught. ⛔ The row is the flat `DEFAULT_FAST_WEIGHT`, not a local
     # reading (`#3400/#4348`).
     "test_own_site_fragment_targets.py",
+    # #14691 (PR #14723) — the T6 structure bundle's falsifiers. A file this fold ADDED,
+    # and its first cut shipped with NO surface row and NO `durations:` row at all: the
+    # required `manifest-integrity` leg redded (`manifest drift:
+    # ['test_14691_structure_evidence.py']`), and the larger half is the `#13826` shape
+    # recorded above — selection is surface->membership, so a file in no surface is
+    # selected by no diff class and the file's falsifiers would have run in NO CI leg,
+    # leaving the bundle's five verdicts guarded by nothing but prose. Listed here for
+    # the reason every row above states: the ENTRY-RULE pin iterates this EXPLICIT
+    # tuple, so a file nobody listed has no `durations:` row and nothing reds. ⛔ The row
+    # is the flat `DEFAULT_FAST_WEIGHT`, not a local reading — the refresher samples
+    # push-to-main runs, so a file a PR ADDS cannot have a junit figure yet
+    # (`#3400/#4348`).
+    "test_14691_structure_evidence.py",
 )
 
 
