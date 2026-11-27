@@ -1286,13 +1286,24 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
             #     on that retry"` left this leg GREEN), so `both succeed on that
             #     retry` is now needled too.
             # What is pinned is the SHIPPED mapping: the retry for the conflicts
-            # and the one-shot cancel, a persisting cause for the rest.
+            # and the one-shot cancel, a persisting cause for the rest. ⛔ THE
+            # MAPPING NEEDS ADJACENCY, NOT JUST VOCABULARY (round-37 review P3):
+            # the two members are only BOUND to their outcomes by the phrases
+            # below, and a swap of the two `57014` members — a `statement_timeout`
+            # succeeding and an operator cancel re-failing — satisfied every
+            # single-token needle and stayed GREEN. Each of the next two entries
+            # spans the member AND its outcome for exactly that reason.
             for needle in ("40001", "40P01", "57014", "rolled the counter back",
                            "starts from the same number", "retry it",
                            "both succeed on that retry",
                            "operator or driver cancel",
                            "only while its cause persists",
-                           "re-fails on the identical replay"):
+                           "re-fails on the identical replay",
+                           # the member->outcome bindings (round-37):
+                           "was an operator or driver cancel, both succeed on that retry",
+                           "only while its cause persists (a `statement_timeout`",
+                           # and the sentence may not re-attach the cascade:
+                           "a `57014` re-fails on the identical replay only while"):
                 assert needle in text, (
                     "the ARMED arm's RETRYABLE half is missing — an aborted "
                     "allocation rolls the counter back, so a replay starts "
