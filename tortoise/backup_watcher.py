@@ -291,8 +291,10 @@ def compute_status(
     confirmed, state PRESENT,   ``backup_set_missing``     ``backup_set_missing``
       no manifest                                          (#2374)
     confirmed, state PRESENT,   ``never`` — and in the     ``backup_set_missing``
-      no R2 prefix at all       census (the double-file    (#2374: state exists,
-                                tracked in #14769)         so not ``never``)
+      no R2 prefix at all AND   census (the double-file    (#2374: state exists,
+      org still in the census   tracked in #14769);        so not ``never``)
+                                NO per-org key once it
+                                leaves the census
     measured age ANY, no state  ``stamp_missing``          ``stamp_missing``
       AND org still in census
     measured age ANY, no state  ``ok`` / ``stale``         ``ok`` / ``stale``

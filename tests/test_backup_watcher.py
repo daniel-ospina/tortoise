@@ -2459,6 +2459,17 @@ def test_status_confirmed_state_org_without_manifest_is_backup_set_missing():
     assert degraded["per_team"]["team_a"] == "stale", degraded["per_team"]
     assert degraded["backup_set_missing"] == [], degraded["backup_set_missing"]
 
+    # …and arm (i) is ``never`` only while the org is STILL in ``orgs``: outside
+    # the census the kind's census still lists the subject, but ``per_team``
+    # carries NO key at all (the class table's row-5 qualifier — without it the
+    # row reads as ``never`` for a state-only org that left the census; the
+    # incident stays open there, pinned end-to-end by
+    # `test_watcher_census_shrink_does_not_falsely_resolve_backup_set_missing`).
+    outside = _status(orgs=[], r2_orgs=[], state_orgs=["team_a"],
+                      newest_ts_by_org={})
+    assert outside["per_team"] == {}, outside["per_team"]
+    assert outside["backup_set_missing"] == ["team_a"], outside["backup_set_missing"]
+
 
 def test_watcher_state_plus_prefix_gone_manifest_is_one_incident_not_two():
     """#9938, the transition that used to report two conditions for one org.
