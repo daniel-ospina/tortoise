@@ -2955,12 +2955,15 @@ def test_the_EXHIBITED_invented_quote_is_the_artifacts_quote():
 def test_the_S5_transacts_sentence_is_the_DROPPED_relations():
     r"""Reds if REPORT §5's dropped-relation sentence keeps a COUNT WORD.
 
-    ⛔ #14723 15th review, finding 3. `7379b02acb` corrected §5 to *"…after both
-    `transacts` rows were dropped"* and derived the two cells it named
-    (`REPORT.md:104`, `:179`) — this sentence kept the word. Measured on that
-    commit: reverting the line to the pre-commit singular (`after the `transacts`
-    row was dropped`) left **104 passed**, because
-    `test_no_FIGURE_in_the_two_documents_is_free` scans DIGITS and a count word is
+    ⛔ #14723 15th review, finding 3; figures RE-MEASURED by the 17th. `7379b02acb`
+    corrected §5 to *"…after both `transacts` rows were dropped"* and derived the
+    two cells it named (`REPORT.md:104`, `:179`) — this sentence kept the word.
+    Measured on `7379b02acb`'s own tree: baseline **103 passed**, and with the
+    singular (`after the `transacts` row was dropped`) **still 103 passed** —
+    GREEN. (The 15th review reported 104 for that mutant: 104 is the count on the
+    LATER `e366cb0a14` tree, so the figure had been carried from the wrong
+    baseline. The green is what matters and it reproduces.)
+    `test_no_FIGURE_in_the_two_documents_is_free` scans DIGITS, so a count word is
     invisible to it. Same class as the exhibit above: the copy, not the figure.
     """
     rows = _score()["A4_no_invention"]["relations_not_written"]
@@ -3808,11 +3811,15 @@ def test_the_after_ingest_block_cost_table_and_remaining_figures_are_derived():
     assert re.match(rf"{claim['quotes_total']} `quote` spans ", quote_line), (
         f"§3's quote-span claim is not the claim layer's "
         f"{claim['quotes_total']}: {quote_line!r}")
-    # ⛔ LINE-SCOPED, and the reason matters: `Examples of the invented 12` occurs
-    # TWICE — here, and in §8.3's own record of this very mutant. A document-wide
-    # `in report` read is therefore satisfied by the RECORD and stays green while
-    # the CLAIM drifts (measured: mutating this line kept the suite green on
-    # cf9e1221). The claim line is the one that starts with it.
+    # ⛔ LINE-SCOPED, and the reason matters (#14723 17th review, LOW: this
+    # comment used to say the LITERAL `Examples of the invented 12` occurs TWICE
+    # — true on `cf9e1221` when §3 still counted 12, but §3 now counts the
+    # artifact's 9, so the literal occurs ONCE and the two headers no longer
+    # share it). The READ is unchanged and is the stronger one either way: §8.3
+    # keeps a record of this very mutant, so a document-wide `in report` read is
+    # satisfied by the RECORD and stays green while the CLAIM drifts (measured: a
+    # mutation of this line kept the suite green on `cf9e1221`). The claim line is
+    # the one that starts with it.
     examples = _report_line(r"^Examples of the invented")
     assert examples, "REPORT.md has no invented-examples header line"
     assert examples.startswith(f"Examples of the invented {claim['invented']}"), (
