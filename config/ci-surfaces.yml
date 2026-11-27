@@ -135,8 +135,10 @@ version: 1
 # `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
 # derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. Measured on
 # this rebase: two copies arrived, one naming `origin/main` `c1c8df1a3817` with `#14700`'s row, one
-# naming the same base with this change's row, and NEITHER described the merged tree (both said
-# 827.4/827.5 and a pool count that this block at this head no longer states). Neither
+# naming the same base with this change's row, and NEITHER described the merged tree — that
+# fold's own MERGE re-derived 827.4/827.5 over nine and two shards (`23e9596240`'s manifest), and
+# this block states no pool count FOR THIS HEAD, because a count here would be a live claim.
+# Neither
 # side is picked: both are DELETED and the paragraph above is a fresh re-derivation with
 # `--emit-push-matrix` on this merged tree. Each earlier fold's figures live on the commit that
 # measured them (`git log`), which is where a spliced copy belongs.

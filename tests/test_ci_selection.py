@@ -10266,7 +10266,9 @@ def test_the_fast_shards_header_states_no_live_pool_census():
     addition RELATIVE to `main` — so the sentence contradicted itself as well as the measurement.
     Nothing graded it, and the copy that preceded it is recorded ONLY by its retraction: the same
     block declares that a copy stating `1333 here against 1333` is FALSE at that fold, so no
-    reachable blob still carries that spelling (measured: `git show 06c10adfb9:config/ci-surfaces.yml`).
+    reachable blob STATES that spelling as a claim — it survives only quoted inside that retraction
+    (`git show 06c10adfb9:config/ci-surfaces.yml`, one occurrence, and the shipped block carries
+    none).
 
     ⛔ THE FIX IS THE BLOCK'S OWN RULE, not a tighter figure. A count that must be re-derived on
     every fold, graded by nothing, is a claim that rots — and grading the VALUE here would be worse
