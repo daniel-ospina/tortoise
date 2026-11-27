@@ -396,8 +396,50 @@ def test_the_renderer_refuses_the_all_surface_combination(tmp_path):
             "artifact the refusal exists to prevent")
 
 
+#: THE PER-ITEM BUDGET THIS ONE ARM DECLARES, because its cost is TWO FULL-TREE
+#: CENSUSES (`--markdown --all-surface` AND `--json --all-surface`, ~9,239 rows
+#: each) and `pyproject.toml`'s `timeout = 300` note says exactly what an item
+#: like that must do: "a leg that needs a longer single item must SAY so —
+#: `--timeout=N` in the workflow or `@pytest.mark.timeout(N)` on the test".
+#: MEASURED, not guessed: ~140 s on an idle box (54.5 s + 85.0 s of census), and the
+#: shipped 300 s cap is crossed by load alone — CI run 45926492586, shard `(h)`:
+#: `FAILED tests/test_13098_cypher_inventory.py::test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish
+#: - Failed: Timeout (>300.0s) from pytest-timeout.` ⛔ THAT RED IS NOT THIS
+#: SUITE'S GUARD AND NOT `#14741`'s: the cost is the census's AST walk, measured
+#: on BOTH trees over the same tree — `origin/main`'s `--markdown --all-surface`
+#: 51.0 s / 9,239 rows vs this head's 54.5 s / 9,239 rows, i.e. the boundary guard
+#: this PR adds does not move it (it runs in the `--render` branch only, and
+#: `--render` with `--check` is REFUSED here in 0.08 s). Two censuses is what the
+#: arms below need — one per output verb, each asserting its own PAYLOAD, because
+#: an rc-only arm cannot tell a wide census from the narrow one (`#14625` review,
+#: P2) — so the budget is what moves, not the coverage. 600 s is 4.3x the idle
+#: cost and ~2x above the observed failure point, and it is the same bound
+#: `tests/test_7951_delete_resurrection.py` declares for its own cold-load arm.
+_DOUBLE_CENSUS_BUDGET_S = 600
+
+
+def _item_timeout_s(item) -> float:
+    """The pytest-timeout budget that will ACTUALLY bound ONE item.
+
+    Read from the plugin's own resolver (`_get_item_settings`) rather than
+    re-implemented, so the marker -> `--timeout` -> `PYTEST_TIMEOUT` -> ini
+    precedence cannot drift from pytest-timeout's — the same read
+    `tests/test_7951_delete_resurrection.py::_item_budget_s` makes, for the same
+    reason (a hand-rolled resolver silently graded an env-rung `PYTEST_TIMEOUT`
+    at the ini value there). A non-positive or absent budget is `inf`, because
+    pytest-timeout arms NOTHING in that case: "no bound" is the true reading,
+    not `0`.
+    """
+    import pytest_timeout
+
+    timeout = pytest_timeout._get_item_settings(item).timeout
+    value = float(timeout) if timeout is not None else 0.0
+    return value if value > 0 else float("inf")
+
+
+@pytest.mark.timeout(_DOUBLE_CENSUS_BUDGET_S)
 def test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish(
-        tmp_path):
+        tmp_path, request):
     """`--check --render <path>` must not accept a write it then silently drops.
 
     ⛔ THE NO-OP-GATE SHAPE, measured at #14625's round-4 review: `main()` returns
@@ -410,6 +452,24 @@ def test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish(
     not happen is exactly the "gate that silently does nothing" class this module
     exists to refuse. 2 (could not run) is the honest answer; 0 is not.
     """
+    # ⛔ THE BUDGET IS ASSERTED, NOT ASSUMED. Dropping the decorator above leaves
+    # this arm grading itself with `pyproject.toml`'s 300 s, which is the budget
+    # MEASURED to be flaked by load alone (run 45926492586 above) — and nothing
+    # else in the file would notice the drop, because the arms below have no
+    # clock of their own. Read through the plugin's resolver so a `--timeout` or
+    # `PYTEST_TIMEOUT` that arrived from somewhere else is graded here too
+    # instead of being missed (`tests/test_7951_delete_resurrection.py` pins the
+    # identical pair for its cold-load arm).
+    budget = _item_timeout_s(request.node)
+    assert budget == float(_DOUBLE_CENSUS_BUDGET_S), (
+        f"this arm must carry @pytest.mark.timeout({_DOUBLE_CENSUS_BUDGET_S}); it "
+        f"resolves to {budget:g} s. Its TWO wide censuses cost ~140 s idle and "
+        "crossed the 300 s default under CI load (`Failed: Timeout (>300.0s)`, "
+        "run 45926492586 shard (h)), so a lower budget hands this arm back to a "
+        "flake that reds the required `python-ci-gate` for a diff it does not "
+        "touch — and the assertions below cannot see that."
+    )
+
     out = tmp_path / "both.md"
     proc = subprocess.run(
         [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
