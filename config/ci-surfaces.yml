@@ -58,7 +58,7 @@ version: 1
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
 # reader of the prose can see. On THIS tree — `origin/main` `2e9c5cdfbb` folded in, over
-# `e2a9c695adfb`, the fold THIS BRANCH de-spliced (the de-splice is a commit of this branch's own,
+# `234d7db4`, the fold THIS BRANCH de-spliced (the de-splice is a commit of this branch's own,
 # not an act that fold performed — the possessive spelling credited it with an edit it never made)
 # — the rows below landed across the folds and the
 # ones before them. ⛔ NO POOL SIZE, NO ROW COUNT AND NO FOLD LIST here either — the rule the
