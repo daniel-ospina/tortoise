@@ -12483,6 +12483,10 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
           compare, so arrival order stands (the prior set IS what existed
           before this capture); a tie keeps it too, since a zero-length
           predecessor window is legal.
+          ⛔ The backfill DIRECTION is now DECLINED rather than emitted (see the
+          branch below): the record's `superseded` side must already be a graph
+          id, so this channel cannot carry it, and emitting it anyway produced a
+          fail-open skip with a warning that claimed success.
         """
         if not new_id or not older_id or new_id == older_id:
             return False
@@ -12551,29 +12555,27 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "claim cannot be the closed side. The declared edge is kept as "
                 "it was; neither interval is closed")
             return False
-        superseded, supersedes_by = older_id, new_id
-        order = "arrival-order"
-        if (superseded, supersedes_by) not in pt_record_pairs:
-            pt_record_pairs.add((superseded, supersedes_by))
+        # Only ONE direction reaches here, so the record is written once and
+        # says exactly that: no `order` variable, because a field that can only
+        # ever hold one value reads as if the other direction existed.
+        if (older_id, new_id) not in pt_record_pairs:
+            pt_record_pairs.add((older_id, new_id))
             supersessions.append({
-                "superseded": superseded, "supersedes_by": supersedes_by,
+                "superseded": older_id, "supersedes_by": new_id,
                 "evidence": "declared NAND contradiction across captures — "
                             "the older claim's interval is closed (retained, "
-                            "never deleted)" +
-                            ("" if order == "arrival-order"
-                             else f"; ordered by {order}")})
+                            "never deleted)"})
             link_before_create.append({
                 "searched_for": f"prior claim '{older_content[:60]}'",
                 "found": True,
-                "note": f"contradicted by point {supersedes_by} — the older "
-                        "claim's interval is closed (CORRECTS, retained)"})
+                "note": f"contradicted by point {new_id} — the older claim's "
+                        "interval is closed (CORRECTS, retained)"})
         warnings.append(
             f"operator endpoint is an EARLIER-CAPTURE claim (#14198): {where} "
             f"resolved to prior point {older_id[:20]!r} outside this capture — "
             f"the contradiction is recorded as a supersession (closed interval "
-            f"{superseded[:20]!r} ← {supersedes_by[:20]!r}, {order}), so the "
-            "older claim is retained and closed rather than left as a second "
-            "live truth")
+            f"{older_id[:20]!r} ← {new_id[:20]!r}), so the older claim is "
+            "retained and closed rather than left as a second live truth")
         return True
 
     for op in _all_ops:

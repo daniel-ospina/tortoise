@@ -182,7 +182,7 @@ supersessions naming the pair: 1
   evidence="declared NAND contradiction across captures — the older claim's interval is closed (retained, never deleted)"
 
 warnings naming the pair:
-  - operator endpoint is an EARLIER-CAPTURE claim (#14198): NAND dst 'ColdPath Logistics holds a validated cold-chain certificate' resolved to prior point 'pt_fc8b3e47bb7e05993' outside this capture — the contradiction is recorded as a supersession (closed interval 'pt_fc8b3e47bb7e05993' ← 'pt_9af28546e85d11f41', arrival-order), so the older claim is retained and closed rather than left as a second live truth
+  - operator endpoint is an EARLIER-CAPTURE claim (#14198): NAND dst 'ColdPath Logistics holds a validated cold-chain certificate' resolved to prior point 'pt_fc8b3e47bb7e05993' outside this capture — the contradiction is recorded as a supersession (closed interval 'pt_fc8b3e47bb7e05993' ← 'pt_9af28546e85d11f41'), so the older claim is retained and closed rather than left as a second live truth
 
 operators naming the pair : 0
 
@@ -206,9 +206,10 @@ hold is not a closure. The shipped number still requires a fresh-graph
 re-ingest (the 5-document run in #14198's owner comment, reading doc-05's
 `supersessions`), and this file is not a substitute for it. It also cannot
 exercise gate 3: the receipt's point rows carry no `when`, so the replay takes
-the arrival-order fallback (the instant/precision cases are covered by
-`test_a_backfill_closes_the_claim_world_time_says_is_older` and
-`test_a_world_time_ordering_is_decided_on_instants_not_date_prefixes`).
+the arrival-order fallback: the backfill branch DECLINES (§6.5), and the two
+instant/precision shapes are covered by
+`test_a_backfill_DECLINES_and_says_so` and
+`test_a_world_time_ordering_is_decided_on_instants_not_date_prefixes`.
 
 ## 4. Compose with retrieval — what a reader sees now
 
