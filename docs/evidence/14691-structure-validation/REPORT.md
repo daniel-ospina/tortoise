@@ -944,7 +944,9 @@ and three of the P2s, and states the residual rather than implying it away.
   neighbours` → `20`, `false on 5/5` → `false on 6/5` (D2) and `containment is absent
   entirely (0 edges)` → `(1 edges)` (§3/A2 finding 5) each left `97 passed`.
   `test_the_door_EVIDENCE_cells_state_the_artifacts_numbers` derives every one of those
-  figures from the artifact that produces it; all four mutants now red.
+  figures from the artifact that produces it — but only until this paragraph existed:
+  §8.18 measured two of the four GREEN again once §8.17 quoted the literals they
+  grep for, and both arms are now scoped to the owning cell.
 - **P2 — the report's COPIES of the door citations were free.** `readback.json`'s copies are
   pinned to code content, but the report repeats them: `navigation.py:172-179` → `166-173`
   (the round-10 mutant, applied to the prose) and `sdk.py:62739-62758` → `61000-61019` both
@@ -968,12 +970,51 @@ and three of the P2s, and states the residual rather than implying it away.
   §1–§7. The figures it VERIFIED are all now pinned (§8.17's third bullet and
   `test_the_CLAIM_layer_and_A2_figures_are_the_artifacts`: `(11 + 27 + 3 + 9 = 50)`,
   `12 of the 50`, the invented `9`, and `6 ownedBy rows are only 4 pairs` — each reds on
-  `+1`, measured). **A global rule was tried and refused**: requiring every prose figure to
+  `+1` at the sentence that owns it, re-measured in §8.18 after this section's own
+  quotes had made two of them free). **A global rule was tried and refused**: requiring every prose figure to
   be carried by exactly one artifact value reds on honest small integers (`2 products`,
   `5 features`, `3 teams` are non-distinctive by construction) and the only way to keep it
   green was an allowlist of 24 figures — the hole wearing a gate's clothes. Closing the rest
   honestly means pinning the sentence the next figure lives in, which is a per-sentence
   obligation no global rule can discharge; the count is left to whoever re-measures it.
+
+### 8.18 What the sixteenth round closed (the review log that graded its own cells)
+
+This lane folded `origin/main` again (`0204a219aa90`, `#14741`), which made the
+`fast_shards` header block's base token name a tree this head no longer folds — the
+third occurrence of the rot that block documents, corrected there in the same fold-named
+shape (`config/ci-surfaces.yml`), with every figure re-derived on the merged tree (nine
+shards at 827.8 s, two at 827.7 s, `watchdog_minutes 28`, headroom 2.03, `fast_pool()`
+1342 against 1341 on the fold, delta exactly `tests/test_14691_structure_evidence.py`,
+reverse delta empty).
+
+The substantive finding is §8.17's own: **the review log quoted every literal the
+round-15 pins searched for, so the log graded the cells it described.** Both arms read
+`flat` — the whole document, whitespace-collapsed — and §8.17's prose spells
+`**0 rows** each`, `false on 5/5`, `containment is absent entirely (0 edges)`,
+`(11 + 27 + 3 + 9 = 50)` and `12 of the 50` verbatim (two of them across a line break,
+which `flat` also erases). Measured at `c76156f`, each mutant applied to the OWNING cell
+alone, whole file:
+
+| mutant, owning cell only | before | after |
+|---|---|---|
+| D4 `**0 rows** each` -> `**1 rows** each` | GREEN | RED |
+| D2 `false on 5/5` -> `false on 6/5` | GREEN | RED |
+| §3/A2 finding 5 `(0 edges)` -> `(1 edges)` | GREEN | RED |
+| §7 `(11 + 27 + 3 + 9 = 50)` -> `12 + 27 + 3 + 9 = 50` | GREEN | RED |
+| §3/A4 `12 of the 50` -> `13 of the 50` | GREEN | RED |
+
+So §8.17's "all four mutants now red" held only until §8.17 existed: the paragraph that
+recorded the fix is what made its own pins vacuous. Both arms now grade the CELL
+(`_report_table_row`) or the CLAIM's own paragraph (`_report_paragraph`), never the
+document — nine mutants (the five above plus the audit partition, the invented count, the
+ownedBy pair count and the asymmetric row total) each red at the owning site alone,
+measured. The citation and bytes arms were checked for the same leak and are not
+vulnerable: they add or scan copies rather than asking whether a literal appears anywhere
+(measured — a moved `sdk.py` range and a `+1` bytes figure each red alone).
+
+⛔ The class, not the instance: **a pin whose haystack is the document that records its
+own review is a pin over the review.** Scope every figure to the cell that owns it.
 
 ---
 

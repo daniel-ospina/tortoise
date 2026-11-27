@@ -470,6 +470,22 @@ def _assert_no_duplicate_figure(got: str, expected: str, why: str, unit: str) ->
 
 
 
+def _report_table_row(pattern: str) -> str:
+    """The ONE REPORT.md table row matching `pattern`, flattened — the CELL that owns
+    the figure, never the document.
+
+    ⛔ A `literal in flat` pin is satisfied by ANY copy of the literal, and §8 is a
+    review-round log that QUOTES every figure it reports on — so the log graded the
+    cell it describes, and the cell could drift free (#14691 review, round 15, found
+    at `c76156f`): mutating the D4 cell's `**0 rows** each`, the D2 cell's
+    `false on 5/5`, or §3/A2 finding 5's `(0 edges)` left the owning arm GREEN,
+    because §8.17 re-states all three.
+    """
+    hits = [ln for ln in _report().splitlines() if re.search(pattern, ln)]
+    assert len(hits) == 1, (pattern, len(hits))
+    return " ".join(hits[0].split())
+
+
 def _report_paragraph(pattern: str) -> str:
     """The whole markdown paragraph whose FIRST line matches `pattern`, joined.
 
@@ -1423,9 +1439,25 @@ def test_the_door_EVIDENCE_cells_state_the_artifacts_numbers():
 
     Each figure below is DERIVED from the artifact that produces it, so the cell
     cannot state a number its own measurement denies.
+
+    ⛔ AND `flat` RE-OPENED TWO OF THEM (round 16, §8.18): §8.17 quotes `**0 rows**
+    each` and `false on 5/5` verbatim, so those mutants were GREEN again at `c76156f`
+    once the section that recorded this fix existed. Each figure is pinned in the
+    ROW that owns it (`_report_table_row`), never in the document.
     """
-    flat = " ".join(_report().split())
     witness = _readback()["link_witness"]
+
+    # ⛔ EACH FIGURE IS GRADED IN THE CELL THAT OWNS IT, never in the flattened
+    # document. `flat` is how this arm was VACUOUS for two of its four figures
+    # (round 15, found at `c76156f`): §8.17 — the paragraph this arm's own fix
+    # added — quotes `**0 rows** each` and `false on 5/5` verbatim, so mutating the
+    # D4 or D2 CELL left the suite GREEN while the log still spelled the number.
+    # D4's `19 real neighbours` and finding 5's `(0 edges)` survived only because
+    # the log happened to spell them differently.
+    d4_row = _report_table_row(r"^\| \*\*D4\*\* \|")
+    d2_row = _report_table_row(r"^\| \*\*D2\*\* \|")
+    finding5 = _report_line(r"^5\. \*\*`team → role` containment")
+    assert finding5, "REPORT §3/A2 has no finding 5 row to grade"
 
     def expand_rows(name: str) -> int:
         reply = witness[name]["expand_relationships"]["reply"]
@@ -1436,14 +1468,14 @@ def test_the_door_EVIDENCE_cells_state_the_artifacts_numbers():
     zero = {name: expand_rows(name) for name in ("Amara Osei", "Platform team", "event-bus")}
     assert lc_rows == 1, f"the expand door returned {lc_rows} rows for Lumen Core"
     assert set(zero.values()) == {0}, zero
-    assert f"Lumen Core: {lc_rows} row" in flat, (
+    assert f"Lumen Core: {lc_rows} row" in d4_row, (
         "REPORT's D4 evidence does not state the expand door's own row count "
         f"({lc_rows})")
     neighbours = witness["Lumen Core"]["explore_neighbour_count"]
     assert neighbours != lc_rows, (neighbours, lc_rows)
-    assert f"{neighbours} real neighbours" in flat, (
+    assert f"{neighbours} real neighbours" in d4_row, (
         f"REPORT's D4 evidence does not state the witness's {neighbours} neighbours")
-    assert f"**{zero['Amara Osei']} rows** each" in flat, (
+    assert f"**{zero['Amara Osei']} rows** each" in d4_row, (
         "REPORT's D4 evidence does not state the zero-row count the door returned "
         "for the three structurally-connected nodes")
 
@@ -1451,13 +1483,13 @@ def test_the_door_EVIDENCE_cells_state_the_artifacts_numbers():
     probes = _score()["A5_retrieval"]["probes"]
     false = sum(1 for p in probes if p["walk_root_is_entity"] is False)
     assert false == len(probes) and probes, (false, len(probes))
-    assert f"false on {false}/{len(probes)}" in flat, (
+    assert f"false on {false}/{len(probes)}" in d2_row, (
         f"REPORT's D2 evidence does not state `false on {false}/{len(probes)}`")
 
     # §3/A2 finding 5 — `team -> role` containment is EMPTY in the artifact
     containment = _score()["A2_edges"]["team_role_containment"]
     assert containment == [], containment
-    assert f"containment is absent entirely ({len(containment)} edges)" in flat, (
+    assert f"containment is absent entirely ({len(containment)} edges)" in finding5, (
         "REPORT §3/A2's finding 5 does not state the artifact's own count of "
         f"team->role containment edges ({len(containment)})")
 
@@ -3599,11 +3631,29 @@ def test_the_CLAIM_layer_and_A2_figures_are_the_artifacts():
     pinned to the fields that produce them, and §8 records the residual: a prose figure
     that is not named here is graded by set membership only, which is why the next
     round should pin the sentence it is about rather than widen this arm.
+
+    ⛔ AND `flat` RE-OPENED FIVE OF THEM (round 16, §8.18): §8.17 quotes
+    `(11 + 27 + 3 + 9 = 50)` and `12 of the 50` verbatim (the A2 tally's counts too),
+    so those mutants were GREEN again at `c76156f`. Each figure is pinned in the
+    PARAGRAPH that owns it (`_report_paragraph`), never in the document.
     """
     claim = _score()["claim_layer"]
     audit = _audit()
     a2 = _score()["A2_edges"]
-    flat = " ".join(_report().split())
+
+    # ⛔ EVERY FIGURE BELOW IS GRADED IN THE CLAIM'S OWN PARAGRAPH, never in the
+    # flattened document. `flat` is how three of these pins were VACUOUS at
+    # `c76156f`: §8.17 quotes `(11 + 27 + 3 + 9 = 50)`, `12 of the 50` and
+    # `(0 edges)` verbatim (and the A2 tally's counts), so mutating §7's or §3/A4's
+    # own copy left this arm GREEN while the review log still spelled the number.
+    partition = _report_paragraph(r"buckets partition its")
+    assert partition, "REPORT §7 has no decider/audit partition paragraph to grade"
+    support = _report_paragraph(r"The unit of support is a TURN")
+    assert support, "REPORT §3/A4 has no sentence-scope paragraph to grade"
+    invented = _report_paragraph(r"the one this report carries")
+    assert invented, "REPORT §3/A4 has no invented-count paragraph to grade"
+    tally = _report_paragraph(r"One line that counts it")
+    assert tally, "REPORT §3/A2 has no direction tally paragraph to grade"
 
     # the DECIDER's four buckets, and their sum — the sentence that had it wrong once
     buckets = (claim["verbatim"], claim["paraphrase"], claim["summary_in_one_turn"],
@@ -3612,7 +3662,7 @@ def test_the_CLAIM_layer_and_A2_figures_are_the_artifacts():
     stated = (
         f"({buckets[0]} + {buckets[1]} + {buckets[2]} + {buckets[3]} = "
         f"{claim['quotes_total']})")
-    assert stated in flat, (
+    assert stated in partition, (
         "REPORT's §7 partition sentence does not state the decider's own buckets — "
         f"expected {stated!r}")
 
@@ -3621,29 +3671,29 @@ def test_the_CLAIM_layer_and_A2_figures_are_the_artifacts():
     assert sum(audit_buckets) == audit["quotes_total"], audit_buckets
     audit_stated = (f"({audit_buckets[0]} + {audit_buckets[1]} + {audit_buckets[2]} = "
                     f"{audit['quotes_total']})")
-    assert audit_stated in flat, (
+    assert audit_stated in partition, (
         "REPORT's §7 audit partition does not state the audit's own buckets — "
         f"expected {audit_stated!r}")
 
     # the sentence-scope count AND the invented count, each from its own field
     assert claim["invented"] != claim["below_sentence_band"], claim
-    assert f"{claim['below_sentence_band']} of the {claim['quotes_total']}" in flat, (
+    assert f"{claim['below_sentence_band']} of the {claim['quotes_total']}" in support, (
         f"REPORT does not state `{claim['below_sentence_band']} of the "
         f"{claim['quotes_total']}` for the sentence-scope population")
-    assert f"**invented** count is **{claim['invented']}**" in flat, (
+    assert f"**invented** count is **{claim['invented']}**" in invented, (
         f"REPORT does not state the decider's invented count ({claim['invented']})")
 
     # A2: the row total, the distinct pairs, and the ownedBy rows behind the difference
     totals = a2["totals"]
     rows = totals["asymmetric_rows_correct"] + totals["asymmetric_rows_inverted"]
-    assert f"**{rows} asymmetric structural rows**" in flat, (
+    assert f"**{rows} asymmetric structural rows**" in tally, (
         f"REPORT does not state the artifact's asymmetric row total ({rows})")
     owned_rows = sum(r["n_edges"] for r in a2["ownership"])
     owned_pairs = len(a2["ownership"])
-    assert f"{owned_rows} `ownedBy` rows are only {owned_pairs} pairs" in flat, (
+    assert f"{owned_rows} `ownedBy` rows are only {owned_pairs} pairs" in tally, (
         "REPORT does not state the ownedBy row/pair counts the distinct-pair total "
         f"rests on ({owned_rows} rows / {owned_pairs} pairs)")
-    assert f"**{totals['asymmetric_pairs_inverted']} distinct pairs**" in flat, (
+    assert f"**{totals['asymmetric_pairs_inverted']} distinct pairs**" in tally, (
         f"REPORT does not state the artifact's inverted-pair count "
         f"({totals['asymmetric_pairs_inverted']})")
 
