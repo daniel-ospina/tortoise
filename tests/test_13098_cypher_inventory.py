@@ -3259,7 +3259,17 @@ def test_a_DAMAGED_boundary_whose_ENCLOSING_worktree_COINCIDES_with_it_cannot_pe
     `absolute-git-dir = <outer>/.git`, `_resolves_to_own_gitdir = False`,
     `_boundary_is_unaskable = False`, `--render` rc 0, `8 -> 89` bytes.
 
-    This arm pins the `== boundary` branch: revert it to `return False` and it reds alone.
+    ⛔ THE MUTANT MOVED WITH THE FIX, and naming a branch this head no longer has would
+    send the next lane to mutate code that is not here. There is no `== boundary` branch to
+    revert: the pointer form has ONE decision, so `return
+    not _resolves_to_own_gitdir(boundary)` → `return False` is the applicable mutant, and it
+    reds FIVE arms, not one (measured: this arm plus
+    `test_a_DANGLING_git_entry_on_a_BOUNDARY_is_asked_about_SOMEBODY_ELSE`,
+    `test_a_DANGLING_git_entry_ON_ROOT_is_asked_about_SOMEBODY_ELSE`,
+    `test_a_BOUNDARY_git_DISOWNS_is_asked_about_SOMEBODY_ELSE` and
+    `test_a_DAMAGED_boundary_under_a_RETARGETED_enclosing_repo_cannot_permit_what_it_tracks`).
+    This arm's own contribution to that red set is the COINCIDENCE shape — the enclosing work
+    tree made equal to the boundary — which no other arm constructs.
     """
     config = ["-c", "user.email=a@b", "-c", "user.name=a"]
     repo = _scratch_repo(tmp_path, needs_non_utf8=False)  # ROOT: tracks nothing here
@@ -5867,9 +5877,12 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # answers `--show-toplevel` with a directory that is neither the boundary nor an
         # ancestor of it — indistinguishable from the healthy arm above by ancestor-hood
         # alone, and read as a permit it replaced content the damaged boundary's OWN index
-        # still held, at rc 0. Only the GITDIR identity separates the two, and this is the
-        # only arm that pins it: revert `_resolves_to_own_gitdir` to the ancestor test and
-        # this one reds while every other arm stays green.
+        # still held, at rc 0. Only the GITDIR identity separates the two, and this arm
+        # constructs the `elsewhere`-answer form of it. ⛔ NOT "the only arm that pins it":
+        # reverting the pointer decision to the pre-round-4 code (equality permit + ancestor
+        # test) reds this arm TOGETHER WITH the coincident-work-tree arm below and the
+        # healthy-ancestor counterweight — 3 arms, measured. The single-arm claim was true
+        # when written and was falsified by the counterweight this same delta added.
         "test_a_DAMAGED_boundary_under_a_RETARGETED_enclosing_repo_cannot_permit_what_it_tracks",
         # ⛔ AND THE SAME DEFECT WHERE THE COINCIDENCE HIDES IT (#14741 review, cycle 5,
         # **P1**): an ENCLOSING repository retargeted to point AT this boundary makes its
