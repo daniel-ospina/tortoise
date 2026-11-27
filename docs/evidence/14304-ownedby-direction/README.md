@@ -68,26 +68,52 @@ is **invisible to the read door** that answers *"what does this person own?"*.
 
 ### 3a. The assertions are NOT vacuous — they red on the parent tree
 
-Measured in a detached worktree at the parent commit `32ce876fbffa`
-(`git worktree add /tmp/prefix-14304 --detach HEAD`), with a 3-test probe that
-imports only what exists there:
+The probe is **committed with this bundle**: `probe_prefix_14304.py`. It is a
+standalone script (deliberately outside `tests/`, so no CI surface collects it)
+that mirrors the three committed assertions and imports ONLY what exists on the
+parent commit — which is why the committed suite itself cannot be the probe:
+`tests/test_relation_orientation_14304.py` imports `orient_declared_pair`, a
+symbol the parent tree does not have.
 
-```text
-$ uv run python tools/test_lane.py run -- tests/prefix_probe_14304.py -q
-_________________ test_the_corpus_pair_is_written_owned_first __________________
->       assert (edges[0].src_id, edges[0].dst_id) == (ACCOUNT, DANA)
-E       AssertionError: assert ('subj-dana',...ordicfreight') == ('obj-nordicf..., 'subj-dana')
-______________________ test_the_writer_receives_the_declared_orientation ______
->       assert [c[:3] for c in writer.calls] == [("ownedBy", ACCOUNT, DANA)]
-E       AssertionError: assert [('ownedBy', ...rdicfreight')]
-________________________ test_the_receipt_declares_the_correction _____________
->       assert result["edges"][0]["orientation"] is not None
-E       KeyError: 'orientation'
-3 failed in 41.22s
+⛔ **A proof record is only evidence if a reader can re-run it.** This section
+used to cite a transcript whose probe was committed nowhere and whose command
+named a file no reader has, and the suite's docstring pointed at the lane's
+`WORKTREE-REPORT.md`, which is gitignored by design (`AGENTS.md`). The
+re-runnable command, against the parent of the fix commit (`344a1c086e06` — the
+parent of `2cea260550a3`):
+
+```bash
+git worktree add --detach /tmp/pfx-14304 344a1c086e06
+cp docs/evidence/14304-ownedby-direction/probe_prefix_14304.py /tmp/pfx-14304/
+( cd /tmp/pfx-14304 && python probe_prefix_14304.py )   # → exit 1, 3 failed
+git worktree remove --force /tmp/pfx-14304
 ```
 
+Measured there (stdout; the pack registry prints its lifecycle notes on stderr):
+
+```text
+$ python probe_prefix_14304.py
+FAILED test_the_corpus_pair_is_written_owned_first: AssertionError:
+FAILED test_the_writer_receives_the_declared_orientation: AssertionError:
+FAILED test_the_receipt_declares_the_correction: KeyError: 'orientation'
+0 passed, 3 failed
+```
+
+The same script on the FIXED tree (`python probe_prefix_14304.py` from the repo
+root) prints `3 passed, 0 failed` — both directions are measured, not asserted.
+
 That is the inversion, at the seam: the plan hands `link_entities` the pair in
-the order the sentence was written.
+the order the sentence was written, and the receipt has no field in which the
+correction could be declared.
+
+⚠️ **Where the original run was made, stated rather than relabelled.** The first
+run of this probe was made at `32ce876fbffa`, the main tip the fix branched from
+— an ANCESTOR of the parent, six commits behind this bundle's head. The two trees
+are identical in exactly the code these assertions exercise
+(`git diff 32ce876fbffa 344a1c086e06 -- tortoise/relation_write.py
+tortoise/relation_guards.py` is EMPTY), so the reds hold at either; the parent is
+named above because "the parent commit" is a claim about the fix, and
+`32ce876fbffa` is not the parent of `2cea260550a3`.
 
 ### 3b. The same emission, on the fixed code
 

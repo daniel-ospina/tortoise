@@ -28,8 +28,11 @@ reasoning `tests/test_relation_write_11237.py` records).
 owned_first` and `test_the_writer_receives_the_declared_orientation` RED on it
 (both assert the exact id order handed to the writer), and
 `test_the_receipt_declares_the_correction` reds too (the pre-fix receipt carries
-no `orientation` key at all). Measured, not asserted: see the lane's
-`WORKTREE-REPORT.md` for the pre-fix run.
+no `orientation` key at all). Measured, not asserted — and re-runnable:
+`docs/evidence/14304-ownedby-direction/probe_prefix_14304.py` mirrors those three
+assertions against the parent tree, with the transcript and the exact command in
+that bundle's `README.md` §3a. (⛔ Not the lane's `WORKTREE-REPORT.md`: it is
+gitignored by design, so a citation to it is unverifiable for every other reader.)
 """
 from __future__ import annotations
 
