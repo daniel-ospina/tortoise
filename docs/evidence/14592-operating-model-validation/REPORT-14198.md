@@ -258,9 +258,10 @@ the *surviving* claims to rank first) is neither implemented nor needed here.
 | **negative (backfill does not block a refuter)** | a DECLINED pair must not spend the one-closure-per-prior budget: a later refuter of the same prior with a forward world date still closes it, and the declined pair keeps its edge — pre-fix `_closed_prior_ids.add` ran before the decline, so the forward refuter returned with no record AND no warning while the only line about that prior asserted it was the newer fact | ❌ | ✅ |
 | **negative (decline claims no retention)** | the decline's warning does not promise an edge it cannot keep: on the `partial` route the payload drops the operand and says so, on the `resolved` route it wires it — asserted on both routes, because the first wording ("the declared edge is kept as it was") was false on the route the corpus itself ran | ❌ | ✅ |
 | **negative (another producer already closed it)** | a prior closed in the SAME payload by a different producer (a point carrying a `supersedes` ref) must not swallow this declaration: `_closed_prior_ids` is this arm's own budget, so appending a second record and `continue`ing deleted the refutation from BOTH representations — the consumer skips a terminal target with a bare `continue` (no warning, not even a `skipped` entry) — while the warning attributed the closure to this pair. Now the NAND is kept on the wiring route and the receipt names the other successor. ⚠️ Reds on base only on the warning half; the structural half is a pin | ⚠️ half | ✅ |
-| **negative (cross-producer warning is route-aware)** | the same case on the `partial` route — the shape the #14592 receipt ran — must NOT claim the edge was kept: it falls through to `operator dropped: …`, so the warning says the edge is dropped as before and the payload is asserted to match. (The first wording promised retention unconditionally, which is the very contradiction the decline's warning is required to avoid) | ✅ (pin) | ✅ |
+| **negative (cross-producer warning is route-aware)** | the same case on the `partial` route — the shape the #14592 receipt ran — must NOT claim the edge was kept: it falls through to `operator dropped: …`, so the warning says the edge is dropped as before and the payload is asserted to match. (The first wording promised retention unconditionally, which is the very contradiction the decline's warning is required to avoid.) RED on base — there is no arm, so no "already closed by" line exists at all | ❌ | ✅ |
 | **positive (fuzzy closure discloses its band)** | a closure decided on an edge-trimmed ("recall band", #8503) match still emits its disclosure — the local warning sink that stops the resolver minting replace-channel refusals must not swallow the resolver's SUCCESS line, which is the only audit trail for terminalising a live belief on a non-exact match | ❌ | ✅ |
-| **negative (id-less prior row)** | the `superseded` side must name a row the PRIOR SET names, not merely "an id this capture did not emit": consolidation falls back to a content-addressed payload id when a prior row carries no `id`, and that id would be skipped FAIL-OPEN on the graph while the warning claimed a closure | ✅ (pin) | ✅ |
+| **negative (id-less prior row)** | the `superseded` side must name a row the PRIOR SET names, not merely "an id this capture did not emit": consolidation falls back to a content-addressed payload id when a prior row carries no `id`, and that id would be skipped FAIL-OPEN on the graph while the warning claimed a closure. COVERAGE, not a pin: removing `older_id not in _prior_graph_ids` reds it (measured) | ✅ | ✅ |
+| **negative (instant granularity of the decline)** | the decline and the consumer agree on the SAME measure: a backfill whose two `when` values are instants on one calendar day is still a backfill (declined, named), not an "unknown date" fallback — and a cross-offset pair that the date prefixes invert closes instead of being declined | ❌ | ✅ |
 | **positive (read)** | a current-scope query for the old claim's own wording no longer answers with it; the terminal scope still does | ❌ | ✅ |
 | **negative (support)** | the *same* two documents with the model declaring `IMPL` (support) close **nothing**; the older claim keeps its open interval and stays current | ✅ | ✅ |
 | **negative (event side)** | a NAND whose emitted side is an Event closes nothing AND does not claim it did (no `recorded as a supersession` warning). Passes on the base commit too, and is REAL coverage for the surviving guard: removing `_written_point_ids` reds this case and the minted-successor one (measured) | ✅ | ✅ |
@@ -269,20 +270,43 @@ the *surviving* claims to rank first) is neither implemented nor needed here.
 | **negative (undeclared)** | a corpus that reverses itself in **wording** but declares no edge gains no contradiction. ⛔ A PIN, not coverage: no mutation of the arm can red it (the `none` shape emits no operator at all) | ✅ | ✅ |
 
 Suite: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_14198_contradiction_closure.py -q`
-→ **20 passed**, and **14 RED on the base commit** (`3f134560b6c`): every
-positive — order-independence included, since it asserts one closure and the base
-closes nothing — plus four negatives whose *new* half is an assertion about what
-the run SAYS or about the budget it spends (the backfill-decline's warning, the
-declined-pair budget, the decline's retention claim, instant precision), plus the
-cross-producer case, which reds there on its warning half only.
-The counts are MEASURED, not counted by hand: the base run of this file is
-`14 failed, 6 passed`. ⚠️ Two earlier revisions were wrong and
-are corrected here rather than re-worded: one said `10 failed, 6 passed` and
-called order-independence a pin that "passes on base" (10 + 6 = 16 of 17, and the
-case asserts a closure); the next had the right arithmetic for 17 cases and went
-stale when two more were added. The cross-producer case's structural half IS a
-mutation pin (it reds when the budget is private again); its warning half is new
-coverage.
+→ **20 passed**, and **14 RED on the base commit** (`3f134560b6c`). Both figures
+are MEASURED, not counted by hand, and the NAMES below are the base run's own
+output (`git archive 3f134560b6c` + this file, `TORTOISE_TEST_CARVE_OUT=1`), so
+the paragraph cannot drift from the table:
+
+**red on base (14)** — `test_declared_cross_capture_contradiction_closes_the_older_claim`,
+`test_the_other_emission_order_closes_the_same_claim`,
+`test_a_world_time_ordering_is_decided_on_instants_not_date_prefixes`,
+`test_the_closure_does_not_depend_on_which_lookup_arm_ran`,
+`test_a_current_scope_query_no_longer_answers_with_the_contradicted_claim`,
+`test_a_fuzzy_closure_still_discloses_its_recall_band`,
+`test_the_closure_order_does_not_depend_on_the_model_list_order`,
+`test_a_declined_backfill_does_not_block_a_closable_refuter`,
+`test_the_decline_does_not_promise_an_edge_it_cannot_keep`,
+`test_a_backfill_declines_in_the_payload_and_names_the_reason`,
+`test_the_backfill_decline_is_instant_granular_not_day_granular`,
+`test_a_prior_another_producer_closed_keeps_this_declaration_as_evidence`,
+`test_the_cross_producer_warning_does_not_promise_retention_on_the_drop_route`,
+`test_a_second_refuter_keeps_its_edge`.
+
+**green on base (6)** — `test_a_backfill_DECLINES_and_says_so`,
+`test_an_event_side_is_dropped_not_recorded_as_a_supersession`,
+`test_declared_support_across_captures_closes_nothing`,
+`test_undeclared_reversal_invents_no_contradiction`,
+`test_a_minted_successor_is_never_named_as_a_superseder`,
+`test_an_id_less_prior_row_can_never_be_the_superseded_side` — exactly the six
+rows above whose pre-fix cell is ✅.
+
+⚠️ Four earlier revisions of this paragraph were wrong and are corrected here
+rather than re-worded: one said `10 failed, 6 passed` and called
+order-independence a pin that "passes on base" (`10 + 6 = 16` of 17, and the case
+asserts a closure); the next had the right arithmetic for 17 cases and went stale
+when two more were added; the third re-taxonomised the rows (calling instant
+precision a negative and order-independence a positive, summing to 11 or 12 of
+13); the fourth named the six green cases from the TABLE's reading instead of a
+run, and put `…declines_in_the_payload…` among them when it in fact reds. The
+list above is the run's own output.
 
 The emission-order, backfill and order-independence cases were each measured RED
 under the mutation that reverts their gate (the `src`-only guard; the
@@ -292,11 +316,12 @@ arrival-order direction; taking the closure slot above the world-time gate).
 `payload_points` minus the mints, so it implies both), and an Event side is
 refused by that surviving guard, so this case pins `_written_point_ids` and reds
 when IT is removed. It is a pin naming the mechanism that actually refuses, and
-the row above says so.
-against the arm, and pinned as pure-function tests (`execute_embed` needs no
-graph). The instant-precision case was measured RED under the mutation that puts
-the date-prefix comparison back — in BOTH directions, which is why it asserts
-one closure and one decline.
+the row above says so. The minted-successor, second-refuter, cross-producer and
+instant-granular shapes were produced by review, measured against the arm, and
+pinned as pure-function tests (`execute_embed` needs no graph). The
+instant-precision case was measured RED under the mutation that puts the
+date-prefix comparison back — in BOTH directions, which is why it asserts one
+closure and one decline.
 
 Regression surface run alongside, all green: `test_extractor_v2`,
 `test_consolidation_4way`, `test_never_across_fold_5080`, `test_10997_i3_partial_run`,
