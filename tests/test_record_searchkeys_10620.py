@@ -2138,3 +2138,76 @@ def test_the_divergence_is_STATED_in_the_doc_the_next_lane_reads():
     assert "NON-`str` ELEMENT" not in MIGRATION_PATH.read_text(encoding="utf-8"), (
         "the landed migration's header must stay UNEDITED (append-only "
         "history); the statement belongs in the doc above")
+
+
+def test_the_allocator_refusal_does_not_claim_a_journal_line_on_the_record_only_arm(
+        monkeypatch, caplog):
+    """#11783 review round 4, F3 — the FIFTH copy of the same false claim.
+
+    The `plan_refused` arm and then the generic `write_failed` arm were taught to
+    branch on `journal_skipped` (round 1 F1 and its scope note). This arm was not,
+    and it is reached FIRST (`_allocator_refusal_cause` is tested above the
+    generic arm), so neither earlier fix covers it.
+
+    `journal_skipped=True` means the caller did not append — a cut-over graph
+    (#14002) — so a `CursorNotActive` arriving here means the write reached
+    NEITHER store. The remedy printed beside it is journal-independent and
+    correct, which is exactly why the false PROVENANCE clause is easy to miss: it
+    sends the operator looking for a journal line that does not exist.
+
+    Reachability is not only the in-process window: `projection_worker.py`
+    forwards a CAPTURED `journal_skipped` to the door later, so a halt (or a
+    deleted cursor row) between capture and write lands here.
+    """
+    from tortoise import record_allocator as ra
+    from tortoise import record_writer
+
+    def _boom(*args, **kwargs):
+        outer = record_writer.RecordWriteError("allocator refused")
+        outer.__cause__ = ra.CursorNotActive("cursor is halted")
+        raise outer
+
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://fake")
+    monkeypatch.setattr(record_writer, "_default_connect",
+                        lambda dsn: _FakeConn())
+    monkeypatch.setattr(record_writer, "write_records", _boom)
+    record_writer._close_live_breaker()
+
+    record = {"type": "PointAdded",
+              "point": {"eventId": "pt-11783-alloc-skipped",
+                        "id": "pt-11783-alloc-skipped",
+                        "content": "a claim", "point_kind": "statement"}}
+
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        write = record_writer.write_live_record(
+            record, seq=9, tenant=("org-t", "graph-t"), journal_skipped=True)
+
+    assert write is not None and write.refusal == "write_failed", (
+        "an allocator refusal stays on the closed `write_failed` token BY "
+        f"CHOICE — got {None if write is None else write.refusal!r}"
+    )
+    message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reached NEITHER store" in message, (
+        "on the record-only arm the allocator WARN must not claim a journal "
+        f"line this write never had — got: {message}"
+    )
+    assert "the journal holds the record" not in message, (
+        f"the fifth copy of the false claim must be gone: {message}"
+    )
+
+    # DISCRIMINATING: the journaled arm really does have the line, so the flag
+    # has to select the sentence rather than the sentence merely being absent.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        journaled = record_writer.write_live_record(
+            record, seq=9, tenant=("org-t", "graph-t"))
+
+    assert journaled is not None and journaled.refusal == "write_failed"
+    journaled_message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "the journal holds the record" in journaled_message, (
+        f"the journaled arm must still name the line — got: {journaled_message}"
+    )
+    assert "reached NEITHER store" not in journaled_message, (
+        f"and must not claim it reached neither store: {journaled_message}"
+    )

@@ -4633,11 +4633,27 @@ def write_live_record(record: Mapping[str, Any], *,
             # collision refusal. Named and counted the same way (one counter, the
             # closed `write_failed` token), but with the READING that applies.
             _count_write_failure("write_failed")
+            # ⛔ THE FIFTH COPY OF THE RECORD-ONLY CLAIM (#14002, round-4 review
+            # F3). On a cut-over graph `journal_skipped` is set and the caller
+            # did NOT append, so "the journal holds the record" is false here
+            # too. The REMEDY beside it is journal-independent and correct
+            # (`_ALLOCATOR_REMEDY` names the counter's state, not a replay), so
+            # what was wrong is the PROVENANCE clause — still enough to send an
+            # operator looking for a line that does not exist. This arm is
+            # reached BEFORE the generic one below, so its fix does not cover it.
+            allocator_journal_clause = (
+                "the record reached NEITHER store (the caller did not append: "
+                "this graph was cut over, so the journal holds no line)"
+                if journal_skipped
+                else "the journal holds the record"
+            )
             _logger.warning(
-                "the record write was REFUSED (%s) — the journal holds the "
-                "record; the ORDINAL ALLOCATOR refused to issue a position. %s: "
+                "the record write was REFUSED (%s) — %s; the ORDINAL ALLOCATOR "
+                "refused to issue a position. %s: "
                 "record=%s %s: %s",
-                allocator_state, _ALLOCATOR_REMEDY.get(
+                allocator_state,
+                allocator_journal_clause,
+                _ALLOCATOR_REMEDY.get(
                     allocator_state, "check record_allocator.metrics()"),
                 record.get("type"), _record_identity(record), exc,
             )
