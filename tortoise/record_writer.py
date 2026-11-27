@@ -3968,7 +3968,7 @@ def _plan_refusal_cause(
     the exclusion here AND at the stamp leaves it GREEN. What holds it is the
     marker's ABSENCE. ⛔ AND THE EXCLUSION BELOW IS DEFENCE IN DEPTH THAT CANNOT
     FIRE WHILE THE STAMP'S OWN EXCLUSION STANDS (measured): the stamp refuses a
-    ``RecordStatementError`` (``record_projection.py:9072-9073``), so a raise that
+    ``RecordStatementError`` (``record_projection.py:9071-9073``), so a raise that
     moved INSIDE ``replay_plan`` would be unstamped rather than exempted here, and
     this type test does work only once THAT one is removed or narrowed. The pin
     that exercises this boundary is ``test_record_searchkeys_10620.py::

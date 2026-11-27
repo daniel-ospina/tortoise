@@ -1177,6 +1177,16 @@ def test_a_mapping_valued_search_keys_is_omitted_not_serialized(caplog):
         "message that opens `record column omitted (point.quote)` puts the STATE "
         f"in the column's slot, so an operator grepping the column reads a verb: {messages}"
     )
+    assert any("the column is left as it was" in m for m in messages), (
+        f"the CREATE door's tail must say where the column went: {messages}"
+    )
+    assert any("the column follows the node" in m for m in messages), (
+        "the PATCH door's tail must be grammatical English: the template is "
+        "`…and %s —`, so the argument carries its own clause. Measured mutant "
+        "(`d26e1d4ea86a`): binding `follows the node` against a "
+        "`…and the column is %s` template renders `and the column is follows the "
+        f"node` while every other leg stays green: {messages}"
+    )
     assert not any("'k'" in m or '"k"' in m for m in messages), (
         "the declaration must name the SHAPE, never the value: a quote is the "
         f"user's own text and this line goes to the deployment's log: {messages}"
