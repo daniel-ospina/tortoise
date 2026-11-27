@@ -3372,6 +3372,25 @@ def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
 #: top of the module, ON PURPOSE: this file's addresses are cited as `file:line`
 #: across the tree (75 of them), and an insertion in the constants block moves
 #: every one below it. Appending here moves none of them.
+#:
+#: ⛔ SCOPE, STATED BECAUSE IT IS WIDER THAN THE HOOK'S OWN STATEMENTS (#14587
+#: review P3-3). `_bound_provision_statements` scopes the GUC on the hook's
+#: TRANSACTION, so it bounds EVERY statement that transaction issues — including
+#: the allocator's `JOURNAL_COUNT_SQL` (`COUNT(*) FROM public.journal_event` for
+#: this org/graph), which `provision_graph_record` reaches whenever
+#: `enumerated_floor is None`, i.e. the re-provision path this hook documents for
+#: a graph that predates it (`set_graph_name` / `set_graph_recording`'s mint).
+#: `tortoise.record_allocator`'s own contract warns about exactly that shape — a
+#: bound short enough to protect a request also bounds a legitimate counting
+#: statement. THAT IS ACCEPTED HERE RATHER THAN EXCLUDED, and the residual is
+#: named instead of hidden: on a journal large enough for `COUNT(*)` to exceed 3 s
+#: the hook FAILS LOUDLY (`provision_failed` is counted, WARNed with the remedy,
+#: and published to `/health`) — the graph is still created and the user's write
+#: still succeeds, because the wrapper never raises. The alternative (unbound
+#: counting) trades that loud, visible refusal for an unbounded statement parked
+#: on a request's event loop, which is the failure this constant exists to close.
+#: No measured worst-case journal size is quoted here: it would be a reading of
+#: ONE deployment's data and would rot as that deployment grows.
 PROVISION_STATEMENT_TIMEOUT_MS = 3000
 
 

@@ -1776,6 +1776,16 @@ def test_backfill_never_arms_a_halted_counter(monkeypatch) -> None:
     assert entry["armed"] is False, entry
     assert "reopen" in entry["arm_refused"], (
         f"the entry must name the halt's own remedy: {entry}")
+    # ⛔ AND THE EXIT CODE MUST SEE IT (#14587 review P2). `armed == 0` above is a
+    # REFUSAL, but `_exit_code_for` read only `refused` — which counts the
+    # `SeedRefused` leg — so a `--arm` run over halted graphs exited 0 over graphs
+    # that allocate nothing, the exact `exit 0`-over-uncut shape that function's
+    # own docstring says the verb exists to remove. Measured before the fix:
+    # `_exit_code_for(payload, dry_run=False)` returned `EXIT_OK` for this payload.
+    assert payload["arm_refused"] == 1, payload
+    assert cli._exit_code_for(payload, dry_run=False) == cli.EXIT_REFUSED, (
+        "an `--arm` refusal that is reported in the payload must reach the exit "
+        f"code: {payload}")
 
 
 # ── the backfill ───────────────────────────────────────────────────────────

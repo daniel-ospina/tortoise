@@ -12442,7 +12442,19 @@ def _sdk147_census_failures(doc_text: str | None = None) -> list[str]:
 # always carry, and an arm that skips when a ref is absent is a no-op gate). What it can do — and
 # what would have caught both heads — is refuse the SHAPE that rots.
 _MEMBERSHIP_CMD_RE = re.compile(
-    r"numstat origin/main\.\.\.HEAD -- "
+    # ⛔ THE COMMAND PREFIX IS A SET, NOT A SPELLING (#14587 review P3). This read
+    # `numstat` only, while the sentence this block makes AUTHORITATIVE
+    # (`_ORG_INFO_ROUTING` below) is spelled `git diff --name-only`. So a negative
+    # claim written in the very spelling the block routes to was invisible: a
+    # `name-only … prints NOTHING` sentence parsed as `([], [])` and the arm below
+    # stayed green over it — a false PASS in the guard, not a wording preference.
+    # `name-status` is read for the same reason: it is the third way a document can
+    # quote a membership command, and a set that names two of three invites the next
+    # edit to rot through the same hole. The non-vacuity is asserted in the arm below
+    # rather than in a NEW case, because this file's case count is pinned by the
+    # `durations` row and by this docstring's own chain — a new arm here would move a
+    # number three other claims quote.
+    r"(?:numstat|name-only|name-status) origin/main\.\.\.HEAD -- "
     r"docs/epics/2026-11-04-7949-extractor-v4-capstone/(?P<path>[0-9A-Za-z._-]+\.md)`"
     r"(?P<tail>[^;]{0,60})"
 )
@@ -12471,6 +12483,24 @@ def _membership_claims(doc_text: str) -> tuple[list[str], list[str]]:
 
 def test_no_bundle_document_states_a_negative_membership_claim_it_cannot_keep():
     """A `numstat … prints NOTHING` sentence is the shape that was FALSE at `6c2c4d06`."""
+    # ⛔ NON-VACUITY ON THE PATTERN ITSELF (#14587 review P3), before it reads a
+    # document: the three command prefixes a bundle document can quote must ALL be
+    # READ, and each must yield the negative claim when the claim is stated. This
+    # lives here rather than in its own case because the file's case count is a
+    # pinned figure in the `durations` row. Measured before the widening: the
+    # `name-only` fixture below returned `([], [])` — the spelling this block is
+    # being changed to ROUTE to was the one the guard could not see.
+    for spelling in ("numstat", "name-only", "name-status"):
+        fixture = (
+            f"`git diff {spelling} origin/main...HEAD -- "
+            "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` "
+            "prints NOTHING")
+        negative, _ = _membership_claims(fixture)
+        assert negative, (
+            f"`_membership_claims` cannot read a `{spelling}` membership sentence — the "
+            "guard is blind to that spelling, so a document stating a negative claim in "
+            "it would pass as clean. Widen `_MEMBERSHIP_CMD_RE` to cover every prefix a "
+            f"document can quote. Fixture that produced no finding: {fixture!r}")
     failures = []
     for name in ("04-plan.md", "05-verify.md"):
         negative, _ = _membership_claims(_EPIC_CITE_DOCS[name].read_text(encoding="utf-8"))

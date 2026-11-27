@@ -684,6 +684,13 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
 
     entries: list[dict[str, Any]] = []
     seeded = refused = armed = 0
+    #: `--arm` refusals, counted SEPARATELY from `refused` (#14587 review P2).
+    #: A `halted` graph takes the seed leg (`seeded += 1`) and then refuses the
+    #: arm at `entry["arm_refused"]`, so it is in NEITHER `refused` NOR
+    #: `payload["refusals"]` — and a run of only those exited 0 over graphs that
+    #: allocate nothing, which is the shape `_exit_code_for`'s docstring says the
+    #: verb exists to remove. Counted so the exit code can see it.
+    arm_refused = 0
     #: The dry-run projection, counted separately from the writes. A dry run
     #: performs neither a seed nor an arm, so `seeded`/`armed` cannot be the
     #: field an operator reads to learn what the run WOULD do (#14624 review 3).
@@ -785,6 +792,7 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
             if arm_them:
                 entry["armed"] = bool(armed_now)
                 if not armed_now:
+                    arm_refused += 1
                     entry["arm_refused"] = (
                         f"the counter is {result.mode!r} after the seed and `arm` "
                         f"moves only `seeded` → `active` — run `reopen --org-id "
@@ -808,6 +816,11 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         "considered": len(graphs),
         "seeded": seeded,
         "refused": refused,
+        # ⛔ AN `--arm` REFUSAL IS A REFUSAL THE EXIT CODE MUST SEE (#14587 review
+        # P2): a `halted` graph is `seeded` and then refused the arm, so it is in
+        # neither `refused` nor `refusals` above, and a run made ONLY of those
+        # used to exit 0 over graphs that allocate nothing.
+        "arm_refused": arm_refused if arm_them else None,
         "armed": armed if arm_them else None,
         # ⛔ A DRY RUN REPORTS WHAT IT WOULD DO, NEVER WHAT IT DID. `seeded` and
         # `armed` above stay 0 on a dry run (nothing was written, nothing was
@@ -1091,6 +1104,15 @@ def _exit_code_for(payload: dict[str, Any], *, dry_run: bool) -> int:
     # here (the string forms already returned EXIT_REFUSED where they were
     # built). `bool` is not a count either — `isinstance(True, int)` is True.
     if isinstance(refused, int) and not isinstance(refused, bool) and refused > 0:
+        return EXIT_REFUSED
+    # ⛔ AND AN `--arm` REFUSAL COUNTS (#14587 review P2). A `halted` graph is
+    # `seeded` and then refused the arm, which lands in `arm_refused` and in
+    # neither `refused` nor `refusals` — so without this arm a `--arm` run over
+    # halted graphs exited 0 over graphs that allocate nothing, the exact
+    # `exit 0`-over-uncut shape the docstring above says this verb removes.
+    arm_refused = payload.get("arm_refused")
+    if (isinstance(arm_refused, int) and not isinstance(arm_refused, bool)
+            and arm_refused > 0):
         return EXIT_REFUSED
     return EXIT_OK
 
