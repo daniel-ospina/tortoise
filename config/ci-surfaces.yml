@@ -75,12 +75,16 @@ version: 1
 # entry, `tests/test_14691_structure_evidence.py` (`core`, flat 2.0 s), the row this lane registers,
 # and the reverse difference is empty — measured by loading each tree's OWN manifest
 # (`git show origin/main:config/ci-surfaces.yml`) through `fast_pool()`.
-# ⛔ No pool SIZE is restated here, and the reason is a recorded ruling rather than a preference
-# (#14691 review, round 15, finding 4): the repo's own doctrine is at `tests/test_ci_selection.py`
-# — "a pool size is a measurement with several independent reasons to move, so restating it is the
-# decay this docstring warns about; the derivation pointer is the durable form". Any test file
-# landing on `main` moves a count with nothing to red it, so the set difference is the durable
-# form and a count is not. ⛔ Every OTHER row this tree carries is `main`'s at this head, so
+# ⛔ No pool SIZE is restated BY THIS RE-DERIVATION, and the reason is a recorded ruling rather
+# than a preference (#14691 review, round 15, finding 4): the repo's own doctrine is at
+# `tests/test_ci_selection.py` — "a pool size is a measurement with several independent reasons to
+# move, so restating it is the decay this docstring warns about; the derivation pointer is the
+# durable form". Any test file landing on `main` moves a count with nothing to red it, so the set
+# difference is the durable form and a count is not. ⛔ THE HISTORY PARAGRAPHS BELOW DO QUOTE POOL
+# COUNTS, and that is not the same claim: each is written in the past tense OF THE FOLD THAT
+# MEASURED IT and names that fold's base, so it is a fact about that fold rather than a claim about
+# this head — which is what the sentence above forbids (#14723 review, P2: it read as an absolute
+# and a reader could grep three counts out of the block). ⛔ Every OTHER row this tree carries is `main`'s at this head, so
 # reading one of them as this lane's delta would attribute a partition move to a row that did not
 # cause it.
 # The name lists are what the guard COMPARES against the live emission
@@ -108,7 +112,8 @@ version: 1
 # derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. Measured on
 # this rebase: two copies arrived, one naming `origin/main` `c1c8df1a3817` with `#14700`'s row, one
 # naming the same base with this change's row, and NEITHER described the merged tree (both said
-# 827.4/827.5 and a `fast_pool()` of 1340 against the 827.6 and 1341 the verb emits here). Neither
+# 827.4/827.5 and a `fast_pool()` of 1340 against the 827.6 and 1341 the verb emitted at that
+# rebase). Neither
 # side is picked: both are DELETED and the paragraph above is a fresh re-derivation with
 # `--emit-push-matrix` on this merged tree. Each earlier fold's figures live on the commit that
 # measured them (`git log`), which is where a spliced copy belongs.

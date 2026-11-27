@@ -211,13 +211,24 @@ def test_a2_ownership_is_present_and_inverted_in_the_committed_receipt():
     assert a2["totals"]["dependency_present_and_correct"].startswith("7/7")
     assert a2["passes"] is False
 
-    # The inversion is a property of the RECEIPT, not of the scorer: every
-    # `ownedBy` row the write door reported has a Subject as src and the owned
-    # thing as dst.
+    # The write door reported SIX `ownedBy` rows, and the scorer's totals above read them as
+    # `0/4` ORIENTED / 4 INVERTED — every row points INTO a Subject rather than out of one.
+    # ⛔ THIS ARM GRADES THE POPULATION, AND SAYS SO (#14723 review, P3). The receipt's rows
+    # carry endpoints as ids (`src_id`/`dst_id`) with no KIND, so the ORIENTATION cannot be
+    # read off them here: it is graded by `ownership_oriented_correct` (`0/4`) and
+    # `ownership_inverted` (4) in the totals asserted above, which the scorer derives from the
+    # readback's typed nodes. The comment that used to sit here claimed this arm checked "a
+    # Subject as src", which nothing in it can see — a claim nothing grades, in the arm whose
+    # job is to grade claims.
     rows = [e for doc in _receipt()["documents"]
             for e in ((doc.get("result") or {}).get("relation_write") or {})
             .get("edges") or [] if e.get("predicate") == "ownedBy"]
     assert len(rows) == 6, f"expected 6 ownedBy rows, got {len(rows)}"
+    # …and the population is EDGES, not placeholders: both endpoints named, and four distinct
+    # owners over four distinct owned things (so the six rows are not one row repeated).
+    assert all(r.get("src_id") and r.get("dst_id") for r in rows), rows
+    assert len({r["src_id"] for r in rows}) == 4, rows
+    assert len({r["dst_id"] for r in rows}) == 4, rows
 
 
 def test_every_owner_was_actually_ASKED_the_ownership_door():
