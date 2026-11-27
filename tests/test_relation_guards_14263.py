@@ -68,10 +68,13 @@ from tortoise.relation_guards import (
     ACCEPT,
     LABEL_ENDPOINTS,
     NORMALISED,
+    ORIENTATION_AS_ASKED,
+    ORIENTATION_REVERSED,
     REVERSED_PAIR,
     UNDECLARED_PAIR,
     canonical_predicate,
     declared_relation_pairs,
+    orient_declared_pair,
     relation_pair_verdict,
 )
 from tortoise.sdk import TortoiseSDK
@@ -85,6 +88,14 @@ TEST_GRAPH = "tortoise_test_14263_relation_pairs"
 #: of being pinned to a literal set that can never vary.
 PRODUCED_OUTCOMES = {
     ACCEPT, NORMALISED, UNDECLARED_PAIR, REVERSED_PAIR, ABSTAIN,
+    # #14304 — the ORIENTATION leg's two outcomes. A deliberately SEPARATE
+    # vocabulary, not a widening of the pair leg's: `reversed_orientation` is
+    # "the declarations put this END CLASS on the other side", which is a
+    # different fact from `reversed_pair`'s "the pack declares this exact pair,
+    # reversed" (`docs/ax/ax-principles.md` §2). Adding them here is the
+    # deliberate-decision step this pin exists to force — the alternative, a
+    # literal set in the test, could never red on a new outcome.
+    ORIENTATION_AS_ASKED, ORIENTATION_REVERSED,
 }
 
 
@@ -454,6 +465,30 @@ class TestAXAdmission:
         doc = rg.__doc__ or ""
         assert "redirect" in doc.lower()
         assert "MEANING" in doc or "meaning" in doc
+
+    def test_the_ORIENTATION_leg_does_redirect_and_declares_it(self):
+        """⛔ `#14304`: the ONE redirect this module produces, and its limit.
+
+        The paragraph above records why the PAIR leg cannot redirect —
+        substituting a predicate swaps the edge's MEANING. The orientation leg
+        swaps the two ENDS of the same predicate instead, which is the
+        correction the `reversed_pair` message already tells the caller to make
+        by hand, so the decision is not reversed: the predicate, the mechanism
+        and the priced meaning are untouched. The correction is DECLARED on the
+        payload — a redirect applied silently would be an AX Rule 1 violation,
+        and this is the assertion that keeps the two halves together.
+        """
+        verdict = orient_declared_pair(
+            "ownedBy", "core:naturalPerson", "object",
+            from_label="Subject", to_label="Object")
+        assert verdict.outcome == ORIENTATION_REVERSED
+        payload = verdict.payload or {}
+        assert payload["predicate"] == "ownedBy"       # the meaning is NOT swapped
+        assert payload["stated"] != payload["written"]  # the ends ARE
+        assert payload["message"]                      # and it is DECLARED
+        # The pair leg, unchanged: still no redirect of any kind.
+        assert relation_pair_verdict(
+            "dependsOn", "dev:issue", "dev:epic").payload.get("override") is None
 
     def test_no_input_reaches_a_refusal(self, monkeypatch):
         """A hostile grid: every verdict is a value, nothing raises."""

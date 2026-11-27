@@ -288,6 +288,10 @@ def test_the_plan_consumes_only_the_typed_record():
         for token in (value if isinstance(value, tuple) else (value,)):
             if isinstance(token, str):
                 assert prose not in token, (field.name, token)
+    # ``causes`` names no label-spelled end, so the orientation leg abstains and
+    # the new field is empty on this record — the prose pin above therefore says
+    # nothing about it, which is exactly why the NEXT assertion exists.
+    assert edge.orientation is None
     # The field set is pinned so a NEW field is a deliberate decision rather
     # than a quiet channel for narrative text.
     assert {f.name for f in dataclasses.fields(edge)} == {
@@ -300,6 +304,16 @@ def test_the_plan_consumes_only_the_typed_record():
         # every other string field, and this pin is what makes adding a field a
         # deliberate decision.
         "direction",
+        # #14304: the DECLARED-orientation correction (`relation_guards.
+        # orient_declared_pair`'s AX payload), or ``None``. ⚠️ It is a DICT, so
+        # the prose loop above (which walks STRINGS) does not reach inside it —
+        # the channel is closed by construction instead: every string in that
+        # payload is built by `relation_guards` from the predicate and the two
+        # KINDS, never from the record. `tests/test_relation_orientation_14304.
+        # py::test_the_correction_carries_no_prose_from_the_record` is the
+        # assertion that a record's prose cannot reach it, so this pin is not
+        # resting on an argument.
+        "orientation",
     }
 
 
