@@ -63,12 +63,15 @@ version: 1
 # possessive spelling here credited the fold's own row to this branch. ⛔ NOT because "the two
 # manifests are byte-identical" — that is FALSE, and what makes it false is a DURABLE fact rather than
 # a head-bound figure (#14587 review cycle 15, P2: this sentence carried a numstat pair for "this
-# head", which moved three times on this branch as its own prose was repaired — 24/78 → 24/81 →
-# 27/88 → 29/95 — so a reader checking it got a different number and distrusted the claim it
-# supported): the two manifests' DATA rows differ by ONE line in one row's inline note, while the
+# head", which moved at EVERY repair commit on this branch as its own prose was rewritten, so a
+# reader checking it got a different number and distrusted the claim it supported — which is why no
+# such pair is quoted here; `git log --numstat` is the reading): the two manifests' DATA rows differ
+# by ONE line in one row's inline note, while the
 # comment blocks account for the rest of the file's divergence — which is exactly why "byte-identical"
 # is the wrong test and ROW MEMBERSHIP is the right one. Measured so: the fold's own two parents
-# differ by `124/118` (a stable pair, both shas named), and the row is present in `origin/main`'s
+# differ by `124/118` (a stable pair — `git diff a01675b50c 344a1c086e --
+# config/ci-surfaces.yml` -> `124 118`, both endpoints named so the reading is reproducible), and
+# the row is present in `origin/main`'s
 # manifest and ABSENT from the PRE-FOLD BASE's, so the fold brought it in) — the verb packs seven shards at 828.0 s (a, f, g, h, i, j, k) and four at
 # 827.9 s (b, c, d, e), so `ceil(828.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is
 # the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
@@ -339,10 +342,11 @@ version: 1
 # that spelling was DELETED rather than re-pointed. The figures that ARE true here are the PRE-FOLD BASE
 # `c1c8df1a3817`'s own emission — measured by loading `git show c1c8df1a3817:config/ci-surfaces.yml`
 # through `fast_pool()` and `push_legs()` — not either copy's, and not the fold's. ⛔ AND NOT
-# BECAUSE A FOLD CARRIES THIS LANE'S ROW: this lane registers NO row at this head, and the fold's
-# pool is larger than the PRE-FOLD BASE's because `main` ADVANCED, not because this branch added a
-# member — a claim the same measurement refutes in one command. Neither copy was picked;
-# the re-derivation above is a third fresh one. ⛔ WHICH ONE IT COUNTS AS IS NOT STATED, and neither
+# BECAUSE A FOLD CARRIES THIS LANE'S ROW: the fold DOES carry it — `origin/main` already carries
+# `tests/test_14582_creation_hook.py`'s `durations` row, so the row is not this branch's gift — and
+# what the same measurement refutes is the INFERENCE drawn from it, "so its pool is strictly
+# larger" — the delta against `main` is EMPTY, and the growth over the pre-fold base was `main`'s own
+# advance. Neither copy was picked; the re-derivation above is a third fresh one. ⛔ WHICH ONE IT COUNTS AS IS NOT STATED, and neither
 # copy's figures are quoted inline: that ordinal is a window the NEXT fold renumbers, and restating
 # a fold's numbers here is the carry the paragraph above refuses — the measurement lives on the
 # commit that took it (`git log`).
