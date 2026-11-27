@@ -293,6 +293,11 @@ counts as `not_in_corpus`); the **invented** count is **9**, and it is the one t
 The turn unit is bounded on purpose: support cannot be assembled across unrelated paragraphs, so a
 recombined claim still scores low and the FAIL direction is unchanged.
 
+⛔ **The overlap histogram beneath that band is persisted, not retyped.** `claim_layer.bands`
+carries it as `11 / 1 / 27` over the non-verbatim quotes (`below_0_5` / `from_0_5_to_0_6` /
+`at_or_above_0_6`), so **11 fall below 0.5**; of the **12** at `< 0.6`, 9 of those are
+unsupported by any corpus turn — the invented count, not the sentence-scope one.
+
 ⛔ **And the search SPAN is corpus-wide, which the receipt now states.** A row's `doc` is the
 document the extractor attributed it to; the turn band is measured against every corpus turn. Exactly
 **one** of the 30 supported rows clears the band only through a different document: doc-04's
@@ -1021,6 +1026,25 @@ vulnerable: they add or scan copies rather than asking whether a literal appears
 
 ⛔ The class, not the instance: **a pin whose haystack is the document that records its
 own review is a pin over the review.** Scope every figure to the cell that owns it.
+
+### 8.19 What the fix lane closed at `4944c705` (the four band pins that graded this log)
+
+§8.18's class, one instance short of closed — and it was hiding in an arm whose NAME says it
+grades "the paragraph that describes it". `test_the_over_typed_table_matches_the_paragraph_that_describes_it`
+also carried four pins on `claim_layer.bands` (**11 fall below 0.5**, **12** at `< 0.6`,
+**9 of those are unsupported by any corpus turn**, and the **11 / 1 / 27** triple), and every
+one of those sentences existed ONLY in this log — §3/A4, the section that discusses the band, never
+stated the histogram at all. So the four pins read `flat`, the whole document, and were satisfied by
+the log that records them: measured, each figure could be mutated HERE and the arm reddened, while
+there was no body copy of it to mutate. The decisive measurement is the class sweep rather than the
+instance: stripping sections 8.1 to 8.18 left exactly ONE arm red — this one — so the remaining
+population of log-graded arms was a single site, not a family.
+
+The fix is §8.18's, applied to the site: the histogram is a measurement of `claim_layer`, so **§3/A4
+now states it** and the arm grades it in that paragraph (`_report_paragraph`), never in the document.
+The four assertions also moved to the claim-layer arm, where the §3/A4 paragraphs are graded — the
+A1 caveat's arm was grading a subject its own docstring never named. This log's copies of the figures
+stay as history; they are no longer load-bearing.
 
 ---
 

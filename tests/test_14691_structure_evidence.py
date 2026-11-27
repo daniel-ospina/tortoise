@@ -1387,11 +1387,14 @@ def _cites_a_site_in(cited: tuple[str, int, int], sites) -> bool:
     ⛔ AND BOUNDING THE START ALONE WAS STILL NOT ENOUGH (#14691 review, round 16, finding 1):
     with only `other_lo - lo <= _CITATION_WIDEN_BOUND`, the same padding attack survived from
     the OTHER side — `sdk.py:62739-99999` opens exactly on the artifact's start and pads the
-    END by 37,241 lines, which left `102 passed` (measured). So shape 3 widens the START and
-    the END by nothing: `hi - other_hi == 0`. That is what the one honest wider span in the
-    two documents actually does — `entity_reads.py:533-559` against the artifact's `:551-559`
-    is slack 18 at the start and 0 at the end (measured), so the honest shape stays green and
-    an end-padded citation cannot pass.
+    END by 37,241 lines, which left `102 passed` (measured). So shape 3 widens the START by
+    at most `_CITATION_WIDEN_BOUND` lines and the END by NOTHING (`hi - other_hi == 0`). That is
+    what the one honest wider span in the two documents actually does — `entity_reads.py:533-559`
+    against the artifact's `:551-559` is slack 18 at the start and 0 at the end (measured) — so
+    the honest shape stays green, and an end-padded citation cannot pass at ANY start offset.
+    ⛔ The START allowance is 20, not 0, and it is LIVE: `sdk.py:62739-62758` -> `62720-62758`
+    (19 lines of start slack) is GREEN and `62718-62758` (21) is RED (measured, round 17). Do
+    not "tidy" `_CITATION_WIDEN_BOUND` away — the honest D1 citation above needs 18 of it.
     """
     name, lo, hi = cited
     for other_name, other_lo, other_hi in sites:
@@ -1927,8 +1930,15 @@ def test_the_over_typed_table_matches_the_paragraph_that_describes_it():
     cycles 8 and 9 (a claim beside the table disagreeing with the table), so the
     table itself is now derived.
 
-    It also pins a band figure the scorer persists: REPORT's "(11 below 0.5)" had
+    It also pinned a band figure the scorer persists: REPORT's "(11 below 0.5)" had
     no artifact behind it until `claim_layer.bands` existed.
+    ⛔ THAT BAND BLOCK WAS GRADING THE REVIEW LOG, and it now lives in
+    `test_the_CLAIM_layer_and_A2_figures_are_the_artifacts` (#14723, fix lane at
+    `4944c705`): the sentences it searched for existed ONLY in §8.19's own log, so a
+    whole-document `flat` pin was satisfied by the log that records it, and this
+    arm — named "matches the paragraph that describes it" — graded a subject its
+    docstring never named. Measured: stripping `### 8.1`..`### 8.18` left this arm
+    the only red in the file. The histogram is a §3/A4 claim and is graded there.
     """
     a4 = _score()["A4_no_invention"]
     untraceable = {u["name"]: u["kind"] for u in a4["untraceable_entities"]}
@@ -1984,60 +1994,6 @@ def test_the_over_typed_table_matches_the_paragraph_that_describes_it():
             assert " ".join(name.lower().split()) in corpus, (
                 f"the caveat calls {name!r} one of the rows stated in the text, "
                 "but its name is not in the corpus")
-
-    # (e) the band figure the report quotes, from the persisted histogram
-    bands = _score()["claim_layer"]["bands"]
-    flat = " ".join(_report().split())
-    assert (f"**{bands['below_0_5']} fall below 0.5**") in flat, (
-        f"the report's below-0.5 figure is not the artifact's ({bands['below_0_5']})")
-    # ⛔ THE REST OF THAT SENTENCE, NOT JUST ITS LAST NUMBER (#14691, 11th review).
-    # Three of its four figures were still free, and both surviving mutants were
-    # numbers that appear SOMEWHERE in an artifact — which is exactly why a
-    # "is this number supported anywhere" sweep cannot see them:
-    #   `**12** at < 0.6` -> `**14**`   (12 is `quotes['invented']`; §7's pinned
-    #                                    breakdown in the SAME document then
-    #                                    refutes the sentence)
-    #   `11 / 1 / 27`     -> `11 / 2 / 26`   (a false histogram, in the sentence
-    #                                    whose stated purpose is to read it)
-    quotes_for_bands = _score()["A4_no_invention"]["quotes"]
-    # ⛔ THE SENTENCE READS THE SENTENCE-SCOPE HISTOGRAM, so the figure it states is
-    # the SENTENCE-scope population (`below_sentence_band`), not `invented`
-    # (#14723 review, round 10, P2: those diverged once the decider moved to the
-    # turn, and pinning the wrong one would force the prose back to the gloss).
-    assert f"**{quotes_for_bands['below_sentence_band']}** at `< 0.6`" in flat, (
-        "the report's below-0.6 total is not `below_sentence_band` "
-        f"({quotes_for_bands['below_sentence_band']})")
-    assert (f"{quotes_for_bands['invented']} of those are unsupported by any corpus "
-            f"turn" in flat), (
-        "the sentence-scope figure is not qualified with the invented count it "
-        "does not equal")
-    triple = f"{bands['below_0_5']} / {bands['from_0_5_to_0_6']} / {bands['at_or_above_0_6']}"
-    assert f"`{triple}`" in flat, (
-        f"the report's band histogram is not the artifact's ({triple}) — a false "
-        "triple in the sentence that exists to read it")
-    # the histogram covers the NON-VERBATIM population (a verbatim quote never
-    # reaches `best_overlap`), so its total is `total - verbatim`, not `total`
-    quotes = _score()["A4_no_invention"]["quotes"]
-    assert sum(bands.values()) == quotes["total"] - quotes["verbatim"], (
-        bands, quotes["total"], quotes["verbatim"])
-    # the two real invariants of the histogram against the buckets
-    # ⛔ the histogram is SENTENCE-scoped, so its below-band arm is the
-    # sentence-scope population (`below_sentence_band`), not `invented` — the two
-    # diverged when the decider moved to the turn (#14723 review, round 10, P2).
-    assert bands["below_0_5"] <= quotes["below_sentence_band"], (
-        f"{bands['below_0_5']} quotes are below 0.5 but only "
-        f"{quotes['below_sentence_band']} are below the 0.6 band", bands, quotes)
-    assert bands["at_or_above_0_6"] == quotes["paraphrase"], (
-        f"the at-or-above-0.6 band ({bands['at_or_above_0_6']}) is not the "
-        f"paraphrase bucket ({quotes['paraphrase']})", bands, quotes)
-    # ...and the DECIDER's histogram partitions the same population
-    turn = _score()["A4_no_invention"]["quotes"]["bands_turn_scope"]
-    assert sum(turn.values()) == quotes["total"] - quotes["verbatim"], turn
-    assert turn["at_or_above_0_6"] == (quotes["paraphrase"]
-                                        + quotes["summary_in_one_turn"]), (
-        "the turn-scope histogram's supported arm is not paraphrase + summary",
-        turn, quotes)
-    assert turn["below_0_5"] <= quotes["invented"], (turn, quotes)
 
 
 def test_the_remaining_prose_figures_are_the_artifacts_figures():
@@ -3684,6 +3640,60 @@ def test_the_CLAIM_layer_and_A2_figures_are_the_artifacts():
         f"REPORT does not state the artifact's inverted-pair count "
         f"({totals['asymmetric_pairs_inverted']})")
 
+    # ── the overlap histogram, graded in the §3/A4 paragraph that states it ──
+    # ⛔ THESE FOUR PINS GRADED THE REVIEW LOG (#14723, fix lane at `4944c705`,
+    # measured): `**11 fall below 0.5**`, `**12** at `< 0.6`, `<invented> of those are
+    # unsupported by any corpus turn` and the `11 / 1 / 27` triple existed ONLY in
+    # §8's narrative, never in §3/A4, so the arm that carried them read `flat` (the
+    # document) and was satisfied by the log that RECORDS them. Measured three ways:
+    # each figure mutated in the LOG reddened that arm; no body copy existed to
+    # mutate; and stripping `### 8.1`..`### 8.18` left it the only red in the file.
+    # The histogram is a claim about `claim_layer`, so §3/A4 states it and it is
+    # graded in that paragraph — never in the document that logs its review.
+    bands = claim["bands"]
+    histogram = _report_paragraph(r"The overlap histogram beneath that band")
+    assert histogram, "REPORT §3/A4 has no overlap-histogram paragraph to grade"
+    assert f"**{bands['below_0_5']} fall below 0.5**" in histogram, (
+        "REPORT does not state the artifact's below-0.5 figure "
+        f"({bands['below_0_5']})")
+    # ⛔ THE SENTENCE READS THE SENTENCE-SCOPE HISTOGRAM, so the figure it states is
+    # the SENTENCE-scope population (`below_sentence_band`), not `invented`
+    # (#14723 review, round 10, P2: those diverged once the decider moved to the
+    # turn, and pinning the wrong one would force the prose back to the gloss).
+    assert f"**{claim['below_sentence_band']}** at `< 0.6`" in histogram, (
+        "REPORT's below-0.6 total is not `below_sentence_band` "
+        f"({claim['below_sentence_band']})")
+    assert (f"{claim['invented']} of those are unsupported by any corpus turn"
+            in histogram), (
+        "the sentence-scope figure is not qualified with the invented count it "
+        "does not equal")
+    triple = (f"{bands['below_0_5']} / {bands['from_0_5_to_0_6']} / "
+              f"{bands['at_or_above_0_6']}")
+    assert f"`{triple}`" in histogram, (
+        f"REPORT's band histogram is not the artifact's ({triple}) — a false "
+        "triple in the paragraph that exists to read it")
+    # the histogram covers the NON-VERBATIM population (a verbatim quote never
+    # reaches `best_overlap`), so its total is `total - verbatim`, not `total`
+    quotes = _score()["A4_no_invention"]["quotes"]
+    assert sum(bands.values()) == quotes["total"] - quotes["verbatim"], (
+        bands, quotes["total"], quotes["verbatim"])
+    # the two real invariants of the histogram against the buckets; ⛔ it is
+    # SENTENCE-scoped, so its below-band arm is `below_sentence_band`, not `invented`
+    assert bands["below_0_5"] <= quotes["below_sentence_band"], (
+        f"{bands['below_0_5']} quotes are below 0.5 but only "
+        f"{quotes['below_sentence_band']} are below the 0.6 band", bands, quotes)
+    assert bands["at_or_above_0_6"] == quotes["paraphrase"], (
+        f"the at-or-above-0.6 band ({bands['at_or_above_0_6']}) is not the "
+        f"paraphrase bucket ({quotes['paraphrase']})", bands, quotes)
+    # ...and the DECIDER's histogram partitions the same population
+    turn = quotes["bands_turn_scope"]
+    assert sum(turn.values()) == quotes["total"] - quotes["verbatim"], turn
+    assert turn["at_or_above_0_6"] == (quotes["paraphrase"]
+                                        + quotes["summary_in_one_turn"]), (
+        "the turn-scope histogram's supported arm is not paraphrase + summary",
+        turn, quotes)
+    assert turn["below_0_5"] <= quotes["invented"], (turn, quotes)
+
 
 def test_the_D4_neighbour_figures_are_the_witnesses():
     """Reds if the D4 evidence's neighbour counts are rewritten — P3-11.
@@ -3775,7 +3785,7 @@ _PROSE_ALLOWED = (
 
 def _prose_tokens() -> set[str]:
     text = (_report() + "\n\n" + (BUNDLE / "VERIFICATION-independent.md").read_text())
-    # ⛔ THE REVIEW LOG IS `### 8.1`..`### 8.18`, NOT the whole of §8 (#14691 review, round
+    # ⛔ THE REVIEW LOG IS `### 8.1`..`### 8.19`, NOT the whole of §8 (#14691 review, round
     # 15, finding 2). The bound used to START at `### 8.1` and run to §9 — excluding 8.2–8.16
     # as well, under a reason that named only the mutant tables. Bounding at `## 8.` fixed that
     # and WIDENED the hole in the same move: it also swallowed `## 8. Artifacts`, the bundle's
@@ -3785,6 +3795,15 @@ def _prose_tokens() -> set[str]:
     # to its `out/t6-score.json` row left the whole suite GREEN under the `## 8.` bound, and
     # REDs under this one. So the exclusion is the review LOG only, and §8's artifacts table is
     # scanned like any other claim table.
+    # ⛔ AND THE REASON THE LOG ITSELF IS EXCLUDED, which nothing else in this file states: its
+    # numbers are what each round's falsifier run PRINTED — pytest counts, mutant descriptions,
+    # `N passed` — and no artifact carries them, so this scan cannot grade them and must not
+    # pretend to. The §8 figures that ARE claims about an artifact are graded by their OWN arms
+    # (`test_EVERY_bytes_figure_in_the_documents_is_the_committed_file`,
+    # `test_every_CODE_citation_in_the_documents_is_one_an_artifact_carries`), never by riding on
+    # this exclusion. Round 16 deleted this paragraph with the stale bound above it and the
+    # surviving text dangles on it; restored here, because an unexplained exclusion is one the
+    # next lane "fixes" by un-excluding a log full of historical mutants (round 17, finding 3).
     text = re.sub(r"(?ms)^### 8\.1 .*?(?=^## 9\.)", " ", text)
     text = re.sub(r"```.*?```", " ", text, flags=re.S)
     for pattern, _reason in _PROSE_ALLOWED:
