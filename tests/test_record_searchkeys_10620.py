@@ -2231,3 +2231,84 @@ def test_the_allocator_refusal_does_not_claim_a_journal_line_on_the_record_only_
     assert "reached NEITHER store" not in journaled_message, (
         f"and must not claim it reached neither store: {journaled_message}"
     )
+
+
+def test_the_divergence_arm_prescribes_no_journal_repair_on_the_record_only_arm(
+        monkeypatch, caplog):
+    """#11783 — the divergence WARN's REPAIR PATH, not just its provenance.
+
+    `journal_skipped=True` means the caller did not append — a cut-over graph
+    (#14002) — so a position it also passes is not a journal position at all.
+    Conditioning only the provenance clause leaves the sentences after it
+    ordering an intervention that cannot run: "compare the two readings" with
+    `tools/record_allocator_cli.py status --journal`, `seed --journal`, and
+    "RESTORE THE JOURNAL" all presuppose the line this write never had. That is
+    the same misdirection the `plan_refused` / allocator / generic arms were
+    fixed for, in the last place it survived.
+
+    `live_write` passes `seq=None` whenever it sets the flag, so this combination
+    comes from a DIRECT caller — reachable, and driven below, which is why the
+    flag selects the message instead of the arm being declared exempt.
+
+    Non-vacuity: the journaled arm is driven through the same window and must
+    still print the compare-and-seed path, so neither assertion can pass by the
+    clause merely being absent from both messages.
+    """
+    from tortoise import record_writer
+    from tortoise.record_writer import RecordWrite, RecordWriteOutcome
+
+    report = RecordWrite(outcome=RecordWriteOutcome.APPLIED, events=1,
+                         statements=2, first_seq=5, last_seq=5)
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://fake")
+    monkeypatch.setattr(record_writer, "_default_connect",
+                        lambda dsn: _FakeConn())
+    monkeypatch.setattr(record_writer, "write_records", lambda *a, **k: report)
+    record_writer._close_live_breaker()
+
+    record = {"type": "PointAdded",
+              "point": {"eventId": "pt-11783-divergence-skipped",
+                        "id": "pt-11783-divergence-skipped",
+                        "content": "a claim", "point_kind": "statement"}}
+
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        write = record_writer.write_live_record(
+            record, seq=9, tenant=("org-t", "graph-t"), journal_skipped=True)
+
+    assert write is not None and write.refusal == "write_failed", (
+        "a divergence on the record-only arm stays on the closed token — got "
+        f"{None if write is None else write.refusal!r}"
+    )
+    message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reached NEITHER store" in message, (
+        f"the record-only arm must say the write reached neither store: {message}"
+    )
+    for dead_end in ("Compare the two readings", "seed --journal",
+                     "RESTORE THE JOURNAL", "the journal line and its position row"):
+        assert dead_end not in message, (
+            "there is no journal line on this arm, so this remedy is a dead "
+            f"end: {dead_end!r} in {message}"
+        )
+    assert "Re-emit the record with NO caller-supplied position" in message, (
+        f"and must replace it with the repair that CAN run here: {message}"
+    )
+
+    # DISCRIMINATING: on the journaled arm the line EXISTS, so the enumerated
+    # repair path is right there and must still be printed.
+    monkeypatch.setenv("TORTOISE_RECORD_ALLOCATE", "1")
+    record_writer._close_live_breaker()
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        journaled = record_writer.write_live_record(
+            record, seq=9, tenant=("org-t", "graph-t"))
+
+    assert journaled is not None and journaled.refusal == "write_failed"
+    journaled_message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "the journal holds the record at position 9" in journaled_message, (
+        f"the journaled arm must still name the line: {journaled_message}"
+    )
+    assert "Compare the two readings" in journaled_message and (
+        "RESTORE THE JOURNAL" in journaled_message), (
+        "and must keep the enumerated-repair path, which is valid there — if "
+        f"this ever stops printing, the flag no longer selects: {journaled_message}"
+    )

@@ -4527,20 +4527,40 @@ def write_live_record(record: Mapping[str, Any], *,
                             _bounded_cause(rollback_exc),
                         )
                 _count_write_failure("write_failed")
-                # ⛔ FLAG-CONDITIONED, not exempt: `live_write` never passes this
+                # ⛔ FLAG-CONDITIONED, not exempt — and the WHOLE message, not
+                # just its first clause: `live_write` never passes this
                 # combination, but a DIRECT caller can (`seq=9` with
-                # `journal_skipped=True` is what the suite drives), and on that
-                # write the journal holds nothing — so the provenance clause is
-                # computed rather than asserted.
-                position_provenance = (
-                    "the write reached NEITHER store (the caller did not "
-                    "append, so there is no journal position)"
-                    if journal_skipped
-                    else f"the journal holds the record at position {seq}"
-                )
+                # `journal_skipped=True` is what the suite drives, and the leg
+                # below pins it), and on that write the journal holds nothing.
+                # Conditioning only the provenance clause left the SAME false
+                # instruction in the sentence after it — "compare the two
+                # readings", `seed --journal`, "RESTORE THE JOURNAL" all
+                # presuppose a line this write never had, so the repair path has
+                # to be selected by the flag too. The journaled message is
+                # unchanged (byte-for-byte), which is why the clause is written
+                # out twice rather than parameterised.
+                if journal_skipped:
+                    _logger.warning(
+                        "the record write was REFUSED (position_divergence) — "
+                        "the write reached NEITHER store (the caller did not "
+                        "append: this graph was cut over), so the position %s "
+                        "it passed is not a journal position, and the ORDINAL "
+                        "ALLOCATOR issued %s for this record. There is NO "
+                        "journal line to disagree with, so there is no journal "
+                        "reading to compare and nothing to seed or restore — "
+                        "those remedies belong to the journaled arm and are "
+                        "dead ends here. The allocation was rolled BACK, so "
+                        "nothing was burned or renumbered. Re-emit the record "
+                        "with NO caller-supplied position: on a cut-over graph "
+                        "the allocator numbers it, and passing one again "
+                        "refuses this same way. record=%s %s",
+                        seq, allocated_first, record.get("type"),
+                        _record_identity(record),
+                    )
+                    return _refused("write_failed", seq)
                 _logger.warning(
-                    "the record write was REFUSED (position_divergence) — %s "
-                    "and the ORDINAL "
+                    "the record write was REFUSED (position_divergence) — the "
+                    "journal holds the record at position %s and the ORDINAL "
                     "ALLOCATOR issued %s, so the two allocators disagree about "
                     "this record's number. Writing it would put the journal line "
                     "and its position row at different numbers, which no replay "
@@ -4572,7 +4592,7 @@ def write_live_record(record: Mapping[str, Any], *,
                     "procedural: do not arm across a seal, halt the graph first "
                     "(#13050 owns segment-aware numbering). "
                     "record=%s %s",
-                    position_provenance, allocated_first, record.get("type"),
+                    seq, allocated_first, record.get("type"),
                     _record_identity(record),
                 )
                 return _refused("write_failed", seq)
@@ -4712,9 +4732,11 @@ def write_live_record(record: Mapping[str, Any], *,
             # than by reachability; and `position_divergence` is unreachable FROM
             # `live_write`, which passes `seq=None` whenever it sets this flag
             # (`live_write.py:650`) — but NOT from a direct caller that passes
-            # both, which the suite itself does, so its clause is
-            # flag-conditioned below instead of being exempt. grep for arms that
-            # BOTH name the provenance AND are reachable on this flag.
+            # both, which the suite itself does and now pins, so its WHOLE
+            # message is selected by the flag rather than being exempt — on that
+            # write the enumerated-repair path it prints (`status --journal`,
+            # `seed --journal`, restore) has no line to point at. grep for arms
+            # that BOTH name the provenance AND are reachable on this flag.
             journal_clause = (
                 "the record reached NEITHER store (the caller did not append: "
                 "this graph was cut over, so the journal holds no line); "
