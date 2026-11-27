@@ -35,9 +35,15 @@ arm                          flagged when
                              keyword — so delivered work never closed and the count never moved.
 ``wip-no-satisfies``         an issue has WIP but **no ``## Satisfies`` checklist** anywhere in its
                              body or comments — work started before the completion criteria existed.
-``pr-partial-close``         a PR uses a **closing keyword** for an issue whose own ``## Satisfies``
-                             checklist still has UNTICKED criteria — i.e. the PR is resolving a scope
-                             it has not finished. Flagged per issue, naming the unticked criteria.
+``pr-partial-close``         a PR uses a **closing keyword** for an issue whose declared rows it does
+                             not claim — it is resolving a scope it has not finished. The declared rows
+                             come from the issue's ``## Satisfies`` checklist (tick state DECIDES where
+                             present) **or**, when the issue carries none, from its row HEADINGS (two or
+                             more, ``### V1 ·`` … ``### V6 ·``) — the latter is the only source present
+                             in the live population (0 of the 30 newest open issues carry the checklist,
+                             1 declares ≥2 row headings), so a table naming only the first source is a
+                             spec for the path that never fires. Flagged per issue, naming the rows the
+                             PR did not claim (or the unticked criteria, when the checklist decides).
 ===========================  =========================================================================
 
 ARM 3 — the row-scoped PR that closes the programme-scoped issue (#13946)
@@ -1552,10 +1558,27 @@ def _ids_in(text: str, rows: list[str]) -> set[str]:
 # NOT one — it LIMITS an affirmative claim (`Closes #N (row V2 only)` claims V2) — and bare `remain` is
 # not one either, because `none remain` is affirmative.
 _DISCLAIMER_RE = re.compile(
-    r"not\s+claim(?:ed|s)?|unclaimed|not\s+closed|not\s+measured|unmeasured|not\s+proved|unproved"
+    r"\bnot\b|n't\b|\bnever\b|\bno\b|\bwithout\b"
+    r"|not\s+claim(?:ed|s)?|unclaimed|not\s+closed|not\s+measured|unmeasured|not\s+proved|unproved"
     r"|not\s+complete|incomplete|remain\w*\s+(?:open|unmeasured|unproved|unclaimed|deferred|out)"
-    r"|(?:stays?|left|still)\s+open|not\s+finished"
+    r"|(?:stays?|left|still)\s+open|not\s+finished|unfinished|unstarted|not\s+yet|yet\s+to"
+    r"|still\s+being|in\s+progress|\bopen\b"
+    r"|pending|\btodos?\b|outstanding|queued|backlog"
     r"|follow[\s-]?ups?|deferred|out\s+of\s+scope|excluded|except|apart\s+from|other\s+than",
+    re.IGNORECASE)
+
+# ⛔ THE POSITIVE MARKER FOR *IDs* (review round 9): round 8 retired the prose-cue blocklist for
+# RANGES, but the ids read still decided polarity by vocabulary — anything `_DISCLAIMER_RE` did not
+# recognise was unioned in as a CLAIM. That made a NEGATION of the close earn the pass: `We do not
+# close #N with V1, V3, V4, V5, V6` and `The capstone rows are V1..V6. This PR proves V2.` both read
+# `clean` over #13036's six rows, because those ids sat in a clause the cue list happened to miss.
+# Prose-based polarity cannot terminate, so a CLAUSE now contributes claims only on a POSITIVE
+# structural marker: it carries the closing keyword (with its attached qualifier), it carries a
+# COMPLETION verb (`_AFFIRM_RE`), or it is the documented `Satisfies #<issue>: <ids>` form. Everything
+# else is a mention, and mentions are not claims in either direction.
+_AFFIRM_RE = re.compile(
+    r"\b(?:prov(?:e|es|ed|en|ing)|measur\w+|done|complet\w+|deliver\w+|cover(?:s|ed)?|verif\w+"
+    r"|satisf\w+|land(?:s|ed)?|shipp(?:ed|ing)|closed|all\s+six|every\s+row)\b",
     re.IGNORECASE)
 # Where one CLAIM can end and a disclaimer can begin. A SPACED dash is a boundary (`#N — only V2 is
 # claimed`), but one sitting BETWEEN two declared row ids is a RANGE (`V1 — V6`) and must NOT split:
@@ -1640,12 +1663,27 @@ def _closing_line_claim(pr_body: str, issue: int,
         # is not a complete claim), so the disclaimed clauses are BLANKED in place of being skipped.
         # Skipping them read each clause in isolation, where that bare range looked like a claim on
         # all six and the line reported `clean` on a one-row PR.
+        spans = _clause_spans(line, rows)
+        claimable: set[int] = set()
+        for i, (a, b) in enumerate(spans):
+            clause = line[a:b]
+            if ref.search(clause) and _CLOSING_WORD_RE.search(clause):
+                # THE CLOSING VERB AND ITS ATTACHED QUALIFIER are the structural positive marker:
+                # `Closes #N (row V2 only)` claims V2 because that parenthetical is the verb's object,
+                # not because any word in it was recognised.
+                claimable.add(i)
+                if i + 1 < len(spans):
+                    claimable.add(i + 1)
+            elif _AFFIRM_RE.search(clause):
+                claimable.add(i)
         chars = list(line)
-        for a, b in _clause_spans(line, rows):
+        for i, (a, b) in enumerate(spans):
             if _DISCLAIMER_RE.search(line[a:b]):
                 disclaimed = True
                 chars[a:b] = " " * (b - a)
-        named |= _ids_in("".join(chars), rows)
+                claimable.discard(i)
+        if claimable:
+            named |= _ids_in("".join(chars), rows)
     return named, disclaimed
 
 
@@ -1817,7 +1855,22 @@ def classify_partial_close(body: str, number: int | str,
                 # NOT claiming and what nothing of what it is.
                 stats["ambiguous"] += 1
                 continue
-            if set(rows) <= _ids_in(strip_code(body, strict=True)[0], rows):
+            # ⛔ AND THE FALLBACK NOW NEEDS AN AFFIRMATIVE CLAUSE, NOT A MENTION (review round 9).
+            # "names all of them ANYWHERE" was true of a row TABLE, a list of rows that are PENDING,
+            # and a sentence that says the opposite of closing — so a body that merely enumerated the
+            # rows reported `clean`. The positive marker is the same one the closing line uses: the
+            # rows must name themselves in a clause carrying a COMPLETION verb and no disclaimer.
+            affirmative_all = False
+            for line in strip_code(body, strict=True)[0].splitlines():
+                for a, b in _clause_spans(line, rows):
+                    clause = line[a:b]
+                    if (_AFFIRM_RE.search(clause) and not _DISCLAIMER_RE.search(clause)
+                            and set(rows) <= _ids_in(clause, rows)):
+                        affirmative_all = True
+                        break
+                if affirmative_all:
+                    break
+            if affirmative_all:
                 stats["clean"] += 1
                 continue
             stats["ambiguous"] += 1

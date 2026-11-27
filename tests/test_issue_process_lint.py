@@ -4232,3 +4232,53 @@ def test_an_empty_sweep_says_it_read_nothing_not_that_the_arm_did_not_run(capsys
     assert rc == 0
     assert "did NOT RUN" not in out
     assert "0 closing ref(s) read" in out
+
+
+# Review round 9: the ids read was still a prose-cue blocklist — anything `_DISCLAIMER_RE` did not
+# recognise was unioned in as a CLAIM — so a NEGATION of the close earned the pass, and a body that
+# merely enumerated the rows reported `clean`. Every shape below is a partial close GitHub WILL close
+# whole; every one of them used to read `clean`.
+@pytest.mark.parametrize("body", [
+    "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 pending",
+    "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 TODO",
+    "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 outstanding",
+    "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 not yet done",
+    "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 still being worked",
+    "Closes #13036 (row V2 only)\n\nWe do not close #13036 with V1, V3, V4, V5, V6 — those remain open.",
+    "Closes #13036 (row V2 only)\n\nThis does not close #13036 for V1, V3, V4, V5, V6.",
+    "Closes #13036\n\nThe capstone rows are V1, V2, V3, V4, V5, V6. This PR proves V2.",
+    "Closes #13036\n\n| V1 | pending |\n| V2 | measured |\n| V3 | pending |\n"
+    "| V4 | pending |\n| V5 | pending |\n| V6 | pending |",
+])
+def test_a_disclosed_partial_close_never_reads_as_a_pass(body):
+    """The three shapes a lane actually writes — a TODO list, a NEGATION of the close, a row table.
+
+    A negation was the worst of them: `We do not close #N with V1 …` names every disclaimed id, and
+    the old read unioned them in as CLAIMS — so the more explicitly a PR disclaimed five rows, the
+    more reliably it passed. Polarity is now decided by a POSITIVE marker (the closing verb and its
+    attached qualifier, a completion verb, or `Satisfies #N:`), never by the absence of a cue word.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(body + "\n", 500, {13036: _scope(rows)})
+    assert stats["clean"] == 0, (body, stats)
+    assert stats["finding"] + stats["ambiguous"] + stats["abstained"] == 1, stats
+    if findings:
+        assert findings[0].evidence["claimed"] and set(findings[0].evidence["claimed"]) < set(rows)
+
+
+def test_the_whole_body_fallback_needs_an_AFFIRMATIVE_clause_naming_every_row():
+    """CONTROL for the round-9 rule, in both directions.
+
+    A completion verb on the line but in a DIFFERENT clause is not an affirmative claim on the rows
+    (`The capstone rows are V1 … V6. This PR proves V2.` ⇒ not clean), while a clause that carries
+    the verb and the six ids together is a complete close (`Every row is proved: V1 … V6` ⇒ clean).
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    listing = "V1, V2, V3, V4, V5, V6"
+    findings, stats = L.classify_partial_close(
+        f"Closes #13036\n\nThe capstone rows are {listing}. This PR proves V2.\n", 500,
+        {13036: _scope(rows)})
+    assert findings == [] and stats["clean"] == 0 and stats["ambiguous"] == 1, stats
+    findings, stats = L.classify_partial_close(
+        f"Closes #13036\n\nEvery row is proved: {listing}.\n", 500, {13036: _scope(rows)})
+    assert findings == [] and stats["clean"] == 1, stats
