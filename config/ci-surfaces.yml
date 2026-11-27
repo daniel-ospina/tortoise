@@ -57,8 +57,8 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `e2a9c695ad` folded in, plus THIS lane's
-# own row (`tests/test_14691_structure_evidence.py`, `core`, at the flat 2.0 s
+# reader of the prose can see. On THIS tree — the LAST `origin/main` fold on this branch, plus THIS
+# lane's own row (`tests/test_14691_structure_evidence.py`, `core`, at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) — the verb packs seven shards at 828.0 s (a, f, g, h, i, j, k) and four at
 # 827.9 s (b, c, d, e), so `ceil(828.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is
 # the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with

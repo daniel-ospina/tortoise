@@ -176,7 +176,7 @@ restored:
 | thing → owner (`ownedBy`) | **4/4** (6 rows) | **0/6 — every row INVERTED** | ❌ |
 | dependent → dependency (`dependsOn`) | **7/7** | **7/7** | ✅ |
 | team → component (`produces`) | 7/7 | **0/7 — every row INVERTED** | ❌ |
-| customer → product | 2/2 | carried only as `related` — the `transacts` rows were **dropped** | ⚠️ |
+| customer → product | 2/2 | carried only as `related` — **2** `transacts` rows **dropped** | ⚠️ |
 
 **One line that counts it.** Of the **22 asymmetric structural rows** this run wrote (`hasPart` is
 symmetric and `related` has no direction), **7 assert what the corpus says and 15 assert the reverse**
@@ -388,8 +388,8 @@ correctly oriented for composition and dependency.
 **Could not:** the wiring of people to things. *Who owns which product or component* — stored
 backwards, and unreadable in either direction through MCP. *Which team a role belongs to* — absent.
 *What relationship a person has to their team or role* — present as `related`, indistinguishable from
-"customer relates to market segment". *Which product a customer runs* — only as `related`, after the
-`transacts` row was dropped.
+"customer relates to market segment". *Which product a customer runs* — only as `related`, after both
+`transacts` rows were dropped.
 
 ---
 

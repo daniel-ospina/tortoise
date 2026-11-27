@@ -3248,7 +3248,9 @@ def test_every_TABLE_ROW_in_the_report_is_derived_from_an_artifact():
         own mechanism item and §5, with the suite green;
       * A2 `person → team **4/4**` → `**9/4**`, `person → role **4/4**` →
         `**9/4**`, the ownedBy `**4/4** (6 rows)` → `**9/4**` / `(11 rows)`,
-        `customer → product 2/2` → `9/2`, `dependsOn **7/7** | **7/7**` →
+        `customer → product 2/2` → `9/2`, its claim cell — `` **2** `transacts`
+        rows **dropped** `` → `**0**` (14th review, P2 — that cell was pinned by no
+        arm at all), `dependsOn **7/7** | **7/7**` →
         `**7/7** | **14/7**`;
       * A1 `| component | 7 | 7 | 7* |` → `9 | 9 | 9*`, `| team | 3 | 3 | 3 |` →
         `6 | 6 | 6 |`;
@@ -3319,7 +3321,39 @@ def test_every_TABLE_ROW_in_the_report_is_derived_from_an_artifact():
                     (2, f"**{a2['dependency_present_and_correct']}**")))
     a2row(r"^\| team → component \(`produces`\)",
           f"{produced_rows}/{produced_rows}", f"**0/{produced_rows}")
-    a2row(r"^\| customer → product \|", "2/2")
+    # ⛔ THE CUSTOMER→PRODUCT ROW WAS THE ONE A2 CLASS ROW IN NEITHER ARM (14th
+    # fresh-context review, P2). It was pinned by the LITERAL "2/2" and its claim
+    # cell was read by NOTHING, so `dropped` → `written` measured 103 passed while
+    # the shipped file contradicted §2's doc-04 cell, §3 mechanism item 6 and §5 —
+    # the same "a claim inverted while keeping its polarity" class this bundle
+    # already closed for `produces`. Both cells are derived now: the count from the
+    # artifact's own `related` customer→product rows, the claim from
+    # `A4_no_invention`, whose `relations_not_written` rows ARE the dropped
+    # relations and name the predicate the writer refused.
+    declared = _corpus()["_declared_structure"]
+    served = [
+        row for row in score["A2_edges"]["other"]
+        if (row.get("edge") or {}).get("predicate") == "related"
+        and row["edge"].get("src") in declared["customers"]
+        and row["edge"].get("dst") in declared["products"]
+    ]
+    not_written = score["A4_no_invention"]["relations_not_written"]
+    dropped_predicates = sorted({
+        m.group(1) for m in (
+            re.search(r"not written \(#\d+\): (\S+) '", row["warning"])
+            for row in not_written) if m
+    })
+    assert len(served) == len(declared["customers"]), served
+    assert not_written, (
+        "the artifact records no dropped relation, so this row's claim cell cannot "
+        "be graded from it — and the row states a drop")
+    assert len(dropped_predicates) == 1, dropped_predicates
+    a2row(r"^\| customer → product \|",
+          cells_at=(
+              (1, f"{len(served)}/{len(declared['customers'])}"),
+              (2, f"carried only as `related` — **{len(not_written)}** "
+                  f"`{dropped_predicates[0]}` rows **dropped**"),
+          ))
 
     # ── A5: each row's rank cell holds exactly the ranks the artifact recorded
     probes = score["A5_retrieval"]["probes"]
@@ -3836,7 +3870,28 @@ def test_the_cost_table_is_the_receipt():
         assert cells[3] == f"{llm.get('prompt_tokens'):,}", (doc_id, cells)
         assert cells[4] == f"{llm.get('completion_tokens'):,}", (doc_id, cells)
         assert cells[5] == str(len(res.get("points") or [])), (doc_id, cells)
-        assert cells[6].startswith(str(len(edges))), (doc_id, cells)
+        dropped_here = [
+            row for row in _score()["A4_no_invention"]["relations_not_written"]
+            if row.get("doc") == doc_id
+        ]
+        if dropped_here:
+            # ⛔ THE TAIL WAS FREE (14th fresh-context review, P2):
+            # `.startswith(len(edges))` graded `3 written` and left
+            # "· **2 dropped** (`transacts`)" unread, so "**0 dropped**" merged
+            # GREEN — the cell would have contradicted §3 item 6 and §5 while the
+            # suite passed. The drop count and the predicate are derived from the
+            # artifact's own `relations_not_written` rows for THIS document.
+            names = "`, `".join(sorted({
+                m.group(1) for m in (
+                    re.search(r"not written \(#\d+\): (\S+) '", row["warning"])
+                    for row in dropped_here) if m
+            }))
+            assert cells[6] == (
+                f"{len(edges)} written · **{len(dropped_here)} dropped** "
+                f"(`{names}`)"), (doc_id, cells[6], dropped_here)
+        else:
+            assert cells[6].startswith(str(len(edges))), (doc_id, cells)
+            assert "dropped" not in cells[6], (doc_id, cells[6])
         total_ack += doc["ack_seconds"]
     totals = [c.strip() for c in _report_line(r"^\| \*\*total\*\* \|").strip().strip("|").split("|")]
     tk = _score()["extraction_tokens"]
