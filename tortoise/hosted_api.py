@@ -8915,7 +8915,7 @@ def _record_health() -> dict:
     # that could not exist for two:
     #
     #   ``write_failed``      the record was UNREACHABLE, or the connection or
-    #                         its statement failed — a REPLAY heals it.
+    #                         its statement failed — a replay heals an OUTAGE.
     #   ``plan_refused``      the PROJECTOR could not BUILD a plan for the record,
     #                         so no statement ran (an undeclared/refused record
     #                         type, a carrier with no snapshot, an unusable
