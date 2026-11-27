@@ -253,7 +253,9 @@ def compute_status(
     """Pure staleness computation. Returns the watcher's decision surface.
 
     Per-org statuses: ``never`` (seam org with no R2 archive), ``stale`` — which
-    is THREE different readings, and only the first is an age (#5047/#9937):
+    is THREE different readings, and the count is scoped by MEASUREMENT, not by
+    poll confirmation: (a) and (b) are BOTH an age claim — (b)'s is an UPPER
+    BOUND — and only (c) is not an age at all (#5047/#9937):
     (a) the newest archive is older than the threshold on a CONFIRMED poll (a
     non-expired simulate object carries an OLD age and forces this too);
     (b) a DEGRADED poll with a CACHED reading — the listing did not answer and
@@ -286,10 +288,16 @@ def compute_status(
       no archive
     confirmed, state PRESENT,   ``backup_set_missing``     ``backup_set_missing``
       no manifest                                          (#2374)
-    measured age > threshold,   ``stale``                  ``stale``
-      state PRESENT
+    confirmed, state PRESENT,   ``never`` — and in the     ``backup_set_missing``
+      no R2 prefix at all       census (the double-file    (#2374: state exists,
+                                tracked in #14769)         so not ``never``)
     measured age ANY, no state  ``stamp_missing``          ``stamp_missing``
       AND org still in census
+    measured age ANY, no state  ``ok`` / ``stale``         ``ok`` / ``stale``
+      NOT in census             (``stamp_missing`` needs   (``stamp_missing``
+                                ``org in orgs``)            needs ``t in orgs``)
+    measured age > threshold,   ``stale``                  ``stale``
+      state PRESENT
     measured age <= threshold,  ``ok``                     ``ok``
       state PRESENT
     org the sweep skips         ``not_eligible``           (key omitted)
