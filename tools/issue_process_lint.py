@@ -1769,7 +1769,9 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
     AMBIGUOUS rather than as either a finding or a pass (see `classify_partial_close`). The second
     element exists so that fallback can be REFUSED where it would launder a disclaimer: a body whose
     closing line says `V1–V6 remain unmeasured` names every id somewhere, and reading the whole body
-    there reports `clean` on a close that disclaimed all six.
+    there reports `clean` on a close that disclaimed all six. ⛔ THAT REFUSAL COVERS THIS READ TOO
+    (round 19): a `Satisfies` line naming EVERY row beside a disclaimer is the same launder through
+    the other source, so it is dropped here and the caller reaches the same UNANSWERABLE verdict.
 
     ⛔ THERE IS NO `skipped` SINK HERE, AND THAT IS MEASURED, NOT AN OVERSIGHT (review round 18, P3).
     This read used to take a `skipped` parameter and forward it to `_claims_in`, and **no caller ever
@@ -1877,7 +1879,21 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
     # both). A closing line that named at least one row is the claim; `Satisfies` is consulted only
     # when it named none, which keeps a bare `Closes #N` + a complete `Satisfies` reading clean.
     if not named:
-        named |= _satisfies_claim(text, issue, rows, repo)
+        satisfies_named = _satisfies_claim(text, issue, rows, repo)
+        # ⛔ AND A DISCLAIMER VETOES THE COMPLETE CLAIM FROM THIS SOURCE TOO (round 19, found while
+        # verifying round 18's guard). The `if disclaimed:` refusal that refuses the whole-body
+        # fallback lives in `classify_partial_close`, so it covers ONE of the two "names all of them
+        # anywhere" paths: a body that said five rows `remain unmeasured` AND carried the process
+        # doc's complete `Satisfies #N: V1 … V6` form reported `clean` — a false PASS on a close that
+        # disclaimed five, through the source that refusal does not reach. `(rows V1, V3–V6 remain
+        # unmeasured)` on the closing line laundered identically. Same reasoning, same verdict: a PR
+        # that told us what it is NOT claiming, and then claimed everything, is UNANSWERABLE, not a
+        # pass (the caller reports that, because the claim set goes back empty). The veto is on the
+        # COMPLETE claim, never on the source — a `Satisfies` line naming just the row the PR did
+        # prove still yields the finding, so the refusal costs no true positive.
+        if disclaimed and set(rows) <= satisfies_named:
+            satisfies_named = set()
+        named |= satisfies_named
     return named, disclaimed
 
 

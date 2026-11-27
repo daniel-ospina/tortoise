@@ -3788,6 +3788,10 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
     honest verdict is AMBIGUOUS (the PR said what it is NOT claiming and not what it is), never a
     pass. Pre-fix: `clean == 1`.
 
+    ⛔ AND THERE ARE TWO "NAMES ALL OF THEM ANYWHERE" SOURCES, NOT ONE (round 19): the whole-body
+    fallback and a `Satisfies #N: <every row>` line. Both laundered the same disclosure — the refusal
+    above covered only the first — so the last three blocks pin the second source and its control.
+
     ⛔ THE DISCLOSURE IS SPELLED AS AN EXPLICIT LIST ON PURPOSE (review round 7, F2): with the range
     form (`V1–V6 remain unmeasured`) the span read does not fire either, so the body never names all
     six and the test stayed GREEN with the disclaimer guard mutated away — it pinned nothing. The
@@ -3808,6 +3812,30 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
         "All six rows V1, V2, V3, V4, V5, V6 are proved.\n", 500, {13036: _scope(rows)})
     assert findings == []
     assert stats["clean"] == 0 and stats["ambiguous"] == 1, stats
+    # ⛔ AND THE SAME REFUSAL MUST COVER THE THIRD SOURCE (round 19, found verifying round 18's
+    # precedence guard). `Satisfies #N: <every row>` is the OTHER "names all of them anywhere" path,
+    # and the guard above never saw it: a body that disclaimed five rows AND carried the process
+    # doc's complete `Satisfies` form reported `clean` — a false PASS on the arm's own question,
+    # through the one source the round-11 refusal does not reach. Pre-fix: `clean == 1`.
+    findings, stats = L.classify_partial_close(
+        "Closes #13036\n\nV1, V3, V4, V5, V6 remain unmeasured and are follow-ups.\n\n"
+        "Satisfies #13036: V1, V2, V3, V4, V5, V6\n", 500, {13036: _scope(rows)})
+    assert findings == []
+    assert stats["clean"] == 0 and stats["ambiguous"] == 1, stats
+    # …and the disclaimer written INSIDE the closing line's parenthetical is the same sentence.
+    findings, stats = L.classify_partial_close(
+        "Closes #13036 (rows V1, V3-V6 remain unmeasured).\n\n"
+        "Satisfies #13036: V1, V2, V3, V4, V5, V6\n", 500, {13036: _scope(rows)})
+    assert findings == []
+    assert stats["clean"] == 0 and stats["ambiguous"] == 1, stats
+    # CONTROL — the veto is on the COMPLETE claim, not on the source. The same disclaimer beside a
+    # `Satisfies` line naming only the row the PR proved is still the finding, claiming exactly V2;
+    # suppressing the whole read instead would trade a true positive for this abstention.
+    findings, stats = L.classify_partial_close(
+        "Closes #13036 (rows V1, V3-V6 remain unmeasured).\n\n"
+        "Satisfies #13036: V2\n", 500, {13036: _scope(rows)})
+    assert stats["finding"] == 1 and stats["clean"] == 0, stats
+    assert findings[0].evidence["claimed"] == ["V2"], findings[0].as_dict()
 
 
 def test_naming_every_row_ANYWHERE_is_a_complete_close():
