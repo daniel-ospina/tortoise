@@ -57,22 +57,27 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — the LAST `origin/main` fold on this branch, plus THIS
-# lane's own row (`tests/test_14691_structure_evidence.py`, `core`, at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) — the verb packs seven shards at 828.0 s (a, f, g, h, i, j, k) and four at
-# 827.9 s (b, c, d, e), so `ceil(828.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is
-# the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.03` (1680 / 828.0 = 2.0290) on every one of the eleven shards, so the two
+# reader of the prose can see. On THIS tree — the LAST `origin/main` fold on this branch, plus this
+# lane's own row (`tests/test_relation_orientation_14304.py`, `core`, at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`) — the verb packs five shards at 828.2 s (a, g, i, j, k) and six at
+# 828.1 s (b, c, d, e, f, h), so `ceil(828.2/60 x 2)` = 28 m governs (a shard's job-level wall clock
+# is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
+# `watchdog_headroom: 2.03` (1680 / 828.2 = 2.0285) on every one of the eleven shards, so the two
 # agree by construction rather than by a hand re-read.
-# ⛔ #14723 RE-DERIVED THIS SENTENCE, and names the move rather than leaving it unattributed: this
-# lane registers one `core` row at the flat 2.0 s, which puts ONE more file in `fast_pool()` and
-# re-packs the bins — `main` at this base splits nine and two, and this tree splits seven and four,
-# while the MINUTE (28 m) and the headroom (2.03) are the same on BOTH sides. That is why the
-# PARTITION is stated and not only the minute: an arithmetic check on `28 m` cannot see a carried
-# figure, and a reader comparing only minutes would call this move cosmetic.
+# ⛔ #14723 RE-DERIVED THIS SENTENCE ON ITS OWN TREE, and named the move rather than leaving it
+# unattributed: that lane registered one `core` row at the flat 2.0 s, which put ONE more file in
+# `fast_pool()` and re-packed the bins — `main` at that base split nine and two, and that tree
+# split seven and four, while the MINUTE (28 m) and the headroom (2.03) were the same on BOTH
+# sides. That is why the PARTITION is stated and not only the minute: an arithmetic check on
+# `28 m` cannot see a carried figure, and a reader comparing only minutes would call the move
+# cosmetic. ⛔ #14304 re-derives it AGAIN on the tree it merges into: `main` has moved twice since
+# that fold, and this lane adds its own `core` row at the same flat 2.0 s, so the bins are now
+# five and six — the figures above are measured with `--emit-push-matrix` on THIS head, never
+# carried from #14723's paragraph (kept as that fold's own past-tense measurement).
 # ⛔ THE POOL DELTA IS RE-COUNTED ON THE RESOLVED TREE AND STATED AS THE OPERATION — never carried,
 # and never as a pair of counts: `set(fast_pool(head)) - set(fast_pool(main))` returns exactly ONE
-# entry, `tests/test_14691_structure_evidence.py` (`core`, flat 2.0 s), the row this lane registers,
+# entry, `tests/test_relation_orientation_14304.py` (`core`, flat 2.0 s), the row THIS lane
+# registers — #14723's own row is already on `main` at this base, so it is not part of this delta —
 # and the reverse difference is empty — measured by loading each tree's OWN manifest
 # (`git show origin/main:config/ci-surfaces.yml`) through `fast_pool()`.
 # ⛔ No pool SIZE is restated BY THIS RE-DERIVATION, and the reason is a recorded ruling rather
@@ -126,15 +131,10 @@ version: 1
 # (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), `#14671`'s
 # `tests/test_13450_ep_position_axis_participation.py` row in `durations` — `core`-registered — and
 # `#14726`'s dual registration, `tests/test_own_site_fragment_targets.py` row in
-# `durations`, on `core` AND `onboarding`. ⛔ NO emission is restated HERE: the merged tree's
-# partition is the re-derivation above (this lane's own row is in the pool), and this list is the
-# rows it carries — a second spelling of the bins is the splice this block refuses.
-# `durations`, on `core` AND `onboarding`, and `#14304`'s `tests/test_relation_orientation_14304.py` row
-# in `durations` (`core`) — the verb packs the pool into two bins: seven shards at
-# 828.0 s (a, f, g, h, i, j, k) and four at 827.9 s (b, c, d, e), so
-# `ceil(828.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
-# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
-# (1680 / 828.0 = 2.0290), so the two agree by construction rather than by a hand re-read.
+# `durations`, on `core` AND `onboarding`, and `#14304`'s `tests/test_relation_orientation_14304.py`
+# row in `durations` (`core`). ⛔ NO emission is restated HERE: the merged tree's partition is the
+# re-derivation above (this lane's own row is in the pool), and this list is the rows it carries —
+# a second spelling of the bins is the splice this block refuses.
 # ⛔ THAT `origin/main` FOLD LABEL IS HAND-CHECKED, and it is stated here rather than left
 # implied: it has been wrong REPEATEDLY, each time caught by a reader rather than by a gate. ⛔ THE
 # COMMITS THAT SHOWED IT ARE NOT LISTED HERE, and that is a correction: an earlier spelling listed
