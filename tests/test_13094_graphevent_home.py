@@ -309,8 +309,8 @@ def test_every_declared_reader_still_names_its_statement_in_the_tree():
     `hosted_backup.py`: a single-occurrence check would let one survivor satisfy
     both rows, so deleting the other would go unnoticed. ⛔ And a FLOOR is not
     enough — measured on `hosted_backup.py`, the statement occurs FOUR times
-    (`:1333`, `:1534`, the live read at `:3603` and a docstring mention at
-    `:3442`), so deleting BOTH censused sites still leaves 2 and a
+    (`:1382`, `:1583`, the live read at `:3652` and a docstring mention at
+    `:3491`), so deleting BOTH censused sites still leaves 2 and a
     `min_occurrences: 2` floor stays GREEN with both rows pointing at deleted
     code. `occurrences` therefore pins the EXACT count where a row declares it,
     which is what makes any deletion of these sites red.

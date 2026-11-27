@@ -29,7 +29,10 @@ import { captureClaimForHarness, captureStatusLabelForHarness } from './captureS
 // by a test (it mounts the whole application at module scope).
 import { HarnessStatusCard } from './harnessStatusCard.jsx'
 import { feedStateOf } from './securityAlerts.js'
-import { SecurityAlertsPanel } from './securityAlertsPanel.jsx'
+// #14686: the alerts are CHROME, not page content — a bell in the header with a
+// ledger that unfolds from it (the panel this replaces rendered inside <main>,
+// above the overview grid, which is the defect the owner reported).
+import { NotificationBell } from './notificationPanel.jsx'
 import { setupGuide } from './setupGuide.js'
 // #2005 (W9): the resume/entry-step derivation shared by the wizard's re-entry
 // doors — ONE function so the Setup pill, the re-entry card and the Settings
@@ -3178,6 +3181,36 @@ function claimIntentInFlight() {
   // all-clear on the one screen whose job is not to hide incidents (round-23
   // review finding).
   const [alertsUnavailable, setAlertsUnavailable] = React.useState(false)
+  // #14694: whether the read that backs `alerts` has SETTLED. A fourth fact beside
+  // rows / cut-scan / failed-read, and the one the panel had no input for: without
+  // it a `[]` feed that nothing had read yet was indistinguishable from a read that
+  // came back empty, so the open panel printed "You have no notifications." over an
+  // unmeasured Organization. Two real windows, both pre-existing: the chrome renders
+  // BEFORE `loadAlerts` settles (`setAuthed(true)` then fire-and-forget, #1567), and
+  // `switchTeam` clears the feed and then reads it asynchronously. Starts `false`
+  // because nothing has been read at first paint; every settle arm below sets it,
+  // including the failure arms — a FAILED read is a settled one (`unavailable`
+  // carries which kind), while a read DISCARDED by the staleness guard is not, so
+  // those returns deliberately leave it alone for the next Organization's own read.
+  const [alertsLoaded, setAlertsLoaded] = React.useState(false)
+  // #14694 (F5): whether a read for `alerts` was ever STARTED. `alertsLoaded`
+  // alone cannot distinguish "a read is in flight" from "nothing ever tried",
+  // and `loadAlerts` can return above its own `fetch` (no session token, no org
+  // id, stale `tid`) with nothing to re-run it — so the panel needs this fact to
+  // say "not checked yet" instead of claiming a check is running forever.
+  const [alertsRequested, setAlertsRequested] = React.useState(false)
+  // #14694 review P2: whether a read DECLINED its own preconditions, i.e. "nothing
+  // will ever read this feed". `!alertsLoaded && !alertsRequested` is ALSO true for
+  // the whole bootstrap window (`completeLogin` calls `loadAlerts` only after
+  // several awaits), so that pair cannot tell "a read is about to start" from "no
+  // read will ever start" — and warning on it flashed an amber `!` on the
+  // notifications bell on every normal login. This is raised ONLY where
+  // `loadAlerts` returns before its own `fetch` because the session token or
+  // Organization id is absent (nothing re-runs it — `loadAlerts` is not polled and
+  // not in the `[currentOrgId]` effect), and cleared the moment a read really
+  // starts. A stale-Organization discard does NOT raise it: that read is abandoned
+  // for a NEWER one that this selection's own flow will start.
+  const [alertsUnstarted, setAlertsUnstarted] = React.useState(false)
   // #10156: the pending episode + the per-episode error. ONE row is disabled at
   // a time via `ackPending`, but that is a UI convention, NOT a single-flight
   // lock: clicking two rows starts two writes, and the first to finish clears
@@ -5150,6 +5183,7 @@ function claimIntentInFlight() {
         // reads — map the BFF profile onto its existing shape here so no
         // downstream `session.user.*` access survives.
         sessionMetaRef.current = {
+          id: profile.id || '',
           display_name: profile.displayName || '',
           email: profile.email || '',
         }
@@ -5434,7 +5468,53 @@ function claimIntentInFlight() {
   async function loadAlerts(tid) {
     // #308 (R7): session-authed alert history — reachable even while the
     // team is suspended (API-key routes 403 by design).
-    if (!sessionTokenRef.current || !tid) return
+    // ⛔ A terminal decline: nothing re-runs `loadAlerts`, so a bell left on
+    // "never read" would be the all-clear lie forever (#14694 review P2). Raising
+    // `alertsUnstarted` is what lets the CLOSED bell say so — and raising it HERE,
+    // rather than inferring it from "not loaded yet", is what keeps the bootstrap
+    // window silent. The stale-Organization guard BELOW deliberately does not raise
+    // it: that read is replaced by a newer one.
+    if (!sessionTokenRef.current || !tid) { setAlertsUnstarted(true); return }
+    // Captured BEFORE the first await — this is what makes the guard below a
+    // question about THIS read rather than about the current selection.
+    const orgAtCall = orgIdRef.current
+    // …and the read must BE for the Organization that is current when it starts.
+    // The in-flight guard compares the ref before and after the awaits, so it
+    // cannot see a caller that captured `tid` BEFORE an await of its own and then
+    // handed us the stale value: `acknowledgeAlert` does exactly that (it holds
+    // `tid` across the acknowledgement POST at `main.jsx` acknowledgeAlert). If a
+    // switch lands during that POST, `orgAtCall` is the NEW Organization while
+    // `tid` is the OLD one — the guard then compares B to B, passes, and writes
+    // the OLD Organization's episodes under the NEW one's header, with the ledger
+    // key already switched, so a snooze taken there lands in the wrong key — and
+    // the card was written when `snoozedUntil` had no incident gate; it has one
+    // now (`effectiveSnoozedUntil`), which bounds the damage but does not make a
+    // stale read safe. The same stale read also
+    // stamps `alertsUnavailable` on the new Organization in its failure arm.
+    // A not-yet-known Organization (the first-organization read, `orgAtCall`
+    // null) is still allowed — that is a real read for the org being selected.
+    if (orgAtCall && orgAtCall !== tid) return
+    // ⛔ STALE means "the Organization changed under this read AND this read was
+    // not for the Organization that is current NOW". Both halves are needed, and
+    // the second is #14694's P2: the pre-request guard above lets a
+    // first-Organization read through (`orgAtCall` null is a real read), and
+    // `completeLogin` starts exactly that read and THEN pins the first selectable
+    // org — so `orgIdRef.current` moves null -> X while `tid` is already `X`. A
+    // capture-only guard compares `X !== null`, discards a read that was FOR the
+    // current Organization, and this path resets neither flag — leaving
+    // `alertsRequested` true and `alertsLoaded` false forever, i.e. the panel
+    // renders "Checking for notifications…" for the rest of the session over a
+    // feed nothing ever re-reads (`loadAlerts` is not in the `[currentOrgId]`
+    // effect and is not polled). Accepting the response when `tid` IS the live
+    // org still discards a real switch (A -> B keeps `B !== tid`) and a logout
+    // (keeps `null !== tid`), so nothing the capture guard protects is lost.
+    const stale = () => orgIdRef.current !== orgAtCall && orgIdRef.current !== tid
+    // Every guard that can abandon this call runs ABOVE this line, so setting it
+    // here means exactly "a request is starting now" — a discarded call leaves
+    // the feed honestly unrequested rather than claiming a check that never began
+    // (#14694 F5).
+    setAlertsRequested(true)
+    setAlertsUnstarted(false)
     try {
       // #3501: same-origin proxy; the `__Host-session` cookie authenticates.
       const res = await fetch(`${API_BASE}/v1/team/alerts?org_id=${encodeURIComponent(tid)}`)
@@ -5448,17 +5528,68 @@ function claimIntentInFlight() {
         // regress silently (a mutant that dropped `unavailable` survived the
         // whole dashboard suite).
         const feed = feedStateOf(await res.json())
+        // #14686: an Organization switch can invalidate this read while it is in
+        // flight. The bell is ALWAYS MOUNTED in the header, so writing a previous
+        // org's feed here would list its rows — and let a snooze/dismissal
+        // written against them land in the NEW org's key. Same guard discipline
+        // as the members/graphs loaders.
+        //
+        // ⛔ CAPTURE-AND-COMPARE, the same `_teamAtCall` idiom loadAll, loadRepos
+        // and loadBranches already use — NOT a comparison of the live ref against
+        // `tid`. (`loadGraphs` deliberately compares the live ref against its own
+        // `orgId` PARAMETER instead; that is correct there and only there, because
+        // its callers always pass the current org. `loadAlerts`' wizard caller
+        // does not, which is exactly why it must capture.) Two earlier forms were both wrong, and
+        // this replaces both:
+        //
+        //  * `orgIdRef.current !== tid` wrongly DISCARDS a legitimate read when
+        //    no Organization is current yet. That is reachable: the org-creation
+        //    wizard calls `loadAlerts(t.org_id)` after `await loadTeams()`, and
+        //    `loadTeams` only pins when it actually got a selectable row — so on
+        //    a failed/empty `/v1/organizations` a first-timer's read is dropped,
+        //    with no recovery (`loadAlerts` is not in the `[currentOrgId]` effect
+        //    and is not polled).
+        //  * `orgIdRef.current && orgIdRef.current !== tid` fixes that by also
+        //    ALLOWING the null case — which lets a response that lands AFTER a
+        //    logout (`orgIdRef.current = null`) write into the next state.
+        //
+        // Capturing the org at call time and comparing after the awaits gets both
+        // right: the guard means "did the Organization change under this read,
+        // and is this read not for the one that is current now?" — so a switch
+        // (A -> B) discards, a first-org read (null -> null) is allowed, and a
+        // first-org read that lands after the org was pinned to ITS OWN target is
+        // allowed too (`stale()`'s second half).
+        //
+        // ⛔ Logout is `A -> null` when the read was for a KNOWN Organization: that
+        // discards. It does NOT discard the FIRST-Organization read, and this
+        // comment used to claim it did — with `orgAtCall` null, logout leaves
+        // `orgIdRef.current = null`, so `null !== null` is false and the response
+        // is ACCEPTED after logout. Harmless in practice (logout navigates away
+        // through `bounceToAuth()`), but the guard's stated contract was wrong
+        // about the one window that is also `completeLogin`'s common path — state
+        // the real behaviour rather than a rule the code does not implement.
+        if (stale()) return
         setAlerts(feed.alerts)
         setAlertsSaturated(feed.saturated)
         setAlertsUnavailable(feed.unavailable)
+        setAlertsLoaded(true)
       } else {
-        // A non-2xx is a FAILED read, not an empty feed.
+        // A non-2xx is a FAILED read, not an empty feed. The SAME staleness guard
+        // applies here as on the success branch: stamping A's failed read onto B's
+        // state makes B's closed bell say "the alerts could not be loaded" about a
+        // read B never made — a claim about the wrong Organization (review finding).
+        // Same guard as the success branch.
+        if (stale()) return
         setAlertsUnavailable(true)
+        setAlertsLoaded(true)
       }
     } catch {
       // Best-effort — alert history never blocks the dashboard — but the panel
-      // must be able to say it could not look.
+      // must be able to say it could not look. Guarded for the same reason as the
+      // arms above: the read may have started before an Organization switch.
+      if (stale()) return
       setAlertsUnavailable(true)
+      setAlertsLoaded(true)
     }
   }
 
@@ -5506,6 +5637,14 @@ function claimIntentInFlight() {
         }[res.status]
         setAckError({
           episode: alert.episode,
+          // #14686 (review finding, P3): the ledger branch now STATES this
+          // refusal, and it has no row to attach it to — so it must carry the
+          // Organization it belongs to and the alert it is about. `switchTeam`
+          // clears it, but a refusal still IN FLIGHT when the switch lands would
+          // otherwise announce org A's sentence inside org B's panel, and say
+          // "that alert" above a list of many.
+          orgId: tid,
+          label: alert.label || '',
           message: refusal
             || 'Could not save that acknowledgement — try again.',
         })
@@ -5514,7 +5653,12 @@ function claimIntentInFlight() {
       }
       await loadAlerts(tid)
     } catch {
-      setAckError({ episode: alert.episode, message: 'Could not save that acknowledgement — try again.' })
+      setAckError({
+        episode: alert.episode,
+        orgId: tid,
+        label: alert.label || '',
+        message: 'Could not save that acknowledgement — try again.',
+      })
     } finally {
       setAckPending(null)
     }
@@ -6537,6 +6681,41 @@ function claimIntentInFlight() {
     setError('')
     setCurrentOrgId(orgId)
     orgIdRef.current = orgId
+    // #14686: the alerts feed is TEAM-scoped, and the bell is now ALWAYS MOUNTED
+    // in the header — before this change the feed only fed a panel that rendered
+    // on the overview tab. Without this reset the bell reports the PREVIOUS
+    // Organization's unresolved count, lists its episodes, and lets a decision
+    // taken on one be written under the other's ledger key. The snooze's incident
+    // gate (`effectiveSnoozedUntil`) bounds the damage but does NOT make a stale
+    // read safe: an activity row's message can be shared across rules — a
+    // `read_velocity` row names only the scope, and a `flag` row's message
+    // repeated across rules until #14702 put the measured numbers in it — and an
+    // ACTIVITY snooze keeps the whole period by design, so snoozing a stale org-A
+    // row could hide org B's own rows for the period (review finding F2).
+    //
+    // ⚠️ THIS CARD USED TO SAY THE SNOOZE HAD NO INCIDENT GATE BY DESIGN. That is
+    // false since #14694's read-side bound landed in `effectiveSnoozedUntil`: an
+    // incident that HAPPENS after the snoozed instant re-opens, mirroring
+    // `abuse.py::_episode_acknowledged`. The reset never depended on the gate
+    // being absent — it is about which Organization the FEED describes.
+    setAlerts([])
+    setAlertsSaturated(false)
+    setAlertsUnavailable(false)
+    setAlertsLoaded(false)
+    // #14694 (F5): the "a read was started" fact is per FEED GENERATION, so it is
+    // reset with the settled one. If it survived, a switch whose re-read is itself
+    // discarded by `loadAlerts`' guards would restore "Checking…" forever — the
+    // exact defect the fact exists to close, reopened one window later.
+    setAlertsRequested(false)
+    loadAlerts(orgId)
+    // #14686 (review finding, P3): `ackError` is cleared only when the NEXT
+    // acknowledgement starts, and the panel renders it in the ledger branch
+    // whenever no detail is open — so a refusal about Organization A's episode
+    // would be announced as `role="alert"` inside Organization B's panel, with no
+    // row and no way to clear it but re-attempting the action. It is the write
+    // state of a feed this block is dropping, so it goes with the feed.
+    setAckError(null)
+    setAckPending(null)
     // #1893 (code-review P1): onboarding state is TEAM-scoped — the switch
     // must re-hydrate the NEW team's persisted scope, never the old team's.
     // The stale flag blocks the hydration effect until refreshOnboarding
@@ -6600,6 +6779,30 @@ function claimIntentInFlight() {
         if (prevOrgId) {
           setCurrentOrgId(prevOrgId)
           orgIdRef.current = prevOrgId
+          // #14686 (review finding, P2): the switch-top reset is NOT enough here.
+          // The failed Organization's feed read is fired at the switch top and
+          // runs CONCURRENTLY with the `refreshTeam` call that is about to fail,
+          // so it can LAND before this revert — and then `alerts` holds the
+          // abandoned Organization's rows while the header says `prevOrgId`. The
+          // org guard cannot help: it only decides whether a LATE read lands, not
+          // whether an already-landed one should survive a change of Organization.
+          // If the read below then fails, those rows stay for the session (nothing
+          // polls), and both "we could not look" notices are gated on an EMPTY
+          // feed — so the reader gets the wrong Organization's count and rows with
+          // no notice and no `!` badge, and a snooze taken there is written into
+          // the RESTORED Organization's ledger key.
+          //
+          // Reset exactly as the switch top does, then read once. `unavailable` is
+          // NOT pre-set to true: the read below owns that answer, and it writes the
+          // flag itself when it fails (`loadAlerts`), so the persistent state is
+          // honest either way while the in-flight window behaves the same as the
+          // happy path's.
+          setAlerts([])
+          setAlertsSaturated(false)
+          setAlertsUnavailable(false)
+          setAlertsLoaded(false)
+          setAlertsRequested(false)
+          loadAlerts(prevOrgId)
           setTeam(null)
           setStaleFired(false) // #1858: the revert re-attaches the previous team — clear the latch so the restored team's skeleton gets a fresh floor (team is already null here, so the reset effect won't fire)
           // #1893 (code-review P1): the revert re-attaches the PREVIOUS
@@ -6611,6 +6814,9 @@ function claimIntentInFlight() {
           // Round-3: reload ALL key-scoped data for the reverted team —
           // otherwise keys/sessions/backups stay wiped until reload.
           await Promise.all([loadAll(''), loadBackups('')]).catch(() => {})
+          // The feed was reset and re-read at the top of this arm, together with
+          // the org re-attach — that single read is the one that counts, and a
+          // second one here would double-fire for no gain.
         }
         setError(e)
       }
@@ -10711,6 +10917,26 @@ function claimIntentInFlight() {
             #2005 (W9): the reopen DERIVES its entry step (openResumeWizard) —
             it used to hardcode step 0, which is #2327's restart. */}
         <button className="ghost small setup-header" onClick={openResumeWizard}>Setup</button>
+        {/* #14686: the notifications bell. It carries the alert feed that used to
+            render as banner blocks above the overview grid, and it is ALWAYS
+            mounted — a control that appears only when there is something to say
+            is a control the reader cannot learn. The panel owns the ledger,
+            snooze, dismiss and the detail view; the state it persists is keyed by
+            the pair below (per user, per Organization). */}
+        <NotificationBell
+          alerts={alerts}
+          scanSaturated={alertsSaturated}
+          unavailable={alertsUnavailable}
+          feedLoaded={alertsLoaded}
+          feedRequested={alertsRequested}
+          feedUnstarted={alertsUnstarted}
+          userId={sessionMetaRef.current?.id || sessionMetaRef.current?.email || ''}
+          orgId={currentOrgId || ''}
+          canAcknowledge={isOwnerAdmin}
+          onAcknowledge={acknowledgeAlert}
+          ackPending={ackPending}
+          ackError={ackError}
+        />
         {/* #1148-ux + #1874: account blob — GitHub/Vercel/Linear pattern:
             the avatar menu is the personal-account surface (identity block
             + Profile entry + workspace switch + Log out); the trigger shows
@@ -11110,8 +11336,25 @@ function claimIntentInFlight() {
             {(TIER_LABELS[team.tier] || team.tier || 'free')} tier
           </span>
         ) : null}
+        {/* #14686: the badge's title names the surface that actually exists — the
+            alerts live in the header's notifications menu now, and "security
+            alerts" was the heading of the block this issue removed.
+
+            TWO decisions meet on this line and BOTH survive:
+              * #14687/#14702 (calibration) retired "Suspicious activity detected"
+                — a `flag` row is a rate MEASUREMENT, and accusing a customer of
+                suspicious activity for one is the false-incident framing that
+                lane removed. Its verb is "measured", not "detected".
+              * #14686 retires the old pointer to the heading of the block this PR
+                deletes. A pointer to a surface that no longer exists is how a
+                reader learns the dashboard is stale.
+            So: main's verb, this PR's destination. Neither half is optional —
+            reverting either one re-introduces a defect the other fixed.
+            ⛔ Do not spell the RETIRED pointer out in this file: the pin in
+            `securityAlerts.test.js` asserts its absence from this source, so a
+            comment that quotes it fails the very test it is explaining. */}
         {team && team.status === 'flagged' && (
-          <span className="tier-badge" title="Unusual activity measured — see recent activity">⚠ flagged</span>
+          <span className="tier-badge" title="Unusual activity measured — see notifications">⚠ flagged</span>
         )}
       </header>
 
@@ -11173,24 +11416,10 @@ function claimIntentInFlight() {
           </div>
         )}
 
-        {tab === 'overview' && (alerts.length > 0 || alertsSaturated || alertsUnavailable) && (
-          // #10156: TWO REGISTERS, never one list. The old block rendered every
-          // entry under "Security alerts / Suspicious activity detected on this
-          // Organization. Revoke any key you don't recognize." — including
-          // notify-only read-velocity observations, which changed nothing, were
-          // a month old, and were one continuous bout counted thirteen times.
-          // The panel owns the split, the ages and the episode counts; the copy
-          // decisions and their tests live in `securityAlerts.js`.
-          <SecurityAlertsPanel
-            alerts={alerts}
-            scanSaturated={alertsSaturated}
-            unavailable={alertsUnavailable}
-            onAcknowledge={acknowledgeAlert}
-            ackPending={ackPending}
-            ackError={ackError}
-            canAcknowledge={isOwnerAdmin}
-          />
-        )}
+        {/* #14686: NOTHING renders here any more. The alert feed is CHROME —
+            `NotificationBell` in the header — because a block inside <main> that
+            pushes the overview content down and cannot be put away is the defect
+            the owner reported, not the layout. */}
         {tab === 'overview' && team === null && (
           // #1841: frames-first — the overview grid renders IMMEDIATELY as
           // skeleton frames (the old code gated the WHOLE section on /v1/team,

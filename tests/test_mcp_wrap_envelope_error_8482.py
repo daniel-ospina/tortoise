@@ -454,11 +454,19 @@ async def test_no_registry_tool_can_deliver_a_payload_its_schema_rejects(
     # (11 -> 10), which is the same re-cut shape the `unions` floor took for P6 — a floor
     # left one above the measurement is a red on a recorded decision, and a floor
     # lowered WITHOUT the measurement is the drift this file exists to catch.
-    assert repaired >= 10, (
-        f"sweep saw only {repaired} wrap-envelope tools; 10 is the measured "
-        "population at the #11609 P7 merge (11 before it, while "
-        "`tortoise_list_graphs` — a retired-forward, array-wrapped listing door — was "
-        "still advertised), and they are the population #8482 actually occurs in")
+    # ⛔ 10 -> 1 on 2026-11-25 (#11609 lane P11), and the move IS that lane's point: the
+    # nine remaining array-wrapped doors retired forward, so the only wrap-envelope tool
+    # left in the advertised registry is `tortoise_query` (the `anyOf` union). What they
+    # were held for did not leave with them — the ARRAY envelope moved to the CONTAINERS,
+    # which now build it by hand (`_row_section_envelope`) and are measured on the wire by
+    # `tests/test_11609_read_containers.py::TestTheContainersCarryTheEnvelope`. This floor
+    # therefore measures a population #11609 deliberately emptied: the number is the
+    # sweep's own output at this head (1), not a target, and a floor left at 10 would red
+    # on the recorded decision that retired those doors.
+    assert repaired >= 1, (
+        f"sweep saw {repaired} wrap-envelope tools; 1 is the measured population after "
+        "#11609 lane P11 retired the nine array-wrapped doors — and `delivered >= 1` "
+        "below keeps the object arm live, so neither half of this sweep is dead code")
 
 
 def test_the_sweep_helper_can_reject_a_non_wrap_payload():
@@ -585,7 +593,7 @@ async def test_every_wrap_envelope_tool_cannot_satisfy_a_failed_payload():
     legitimately admits is left alone. Had this existed, it would have caught
     the defect for all 13 affected tools at once instead of two.
     """
-    from tortoise.tool_registry import TOOL_REGISTRY
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
     #: A `result` the declared schema ACCEPTS, built FROM that schema (its own
     #: `type`, and for an array its `items.type`) rather than hardcoded: a fixed
@@ -609,7 +617,16 @@ async def test_every_wrap_envelope_tool_cannot_satisfy_a_failed_payload():
     _WAIT_BOUND = {"error": {"code": -32001, "message": "x", "data": {}}}
 
     typed = unions = 0
-    for entry in TOOL_REGISTRY:
+    # ⛔ THE POPULATION IS BOTH REGISTRIES. Sweeping only `TOOL_REGISTRY` left this leg
+    # with NOTHING to measure after #11609 lane P11 retired the last nine array-wrapped
+    # doors: `typed` was 0, so `assert typed >= 0` could not fail under any edit and the
+    # typed branch below (the `_SAFE_FAILURE`-admitted arm) ran for ZERO tools while the
+    # floor message still claimed to guard shrinkage. A retired name is still SERVED —
+    # through the warning shim (#3883) — and still advertises the door's own
+    # `x-fastmcp-wrap-result` envelope, so `_registered_schema` resolves it via
+    # `get_tool` and the repair is still asserted on the wire for it. Including them is
+    # what keeps this a measurement rather than a formality (review finding, #14645).
+    for entry in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY):
         schema = await _registered_schema(entry.name)
         if not isinstance(schema, dict) or not schema.get("x-fastmcp-wrap-result"):
             continue
@@ -634,36 +651,36 @@ async def test_every_wrap_envelope_tool_cannot_satisfy_a_failed_payload():
     # Shrinkage is the dangerous direction — the sweep must keep measuring the
     # surface it was written for. Growth (a new envelope tool) is fine and is
     # covered by the loop itself.
-    # ⛔ `unions` is 1 at this head, not 2: the sweep reads the ADVERTISED registry, and
-    # #11609 lane P6 retired `tortoise_delete_entity` — the second `anyOf` door. Its shim
-    # still carries the union schema (a retired name keeps answering, #3883), but a shim is
-    # not advertised, so it is not in this population. The floor stays at the measured
-    # number because its job is NON-VACUITY: with 1 union the `_SAFE_FAILURE`-admitted
-    # branch above still runs, and the moment that door went the branch would be skipped
-    # silently if this were 0.
+    # ⛔ THE POPULATION IS BOTH REGISTRIES, AND THAT IS WHAT MAKES THESE FLOORS REAL.
+    # Sweeping `TOOL_REGISTRY` alone measured 0 typed + 1 union after #11609 lane P11
+    # retired the last array-wrapped ADVERTISED doors — and `assert typed >= 0` cannot
+    # fail, so that half of the guard was inert while its message still claimed to guard
+    # shrinkage. A retired name is still SERVED through the warning shim (#3883) and still
+    # advertises the door's own `x-fastmcp-wrap-result` envelope, so `_registered_schema`
+    # resolves it through `get_tool` and the wire repair is still asserted for it. Adding
+    # those 16 rows back is what keeps this a MEASUREMENT (review finding, #14645).
+    #
     # The floors are NAMED and interpolated so the failure text cannot drift away
     # from them. Restating them as literals in the message is a second copy of the
     # floor, and the copy is what goes stale — this message still claimed "10 + 2"
-    # long after P6 took `unions` to 1, which steered the next operator to a
+    # long after a retirement took `unions` to 1, which steered the next operator to a
     # population that no longer existed (review finding, #13648).
-    # ⛔ `typed` 10 -> 9 on 2026-11-21 (#11609 lane P7), for the SAME reason and by the
-    # same measurement as the wrap floor above: `tortoise_list_graphs` was the one
-    # typed-array door that left the advertised registry (retired forward into
-    # `tortoise_graph_overview(section="graphs")`, which declares no envelope). The
-    # linking verb P7 added is object-shaped and enters neither population, so the
-    # 10 -> 9 is NOT the `create_edge`/`create_operator` swap. The number is the sweep's
-    # own output at that merge (9 typed + 1 union), not a target.
-    # `unions` 2 -> 1 came with P6 and `typed` 10 -> 9 with P7; BOTH are recorded because a
-    # floor that moves without its reason is indistinguishable from a gate quietly widened
-    # to pass.
-    floor_typed, floor_unions = 9, 1
+    # History, kept because a floor that moves without its reason is indistinguishable
+    # from a gate quietly widened to pass: `typed` 10 -> 9 (P7 retired
+    # `tortoise_list_graphs` from the ADVERTISED registry) and 9 -> 0 when P11 retired the
+    # remaining nine array-wrapped doors. At that point the advertised half of the sweep
+    # measured nothing — which is why the population, not the number, was the defect. On
+    # `TOOL_REGISTRY + RETIRED_TOOL_REGISTRY` the same sweep measures 16 typed + 2 unions
+    # at this head, and those are the floors.
+    floor_typed, floor_unions = 16, 2
     assert typed >= floor_typed and unions >= floor_unions, (
         f"sweep found {typed} typed + {unions} union envelopes; the floors are "
-        f"{floor_typed} + {floor_unions}, each sitting ON its measured value "
-        "(#11609 P6 retired the second `anyOf` door, so `unions` moved 2 -> 1; P7 "
-        "then retired the array-wrapped `tortoise_list_graphs` forward, so `typed` "
-        "moved 10 -> 9). "
-        "Shrinkage is what this floor guards, so it follows a deliberate "
+        f"{floor_typed} + {floor_unions}, each sitting ON its measured value over "
+        "`TOOL_REGISTRY + RETIRED_TOOL_REGISTRY` (a retired name is served through the "
+        "warning shim and still carries its envelope). The advertised-only sweep measured "
+        "0 + 1 after #11609 P11, which made the typed leg unfalsifiable; a retirement that "
+        "takes one of these names out of BOTH registries must move this floor in the same "
+        "change. Shrinkage is what this floor guards, so it follows a deliberate "
         "removal; growth is covered by the loop itself.")
 
 
@@ -748,8 +765,16 @@ async def test_real_mcp_round_trip_delivers_the_sdk_message(quiet, stdio):
 
     with mock.patch.object(ms, "_get_org_sdk", _RaisingSDK):
         async with Client(ms.mcp) as client:
-            advertised = next(t for t in await client.list_tools()
-                              if t.name == "tortoise_search")
+            # ⛔ READ FROM `get_tool`, NOT `list_tools` (#11609 lane P11):
+            # `tortoise_search` retired forward into `tortoise_search_knowledge`, so it is
+            # no longer ADVERTISED — but its declaration is kept on purpose and the #3883
+            # shim still serves it with the array envelope, which is exactly the subject
+            # of this test (the client validates `structuredContent` against the tool's OWN
+            # advertised `outputSchema`, and that is where the -32602 came from). Reading
+            # the schema by NAME keeps the case measuring the #8482 repair instead of
+            # disappearing with the door; the live container's own no-schema property is
+            # pinned separately in `tests/test_11609_read_containers.py`.
+            advertised = await _registered_schema("tortoise_search")
             result = await client.call_tool(
                 "tortoise_search", {"query": "positioning", "limit": 10},
                 raise_on_error=False)
@@ -763,8 +788,8 @@ async def test_real_mcp_round_trip_delivers_the_sdk_message(quiet, stdio):
     # The message reaches the caller's error channel instead of being replaced
     # by the schema complaint the issue reported.
     assert "VectorF32" in str(raised.value)
-    # ...and the advertised schema is UNCHANGED: this is not a relaxation.
-    assert advertised.outputSchema["properties"]["result"]["type"] == "array"
+    # ...and the schema is UNCHANGED: this is not a relaxation.
+    assert advertised["properties"]["result"]["type"] == "array"
 
 
 @pytest.mark.asyncio

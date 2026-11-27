@@ -260,7 +260,10 @@ returns that one line; the sentence has followed the symbol through `2297` → `
 `2343` as `#13971`'s review round corrected the capture path's own docstring above and then
 added the restore-door residual there → `2363` (`#14596`) → `2379` (`#14567`), each of those
 two growing this module above the declaration, and before that
-`2257`, a comment at that head, and `1584` at `4f68a2aa7`) and the graph migration
+`2257`, a comment at that head, and `1584` at `4f68a2aa7` — ⛔ and the reading is the
+`grep -nF` above, never the number beside it: this diff touches no line of that module,
+which `git diff --name-only origin/main...HEAD -- tortoise/projection/entities.py` prints
+as nothing) and the graph migration
 `relabel_legacy_documents` (`migrate_kinds.py:167`).
 
 **How to read a line pointer in this section:** the LINE NUMBERS from §5's

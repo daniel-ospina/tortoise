@@ -396,8 +396,56 @@ def test_the_renderer_refuses_the_all_surface_combination(tmp_path):
             "artifact the refusal exists to prevent")
 
 
+#: THE PER-ITEM BUDGET THIS ONE ARM DECLARES, because its cost is a FULL-TREE
+#: CENSUS — `--markdown --all-surface` walks every tracked Python file (~9,239
+#: rows) — and `pyproject.toml`'s `timeout = 300` note says exactly what an item
+#: like that must do: "a leg that needs a longer single item must SAY so —
+#: `--timeout=N` in the workflow or `@pytest.mark.timeout(N)` on the test".
+#: MEASURED, not guessed: ~54.5 s for that census on an idle box, and the shipped
+#: 300 s cap is crossed by LOAD ALONE — CI run 45926492586, shard `(h)`:
+#: `FAILED tests/test_13098_cypher_inventory.py::test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish
+#: - Failed: Timeout (>300.0s) from pytest-timeout.` ⛔ THAT RED IS NOT THIS
+#: SUITE'S GUARD AND NOT `#14741`'s: the cost is the census's AST walk, measured
+#: on BOTH trees over the same tree — `origin/main`'s `--markdown --all-surface`
+#: 51.0 s / 9,239 rows vs this head's 54.5 s / 9,239 rows, i.e. the boundary guard
+#: this PR adds does not move it (it runs in the `--render` branch only, and
+#: `--render` with `--check` is REFUSED here in 0.08 s).
+#:
+#: ⛔ AND ONLY ONE CENSUS IS PAID NOW, NOT TWO (`#14757`). The arm used to run
+#: `--json --all-surface` for real as well, and that form enumerates TWICE
+#: (`census()` then `rg_totals()`) — measured **6m10s** on this head over 2,604
+#: tracked files, i.e. the expensive half of the arm and past the 300 s default ON
+#: ITS OWN. The JSON form's widening is now graded at the TERM that carries it (the
+#: `prefixes`/`drop_test_modules` pair `main()` hands the enumerators) instead of by
+#: paying for the traversal twice — see the arm's own comment — so the surviving
+#: 600 s bound is ~11x the idle cost of what remains and absorbs the CI load the
+#: 300 s default could not. It is also the same bound
+#: `tests/test_7951_delete_resurrection.py` declares for its own cold-load arm.
+_DOUBLE_CENSUS_BUDGET_S = 600
+
+
+def _item_timeout_s(item) -> float:
+    """The pytest-timeout budget that will ACTUALLY bound ONE item.
+
+    Read from the plugin's own resolver (`_get_item_settings`) rather than
+    re-implemented, so the marker -> `--timeout` -> `PYTEST_TIMEOUT` -> ini
+    precedence cannot drift from pytest-timeout's — the same read
+    `tests/test_7951_delete_resurrection.py::_item_budget_s` makes, for the same
+    reason (a hand-rolled resolver silently graded an env-rung `PYTEST_TIMEOUT`
+    at the ini value there). A non-positive or absent budget is `inf`, because
+    pytest-timeout arms NOTHING in that case: "no bound" is the true reading,
+    not `0`.
+    """
+    import pytest_timeout
+
+    timeout = pytest_timeout._get_item_settings(item).timeout
+    value = float(timeout) if timeout is not None else 0.0
+    return value if value > 0 else float("inf")
+
+
+@pytest.mark.timeout(_DOUBLE_CENSUS_BUDGET_S)
 def test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish(
-        tmp_path):
+        tmp_path, request, monkeypatch, capsys):
     """`--check --render <path>` must not accept a write it then silently drops.
 
     ⛔ THE NO-OP-GATE SHAPE, measured at #14625's round-4 review: `main()` returns
@@ -410,6 +458,24 @@ def test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish(
     not happen is exactly the "gate that silently does nothing" class this module
     exists to refuse. 2 (could not run) is the honest answer; 0 is not.
     """
+    # ⛔ THE BUDGET IS ASSERTED, NOT ASSUMED. Dropping the decorator above leaves
+    # this arm grading itself with `pyproject.toml`'s 300 s, which is the budget
+    # MEASURED to be flaked by load alone (run 45926492586 above) — and nothing
+    # else in the file would notice the drop, because the arms below have no
+    # clock of their own. Read through the plugin's resolver so a `--timeout` or
+    # `PYTEST_TIMEOUT` that arrived from somewhere else is graded here too
+    # instead of being missed (`tests/test_7951_delete_resurrection.py` pins the
+    # identical pair for its cold-load arm).
+    budget = _item_timeout_s(request.node)
+    assert budget == float(_DOUBLE_CENSUS_BUDGET_S), (
+        f"this arm must carry @pytest.mark.timeout({_DOUBLE_CENSUS_BUDGET_S}); it "
+        f"resolves to {budget:g} s. Its surviving FULL-TREE census costs ~54.5 s "
+        "idle and the 300 s default was crossed by CI LOAD alone ("
+        "`Failed: Timeout (>300.0s)`, run 45926492586 shard (h)), so a lower budget "
+        "hands this arm back to a flake that reds the required `python-ci-gate` for "
+        "a diff it does not touch — and the assertions below cannot see that."
+    )
+
     out = tmp_path / "both.md"
     proc = subprocess.run(
         [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
@@ -456,33 +522,90 @@ def test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish(
                 f"the refusal must name every verb in `{' '.join(combo)}` so the lane "
                 f"knows what to split; stderr was:\n{both.stderr}")
 
-    for legal in (("--markdown", "--all-surface"), ("--json", "--all-surface")):
-        ok = subprocess.run(
-            [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"), *legal],
-            capture_output=True, text=True, cwd=ROOT,
-        )
-        assert ok.returncode == 0, (
-            f"`{' '.join(legal)}` must stay LEGAL — `--all-surface` is the modifier "
-            f"that widens the census, not a second output verb; got {ok.returncode} "
-            f"with stderr:\n{ok.stderr}")
-        # ⛔ AND THE PAYLOAD, NOT JUST THE EXIT CODE (#14625 review, P2). Asserting
-        # `rc == 0` alone cannot tell §1's WIDE census from the PRODUCT census — a
-        # regression that silently ignores `--all-surface` (exactly the
-        # scope-narrowing the sibling refusal arm exists to prevent) would stay
-        # green, and the two outputs differ by ~7,900 rows. Measured at this head:
-        # `--markdown` emits ~1,334 lines, `--markdown --all-surface` ~9,239; the
-        # JSON form names its prefix set, which is the whole difference.
-        if "--json" in legal:
-            payload = json.loads(ok.stdout)
-            assert payload["prefixes"] == ["."], (
-                "`--json --all-surface` must report the ROOT prefix `.` (the wide "
-                f"census); got prefixes={payload['prefixes']!r} — `--all-surface` was "
-                "accepted and then ignored")
-        else:
-            assert len(ok.stdout.splitlines()) > 2000, (
-                "`--markdown --all-surface` must emit the WIDE table (thousands of "
-                f"rows at this tree); got {len(ok.stdout.splitlines())} line(s), i.e. "
-                "`--all-surface` was accepted and then ignored")
+    # ⛔ AND THE WIDENING OF BOTH WIDE FORMS, WITH ONLY ONE TRAVERSAL PAID FOR
+    # (#14757, measured). `--all-surface` widens the census in exactly TWO terms
+    # inside `main()` — `prefixes = (".",)` instead of `("tortoise",)` and
+    # `drop_test_modules=False` instead of `True` — and a wide table's SIZE is a
+    # consequence of those two terms, not an independent fact. So:
+    #
+    #   * `--markdown --all-surface` runs FOR REAL: the end-to-end wide census stays
+    #     graded, so a regression that breaks the enumeration itself still reds;
+    #   * `--json --all-surface` is graded at the TERM, because it is the form that
+    #     enumerates TWICE (`census()` then `rg_totals()`): measured **6m10s** on this
+    #     head over 2,604 tracked files — past this repo's 300 s per-test timeout ON
+    #     ITS OWN — and CI paid for it: `Failed: Timeout (>300.0s) from
+    #     pytest-timeout`, after which shard (h) was WATCHDOG-killed at 22m (rc 137)
+    #     reporting `test leg INCOMPLETE — no pytest summary; failure set
+    #     unobservable`, discarding 1,496 results that had already passed. A gate that
+    #     cannot run fails on the WRONG axis: it grades the box, not the invariant it
+    #     claims.
+    #
+    # The prefix assertion is also STRICTER than the row count it replaces: `>2000
+    # lines` could not tell `--all-surface` from a wider default, and the PRODUCT
+    # direction is graded below too, so a form that widened UNCONDITIONALLY cannot
+    # ride either.
+    ok = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
+         "--markdown", "--all-surface"],
+        capture_output=True, text=True, cwd=ROOT,
+    )
+    assert ok.returncode == 0, (
+        "`--markdown --all-surface` must stay LEGAL — `--all-surface` is the "
+        "modifier that widens the census, not a second output verb; got "
+        f"{ok.returncode} with stderr:\n{ok.stderr}")
+    # ⛔ AND THE PAYLOAD, NOT JUST THE EXIT CODE (#14625 review, P2). `rc == 0` alone
+    # cannot tell §1's WIDE census from the PRODUCT census — a regression that
+    # silently ignores `--all-surface` would stay green, and the two outputs differ
+    # by ~7,900 rows. Measured at this head: `--markdown` emits ~1,334 lines,
+    # `--markdown --all-surface` ~9,239.
+    assert len(ok.stdout.splitlines()) > 2000, (
+        "`--markdown --all-surface` must emit the WIDE table (thousands of rows at "
+        f"this tree); got {len(ok.stdout.splitlines())} line(s), i.e. "
+        "`--all-surface` was accepted and then ignored")
+
+    handed: list[tuple[str, tuple[str, ...], bool]] = []
+
+    def _recording(name):
+        def recorder(prefixes, *, drop_test_modules=True):
+            handed.append((name, prefixes, drop_test_modules))
+            return {"prefixes": list(prefixes), "files_scanned": 0,
+                    "files_with_sites": 0, "sites": [],
+                    "non_cypher_door_calls": 0, "unparsed_files": 0, "partial": 0}
+        return recorder
+
+    monkeypatch.setattr(census, "census", _recording("census"))
+    monkeypatch.setattr(census, "rg_totals", _recording("rg_totals"))
+
+    capsys.readouterr()
+    assert census.main(["--json", "--all-surface"]) == 0, (
+        "`--json --all-surface` must stay LEGAL — `--all-surface` is the modifier "
+        "that widens the census, not a second output verb; a refusal here breaks "
+        "§1's own wide-census recipe")
+    assert ("census", (".",), False) in handed, (
+        "`--json --all-surface` must census the ROOT prefix `.` with the test modules "
+        "INCLUDED — that is what `--all-surface` means. `main()` handed the "
+        f"enumerator {[(n, p, d) for n, p, d in handed]}, so the flag was accepted "
+        "and then IGNORED")
+    assert ("rg_totals", (".",), False) in handed, (
+        "`--json --all-surface` re-reads the index for its `rg` totals, so that "
+        "SECOND enumeration must widen too; `main()` handed it "
+        f"{[(n, p, d) for n, p, d in handed]}")
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["prefixes"] == ["."], (
+        "`--json --all-surface` must report the ROOT prefix `.` (the wide census); "
+        f"got prefixes={payload['prefixes']!r} — `--all-surface` was accepted and "
+        "then ignored")
+
+    # ⛔ THE COUNTERWEIGHT. Without it, a `main()` that widened UNCONDITIONALLY — the
+    # mirror regression, which would make §1's product counts unreproducible — passes
+    # every assertion above.
+    handed.clear()
+    assert census.main(["--json"]) == 0, (
+        "the PRODUCT `--json` form must stay legal; it answered non-zero")
+    assert handed and {(prefixes, drop) for _, prefixes, drop in handed} == {
+        (("tortoise",), True)}, (
+        "the product `--json` form must census `tortoise/` with the test-module "
+        f"exclusion ON; `main()` handed {[(n, p, d) for n, p, d in handed]}")
 
 
 def test_the_output_verb_refusal_is_pinned_over_the_PARSER_not_over_a_hand_list():
@@ -1463,6 +1586,339 @@ def test_a_git_that_never_answers_makes_could_not_run_not_drift(tmp_path, monkey
         f"each refusal must read as 'could not run'; stderr:\n{err}")
 
 
+def test_a_repository_BETWEEN_ROOT_and_the_destination_cannot_permit_what_it_tracks(
+    tmp_path, monkeypatch, capsys
+):
+    """…and two named providers are still an enumeration — ask every BOUNDARY.
+
+    ⛔ THE ROUNDS KEPT LOSING TO NESTING DEPTH (#14625 review, round 10, P3,
+    measured). Round 7 fixed the destination's own repository; round 8 added ROOT. The
+    shape both miss sits BETWEEN them: `ROOT/inner` tracks `deeper/docs/DOC.md`,
+    `ROOT/inner/deeper` is a second repository whose commit does not name it, and ROOT
+    does not track it either — so the destination half answers "untracked", the ROOT
+    half answers "untracked", and `--render` replaced 11 bytes of content `inner`'s index
+    AND HEAD both hold at **rc 0**, no stderr. Two named providers is an enumeration that
+    the next nesting level defeats, so the guard asks ROOT, every ancestor directory
+    below it that holds a `.git`, and the destination's own directory; a refusal from any
+    one is the verdict, which is MONOTONE (a provider can only add refusals).
+
+    This arm pins the intermediate boundary: drop it and it reds.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    inner = repo / "inner"
+    keeper = inner / "deeper" / "docs" / "DOC.md"
+    keeper.parent.mkdir(parents=True)
+    keeper.write_text("keep me\n", encoding="utf-8")
+    inner.mkdir(exist_ok=True)
+    subprocess.run(["git", "-C", str(inner), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(inner), "add", "--", "deeper/docs/DOC.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(inner), "-c", "user.email=a@b", "-c", "user.name=a",
+         "commit", "-qm", "inner tracks it"],
+        check=True,
+    )
+    deeper = inner / "deeper"
+    # ⛔ THE DEEPER REPOSITORY GETS A COMMIT THAT DOES NOT NAME THE KEEPER, and NOT via
+    # `git add -A`: that would put the keeper in the DEEPER index and the destination
+    # half would refuse for the wrong reason — the vacuous-fixture trap round 10's
+    # reviewer hit first and had to rebuild its row-2 fixture for.
+    config = ["-c", "user.email=a@b", "-c", "user.name=a"]
+    subprocess.run(["git", "-C", str(deeper), "init", "-q"], check=True)
+    (deeper / "placeholder.txt").write_text("unrelated\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(deeper), "add", "--", "placeholder.txt"], check=True)
+    subprocess.run(["git", "-C", str(deeper), *config, "commit", "-qm", "unrelated"],
+                   check=True)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # ALL THREE HALVES OF THE PREMISE MEASURED: only the INTERMEDIATE repository may
+    # know the path, or the arm would grade the ROOT or the destination half instead.
+    root_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "inner/deeper/docs/DOC.md"],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert root_answer.returncode == 1, (
+        "the premise: ROOT must NOT track the destination; got "
+        f"rc={root_answer.returncode}")
+    inner_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "deeper/docs/DOC.md"],
+        cwd=inner, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert inner_answer.returncode == 0, (
+        "the premise: the INTERMEDIATE repository must track it; got "
+        f"rc={inner_answer.returncode} — without that there is nothing for it to refuse")
+    dest_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "docs/DOC.md"],
+        cwd=deeper, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert dest_answer.returncode == 1, (
+        "the premise: the DESTINATION's own repository must NOT name it; got "
+        f"rc={dest_answer.returncode} — if it did, this arm would grade the "
+        "destination half rather than the boundary between")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", keeper.relative_to(repo).as_posix()])
+    assert rc == 2, (
+        f"an INTERMEDIATE repository must not permit what it tracks, got {rc} — "
+        "asking only ROOT and the destination misses every boundary between them")
+    err = capsys.readouterr().err
+    assert "TRACKED path" in err, f"the refusal must name the tracked path; stderr:\n{err}"
+    assert keeper.read_bytes() == before, (
+        "tracked content was overwritten: the guard asked two providers and the "
+        "repository that tracks the path was neither of them")
+
+
+def test_a_LINKED_WORKTREE_boundary_cannot_permit_what_it_tracks(
+    tmp_path, monkeypatch, capsys
+):
+    """…and a boundary is a boundary whether its `.git` is a DIRECTORY or a FILE.
+
+    ⛔ A DECLARED SHAPE WITH NO ARM IS HOW ROUNDS 5, 7, 8, 10 AND 11 EACH SHIPPED A
+    FAIL-OPEN (#14625 review, round 12, P2, measured). `_destination_probes` decides a
+    boundary with `os.path.lexists(boundary / ".git")`, whose docstring names three
+    shapes: a nested repository (`.git` directory), a LINKED WORKTREE (a `.git` FILE
+    holding `gitdir:`), and a submodule's gitlink. BOTH boundary arms above build `.git`
+    DIRECTORIES, so a one-token refactor to `(boundary / ".git").is_dir()` deleted the
+    worktree boundary with the suite GREEN — measured: the shape below then answered
+    PERMIT and overwrote content the worktree's repository held in its index AND HEAD,
+    while every arm passed.
+
+    `.worktrees/` is this fleet's standard lane layout, so the shape is the PRODUCTION
+    one, not an exotic nesting: the intermediate boundary here is a real
+    `git worktree add` checkout, its `.git` is a FILE, and the repository it belongs to
+    tracks the destination.
+
+    This arm pins the FILE form: revert `lexists` to `is_dir` and it reds.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    config = ["-c", "user.email=a@b", "-c", "user.name=a"]
+    # The repository the intermediate boundary BELONGS to — a separate checkout, so the
+    # worktree's `.git` is a FILE that names this gitdir rather than a directory.
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    source_keeper = source / "inner" / "docs" / "DOC.md"
+    source_keeper.parent.mkdir(parents=True)
+    source_keeper.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "add", "--", "inner/docs/DOC.md"],
+                   check=True)
+    subprocess.run(["git", "-C", str(source), *config, "commit", "-qm", "source tracks it"],
+                   check=True)
+    wt = repo / "wt"
+    subprocess.run(["git", "-C", str(source), "worktree", "add", "-q", str(wt),
+                    "-b", "wt-branch"], check=True)
+    # ⛔ THE KEEPER IS THE WORKTREE'S OWN COPY, not the source's: the destination has to
+    # sit under ROOT for the in-ROOT branch to be graded, and the write must be able to
+    # reach the file the WORKTREE's repository tracks.
+    keeper = wt / "inner" / "docs" / "DOC.md"
+    # ⛔ THE PREMISE, ASSERTED WHERE IT IS CONSTRUCTED: this only grades the FILE form if
+    # the boundary's `.git` really is a file. A git that ever materialised a worktree as
+    # a directory would make this arm a duplicate of the two above rather than a new one.
+    assert (wt / ".git").is_file() and not (wt / ".git").is_dir(), (
+        "the premise: a linked worktree's `.git` must be a FILE; got "
+        f"is_file={(wt / '.git').is_file()} is_dir={(wt / '.git').is_dir()}")
+    # The nested repository BELOW the boundary, committed WITHOUT the keeper — the shape
+    # that makes the innermost provider answer "untracked", so only the worktree
+    # boundary can refuse. NOT via `git add -A`: that would put the keeper in the nested
+    # index and the destination half would refuse for the wrong reason (the vacuous
+    # fixture trap the round-10 reviewer hit).
+    inner = wt / "inner"
+    subprocess.run(["git", "-C", str(inner), "init", "-q"], check=True)
+    (inner / "placeholder.txt").write_text("unrelated\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(inner), "add", "--", "placeholder.txt"], check=True)
+    subprocess.run(["git", "-C", str(inner), *config, "commit", "-qm", "unrelated"],
+                   check=True)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    rel = keeper.relative_to(repo).as_posix()
+    # ALL THREE HALVES OF THE PREMISE MEASURED, so a refusal cannot come from the wrong
+    # provider: ROOT must not know the path, the WORKTREE must, the nested repo must not.
+    for what, cwd, spec, want in (
+        ("ROOT", repo, rel, 1),
+        ("the LINKED WORKTREE", wt, "inner/docs/DOC.md", 0),
+        ("the NESTED repository", inner, "docs/DOC.md", 1),
+    ):
+        answer = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", spec],
+            cwd=cwd, capture_output=True, text=True, env=census._git_env(),
+        )
+        assert answer.returncode == want, (
+            f"the premise: {what} must answer rc={want} about {spec}; got "
+            f"rc={answer.returncode} — without that this arm grades some other provider")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", rel])
+    assert rc == 2, (
+        f"a LINKED-WORKTREE boundary must not permit what its repository tracks, got "
+        f"{rc} — a `.git` FILE is a boundary exactly like a `.git` directory, and "
+        "`is_dir()` in place of `lexists` silently deletes it from the walk")
+    err = capsys.readouterr().err
+    assert "TRACKED path" in err, f"the refusal must name the tracked path; stderr:\n{err}"
+    assert keeper.read_bytes() == before, (
+        "tracked content was overwritten: the worktree's `.git` is a FILE and the walk "
+        "did not treat it as a repository boundary")
+
+
+def test_a_repository_ABOVE_ROOT_cannot_permit_what_it_tracks(
+    tmp_path, monkeypatch, capsys
+):
+    """…and ROOT is not a fence: a repository ABOVE it is a boundary too.
+
+    ⛔ THE WALK USED TO STOP AT ROOT (#14625 review, round 12, P2, measured). It was
+    justified by "a linked worktree's ancestors include the MAIN checkout, which tracks
+    the same relative paths" — and that justification is FALSE, measured: the main
+    checkout is asked with the WORKTREE-RELATIVE remainder (`.worktrees/<lane>/docs/…`),
+    which it does not track, so `ls-files --error-unmatch` answers rc 1 and permits. The
+    stop bought no protection and cost the outermost provider, leaving this shape open:
+    `outer` commits `inner/sub/docs/DOC.md`; `inner` is a repository created later whose
+    commit does not name it; ROOT is `inner/sub`. `--render docs/DOC.md` exited **0** and
+    replaced 8 bytes of content `outer`'s index AND HEAD both hold.
+
+    This arm pins the walk PAST ROOT: reinstate the stop and it reds.
+    """
+    config = ["-c", "user.email=a@b", "-c", "user.name=a"]
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    subprocess.run(["git", "init", "-q", str(outer)], check=True)
+    keeper = outer / "inner" / "sub" / "docs" / "DOC.md"
+    keeper.parent.mkdir(parents=True)
+    keeper.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(outer), "add", "--", "inner/sub/docs/DOC.md"],
+                   check=True)
+    subprocess.run(["git", "-C", str(outer), *config, "commit", "-qm", "outer tracks it"],
+                   check=True)
+    # The nested repository BETWEEN the above-ROOT repository and ROOT, committed WITHOUT
+    # the keeper — so the INNERMOST provider permits and only the repository ABOVE ROOT
+    # can refuse.
+    inner = outer / "inner"
+    subprocess.run(["git", "-C", str(inner), "init", "-q"], check=True)
+    (inner / "placeholder.txt").write_text("unrelated\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(inner), "add", "--", "placeholder.txt"], check=True)
+    subprocess.run(["git", "-C", str(inner), *config, "commit", "-qm", "unrelated"],
+                   check=True)
+    top = inner / "sub"
+    monkeypatch.setattr(census, "ROOT", top)
+    src = top / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", top / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # THE PREMISE, MEASURED: ROOT itself holds no repository (so its own probe answers
+    # from the INNERMOST enclosing one, a permit), that innermost repository permits, and
+    # the ONLY provider that tracks the path is the repository ABOVE ROOT.
+    assert not (top / ".git").exists(), (
+        "the premise: ROOT must not itself be a repository, or the walk would be "
+        "asking a provider inside it rather than one above")
+    for what, cwd, spec, want in (
+        ("the INNERMOST repository", inner, "sub/docs/DOC.md", 1),
+        ("the repository ABOVE ROOT", outer, "inner/sub/docs/DOC.md", 0),
+    ):
+        answer = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", spec],
+            cwd=cwd, capture_output=True, text=True, env=census._git_env(),
+        )
+        assert answer.returncode == want, (
+            f"the premise: {what} must answer rc={want} about {spec}; got "
+            f"rc={answer.returncode} — without that this arm grades some other provider")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", keeper.relative_to(top).as_posix()])
+    assert rc == 2, (
+        f"a repository ABOVE ROOT must not permit what it tracks, got {rc} — stopping "
+        "the walk at ROOT drops the outermost provider, and a worktree lane is asked "
+        "with a remainder its main checkout does not track, so the stop protects nothing")
+    err = capsys.readouterr().err
+    assert "TRACKED path" in err, f"the refusal must name the tracked path; stderr:\n{err}"
+    assert keeper.read_bytes() == before, (
+        "tracked content was overwritten: the repository above ROOT was never asked")
+
+
+def test_a_repository_ABOVE_an_OUT_of_ROOT_destination_cannot_permit_what_it_tracks(
+    tmp_path, monkeypatch, capsys
+):
+    """…and the boundary walk is not skipped for a destination OUTSIDE `ROOT`.
+
+    ⛔ THE WALK WAS BUILT INSIDE `if rel is not None:` (#14625 review, round 11, P2,
+    measured). So this arm — the arm above with ROOT swapped for an UNRELATED
+    repository — took the other branch, which produced exactly ONE provider, and ONE
+    `git -C` invocation answers from the INNERMOST repository git discovers, never an
+    enclosing one (`git-ls-files(1)`: `--error-unmatch` is a membership test on the
+    CURRENT repository's index and does not search ancestors). `--render` exited **0**,
+    no stderr, and replaced content the OUTER repository's index AND HEAD both hold.
+
+    The trigger is the BRANCH, not a deeper nesting level, which is why no in-ROOT arm
+    could see it: `peer` is a sibling of ROOT, so `target.relative_to(ROOT)` raises and
+    `rel` is None. Every premise below is measured, and the destination's own
+    repository answers "untracked" so this cannot grade the destination half.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)  # ROOT — unrelated to `peer`
+    peer = tmp_path / "peer"  # the OUTER repository: NOT ROOT, which is the whole point
+    keeper = peer / "inner" / "deeper" / "docs" / "DOC.md"
+    keeper.parent.mkdir(parents=True)
+    keeper.write_text("keep me\n", encoding="utf-8")
+    config = ["-c", "user.email=a@b", "-c", "user.name=a"]
+    subprocess.run(["git", "-C", str(peer), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(peer), "add", "--", "inner/deeper/docs/DOC.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(peer), *config, "commit", "-qm", "peer tracks it"],
+        check=True,
+    )
+    deeper = peer / "inner" / "deeper"
+    # ⛔ THE DESTINATION'S OWN REPOSITORY GETS A COMMIT THAT DOES NOT NAME THE KEEPER,
+    # and NOT via `git add -A`: that would put the keeper in THIS index and the
+    # destination half would refuse for the wrong reason (the vacuous-fixture trap the
+    # arm above names).
+    subprocess.run(["git", "-C", str(deeper), "init", "-q"], check=True)
+    (deeper / "placeholder.txt").write_text("unrelated\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(deeper), "add", "--", "placeholder.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(deeper), *config, "commit", "-qm", "unrelated"], check=True)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # THE PREMISE THAT MAKES THIS ARM GRADES THE `rel is None` BRANCH AT ALL: `peer` is
+    # a SIBLING of ROOT, so the destination is not under it.
+    with pytest.raises(ValueError):
+        keeper.relative_to(repo)
+    # AND THE OTHER TWO HALVES, MEASURED: only the OUTER repository may know the path.
+    peer_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "inner/deeper/docs/DOC.md"],
+        cwd=peer, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert peer_answer.returncode == 0, (
+        "the premise: the OUTER repository must track the destination; got "
+        f"rc={peer_answer.returncode} — without that there is nothing for it to refuse")
+    dest_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "docs/DOC.md"],
+        cwd=deeper, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert dest_answer.returncode == 1, (
+        "the premise: the DESTINATION's own repository must NOT name it; got "
+        f"rc={dest_answer.returncode} — if it did, this arm would grade the "
+        "destination half rather than the repository above it")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", str(keeper)])
+    assert rc == 2, (
+        f"a repository ABOVE the destination must not permit what it tracks, got {rc} — "
+        "the boundary walk was built only when the destination sat under ROOT, so an "
+        "OUTSIDE-ROOT destination asked ONE provider and that provider is the "
+        "INNERMOST repository git discovers")
+    err = capsys.readouterr().err
+    assert "TRACKED path" in err, f"the refusal must name the tracked path; stderr:\n{err}"
+    assert keeper.read_bytes() == before, (
+        "tracked content was overwritten: the guard asked only the destination's own "
+        "repository, and the repository that tracks the path was above it")
+
+
 def test_a_NESTED_repository_under_ROOT_cannot_permit_what_ROOT_tracks(
     tmp_path, monkeypatch, capsys
 ):
@@ -1539,7 +1995,7 @@ def test_EVERY_git_probe_carries_the_modules_own_timeout_bound():
     there — the figure belongs to THAT tree, not to this one): deleting
     `timeout=_GIT_PROBE_TIMEOUT_S` from `surface_files`'s `git ls-files` stayed GREEN;
     from `_tracked_destination_refusal`'s probe, GREEN again. Re-verified at this head by
-    mutation — every one of the four `subprocess.run` sites reds when its kwarg goes.
+    mutation — every one of the six `subprocess.run` sites reds when its kwarg goes.
     ⛔ NOT "a call site": the metadata probe's own arm records `passed_kwargs`, so
     deleting the kwarg THERE reds it (`the probe's bound must be the module's own`). The
     two sites this arm exists for are the other two. The artifact claimed the bound was
@@ -1556,6 +2012,17 @@ def test_EVERY_git_probe_carries_the_modules_own_timeout_bound():
     would otherwise shrink the population this arm walks and stay green; a NEW
     `subprocess.run` that is not a git probe (a future `git apply`, a formatter) reds,
     and the remedy is to classify it here rather than to widen the loop silently.
+
+    ↳ THE FIFTH SITE is `_boundary_is_unaskable`'s `git rev-parse --show-toplevel`
+    (#14741 review, cycle 2): it asks git WHICH repository it resolved, so it is a git
+    probe and it carries the same bound — a hung git there hangs every `--render` before
+    any other refusal can fire.
+
+    ↳ AND THE SIXTH SITE is `_resolves_to_own_gitdir`'s `git rev-parse --absolute-git-dir`
+    (#14741 review, cycle 4): the SECOND subprocess that decides askability, added when the
+    gitdir identity replaced ancestor-hood as the discriminator. It is reached from both
+    askability branches, so a hung git there hangs every `--render` exactly as the fifth
+    site does, and it carries `_GIT_PROBE_TIMEOUT_S` for the same reason.
     """
     source = Path(census.__file__).read_text(encoding="utf-8")
     calls = [
@@ -1566,8 +2033,8 @@ def test_EVERY_git_probe_carries_the_modules_own_timeout_bound():
         and isinstance(node.func.value, ast.Name)
         and node.func.value.id == "subprocess"
     ]
-    assert len(calls) == 4, (
-        f"expected EXACTLY 4 `subprocess.run` probe sites in the census; got "
+    assert len(calls) == 6, (
+        f"expected EXACTLY 6 `subprocess.run` probe sites in the census; got "
         f"{len(calls)} at lines {[c.lineno for c in calls]} — a probe site was removed "
         "(its bound and its refusal went with it) or added (classify it here: this arm "
         "asserts every site is a git probe and carries the module's bound)")
@@ -2293,6 +2760,764 @@ def test_a_DANGLING_git_entry_is_NOT_a_permit_for_the_tracking_probe(
         f"the TRACKING probe must refuse this; stderr:\n{err}")
     assert keeper.read_bytes() == before, (
         "the tracked file was overwritten through a `.git` that git could not resolve")
+
+
+def test_a_DANGLING_git_entry_on_a_BOUNDARY_is_asked_about_SOMEBODY_ELSE(
+    tmp_path, monkeypatch, capsys
+):
+    """…and one nesting level DOWN, a dangling `.git` is not a provider that can be asked.
+
+    ⛔ `lexists` MAKES IT A BOUNDARY AND THAT IS ONLY HALF THE JOB (#14741 review, P2,
+    measured). The arm above ends up answering `fatal: not a git repository` at 128 —
+    git's own admission that it found nothing — because the dangling `.git` sits on the
+    repository the probe is aimed at. `ROOT/sub` is a different case: git SKIPS the
+    entry it cannot stat and keeps walking UP, finds ROOT, and ANSWERS — rc 1, the
+    documented non-match, about ROOT's index instead of `sub`'s. So `sub`'s intact index
+    (which tracks the path) is never consulted, no probe ever says "not a git
+    repository", and `--render` overwrote the 8 bytes that index AND HEAD both hold at
+    **rc 0** with empty stderr — one `git checkout -q` from restore, which is exactly the
+    class this module refuses rather than restores.
+
+    This arm is the mutant's target: delete the `spec is None` branch in
+    `_destination_probes` (or `_boundary_is_unaskable`) and it reds; every in-ROOT
+    arm stays green, because finding a repository one level up is precisely what they
+    need git to do.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)  # ROOT: tracks nothing here
+    sub = repo / "sub"
+    keeper = sub / "docs" / "K.md"
+    keeper.parent.mkdir(parents=True)
+    keeper.write_text("sub keep\n", encoding="utf-8")
+    config = ["-c", "user.email=a@b", "-c", "user.name=a"]
+    subprocess.run(["git", "-C", str(sub), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(sub), "add", "--", "docs/K.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(sub), *config, "commit", "-qm", "sub tracks docs/K.md"],
+        check=True,
+    )
+    git_dir = sub / ".git-real"
+    (sub / ".git").rename(git_dir)
+    os.symlink(str(tmp_path / "gitdir-on-an-unmounted-volume"), sub / ".git")
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # PREMISE 1 — the entry is PRESENT and cannot be RESOLVED.
+    assert os.path.lexists(sub / ".git") and not (sub / ".git").exists(), (
+        "the premise: `lexists` sees the entry and `exists()` does not — a name that is "
+        "simply absent would grade nothing")
+    # PREMISE 2 — the nested repository's index AND HEAD both hold the path. Asked
+    # through the REAL gitdir, because `sub` itself is no longer a repository to git.
+    indexed = subprocess.run(
+        ["git", "--git-dir", str(git_dir), "--work-tree", str(sub), "ls-files"],
+        cwd=sub, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert indexed.stdout.split() == ["docs/K.md"], (
+        "the premise: the DAMAGED repository's index must track the destination; got "
+        f"{indexed.stdout!r}")
+    committed = subprocess.run(
+        ["git", "--git-dir", str(git_dir), "--work-tree", str(sub),
+         "ls-tree", "--name-only", "HEAD", "--", "docs"],
+        cwd=sub, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert committed.stdout.split() == ["docs"], (
+        "the premise: HEAD must name it too, so the write is restorable damage rather "
+        f"than an untracked file; got {committed.stdout!r}")
+    # PREMISE 3 — THE MECHANISM: git run AT the boundary silently answers as the
+    # ENCLOSING repository. Without this the arm would grade a refusal git already makes.
+    enclosing = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=sub, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert Path(enclosing.stdout.strip()).resolve() == repo.resolve(), (
+        "the premise: git at the boundary must discover the ENCLOSING repository — that "
+        f"answer is what makes the probe a permit; got {enclosing.stdout!r}")
+    root_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "sub/docs/K.md"],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert root_answer.returncode == 1, (
+        "the premise: ROOT must NOT track it, or this arm would grade the ROOT probe; "
+        f"got rc={root_answer.returncode}")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", "sub/docs/K.md"])
+    assert rc == 2, (
+        f"a boundary whose `.git` dangles must not permit the write, got {rc} — git "
+        "answered as the repository ABOVE it, and that repository does not hold this "
+        "path while the damaged one does")
+    err = capsys.readouterr().err
+    assert "could not probe" in err and "does not resolve" in err, (
+        f"the refusal must name the unaskable boundary; stderr:\n{err}")
+    assert keeper.read_bytes() == before, (
+        "tracked content was overwritten through a boundary git answered from the "
+        "wrong repository")
+
+
+def test_a_DANGLING_git_entry_ON_ROOT_is_asked_about_SOMEBODY_ELSE(
+    tmp_path, monkeypatch, capsys
+):
+    """…and ROOT itself is not exempt: the same damage AT ROOT, nested in a repository.
+
+    ⛔ ROOT WAS THE ONE PROVIDER THAT NEVER PASSED THE ASKABILITY TEST (#14741 review,
+    cycle 3, P2, measured). `_destination_probes` `add`ed `(ROOT, rel)` unconditionally
+    and the walk STOPPED at ROOT, so ROOT was a provider no askability test could
+    reach. With `inner/.git` dangling inside an enclosing repository `O`, probe 1
+    (`git -C inner ls-files --error-unmatch -- docs/K.md`) SKIPS the entry, answers as
+    `O` (rc 1 — "untracked") and permits; `probe_dir` IS `inner`, so the `seen` key
+    deduped it away; and nothing else was asked. `--render docs/K.md` replaced the 8
+    bytes `inner`'s intact index AND HEAD both hold at **rc 0** with empty stderr — the
+    class this module refuses rather than restores.
+
+    The arm above cannot see it: its fixture has NO enclosing repository, so git answers
+    `128 + not a git repository` and the refusal comes from
+    `_plainly_outside_any_repository`'s structural half, never from the askability
+    mechanism. Nesting the same fixture one level inside a repository is what makes the
+    mechanism — not git's own failure — the thing under test.
+
+    This arm pins ROOT's INCLUSION in the boundary walk: make ROOT exempt from the loop
+    (`if boundary == ROOT: continue`, the walk's old `stop = ROOT` shape) and it reds
+    alone, because every other arm's unaskable boundary is NOT ROOT.
+    """
+    outer = _scratch_repo(tmp_path, needs_non_utf8=False)  # the ENCLOSING repository
+    (outer / "README.md").write_text("outer\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(outer), "add", "--", "README.md"], check=True)
+    inner = outer / "inner"  # ROOT: a repository of its own, tracking the destination
+    keeper = inner / "docs" / "K.md"
+    keeper.parent.mkdir(parents=True)
+    keeper.write_text("inner keep\n", encoding="utf-8")
+    config = ["-c", "user.email=a@b", "-c", "user.name=a"]
+    subprocess.run(["git", "-C", str(inner), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(inner), "add", "--", "docs/K.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(inner), *config, "commit", "-qm", "inner tracks docs/K.md"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(outer), *config, "commit", "-qm", "outer"],
+                   check=True)
+    git_dir = inner / ".git-real"
+    (inner / ".git").rename(git_dir)
+    os.symlink(str(tmp_path / "gitdir-on-an-unmounted-volume"), inner / ".git")
+    monkeypatch.setattr(census, "ROOT", inner)
+    src = inner / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", inner / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # PREMISE 1 — the entry at ROOT is PRESENT and cannot be RESOLVED. A name that is
+    # simply absent would grade the `lexists` half instead of askability.
+    assert os.path.lexists(inner / ".git") and not (inner / ".git").exists(), (
+        "the premise: `lexists` sees ROOT's `.git` and `exists()` does not")
+    # PREMISE 2 — ROOT's REAL repository indexes AND commits the destination. Asked
+    # through the real gitdir, because ROOT is no longer a repository to git.
+    indexed = subprocess.run(
+        ["git", "--git-dir", str(git_dir), "--work-tree", str(inner), "ls-files"],
+        cwd=inner, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert indexed.stdout.split() == ["docs/K.md"], (
+        "the premise: ROOT's DAMAGED repository must track the destination; got "
+        f"{indexed.stdout!r}")
+    committed = subprocess.run(
+        ["git", "--git-dir", str(git_dir), "--work-tree", str(inner),
+         "ls-tree", "--name-only", "HEAD", "--", "docs"],
+        cwd=inner, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert committed.stdout.split() == ["docs"], (
+        "the premise: HEAD must name it too, so the write is restorable damage rather "
+        f"than an untracked file; got {committed.stdout!r}")
+    # PREMISE 3 — THE MECHANISM: git run AT ROOT skips the damaged entry and answers as
+    # the ENCLOSING repository, which does NOT hold the path — i.e. probe 1 permits.
+    enclosing = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=inner, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert Path(enclosing.stdout.strip()).resolve() == outer.resolve(), (
+        "the premise: git at ROOT must discover the ENCLOSING repository — that answer "
+        f"is what made ROOT's own probe a permit; got {enclosing.stdout!r}")
+    root_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "docs/K.md"],
+        cwd=inner, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert root_answer.returncode == 1, (
+        "the premise: ROOT's own probe must answer 'untracked' (as the ENCLOSING "
+        f"repository); got rc={root_answer.returncode}")
+    outer_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "inner/docs/K.md"],
+        cwd=outer, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert outer_answer.returncode == 1, (
+        "the premise: the ENCLOSING repository must NOT track it, or this arm could be "
+        f"satisfied by a provider other than ROOT's askability; got rc={outer_answer.returncode}")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", "docs/K.md"])
+    assert rc == 2, (
+        f"ROOT's own `.git` dangling must not permit the write, got {rc} — git answered "
+        "as the repository ABOVE ROOT, and that repository does not hold this path "
+        "while the damaged ROOT does")
+    err = capsys.readouterr().err
+    assert "could not probe" in err and "does not resolve" in err, (
+        f"the refusal must name the unaskable ROOT; stderr:\n{err}")
+    assert keeper.read_bytes() == before, (
+        "ROOT's tracked content was overwritten through a `.git` git answers from the "
+        "wrong repository")
+
+
+def test_a_BOUNDARY_git_DISOWNS_is_asked_about_SOMEBODY_ELSE(tmp_path, monkeypatch, capsys):
+    """…and the damage shapes `lexists` CANNOT see: `.git` present AND resolvable, git disowned.
+
+    ⛔ THE PREDICATE CLOSED ONE OF FOUR SHAPES (#14741 review, cycle 2, P1, measured).
+    `lexists(.git) and not exists(.git)` is a test of the NAME's resolvability. Three
+    other shapes leave a `.git` that is PRESENT and fully RESOLVABLE and still not a
+    repository git will use — `HEAD` removed, `objects/` removed, a symlink to an
+    existing non-gitdir — and in every one of them git WALKS UP and answers from the
+    ENCLOSING repository, so the boundary was probed, the probe permitted, and
+    `--render` overwrote content the damaged repository's index AND HEAD both hold at
+    **rc 0** with empty stderr. For the `objects/`-removed row those bytes are the LAST
+    copy, so that instance is damage git cannot restore.
+
+    So askability is decided by asking git which repository it resolved
+    (`rev-parse --show-toplevel` must name the boundary), not by enumerating shapes —
+    the same lesson rounds 5-11 kept re-learning one enumeration wider. This arm pins
+    the `HEAD`-removed row, which is the restorable one and the one the module's
+    `_plainly_outside_any_repository` docstring already names as a damage state.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)  # ROOT: tracks nothing here
+    sub = repo / "sub"
+    keeper = sub / "docs" / "K.md"
+    keeper.parent.mkdir(parents=True)
+    keeper.write_text("sub keep\n", encoding="utf-8")
+    config = ["-c", "user.email=a@b", "-c", "user.name=a"]
+    subprocess.run(["git", "-C", str(sub), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(sub), "add", "--", "docs/K.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(sub), *config, "commit", "-qm", "sub tracks docs/K.md"],
+        check=True,
+    )
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # THE DAMAGE: the index survives, `HEAD` does not. `.git` is untouched, so every
+    # name-based test — `exists`, `lexists`, `_looks_like_git_metadata` — still sees a
+    # perfectly ordinary repository.
+    (sub / ".git" / "HEAD").unlink()
+    # PREMISE 1 — the `.git` NAME is resolvable, so the arm cannot be graded by the
+    # dangling predicate the arm above pins.
+    assert (sub / ".git").exists() and (sub / ".git").is_dir(), (
+        "the premise: `.git` must be PRESENT and RESOLVABLE; otherwise this arm grades "
+        "the dangling shape instead")
+    # PREMISE 2 — git DISOWNS the damaged gitdir when it is NAMED.
+    named = subprocess.run(
+        ["git", "--git-dir", str(sub / ".git"), "ls-files"],
+        cwd=sub, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert named.returncode == 128, (
+        "the premise: git must DISOWN the damaged gitdir when it is named; got "
+        f"rc={named.returncode} stderr={named.stderr!r}")
+    # PREMISE 3 — AND SILENTLY WALKS UP when asked through cwd discovery, which is what
+    # makes the probe an answer about the ENCLOSING repository rather than a refusal.
+    discovered = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=sub, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert Path(discovered.stdout.strip()).resolve() == repo.resolve(), (
+        "the premise: cwd discovery must land on the ENCLOSING repository; got "
+        f"{discovered.stdout!r}")
+    # PREMISE 4 — the damaged repository's index still tracks it (that is the file the
+    # write would replace), and ROOT does not (or this arm would grade the ROOT probe).
+    indexed = subprocess.run(
+        ["git", "--git-dir", str(sub / ".git"), "--work-tree", str(sub), "ls-files"],
+        cwd=sub, capture_output=True, text=True, env=census._git_env(),
+    )
+    root_answer = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "sub/docs/K.md"],
+        cwd=repo, capture_output=True, text=True, env=census._git_env(),
+    )
+    assert root_answer.returncode == 1, (
+        "the premise: ROOT must NOT track it; got "
+        f"rc={root_answer.returncode}")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", "sub/docs/K.md"])
+    assert rc == 2, (
+        f"a boundary git disowns must not permit the write, got {rc} — git walked up "
+        "and answered from the repository above, which does not hold this path "
+        f"(damaged index says: {indexed.stdout!r})")
+    err = capsys.readouterr().err
+    assert "could not probe" in err and "does not resolve" in err, (
+        f"the refusal must name the unanswerable boundary; stderr:\n{err}")
+    assert keeper.read_bytes() == before, (
+        "tracked content was overwritten through a boundary git answered from the "
+        "wrong repository")
+
+
+def test_a_DAMAGED_bare_gitdir_boundary_cannot_permit_what_it_tracks(
+    tmp_path, monkeypatch, capsys
+):
+    """…and the METADATA-IN-PLACE form of the same damage, which the `.git` test skipped.
+
+    ⛔ THE BARE-GITDIR EXEMPTION WAS A DECLARED SHAPE WITH NO ARM (#14741 review,
+    cycle 3, P2, measured). `_boundary_is_unaskable` returned early for a boundary that
+    carries no `.git` NAME, justified by "its metadata lives in place, and the GIT
+    METADATA guard decides it". That premise holds only while git still RECOGNISES the
+    directory: once git disowns it, every guard answers about the ENCLOSING repository —
+    the tracked probe's `git -C <boundary> ls-files` walks up and answers rc 1 (a
+    permit), `_path_in_HEAD` agrees, and the metadata guard's own `rev-parse --git-dir`
+    also walks up, so the destination is not "inside metadata" to it either. Measured on
+    the real `main()`: `--render outer4x/bare.git/doc.md` exited **0** with empty stderr
+    and replaced the bytes that gitdir's INDEX still holds — its LAST copy, since the
+    damage that disowned it was the removed `HEAD`.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)  # ROOT: tracks nothing here
+    bare = repo / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    # PREMISE 1 — the bare gitdir's OWN INDEX names the destination. That is the content
+    # a permit would overwrite, and the reason a bare boundary is a provider at all.
+    blob = subprocess.run(
+        ["git", "--git-dir", str(bare), "hash-object", "-w", "--stdin"],
+        input="bare keeps me\n", capture_output=True, text=True,
+        env=census._git_env(), check=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "--git-dir", str(bare), "update-index", "--add", "--cacheinfo",
+         f"100644,{blob},doc.md"],
+        env={**census._git_env(), "GIT_INDEX_FILE": str(bare / "index")}, check=True,
+    )
+    keeper = bare / "doc.md"
+    keeper.write_text("bare keeps me\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # THE DAMAGE: `HEAD` is removed, so git no longer accepts the directory as a
+    # repository — while `objects/`, `refs/`, `config/` and `index` all survive, which is
+    # what `_looks_like_git_metadata` grades it on, so it is still a BOUNDARY.
+    (bare / "HEAD").unlink()
+    assert not (bare / ".git").exists(), (
+        "the premise: a bare gitdir carries no `.git` name, so the name-based test never "
+        "asks it — which is exactly why the exemption was a hole")
+    assert census._looks_like_git_metadata(bare), (
+        "the premise: the damaged bare gitdir must still be a BOUNDARY")
+    # PREMISE 2 — git DISOWNS it when named.
+    named = subprocess.run(
+        ["git", "--git-dir", str(bare), "ls-files"], cwd=bare,
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    assert named.returncode == 128, (
+        "the premise: git must DISOWN the damaged gitdir when it is named; got "
+        f"rc={named.returncode} stderr={named.stderr!r}")
+    # PREMISE 3 — and WALKS UP through cwd discovery, so every probe answers about the
+    # ENCLOSING repository: that is the mechanism, not an assumption.
+    discovered = subprocess.run(
+        ["git", "rev-parse", "--git-dir"], cwd=bare,
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    assert Path(discovered.stdout.strip()).resolve() == (repo / ".git").resolve(), (
+        "the premise: cwd discovery must land on the ENCLOSING repository; got "
+        f"{discovered.stdout!r}")
+    # PREMISE 4 — and that walking-up answer is a PERMIT for this path, which is what
+    # made the write possible rather than merely misreported.
+    permitting = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", ":(literal)doc.md"], cwd=bare,
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    assert permitting.returncode == 1, (
+        "the premise: the ENCLOSING repository must NOT track it, so the walked-up probe "
+        f"permits; got rc={permitting.returncode}")
+    before = keeper.read_bytes()
+    rc = census.main(["--render", "bare.git/doc.md"])
+    assert rc == 2, (
+        f"a metadata-in-place boundary git disowns must not permit the write, got {rc} — "
+        "git walked up and answered from the repository above, which does not hold this "
+        f"path (the damaged gitdir's index still holds {blob})")
+    err = capsys.readouterr().err
+    assert "could not probe" in err and "does not resolve" in err, (
+        f"the refusal must name the unanswerable boundary; stderr:\n{err}")
+    assert keeper.read_bytes() == before, (
+        "tracked content was overwritten through a bare boundary git answered from the "
+        "wrong repository")
+
+
+def test_a_DAMAGED_boundary_under_a_RETARGETED_enclosing_repo_cannot_permit_what_it_tracks(
+    tmp_path, monkeypatch, capsys
+):
+    """…and an enclosing REPOSITORY retargeted by `core.worktree` is not a permit either.
+
+    ⛔ ANCESTOR-HOOD ALONE CANNOT DECIDE ASKABILITY, because the "elsewhere" answer is TWO
+    shapes (#14741 review, cycle 4, P2, measured). One is the healthy retargeted work tree
+    — the boundary's OWN `core.worktree` points somewhere else, so the destination is not
+    in that work tree, nothing is at risk, and refusing would be an over-block. The other
+    is THIS arm: the boundary is DAMAGED (`HEAD` removed) and the repository it falls back
+    to is the one retargeted, so git walks up and answers with the ENCLOSING repository's
+    `core.worktree` — also elsewhere. The old test (`answer is a strict ancestor of me`)
+    read that as a permit and `--render` exited **0**, no stderr, replacing content the
+    damaged boundary's OWN index still holds.
+
+    `core.worktree` moves the work tree and never the git dir, so the verdict is derived
+    from the GITDIR identity: this boundary's own git dir, or somebody else's (a refusal).
+
+    This arm pins the discriminator: revert `_resolves_to_own_gitdir` to the ancestor test
+    and it reds — measured, `render: wrote 4 lines` over the damaged boundary's tracked
+    file.
+    """
+    config = ["-c", "user.email=a@b", "-c", "user.name=a"]
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)  # ROOT: tracks nothing here
+    # ⛔ THE ENCLOSING REPOSITORY IS THE RETARGETED ONE, and its own index names ONLY an
+    # unrelated path — so it can supply neither a refusal nor the destination. That is
+    # what makes the DAMAGED BOUNDARY the sole provider that could refuse.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    outer = repo / "outer"
+    outer.mkdir()
+    subprocess.run(["git", "init", "-q", str(outer)], check=True)
+    subprocess.run(
+        ["git", "-C", str(outer), "config", "core.worktree", str(elsewhere)], check=True)
+    (elsewhere / "unrelated.txt").write_text("unrelated\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(outer), "add", "--", "unrelated.txt"], check=True)
+    subprocess.run(["git", "-C", str(outer), *config, "commit", "-qm", "outer"], check=True)
+    # The boundary: a real repository whose OWN index tracks the destination.
+    sub = outer / "inner" / "sub"
+    (sub / "docs").mkdir(parents=True)
+    keeper = sub / "docs" / "DOC.md"
+    keeper.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(sub), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(sub), "add", "--", "docs/DOC.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(sub), *config, "commit", "-qm", "sub tracks it"], check=True)
+    # THE DAMAGE: `HEAD` removed, so git will not accept this directory's `.git` and walks
+    # UP — to `outer`, which is retargeted to `elsewhere`.
+    (sub / ".git" / "HEAD").unlink()
+    # PREMISE 1 (measured against the boundary's OWN INDEX BYTES, because git disowns the
+    # damaged gitdir even when it is named — `git --git-dir sub/.git ls-files` answers 128,
+    # which is the damage itself): the tracking SURVIVES in the index that is about to be
+    # overwritten, and the path appears there verbatim.
+    own_index = (sub / ".git" / "index").read_bytes()
+    assert b"docs/DOC.md" in own_index, (
+        "the premise: the damaged boundary's OWN index must still name the destination — "
+        "without that there is no tracked content for a permit to destroy")
+    # PREMISE 2 — the walked-up answer is ELSEWHERE, i.e. NEITHER this boundary NOR an
+    # ancestor of it. That single fact is what the old predicate mistook for a permit.
+    walked_up = subprocess.run(
+        ["git", "-C", str(sub), "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    walked_up_real = Path(os.path.realpath(walked_up.stdout.strip()))
+    assert walked_up.returncode == 0, (
+        f"the premise: git must answer through the walk-up; rc={walked_up.returncode}")
+    assert walked_up_real == Path(os.path.realpath(elsewhere)), (
+        "the premise: the walked-up answer must be the ENCLOSING repository's retargeted "
+        f"work tree ({elsewhere}); got {walked_up_real}")
+    assert walked_up_real != Path(os.path.realpath(sub)), (
+        "the premise: the answer must differ from the boundary itself")
+    assert walked_up_real not in Path(os.path.realpath(sub)).parents, (
+        "the premise: the answer must NOT be an ancestor of the boundary — if it were, "
+        "the ancestor test would have refused and this arm would grade nothing new")
+    # PREMISE 3 — and `--absolute-git-dir` DOES name somebody else's git dir, which is the
+    # question that separates this shape from a healthy retargeted boundary.
+    assert not census._resolves_to_own_gitdir(sub), (
+        "the premise: the gitdir git resolves must NOT be this boundary's own")
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    before = keeper.read_bytes()
+    rc = census.main(["--render", keeper.relative_to(repo).as_posix()])
+    assert rc == 2, (
+        f"a DAMAGED boundary under a RETARGETED enclosing repository must not permit the "
+        f"write, got {rc} — the walked-up answer is 'elsewhere', which the ancestor test "
+        "reads as a healthy retargeted work tree and permits")
+    err = capsys.readouterr().err
+    assert "does not resolve" in err, (
+        f"the refusal must name the unanswerable boundary; stderr:\n{err}")
+    assert keeper.read_bytes() == before, (
+        "tracked content was overwritten: `core.worktree` moved the enclosing work tree, "
+        "so the walked-up answer was neither this boundary nor an ancestor of it")
+
+
+def test_a_DAMAGED_boundary_whose_ENCLOSING_worktree_COINCIDES_with_it_cannot_permit_what_it_tracks(
+    tmp_path, monkeypatch, capsys
+):
+    """…and the coincidence form: the enclosing work tree IS this boundary.
+
+    ⛔ THE SAME DEFECT ONE BRANCH OVER, AND IT WAS A P1 (#14741 review, cycle 5, measured).
+    The previous round established that `core.worktree` moves the work tree and never the
+    git dir, and applied that to the ELSEWHERE branch only. An ENCLOSING repository
+    retargeted to point AT this boundary makes its work tree root EQUAL the boundary, so a
+    DAMAGED boundary's walked-up `--show-toplevel` answers the boundary ITSELF — equal —
+    and the `== boundary` branch returned "askable" without ever asking the gitdir question.
+    `--render` then exited **0**, no stderr, and replaced bytes the damaged boundary's OWN
+    index still held, while `_resolves_to_own_gitdir` answered `False` (correctly) and was
+    never consulted.
+
+    Measured before the fix: `show-toplevel == boundary` (True),
+    `absolute-git-dir = <outer>/.git`, `_resolves_to_own_gitdir = False`,
+    `_boundary_is_unaskable = False`, `--render` rc 0, `8 -> 89` bytes.
+
+    ⛔ THE MUTANT MOVED WITH THE FIX, and naming a branch this head no longer has would
+    send the next lane to mutate code that is not here. There is no `== boundary` branch to
+    revert: the pointer form has ONE decision, so `return
+    not _resolves_to_own_gitdir(boundary)` → `return False` is the applicable mutant, and it
+    reds FIVE arms, not one (measured: this arm plus
+    `test_a_DANGLING_git_entry_on_a_BOUNDARY_is_asked_about_SOMEBODY_ELSE`,
+    `test_a_DANGLING_git_entry_ON_ROOT_is_asked_about_SOMEBODY_ELSE`,
+    `test_a_BOUNDARY_git_DISOWNS_is_asked_about_SOMEBODY_ELSE` and
+    `test_a_DAMAGED_boundary_under_a_RETARGETED_enclosing_repo_cannot_permit_what_it_tracks`).
+    This arm's own contribution to that red set is the COINCIDENCE shape — the enclosing work
+    tree made equal to the boundary — which no other arm constructs.
+    """
+    config = ["-c", "user.email=a@b", "-c", "user.name=a"]
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)  # ROOT: tracks nothing here
+    outer = repo / "outer"
+    sub = outer / "sub"
+    sub.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(outer)], check=True)
+    # ⛔ THE ENCLOSING REPOSITORY'S WORK TREE IS THE BOUNDARY — that coincidence is the
+    # whole shape, and it is what made the walked-up answer look "self-resolved". Its index
+    # is left EMPTY on purpose: nothing but the damaged boundary's own index may hold the
+    # destination, or this arm would grade a different provider.
+    subprocess.run(
+        ["git", "-C", str(outer), "config", "core.worktree", str(sub)], check=True)
+    # The boundary: a REAL nested repository whose OWN index tracks the destination.
+    subprocess.run(["git", "-C", str(sub), "init", "-q"], check=True)
+    (sub / "docs").mkdir()
+    keeper = sub / "docs" / "DOC.md"
+    keeper.write_text("keep me\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(sub), "add", "--", "docs/DOC.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(sub), *config, "commit", "-qm", "sub tracks it"], check=True)
+    # THE DAMAGE: `HEAD` removed, so git will not accept this directory's `.git` and walks
+    # UP — to `outer`, whose `core.worktree` points back AT `sub`.
+    (sub / ".git" / "HEAD").unlink()
+    # PREMISE 1 — the tracking survives in the index about to be overwritten (read from the
+    # index BYTES, because git disowns the damaged gitdir and answers 128 even when named).
+    own_index = (sub / ".git" / "index").read_bytes()
+    assert b"docs/DOC.md" in own_index, (
+        "the premise: the damaged boundary's OWN index must still name the destination")
+    # PREMISE 2 — the walked-up answer EQUALS the boundary. This is the coincidence the arm
+    # exists for: without it the ancestor / elsewhere branch would be graded instead.
+    walked_up = subprocess.run(
+        ["git", "-C", str(sub), "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    assert walked_up.returncode == 0, (
+        f"the premise: git must answer through the walk-up; rc={walked_up.returncode}")
+    assert Path(os.path.realpath(walked_up.stdout.strip())) == Path(os.path.realpath(sub)), (
+        "the premise: the walked-up answer must EQUAL the boundary — that coincidence is "
+        f"the shape this arm grades; got {walked_up.stdout.strip()!r}")
+    # PREMISE 3 — and the gitdir question DOES name somebody else's git dir, which is the
+    # discriminator that was never reached.
+    assert not census._resolves_to_own_gitdir(sub), (
+        "the premise: the gitdir git resolves must NOT be this boundary's own")
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    before = keeper.read_bytes()
+    rc = census.main(["--render", keeper.relative_to(repo).as_posix()])
+    assert rc == 2, (
+        f"a DAMAGED boundary whose ENCLOSING work tree coincides with it must not permit "
+        f"the write, got {rc} — the walked-up answer equals the boundary, so work-tree "
+        "identity cannot decide askability and the gitdir must be asked on this branch too")
+    err = capsys.readouterr().err
+    assert "does not resolve" in err, (
+        f"the refusal must name the unanswerable boundary; stderr:\n{err}")
+    assert keeper.read_bytes() == before, (
+        "tracked content was overwritten: the gitdir question was never reached because "
+        "the walked-up work tree root happened to equal the boundary")
+
+
+def test_a_directory_that_only_LOOKS_like_git_metadata_still_RENDERS(tmp_path, monkeypatch):
+    """…and the COUNTERWEIGHT: the metadata heuristic must not refuse a plain directory.
+
+    ⛔ ASKABILITY REFUSES A HEURISTIC HIT, SO THE HEURISTIC NEEDS A FLOOR (#14741 review,
+    cycle 3, P2, measured). `_looks_like_git_metadata` is "one distinctive marker plus
+    any second", and the cycle-3 fix refuses a boundary that git will not resolve to
+    itself. Without a further term a plain project directory holding `objects/`,
+    `refs/` and `config/` (no `.git`, not a repository, no index) became an UNASKABLE
+    boundary and `--render` into it answered 2 where `origin/main` answered 0 — a NEW
+    over-block, attributable to that fix. A gitdir's tracking lives in its INDEX, so a
+    metadata-in-place boundary is one that HOLDS an index: with one, a disowned gitdir
+    may hold this very path and only it can be asked (the fail-open the same round
+    closes); without one there is no tracked entry for this guard to protect, and git
+    refuses to call the directory a repository either way — so no test separates it from
+    the lookalike, and the fail-closed side is reserved for the shape with bytes to lose.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    lookalike = repo / "data" / "objects"
+    (lookalike / "refs").mkdir(parents=True)
+    (lookalike / "config").write_text("[core]\n", encoding="utf-8")
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # PREMISE 1 — the heuristic DOES fire on it, so this arm grades the floor and not a
+    # directory the boundary walk would have skipped anyway.
+    assert census._looks_like_git_metadata(lookalike), (
+        "the premise: the lookalike must trip `_looks_like_git_metadata`, or the arm is "
+        "vacuous")
+    assert not (lookalike / ".git").exists(), "the premise: there is no `.git` name"
+    # PREMISE 2 — and it holds NO index, which is what makes it safe to skip.
+    assert not (lookalike / "index").exists(), (
+        "the premise: the lookalike must hold no index; an index is the marker that "
+        "makes a metadata-in-place boundary refuse rather than skip")
+    # PREMISE 3 — and git does not resolve it to itself, so the askability test would
+    # refuse it if it were treated as a boundary at all.
+    resolved = subprocess.run(
+        ["git", "rev-parse", "--absolute-git-dir"], cwd=lookalike,
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    assert Path(resolved.stdout.strip()).resolve() != lookalike.resolve(), (
+        "the premise: git must not resolve the lookalike to itself; got "
+        f"{resolved.stdout!r}")
+    rc = census.main(["--render", "data/objects/OUT.md"])
+    assert rc == 0, (
+        f"a directory that merely LOOKS like git metadata must not block a render, got "
+        f"{rc} — `origin/main` answered 0 for this shape")
+    out = lookalike / "OUT.md"
+    assert out.exists() and out.stat().st_size > 0, "the render wrote nothing"
+
+
+def test_a_HEALTHY_worktree_RETARGETED_elsewhere_is_NOT_refused(tmp_path, monkeypatch):
+    """…and the askability test must not read a HEALTHY retargeted work tree as damage.
+
+    ⛔ `--show-toplevel` ANSWERS A PATH, AND "NOT THIS DIRECTORY" HAS TWO CAUSES (#14741
+    review, P3, measured). One is damage — git walked UP and answered as the repository
+    ABOVE, which is a strict ANCESTOR of this boundary and is why the refusal exists. The
+    other is a healthy repository whose work tree has been retargeted
+    (`git config core.worktree <elsewhere>`): git resolves this directory to ITSELF and
+    reports a work tree root that is neither this directory nor above it. Treating that
+    as unaskable refused `--render` on a shape `origin/main` permits (rc 0), i.e. an
+    over-block on a healthy repository — the failure mode the other arms here guard the
+    opposite side of.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    sub = repo / "sub"
+    (sub / "docs").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    subprocess.run(["git", "-C", str(sub), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(sub), "config", "core.worktree", str(elsewhere)],
+        check=True,
+    )
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # THE PREMISE THAT MAKES THIS THE RETARGETED SHAPE AND NOT THE DAMAGE SHAPE: git
+    # answers a toplevel that is NOT this boundary and NOT an ancestor of it.
+    resolved = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], cwd=sub,
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    assert resolved.returncode == 0, (
+        f"the premise: git must resolve the retargeted work tree; rc={resolved.returncode} "
+        f"stderr={resolved.stderr!r}")
+    toplevel = Path(resolved.stdout.strip()).resolve()
+    assert toplevel != sub.resolve(), "the premise: the work tree root must NOT be this dir"
+    assert not sub.resolve().is_relative_to(toplevel), (
+        "the premise: the answer must NOT be an ancestor of the boundary — an ancestor is "
+        "the DAMAGE signature, and this arm would then grade the wrong shape")
+    assert census._boundary_is_unaskable(sub) is False, (
+        "a healthy repository whose work tree is ELSEWHERE must be askable: git resolved "
+        "this directory to itself, so it is not 'the repository above'")
+    rc = census.main(["--render", "sub/docs/K.md"])
+    assert rc == 0, (
+        f"a retargeted work tree is not damage and must not block the render, got {rc} — "
+        "`origin/main` permits this shape")
+    assert (sub / "docs" / "K.md").exists(), "the render wrote nothing"
+
+
+def test_a_HEALTHY_repository_retargeted_to_AN_ANCESTOR_is_NOT_refused(
+        tmp_path, monkeypatch):
+    """…and a strictly-ANCESTOR work tree root is not a refusal signal either.
+
+    ⛔ THE OTHER HALF OF "THE ANSWER IS NOT THIS DIRECTORY", and the shape every prior
+    round left ungraded (#14741 review, cycle 7, P2, measured). The arm above deliberately
+    pins a toplevel that is NOT an ancestor, on the belief — carried in the docstring as
+    "Only a strict ANCESTOR still means walked-up" — that an ancestor answer can only be
+    git walking UP to an enclosing repository. **Measured false.** A HEALTHY repository
+    whose own `core.worktree` names a **PARENT** of the boundary (its metadata sits in a
+    subdirectory of its own work tree — the inverse of the layout `--separate-git-dir`
+    creates) answers a strict ancestor while its gitdir is its own:
+
+        --show-toplevel      -> <parent>        (a STRICT ANCESTOR of the boundary)
+        --absolute-git-dir   -> <b>/.git        (its OWN gitdir)
+        git ls-files         -> rc 0 over the destination
+
+    The removed fast path refused that boundary without ever asking the gitdir, and the
+    refusal it printed ("that directory's `.git` entry does not resolve to a repository
+    git will use, so it answers as the repository ABOVE it") is false in every clause:
+    the `.git` DOES resolve, and that repository DOES hold the path. So the gitdir question
+    now decides EVERY pointer-form answer and this arm is what reds if an `answer`-shape
+    shortcut is reintroduced on any branch.
+
+    Non-vacuity: on the pre-fix head `_boundary_is_unaskable(sub)` is **True** (the fast
+    path returns before the gitdir question) while `_resolves_to_own_gitdir(sub)` is
+    **True** — so the assertions below fail there, which is the attribution for the fix.
+    """
+    repo = _scratch_repo(tmp_path, needs_non_utf8=False)
+    sub = repo / "sub"
+    (sub / "docs").mkdir(parents=True)
+    subprocess.run(["git", "-C", str(sub), "init", "-q"], check=True)
+    # THE RETARGET: this repository's work tree is its own PARENT, so git answers with a
+    # strict ancestor of the boundary — the shape that was read as damage.
+    subprocess.run(
+        ["git", "-C", str(sub), "config", "core.worktree", str(repo)], check=True)
+    monkeypatch.setattr(census, "ROOT", repo)
+    src = repo / "CYPHER-INVENTORY.src.md"
+    src.write_text("# the source, with no pins and no rows\n", encoding="utf-8")
+    monkeypatch.setattr(census, "DOC_SRC", src)
+    monkeypatch.setattr(census, "DOC_OUT", repo / "CYPHER-INVENTORY.md")
+    monkeypatch.setattr(census, "census", lambda *_a, **_k: _stub_census([]))
+    # PREMISE 1 — the toplevel answer is a STRICT ANCESTOR of the boundary. This is the
+    # whole point: without it the arm grades the `elsewhere` shape instead.
+    resolved = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], cwd=sub,
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    assert resolved.returncode == 0, (
+        f"the premise: git must resolve the retargeted work tree; rc={resolved.returncode} "
+        f"stderr={resolved.stderr!r}")
+    toplevel = Path(resolved.stdout.strip()).resolve()
+    assert sub.resolve().is_relative_to(toplevel), (
+        "the premise: the answer must BE an ancestor of the boundary — this arm exists to "
+        f"grade the ancestor shape, and git answered {toplevel}")
+    assert toplevel != sub.resolve(), (
+        "the premise: the answer must be a STRICT ancestor, not the boundary itself")
+    # PREMISE 2 — while the GITDIR is this boundary's OWN. That pair is what ancestor-hood
+    # cannot separate from damage, and what `_resolves_to_own_gitdir` can.
+    gitdir = subprocess.run(
+        ["git", "rev-parse", "--absolute-git-dir"], cwd=sub,
+        capture_output=True, text=True, env=census._git_env(),
+    )
+    assert Path(gitdir.stdout.strip()).resolve() == (sub / ".git").resolve(), (
+        "the premise: the gitdir must be this boundary's OWN, so the gitdir question "
+        f"permits; git answered {gitdir.stdout!r}")
+    assert census._resolves_to_own_gitdir(sub) is True, (
+        "the premise: the gitdir question must PERMIT this healthy repository — that is "
+        "what makes an `answer`-shape refusal a false diagnosis rather than a true one")
+    assert census._boundary_is_unaskable(sub) is False, (
+        "a healthy repository whose work tree root is a strict ANCESTOR must still be "
+        "askable: ancestor-hood is not the damage signature, and refusing it reported a "
+        "`.git` that does not resolve when it provably does")
+    rc = census.main(["--render", "sub/docs/K.md"])
+    assert rc == 0, (
+        f"an ancestor-shaped but HEALTHY work tree must not block the render, got {rc} — "
+        "the destination is untracked, so no provider has a reason to refuse it")
+    assert (sub / "docs" / "K.md").exists(), "the render wrote nothing"
 
 
 def test_the_tracking_probe_still_PERMITS_both_honest_answers(tmp_path, monkeypatch):
@@ -4508,6 +5733,34 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "test_a_damaged_git_directory_is_NOT_a_permit_for_the_TRACKING_probe",
         "test_a_tracking_probe_answers_about_the_INDEX_so_HEAD_is_asked_before_a_permit",
         "test_a_DANGLING_git_entry_is_NOT_a_permit_for_the_tracking_probe",
+        # ⛔ AND THE SAME DAMAGE ONE NESTING LEVEL DOWN (#14741 review, P2, measured):
+        # the arm above is answered by git (`not a git repository`, 128) because the
+        # dangling entry sits on the repository being asked. With it one level UP, git
+        # skips the entry and ANSWERS as the enclosing repository — rc 1, a permit — so
+        # nothing in the tree refuses and `--render` overwrote the nested repository's
+        # committed bytes at rc 0. Every in-ROOT arm stays green with the `spec is None`
+        # branch deleted, which is why this one has to exist.
+        "test_a_DANGLING_git_entry_on_a_BOUNDARY_is_asked_about_SOMEBODY_ELSE",
+        # ⛔ AND THE SAME DAMAGE **AT ROOT ITSELF** (#14741 review, cycle 3, P2,
+        # measured): ROOT was the ONE provider that never passed an askability test —
+        # `add(ROOT, rel)` was unconditional and the walk stopped at ROOT, so with
+        # `ROOT/.git` dangling inside an enclosing repository the first probe skipped
+        # the entry and answered as the repository ABOVE (rc 1, a permit), `probe_dir`
+        # was deduped away, and `--render` replaced ROOT's committed bytes at rc 0.
+        # The arm above cannot see it: with no enclosing repository git answers `128 +
+        # not a git repository` and a DIFFERENT mechanism (the structural half of
+        # `_plainly_outside_any_repository`) refuses. Only nested does this arm grade
+        # ROOT's inclusion in the walk.
+        "test_a_DANGLING_git_entry_ON_ROOT_is_asked_about_SOMEBODY_ELSE",
+        # ⛔ AND THE SAME HOLE WHERE `.git` IS RESOLVABLE AND STILL DISOWNED (#14741
+        # review, cycle 2, P1, measured): `lexists`/`exists` is a test of the NAME, and
+        # three of the four damage shapes (HEAD removed, objects/ removed, a symlink to
+        # an existing non-gitdir) pass it while git walks up and answers from the
+        # repository ABOVE — rc 0, tracked content replaced. Askability is therefore
+        # decided by `rev-parse --show-toplevel` naming the boundary, not by enumerating
+        # shapes; this arm is the `HEAD`-removed row.
+        "test_a_BOUNDARY_git_DISOWNS_is_asked_about_SOMEBODY_ELSE",
+        "test_a_repository_BETWEEN_ROOT_and_the_destination_cannot_permit_what_it_tracks",
         "test_a_NESTED_repository_under_ROOT_cannot_permit_what_ROOT_tracks",
         # ⛔ AND THE DESTINATION IS A PATH, NOT A PATHSPEC (#14625 review, round 8, P3):
         # handing it to `git ls-files`/`git ls-tree` bare made an UNTRACKED destination
@@ -4581,6 +5834,64 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         # arm a fifth output verb would silently drop its neighbour with every
         # hand-written pair list in this file still green.
         "test_the_output_verb_refusal_is_pinned_over_the_PARSER_not_over_a_hand_list",
+        # ⛔ AND THE BRANCH, NOT THE DEPTH (#14625 review, round 11, P2): the boundary
+        # walk was built inside `if rel is not None:`, so a destination OUTSIDE ROOT got
+        # one provider and `--render` overwrote an outer repository's TRACKED file at
+        # rc 0. Every in-ROOT arm stays green with the walk deleted from that branch, so
+        # this is the only arm that pins it.
+        "test_a_repository_ABOVE_an_OUT_of_ROOT_destination_cannot_permit_what_it_tracks",
+        # ⛔ AND THE BOUNDARY WHOSE `.git` IS A FILE (#14625 review, round 12, P2): the
+        # two arms above build `.git` DIRECTORIES, so `lexists` -> `is_dir()` in
+        # `_destination_probes` deleted the linked-worktree boundary and left the whole
+        # suite green. This is the only arm that pins the FILE form.
+        "test_a_LINKED_WORKTREE_boundary_cannot_permit_what_it_tracks",
+        # ⛔ AND THE PROVIDER ABOVE ROOT (#14625 review, round 12, P2): the walk stopped
+        # at ROOT, so a repository ABOVE it was never asked and the same fail-open
+        # exit 0. This is the only arm that pins the walk past ROOT.
+        "test_a_repository_ABOVE_ROOT_cannot_permit_what_it_tracks",
+        # ⛔ AND THE METADATA-IN-PLACE BOUNDARY (#14741 review, cycle 3, P2): the bare/
+        # `--separate-git-dir` form has no `.git` NAME, so `_boundary_is_unaskable`
+        # exempted it and a disowned bare gitdir was never asked — every probe answered
+        # from the enclosing repository and `--render` replaced its indexed bytes at
+        # rc 0. This is the only arm that pins the non-`.git` form.
+        "test_a_DAMAGED_bare_gitdir_boundary_cannot_permit_what_it_tracks",
+        # ⛔ AND ITS FLOOR (#14741 review, cycle 3): an index-less directory that merely
+        # trips the metadata heuristic must still render. Without this arm the fix's own
+        # over-block (rc 2 where `origin/main` answered 0) is invisible.
+        "test_a_directory_that_only_LOOKS_like_git_metadata_still_RENDERS",
+        # ⛔ AND THE OTHER OVER-BLOCK (#14741 review, P3, measured): a HEALTHY repository
+        # whose work tree is retargeted answers `--show-toplevel` with a directory that is
+        # not an ancestor — that is "a work tree elsewhere", not "the repository above",
+        # and refusing it turned a legitimate render into rc 2.
+        "test_a_HEALTHY_worktree_RETARGETED_elsewhere_is_NOT_refused",
+        # ⛔ AND THE ANCESTOR-SHAPED ONE (#14741 review, cycle 7, P2, measured): a healthy
+        # repository whose `core.worktree` names a PARENT of the boundary answers a STRICT
+        # ANCESTOR at `--show-toplevel` while its gitdir is its OWN. The fast path that read
+        # an ancestor as walked-up refused it with a diagnosis that is false about it, and no
+        # arm graded this shape because the `elsewhere` counterweight above deliberately
+        # asserts its answer is NOT an ancestor. The gitdir question decides every
+        # pointer-form answer, and this is the only arm that pins the ancestor one.
+        "test_a_HEALTHY_repository_retargeted_to_AN_ANCESTOR_is_NOT_refused",
+        # ⛔ AND THE OTHER SHAPE THAT ANSWERS "ELSEWHERE" (#14741 review, cycle 4, P2):
+        # a DAMAGED boundary whose ENCLOSING repository is retargeted by `core.worktree`
+        # answers `--show-toplevel` with a directory that is neither the boundary nor an
+        # ancestor of it — indistinguishable from the healthy arm above by ancestor-hood
+        # alone, and read as a permit it replaced content the damaged boundary's OWN index
+        # still held, at rc 0. Only the GITDIR identity separates the two, and this arm
+        # constructs the `elsewhere`-answer form of it. ⛔ NOT "the only arm that pins it":
+        # reverting the pointer decision to the pre-round-4 code (equality permit + ancestor
+        # test) reds this arm TOGETHER WITH the coincident-work-tree arm below and the
+        # healthy-ancestor counterweight — 3 arms, measured. The single-arm claim was true
+        # when written and was falsified by the counterweight this same delta added.
+        "test_a_DAMAGED_boundary_under_a_RETARGETED_enclosing_repo_cannot_permit_what_it_tracks",
+        # ⛔ AND THE SAME DEFECT WHERE THE COINCIDENCE HIDES IT (#14741 review, cycle 5,
+        # **P1**): an ENCLOSING repository retargeted to point AT this boundary makes its
+        # work tree root EQUAL the boundary, so a damaged boundary's walked-up
+        # `--show-toplevel` answers the boundary itself and the `== boundary` branch returned
+        # askable WITHOUT asking the gitdir — `--render` exited 0 over bytes the damage left
+        # in the boundary's own index. Both branches are decided by the gitdir identity, and
+        # this is the only arm that pins the `== boundary` one.
+        "test_a_DAMAGED_boundary_whose_ENCLOSING_worktree_COINCIDES_with_it_cannot_permit_what_it_tracks",
     }
     # ⛔ AND THE SET'S OWN SIZE — the direction `missing` structurally cannot see.
     # `missing` reds for a NAME that no longer resolves; it stays GREEN for a member
@@ -4591,8 +5902,28 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `len(decorated) == 9` cannot see it either because these arms are ungated on
     # purpose. So the size is EXACT, for the reason `== 9` is: a red a reviewer reads
     # rather than slack a silently-removed name can absorb. Bump it WITH a new name.
-    assert len(split_arms) == 52, (
-        f"expected EXACTLY 52 named split arms; got {len(split_arms)} — either a "        "member was PRUNED from the literal (leaving the arm it named deletable "
+    # ⛔ AND THE LINKED-WORKTREE BOUNDARY TAKES IT 56 -> 57: the FILE-form boundary was
+    # the one declared shape with no arm, and the same round reported it.
+    # ⛔ AND ROOT-IS-NOT-A-FENCE TAKES IT 57 -> 58: a repository ABOVE ROOT was one more
+    # provider the stop silently dropped, and the same round measured it.
+    # ⛔ AND THE METADATA-IN-PLACE BOUNDARY TAKES IT 58 -> 59: the bare-gitdir form had no
+    # `.git` name, so the askability test skipped it and a DISOWNED bare gitdir was asked
+    # about the repository above it — a permit (#14741 review, cycle 3, P2, measured).
+    # ⛔ AND ROOT'S OWN ASKABILITY TAKES IT 59 -> 60: ROOT was the one provider no
+    # askability test could reach (its `add` was unconditional and the walk stopped
+    # there), so the same dangling-`.git` damage AT ROOT, nested in a repository,
+    # overwrote ROOT's committed bytes at rc 0 (#14741 review, cycle 3, P2, measured).
+    # The code path is closed; this arm is what reds if ROOT is exempted again.
+    # ⛔ AND ITS OVER-BLOCK FLOOR TAKES IT 60 -> 61: refusing a heuristic hit made a plain
+    # `objects/`+`refs/` directory unaskable and turned a legitimate render into rc 2
+    # (#14741 review, cycle 4, P2, measured against `origin/main`).
+    # ⛔ AND THE RETARGETED-WORK-TREE COUNTERWEIGHT TAKES IT 61 -> 62 (#14741 review, P3,
+    # measured): a healthy repository whose work tree is RETARGETED answers
+    # `--show-toplevel` with a directory that is not an ancestor, and treating that as
+    # "the repository above" refused a legitimate render.
+    assert len(split_arms) == 65, (
+        f"expected EXACTLY 65 named split arms; got {len(split_arms)} — either a "
+        "member was PRUNED from the literal (leaving the arm it named deletable "
         "with nothing red) or a new ungated invariant arm was added without being "
         f"named here: {sorted(split_arms)}")
     missing = sorted(split_arms - defined)
@@ -4601,7 +5932,8 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
         "ungated on purpose (so they ride the required gate) and NOTHING else "
         "asserts what they carry; restore them")
     # ⛔ AND THE DIRECTION BOTH PINS ABOVE STRUCTURALLY CANNOT SEE — a NEW ungated arm.
-    # `len(split_arms) == 52` reds a name PRUNED from the literal and `missing` reds a    # name that no longer resolves; neither can red for an arm that was never named at
+    # `len(split_arms) == 65` reds a name PRUNED from the literal and `missing` reds a
+    # name that no longer resolves; neither can red for an arm that was never named at
     # all, because such an arm adds nothing to either set. MEASURED, which is why this
     # is a pin and not a comment: a `def test_…(): assert True` appended to this file
     # left the whole suite GREEN (100 passed, 15 skipped), so the sentence above — that
@@ -4648,8 +5980,54 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # `surface_files`'s `git ls-files` and `_tracked_destination_refusal`'s probe are
     # GREEN from the raise-only arms alone. The metadata probe's arm records
     # `passed_kwargs` and DOES see its own bound, so it is not one of the blind ones.
-    assert len(test_functions) == 111, (
-        f"expected EXACTLY 111 test functions in this module; got "        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
+    # ⛔ AND THE `rel is None` BRANCH TAKES IT 112 -> 113 (`split_arms` 53 -> 54): the
+    # boundary walk was built only for a destination under ROOT, so an OUTSIDE-ROOT
+    # destination asked one provider — the innermost repository — and an OUTER
+    # repository's TRACKED file was overwritten at rc 0 (#14625 review, round 11, P2).
+    # ⛔ AND A BOUNDARY WHOSE `.git` DANGLES TAKES IT 113 -> 114 (`split_arms` 54 -> 55):
+    # `lexists` made such a boundary a provider, but git SKIPS the entry and answers as
+    # the repository ABOVE it — so the probe returned the enclosing repository's permit
+    # and the damaged repository's committed bytes were overwritten at rc 0 (#14741
+    # review, P2, measured).
+    # ⛔ AND THE LINKED-WORKTREE BOUNDARY TAKES IT 115 -> 116 (`split_arms` 56 -> 57):
+    # the FILE-form boundary was a declared shape with no arm, and a one-token
+    # `lexists` -> `is_dir()` reopened the fail-open with the suite green (#14625
+    # review, round 12, P2).
+    # ⛔ AND WALKING PAST ROOT TAKES IT 116 -> 117 (`split_arms` 57 -> 58): a repository
+    # ABOVE ROOT was never asked, measured as a fail-open at rc 0 (#14625 review,
+    # round 12, P2 — the same round that falsified the stop's own justification).
+    # ⛔ AND THE METADATA-IN-PLACE BOUNDARY TAKES IT 117 -> 118 (`split_arms` 58 -> 59):
+    # a bare gitdir has no `.git` name, so the exemption skipped the askability test and
+    # a DISOWNED one was asked about the repository above it at rc 0 (#14741 review,
+    # cycle 3, P2 — measured against the real `main()`).
+    # ⛔ AND ROOT'S OWN ASKABILITY TAKES IT 118 -> 119 (`split_arms` 59 -> 60): the
+    # arm that pins ROOT as a boundary the unaskability test reaches — the one provider
+    # the `stop = ROOT` walk exempted by construction (#14741 review, cycle 3, P2).
+    # ⛔ AND THE OVER-BLOCK COUNTERWEIGHT TAKES IT 119 -> 120 (`split_arms` 60 -> 61).
+    # ⛔ AND THE RETARGETED-WORK-TREE COUNTERWEIGHT TAKES IT 120 -> 121 (`split_arms`
+    # 61 -> 62): `--show-toplevel` answering a NON-ancestor is a healthy work tree that
+    # is elsewhere, not "the repository above", and refusing it was an over-block on a
+    # healthy repository (#14741 review, P3, measured against `origin/main`).
+    # ⛔ AND THE RETARGETED-ENCLOSING-REPO ARM TAKES IT 121 -> 122 (`split_arms` 62 -> 63):
+    # a DAMAGED boundary under a RETARGETED enclosing repository answers `--show-toplevel`
+    # with a directory that is neither the boundary nor an ancestor of it, which the
+    # ancestor test read as the healthy counterweight above and permitted — replacing
+    # content the damaged boundary's OWN index still held (#14741 review, cycle 4, P2,
+    # measured). Only the GITDIR identity separates the two.
+    # ⛔ AND ITS COINCIDENT-WORK-TREE ARM TAKES IT 122 -> 123 (`split_arms` 63 -> 64): the
+    # identical defect one branch over, where the enclosing repository's `core.worktree`
+    # points AT the boundary so the walked-up `--show-toplevel` equals the boundary and the
+    # `== boundary` branch returned askable without asking the gitdir at all (#14741
+    # review, cycle 5, P1, measured — `--render` exited 0 over indexed bytes).
+    # ⛔ AND THE ANCESTOR-SHAPED HEALTHY COUNTERWEIGHT TAKES IT 123 -> 124
+    # (`split_arms` 64 -> 65): a healthy repository whose `core.worktree` names a PARENT of
+    # the boundary answers a strict ANCESTOR, which the fast path read as walked-up and
+    # refused with a false diagnosis. Ancestor-hood is not the damage signature
+    # (#14741 review, cycle 7, P2, measured), and the gitdir question now decides every
+    # pointer-form answer.
+    assert len(test_functions) == 124, (
+        f"expected EXACTLY 124 test functions in this module; got "
+        f"{len(test_functions)} — a NEW arm was added: {sorted(test_functions)}"
         " — if it carries a #13098 split invariant, add its NAME to `split_arms`; "
         "either way bump this count, so the addition is a decision rather than slack")
 

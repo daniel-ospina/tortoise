@@ -2301,6 +2301,48 @@ short a member, and the rollback left a row nothing could remove — both would 
 and neither was a stale sentence about a fix. **The document is converging on content; what remains is the
 population-claim class, which this section has now caught five times.**
 
+#### A8.3.13 The fifteenth pass: §A7.8 item 8 shipped as a DIFFERENT carrier, and this document now says so
+
+⛔ **This pass was found by a code review, not by re-reading the plan — and the finding is that the plan teaches a
+rule the shipped code contradicts.** Deliverable 8 above (`§A7.8` item 8 and its site map) states, as *the CURRENT
+rule*, that the deliverable is **one Postgres RPC that inserts the `public.graphs` row AND `record_cursor(…)` in ONE
+transaction**, and that a custom-graph creation **may fail hard** because *"a raise rolls the graph back, which is
+what a failed creation should do"*.
+
+**What shipped is the opposite on all three points**, and the departure is deliberate:
+
+| item 8's rule | the shipped carrier |
+|---|---|
+| one RPC, one transaction | **no RPC**: `tortoise/record_writer.py::provision_graph_record` opens its **own connection** |
+| the same role writes `graphs` and `record_cursor` | **a different role, on a different connection** — the record app role has **no grant on `public.graphs`**, so it cannot participate in the create's transaction |
+| fail-hard on custom-graph creation | **best-effort on every door**, including `hosted_api._provision_graph`'s control-plane arm |
+
+**Why the plan's form is unbuildable rather than merely unchosen:** a hard failure presupposes the atomic rollback
+that the one-transaction RPC would have provided. A carrier that cannot be atomic would leave an **orphan
+`record_cursor` row behind every refusal** (item 1 deliberately omits `ON DELETE CASCADE` and item 3 grants the app
+role **no DELETE**, so nothing removes it — the fourteenth pass's P1) **and** 500 the create. The consequence is
+therefore made loud and repairable instead: the create succeeds, the graph is reported on `/health` as
+`record.armed_but_uncut`, and `tools/record_allocator_cli.py backfill` heals it.
+
+> **OVERRIDES:** §A7.8 item 8's ONE-TRANSACTION RPC and its fail-hard-on-custom-graph-creation — the record app role
+> has no grant on `public.graphs`, so the cursor row is written by a different role on a different connection and the
+> carrier cannot be atomic; a hard failure would then leave an orphan cursor row behind every refusal *and* 500 the
+> create, so the hook is best-effort on every door and the gap is published on `/health` and healed by `backfill`.
+
+**Where the ruling is recorded, so the next reader finds it before "fixing" the door back to fail-hard:** the reason
+in full is `tortoise/record_writer.py::provision_graph_record`'s property 2 (it names this item by number), the door's
+own comment in `tortoise/hosted_api.py::_provision_graph_record`, and the operator-facing cutover text in
+`tools/record_allocator_cli.py`. The marker itself is **on #14582**, which is the artifact a lane reads before it
+plans this door: <https://github.com/daniel-ospina/tortoise/issues/14582#issuecomment-7157877986>. **Item 8 and its
+site map above are LEFT AS WRITTEN** — they are the recorded intent
+this pass rules against, and rewriting them would erase the decision the `OVERRIDES:` line exists to make findable.
+
+⚠️ **What this pass also settles about scope:** the *population* lesson below still governs the healed set. The hook
+covers every graph-creation **door**; it does **not** heal a graph whose default row already exists and whose cursor
+row is missing (`supabase_control.default_graph_for_credential` returns a present row's id without re-entering the
+mint), which is `backfill`/`sweep`'s population — stated in `_provision_default_graph_record`'s docstring and in
+§A8.2 item 11's residual.
+
 ---
 
 ⛔ **What the thirteenth pass proves, and it is the round that justifies this whole section: a fix can carry the

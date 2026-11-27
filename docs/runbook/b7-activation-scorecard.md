@@ -125,7 +125,7 @@ tool-level refusal is answered as an `_SafeError` and recorded `exec_error` /
 NOT refusals a `status` filter should find: a domain answer that carries an
 `error` key on purpose (`tortoise_get_operator` on a point that is not an
 operator — a successful fetch reporting that fact, #4576), and a PARTIAL
-summary of `tortoise_overview()` with no `section`, where a REFUSED section's
+summary of `tortoise_graph_overview()` with no `section`, where a REFUSED section's
 payload is nested one level down and is not classified. (A TOTAL outage no
 longer nests: since #11153 the aggregate returns the refusal at the payload's
 TOP level, which the seam classifies — so an orientation read where every

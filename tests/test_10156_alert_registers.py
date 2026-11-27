@@ -29,10 +29,12 @@ cannot go vacuously green — and the calibration that stops the detector firing
 a key's own normal rate.
 
 The rendered half lives in the dashboard package
-(``website/apps/dashboard/src/securityAlertsPanel.dom.test.jsx``, vitest+jsdom;
-the dashboard DOES have a test runner and a CI leg for it) and the endpoint tests
-in ``tests/test_abuse_integration.py`` beside the other ``/v1/team/alerts``
-tests.
+(``website/apps/dashboard/src/notificationPanel.dom.test.jsx``, vitest+jsdom;
+the dashboard DOES have a test runner and a CI leg for it). #14686 moved that
+render from ``securityAlertsPanel.dom.test.jsx`` — the alert blocks it drew sat
+inside ``<main>`` above the overview grid — into the header's notifications menu,
+so this docstring names the file that exists. The endpoint tests live in
+``tests/test_abuse_integration.py`` beside the other ``/v1/team/alerts`` tests.
 """
 from __future__ import annotations
 

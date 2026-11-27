@@ -7,18 +7,23 @@ enumerated arm while the graph is cut over, so `_refuse_an_enumerated_replay`
 refuses every record while the journal keeps advancing; `write_live_record` is
 fail-soft by contract, so this is a WARN per record and never an exception). It
 also found that the flag is GLOBAL while the cutover is PER GRAPH, and that
-nothing in this tree creates the counter row for a NEW graph
-(`provision_graph_record` has zero hits), so every graph created after the
-cutover is born uncut.
+nothing created the counter row for a NEW graph
+(`provision_graph_record` had zero hits when this file was written — `#14582`
+has since added it, called from the two doors the record can file — so what
+remains is the graphs that existed BEFORE it landed: the hook runs at the
+creating door, and a credential resolver that finds an existing default row
+returns it without re-running that door), and every graph created after the
+cutover was born uncut.
 
 The fixes asserted here:
 
 * `arm` REFUSES without `--acknowledge-cutover`, and the refusal is the
   documentation: it names the env flag, its HOME (the writer, not this shell),
-  the order of operations, the per-graph scope, the absent creation hook, and
-  the backfill lane.
-* `sweep` finds born-uncut graphs the record has seen (read-only), so the hazard
-  is discoverable rather than a sentence.
+  the order of operations, the per-graph scope, the creation hook, and the
+  backfill lane.
+* `sweep` finds the graphs NOT ALLOCATING — no counter row at all, or a row in
+  `seeded`/`halted` — the record has seen (read-only), so the hazard is
+  discoverable rather than a sentence.
 * `status` reports the RECORD's state and the flag SEPARATELY (P2-4), and the
   DSN name is IMPORTED from the seam rather than copied (P2-2).
 """
@@ -51,7 +56,7 @@ def test_arm_refuses_without_the_acknowledgement(capsys) -> None:
     for required in ("TORTOISE_RECORD_ALLOCATE",   # the flag, by name
                      "WRITER",                     # …and whose environment it lives in
                      "halt", "seed", "reopen",     # the way back, in order
-                     "provision_graph_record",     # the hook that is absent
+                     "provision_graph_record",     # the creation hook, by name
                      "sweep",                      # how the hazard is found
                      "backfill_copy_turns"):       # the fourth position-row writer
         assert required in err, (
@@ -59,6 +64,50 @@ def test_arm_refuses_without_the_acknowledgement(capsys) -> None:
             f"it only from the incident:\n{err}")
     # ⛔ THE ACK IS NOT A KEYSTROKE THE TOOL PERFORMS: nothing was armed.
     assert "arm" in out
+
+
+def test_the_acknowledgement_states_each_verbs_own_blast_radius(capsys) -> None:
+    """⛔ ONE SHARED SENTENCE CANNOT DESCRIBE BOTH VERBS (#14610 review F2).
+
+    `CUTOVER_ACK_TEXT` was shared verbatim by `arm` and by `backfill --arm`, and
+    its blast-radius sentence read *"This command arms ONE graph; every other
+    graph in the org stays uncut"* — true of `arm`, the OPPOSITE of `backfill
+    --arm`, which arms the whole sweep population in one run. An acknowledgement
+    whose scope sentence is false for the verb the operator ran is not an
+    acknowledgement: the scope is precisely what they are being asked to accept.
+    `#14610`'s review closed this there; this branch carried the pre-fix shared
+    text, so it is pinned here.
+
+    NON-VACUITY: with the shared text restored, the population refusal contains
+    `arms ONE graph; every other graph in the org` (the assertion below reds on
+    its presence) and contains no `EVERY UNCUT GRAPH IN ITS POPULATION`, so both
+    directions red rather than one.
+    """
+    assert cli.main(["arm", "--org-id", "o", "--graph-id", "g"
+                     ]) == cli.EXIT_REFUSED
+    single = capsys.readouterr().err
+    assert cli.main(["backfill", "--org-id", "o", "--arm"
+                     ]) == cli.EXIT_REFUSED
+    population = capsys.readouterr().err
+
+    assert "ONE GRAPH" in single.upper(), (
+        "`arm`'s acknowledgement no longer states its single-graph scope:\n" + single)
+    assert "EVERY UNCUT GRAPH IN ITS POPULATION" in population.upper(), (
+        "`backfill --arm`'s acknowledgement does not state the population scope — "
+        "it is telling a population operator about one graph:\n" + population)
+    # ⛔ The failure this pin exists for: the single-graph sentence surviving into
+    # the population verb's text. `arm`'s phrasing, verbatim, must NOT be there.
+    assert "arms ONE graph; every other graph in the org" not in population, (
+        "`backfill --arm` printed `arm`'s single-graph blast radius — the text is "
+        "shared verbatim instead of interpolated per verb:\n" + population)
+    # …and the header must name the verb the operator actually ran.
+    assert "`arm` changes" not in population, (
+        "`backfill --arm`'s header names the WRONG verb, so an operator reading a "
+        "population refusal believes they ran the single-graph command:\n"
+        + population)
+    assert "`backfill --arm` changes" in population, (
+        "`backfill --arm`'s header must name the verb the operator ran:\n"
+        + population)
 
 
 def test_the_acknowledgement_is_only_a_gate_not_a_DSN_bypass(monkeypatch) -> None:
@@ -116,6 +165,14 @@ def test_the_sweep_query_is_org_scoped_and_reads_the_ROW_TABLE_not_graphs() -> N
         "UNCUT_GRAPHS_SQL reads public.graphs, which the record role cannot see")
     assert "public.record_cursor" in sql and "IS NULL" in sql
     assert sql.count("%s") == 1, "the sweep must be scoped to ONE org"
+    # ⛔ AND THE POPULATION IS EVERYTHING NOT ALLOCATING (#14624 review 1):
+    # `WHERE c.graph_id IS NULL` alone read CLEAN over the `seeded` graphs
+    # `backfill` leaves behind, because a `seeded` row allocates nothing either.
+    assert "c.mode" in sql, (
+        "the sweep no longer selects the counter's mode — membership cannot tell "
+        "`seeded` (heal with `arm`) from `halted` (heal with `reopen`)")
+    assert "<> 'active'" in sql, (
+        f"the population must exclude only the TERMINAL mode: {sql}")
 
 
 def test_status_reports_the_record_state_and_the_box_separately() -> None:
@@ -254,7 +311,11 @@ class _SweepCursor:
         elif "pg_roles" in sql:            # the scope READ-BACK: (tenant, bypassing)
             self._rows = [(self.conn.org, False)]
         elif "IS NULL" in sql:            # UNCUT_GRAPHS_SQL
-            self._rows = [(g,) for g in self.conn.graphs]
+            # ⛔ TWO COLUMNS: `(graph_id, counter_mode)` (#14624 review 1). The
+            # fake answers the statement the code ACTUALLY runs — a fake left on
+            # the old one-column shape raises `IndexError` here instead of
+            # reporting `counter_mode: None` for a seeded graph.
+            self._rows = [(g, self.conn.modes.get(g)) for g in self.conn.graphs]
             self.conn.rollbacks_at_uncut_read = self.conn.rollbacks
         elif "COUNT(*)" in sql:            # JOURNAL_COUNT_SQL
             self.conn.count_reads.append((params[1], self.conn.rollbacks))
@@ -279,8 +340,12 @@ class _SweepCursor:
 class _SweepConn:
     closed = False
 
-    def __init__(self, graphs, max_seq=1, org="o", count=None):
+    def __init__(self, graphs, max_seq=1, org="o", count=None, modes=None):
         self.graphs, self.max_seq, self.org = graphs, max_seq, org
+        #: `graph_id -> counter_mode`, with a MISSING key meaning "no counter row"
+        #: (`None`) — the born-uncut state. Set it to give a graph the `seeded` /
+        #: `halted` row the population now also carries (#14624 review 1).
+        self.modes = modes or {}
         # `count` defaults to `max_seq` — a DENSE journal, where the two
         # quantities coincide. Tests that care about the difference set it.
         self.count = max_seq if count is None else count
@@ -325,6 +390,84 @@ def test_the_sweep_keeps_the_tenant_guc_alive_until_the_per_graph_read() -> None
     # rollback between the two would make it answer 0 under a NULL predicate.
     assert conn.count_reads and all(read[1] == 0 for read in conn.count_reads), (
         f"the COUNT(*) read ran outside the tenant scope: {conn.count_reads}")
+
+
+def test_the_sweep_reports_which_not_cut_over_state_each_graph_is_in() -> None:
+    """⛔ THE POPULATION IS "NOT ALLOCATING", AND THE TWO STATES HAVE OPPOSITE
+    REMEDIES (#14624 review 1).
+
+    `backfill` without `--arm` leaves graphs `seeded`, which allocates nothing;
+    a `halted` graph allocates nothing either. Both must stay in the pre-flight's
+    population — omitting them made `sweep` answer **0 rows, "clean"** over
+    graphs that refuse every record write, which is the false CLEAN the operator
+    checklist then acted on. Because `seed`/`arm` heals the first and `reopen`
+    the second, the mode travels with the id rather than being assumed from
+    membership.
+
+    The mutant this reds: drop `counter_mode` from the entry (KeyError), or
+    narrow `UNCUT_GRAPHS_SQL` back to `c.graph_id IS NULL` (the DB legs and the
+    static pin in `tests/test_14582_creation_hook.py` red for that half).
+    """
+    conn = _SweepConn(["g-seeded", "g-halted", "g-born"], max_seq=4,
+                      modes={"g-seeded": "seeded", "g-halted": "halted"})
+    payload = _sweep(type("A", (), {"org_id": "o", "floor": None,
+                                    "journal": None})(), conn)
+    assert payload["count"] == 3, payload
+    assert {e["graph_id"]: e["counter_mode"] for e in payload["uncut_graphs"]} == {
+        "g-seeded": "seeded", "g-halted": "halted", "g-born": None}, payload
+    assert "allocating" in payload["count_means"] and "seeded" in payload["count_means"], (
+        f"the payload must say what `count: 0` means: {payload.get('count_means')!r}")
+
+
+def test_each_state_is_handed_the_command_that_actually_reaches_it() -> None:
+    """⛔ THE ENTRY'S ONE ACTIONABLE FIELD MUST NOT PRINT A HALF REMEDY (#14624 F2).
+
+    Every entry used to carry `seed_command`, and `seed` is the right verb for
+    exactly ONE of the three states this population now holds. `seed` re-seeds
+    MONOTONICALLY and leaves the mode alone, so over a `seeded` row it changes
+    nothing an allocation reads (still `seeded`, so still nothing allocates) and
+    over a `halted` row it leaves the halt standing. That is the "green command,
+    unchanged red field" shape `record_writer.uncut_graph_remedy` exists to
+    prevent — published by the field an operator acts on, beside the mode that
+    refutes it.
+
+    The mode-bearing states are delegated to that one home, so this test is also
+    the CLI's pin against a second copy of the verb table: a local `if seeded:`
+    re-derivation drifts the day `ARM_SQL`/`HALT_SQL` move.
+
+    NON-VACUITY: pre-fix the field is named `seed_command` (KeyError) — and even
+    renamed, every entry would carry `seed --org-id o --graph-id <g>`, which reds
+    both mode arms below.
+    """
+    conn = _SweepConn(["g-seeded", "g-halted", "g-born"], max_seq=4,
+                      modes={"g-seeded": "seeded", "g-halted": "halted"})
+    payload = _sweep(type("A", (), {"org_id": "o", "floor": None,
+                                    "journal": None})(), conn)
+    commands = {e["graph_id"]: e["next_command"] for e in payload["uncut_graphs"]}
+
+    # BORN UNCUT: no row at all, so a SEED is what creates one — and its floor is
+    # that graph's own journal, which is why the flag is `--journal`, not a
+    # magic number.
+    born = commands["g-born"]
+    assert " seed --org-id o --graph-id g-born" in born, born
+    assert "--journal" in born and "--enumerated-floor" not in born, (
+        f"a born-uncut graph's floor comes from ITS journal — got {born!r}")
+
+    # SEEDED: the row exists and only needs arming. The narrower verb, because
+    # this entry is one graph (`backfill --arm` reaches it too, org-wide).
+    seeded = commands["g-seeded"]
+    assert " arm --org-id o --graph-id g-seeded" in seeded, (
+        f"a `seeded` row allocates nothing until it is ARMED — got {seeded!r}")
+    assert "seed" not in seeded.replace("seeded", ""), (
+        f"`seed` leaves the mode alone, so it is the half remedy here — got {seeded!r}")
+    assert "--acknowledge-cutover" in seeded, (
+        f"`arm` carries the cutover acknowledgement gate — got {seeded!r}")
+
+    # HALTED: `ARM_SQL` is scoped `mode = 'seeded'`, so `arm` ALONE is a no-op and
+    # `reopen` must be the first step (the order, not just the presence).
+    halted = commands["g-halted"]
+    assert "reopen" in halted and halted.index("reopen") < halted.index("arm --org-id"), (
+        f"a halted row needs `reopen` BEFORE `arm`, or the command is a no-op: {halted!r}")
 
 
 def test_the_sweep_does_not_assert_a_floor_it_never_counted() -> None:

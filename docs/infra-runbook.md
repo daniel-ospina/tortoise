@@ -841,8 +841,8 @@ false reassurance:
   body — which is the shape `#10602` recorded. So a recurrence of *this* P0
   shows up as `mcp`, never as `rest`.
 
-The same field is on the MCP health tool (`tortoise_health`, or
-`tortoise_overview(section="health")`) — the surface `#10602` itself was
+The same field is on the MCP health tool
+(`tortoise_graph_overview(section="health")`) — the surface `#10602` itself was
 measured on — and in `monitoring.serve_health`'s **`/health`** body.
 
 ⛔ Do not go looking for this JSON shape on `serve_health`'s **`/metrics`**: that
@@ -5036,7 +5036,7 @@ consequences, both load-bearing:
    ROW is the fact, not the mode, which is exactly why the flag must be rolled **after** the seeding.
 2. **The order is `sweep` → `seed --journal <path>` → `arm` (per graph) → THEN the flag for the box.**
    `tortoise/live_write.py:105-109` states that order and names
-   `tools/record_allocator_cli.py`'s `CUTOVER_ACK_TEXT` (`:119-147`) as its authority — that text is the
+   `tools/record_allocator_cli.py`'s `CUTOVER_ACK_TEXT` (`:143-186`) as its authority — that text is the
    procedure, not this paragraph; it also carries the four preconditions `arm` refuses without
    `--acknowledge-cutover` (the flag lives in the WRITER's environment; every graph written after the
    cutover needs its own counter row and the provisioning hook is not in this tree; cutover is per graph;

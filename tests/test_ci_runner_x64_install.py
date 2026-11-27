@@ -6694,6 +6694,111 @@ def test_every_pool_only_pin_is_named_in_the_runbooks_departure_record():
     )
 
 
+def test_the_pool_split_rows_are_counted_and_named_in_the_departure_record(monkeypatch):
+    r"""⛔ THE ONLY REQUIRED LEGS ON THE POOL ARE ROUTED BY A DYNAMIC MATRIX, SO NO STATIC SCAN SEES THEM (#10237).
+
+    The pin above scans workflow FILES for a static `runs-on:` naming a pool-only label. The
+    `pool-split` departure is not written in a workflow at all: `python-ci.yml`'s `test` job is
+    `runs-on: ${{ fromJSON(matrix.runner) }}`, and the label lives in the row the SELECTOR emits
+    (`tools/ci_selection.py::fast_shard_runner`). So a static scan returns zero pool rows there by
+    construction — and the five REQUIRED legs that actually carry a POOL-ONLY label, with no
+    GitHub-hosted half, were recorded in prose that nothing compared against the selector.
+
+    MEASURED 2026-11-27, which is why this is a test and not a note. `CI_SHARD_ROUTING=pool-split`
+    is SET in this repo's actions variables (2026-11-18), so the split is LIVE — and the runbook
+    said, in four places, "4 of 9", "those four legs", "no required leg is pinned to the pool".
+    `fast_shards` is 11 now, so the derived set is `(b)`, `(d)`, `(f)`, `(h)`, `(j)`: **`test (j)`
+    had joined the pool-routed set with no record at all**, and run `45969747799` shows it there. The
+    page had already been corrected once for exactly this drift (#13596, the test above), on the
+    STATIC half; the dynamic half had no guard and drifted again.
+
+    So both axes are pinned against the derivation, not against the sentence's arithmetic:
+
+      * every `PIN on N of M required legs` statement on the page must agree with the selector's own
+        counts, so a shard-count change cannot move a required leg onto the class with no hosted half
+        while the page keeps quoting the old denominator;
+      * every derived pool row's shard letter must be NAMED inside a `**OVERRIDES:**` departure block
+        that mentions `pool-split`, so the leg is at least recorded where the next lane reads it.
+
+    ⛔ WHAT THIS DOES NOT CHECK, stated so a green run is not over-read:
+
+      * **The MODE.** `CI_SHARD_ROUTING` is a repo VARIABLE — Actions settings, not the checkout — so
+        no test here can read whether the split is engaged. Only the ship default is in the tree. A
+        lane that needs the live state must read it (`gh api …/actions/variables`); the EOF section of
+        the runbook records one such measurement and its date rather than claiming to derive it.
+      * **Attribution.** As in the test above, the rule is "this letter is named in a pool-split block",
+        not "this block attributes this shard correctly".
+      * **Whether the pool can finish a leg inside its budget.** That is a runtime property; the
+        measured kill on a loaded box is recorded in the runbook's EOF section, not pinned here.
+    """
+    from tools.ci_selection import (
+        FOLD_RUNNER_ENV,
+        PR_LABELS_ENV,
+        SHARD_ROUTING_POOL_SPLIT,
+        SHARD_RUNNER_X64,
+        fast_matrix_include,
+        load_manifest,
+        push_legs,
+    )
+
+    # The fold class is an independent override of `runner` (#10897) — clear it so this pin measures
+    # the ROUTING and not whatever the ambient box happens to carry.
+    monkeypatch.delenv(FOLD_RUNNER_ENV, raising=False)
+    monkeypatch.delenv(PR_LABELS_ENV, raising=False)
+
+    runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
+    shards = push_legs(load_manifest())["shards"]
+    inc = fast_matrix_include(shards, routing=SHARD_ROUTING_POOL_SPLIT)["include"]
+    assert inc, "the real config emits no fast shards — nothing to route"
+    pool = [e["half"] for e in inc if json.loads(e["runner"]) == SHARD_RUNNER_X64]
+    assert pool, (
+        "the opt-in split routes NO row to the pool, so this pin checks nothing — if "
+        "`fast_shard_runner` was retired, delete this pin in the same change rather than leaving a "
+        "green scan over an empty population"
+    )
+    assert len(pool) < len(inc), (
+        f"every row is pool-routed ({', '.join(pool)}) — the canary producer must stay on the "
+        "hosted label or the canary streak becomes a comparison of runner classes (#6897)"
+    )
+
+    # (1) every count the page states agrees with the derivation.
+    counts = re.findall(r"PIN on (\d+) of (\d+) required legs", runbook)
+    assert counts, (
+        "`docs/ops/ci-runner-x64.md` no longer states the split's cost in the form "
+        "`PIN on N of M required legs`, so there is no arithmetic to check — restore the wording "
+        "or rewrite this pin, but do not leave the count unguarded"
+    )
+    for declared_pool, declared_total in counts:
+        assert (int(declared_pool), int(declared_total)) == (len(pool), len(inc)), (
+            f"the runbook says the pool-split is a PIN on {declared_pool} of {declared_total} "
+            f"required legs; the selector derives {len(pool)} of {len(inc)} "
+            f"({', '.join(pool)}). A shard-count change moves a REQUIRED leg onto the class with no "
+            "hosted half — record it, do not inherit it."
+        )
+
+    # (2) every derived pool row is NAMED in a pool-split departure block.
+    def _opens_with_marker(paragraph: str) -> bool:
+        return paragraph.lstrip().lstrip(">").lstrip().startswith("**OVERRIDES:**")
+
+    blocks = [p for p in re.split(r"\n[ \t]*\n", runbook) if _opens_with_marker(p)]
+    pool_blocks = [b for b in blocks if "pool-split" in b]
+    assert pool_blocks, (
+        "no `**OVERRIDES:**` departure block on the runbook mentions `pool-split` — the departure "
+        "then has no record at all and this pin has nothing to check it against"
+    )
+    named: set[str] = set()
+    for block in pool_blocks:
+        named |= set(re.findall(r"\(([a-z])\)", block))
+    missing = [half for half in pool if half not in named]
+    assert not missing, (
+        "a REQUIRED fast shard is routed to a POOL-ONLY label with no recorded departure: "
+        + ", ".join(f"test ({h})" for h in missing)
+        + ". The pool-split block in `docs/ops/ci-runner-x64.md` must NAME it beside the others — a "
+        "required leg with no hosted half is a merge stop while the pool is down, and a routing "
+        "change that lands without that sentence reads as an accident of history."
+    )
+
+
 # ── 9. the unit's survival drop-in: a death is retried, and one unit's memory is bounded (#13774) ──
 def _dropin_env(tmp_path: Path, *, unit_present: bool, **extra: str) -> dict[str, str]:
     """An INSTALL-mode env whose unit directory is hermetic and whose `sudo`/`systemctl` are stubs.
