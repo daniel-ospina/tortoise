@@ -1738,8 +1738,7 @@ def _satisfies_claim(text: str, issue: int, rows: list[str], repo: str | None) -
 
 
 def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
-                        repo: str | None = None,
-                        skipped: list[int] | None = None) -> tuple[set[str], bool]:
+                        repo: str | None = None) -> tuple[set[str], bool]:
     """`(rows this PR claims, did a closing line DISCLAIM rows)` — the polarity-aware read.
 
     Two sources, and both are GROUNDED in the issue's declared rows, so a token the issue does not use
@@ -1771,6 +1770,15 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
     element exists so that fallback can be REFUSED where it would launder a disclaimer: a body whose
     closing line says `V1–V6 remain unmeasured` names every id somewhere, and reading the whole body
     there reports `clean` on a close that disclaimed all six.
+
+    ⛔ THERE IS NO `skipped` SINK HERE, AND THAT IS MEASURED, NOT AN OVERSIGHT (review round 18, P3).
+    This read used to take a `skipped` parameter and forward it to `_claims_in`, and **no caller ever
+    supplied one** — so it described a second drop note that could never print, which reads to the
+    next lane as a live guard. A drop here is unreachable in effect: the population is built by
+    `closing_targets`, which resolves an `owner/repo#N` under the SAME repo, so an issue whose
+    qualifier cannot be resolved is dropped THERE and reported through its own `dropped` sink (see
+    `run_closing_scope`) before this read is ever asked about it; and where the repo IS known this
+    read resolves the qualifier too. Dead parameters are removed here rather than documented.
     """
     text, _hidden = strip_code(pr_body, strict=True)
     named: set[str] = set()
@@ -1784,7 +1792,7 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
         # above it: `clean` on the exact shape the arm was filed for. The module already owns the
         # binding grammar (`CLAIM_RE` via `_claims_in`, the same test `closing_targets` trusts), so the
         # line qualifies only when that grammar says the keyword resolves THIS issue here.
-        if issue not in _claims_in(line, None, repo, skipped)["closing"]:
+        if issue not in _claims_in(line, None, repo)["closing"]:
             # ⛔ NOT a closing line, but it can still DISCLAIM. A disclosure written on its OWN line
             # is the shape the careful author produces — `Closes #N` on one line, then `V2 is proved;
             # V1, V3–V6 remain unmeasured and are follow-ups` on the next — and reading disclaimers
