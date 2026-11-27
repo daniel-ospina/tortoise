@@ -3698,12 +3698,22 @@ def test_a_row_range_shorthand_claims_every_row_it_spans():
                  "Closes #13036 (rows V1 through V6)\n",
                  "Closes #13036 (rows from V1 to V6)\n",
                  "Closes #13036 (rows V6–V1)\n",       # stated backwards, still the same span
-                 "Closes #13036 — all six rows V1..V6 are proved\n"):
+                 "Closes #13036 (all six rows V1..V6)\n"):
         findings, stats = L.classify_partial_close(line, 500, {13036: _scope(rows)},
                                                   "daniel-ospina/tortoise")
         assert findings == [], (line, [f.as_dict() for f in findings])
         assert stats == {"closes": 1, "clean": 1, "finding": 0,
                          "abstained": 0, "ambiguous": 0, "unread": 0}, line
+    # ⛔ A RANGE INSIDE A SENTENCE IS A MENTION, NOT A CLAIM (review round 8): the span read is a
+    # POSITIVE marker — the range must be the clause's whole claim — because every blocklist of prose
+    # cues leaked the next spelling one round later. So a wordy complete close is AMBIGUOUS: not a
+    # pass (this arm never calls a set-mention a claim) and not a finding (its author did claim all
+    # six). An honest non-answer, counted and printed, is the terminating outcome.
+    findings, stats = L.classify_partial_close(
+        "Closes #13036 — all six rows V1..V6 are proved\n", 500, {13036: _scope(rows)},
+        "daniel-ospina/tortoise")
+    assert findings == []
+    assert (stats["ambiguous"], stats["clean"], stats["finding"]) == (1, 0, 0), stats
 
 
 def test_a_range_that_covers_only_part_of_the_issue_still_names_the_rows_outside_it():
@@ -4158,6 +4168,15 @@ def test_every_dash_and_word_spelling_of_a_full_range_is_a_complete_claim(spelli
     ("Closes #13036 (row V2 only); only rows V1–V6 bar. See rows V3–V6 later.\n", "finding"),
     ("Closes #13036\n\nThis PR is one step on the rows V1–V6 bar: V2 is now proved.\n", "ambiguous"),
     ("Closes #13036 (row V2 only; the rows V1 to V6 are still open)\n", "finding"),
+    # rows 14–17 — the CUE-BLOCKLIST leaks round 8 measured with NO cue at all (F2): a range the
+    # sentence merely describes. A naming sibling clause decides the claim, so these are findings.
+    ("Closes #13036 (proving V2; rows V1–V6 are the capstone)\n", "finding"),
+    ("Closes #13036 (rows V1–V6; V2 is what this PR proves)\n", "finding"),
+    ("Closes #13036 (rows V1–V6 cover the surface; V2 measured)\n", "finding"),
+    # …and the FALSE POSITIVES that blocklist caused on correct completes (F1): an honest non-answer,
+    # never a `clean` and never an accusation naming rows the author already claimed.
+    ("Closes #13036 (rows V1–V6, see the evidence doc)\n", "ambiguous"),
+    ("Closes #13036 (rows V1–V6 of the capstone programme)\n", "ambiguous"),
 ])
 def test_a_range_that_names_the_row_set_is_not_a_claim_on_it(body, expected):
     """`_row_range_span` used to expand unconditionally, so `(row V2 of V1–V6)` claimed all six.
@@ -4165,8 +4184,11 @@ def test_a_range_that_names_the_row_set_is_not_a_claim_on_it(body, expected):
     `#13036` is titled `## The bar — all six must be measured`, so naming the bar by its id range is
     the natural sentence for a lane to write — and it turned the arm's headline defect into `clean`,
     in the passing direction the module ranks worst. A span now needs a plural row noun before it
-    (`rows V1–V6`) or to be the whole claim (`Satisfies #N: V2–V4`); a mere mention keeps the
-    endpoints, which understates in the safe direction and lands a finding.
+    (`rows V1–V6`) or to be the whole claim (`Satisfies #N: V2–V4`). Round 8 retired the cue
+    blocklist that stood in between: it flagged correct completes (`…, see the evidence doc`) and
+    still passed cue-free mentions (`(proving V2; rows V1–V6 are the capstone)`). A mention's ids are
+    now not claims at all, so those classes land `finding` (a sibling clause named a row) or
+    `ambiguous` (it named none) — never `clean`, never a false accusation.
     """
     rows = L.row_ids([CAPSTONE_BODY])
     findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
@@ -4187,9 +4209,14 @@ def test_the_satisfies_clause_still_spans_without_a_row_noun():
     """
     rows = L.row_ids([CAPSTONE_BODY])
     assert L.claimed_row_ids("Satisfies #13036: V2–V4\n", 13036, rows) == {"V2", "V3", "V4"}
+    # ⛔ THE TAIL PINS THE HONEST CLAIM (review round 8, F3): `Satisfies` and `Refs` are deliberately
+    # NOT closing keywords, so this body has no closing target and no verdict can be produced at all.
+    # Asserting only `findings == []` looked like it pinned "the documented partial form is never
+    # flagged" while varying under nothing; `closes == 0` is what actually holds.
     body = "Satisfies #13036: V2–V4\nRefs #13036\n"
-    findings, _stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
+    findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
     assert findings == []
+    assert stats["closes"] == 0, stats
 
 
 def test_an_empty_sweep_says_it_read_nothing_not_that_the_arm_did_not_run(capsys, monkeypatch):

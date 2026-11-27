@@ -1428,63 +1428,88 @@ def row_ids(issue_bodies: list[str]) -> list[str]:
 # naming its two endpoints, so a COMPLETE close reported a finding on four rows it had claimed.
 _RANGE_JOIN = r"(?:\s*(?:--?|–|—|\.{2,}|…)\s*|\s+(?:through|to)\s+)"
 
-# ⛔ A RANGE ONLY SPANS WHEN IT IS THE OBJECT OF A CLAIM, NOT WHEN IT JUST NAMES THE ROW SET.
-# `Closes #13036 (rows V1–V6)` claims six; `Closes #13036 (row V2 of V1–V6)` and `… (the V1–V6 bar
-# is unchanged)` claim ONE and merely REFER to the set. Expanding unconditionally made every such
-# sentence `clean`: `#13036` is titled `## The bar — all six must be measured`, so naming the bar by
-# its id range is the natural thing for a lane to write, and the arm reported a pass on the exact
-# defect it exists to catch. The gate is a plural row noun immediately before the range (`rows`,
-# `ids`, `items`, `criteria`), or a range that IS the whole claim — which is how `Satisfies #N: V2–V4`
-# arrives here, its clause carrying nothing else.
-_ROW_NOUN_BEFORE = re.compile(r"(?:\b(?:rows?|ids?|items?|criteria|row\s+ids?)\s+(?:from\s+)?)$",
-                              re.IGNORECASE)
-
-# ⛔ AND THE NOUN IS NOT ENOUGH: the most natural way to NAME the set is with that same noun. Round 7
-# measured it as a one-word margin from a pinned control — `(row V2 only; rows V1–V6 bar is unchanged)`
-# read `clean`, where the same sentence WITHOUT the word `rows` was the pinned finding. So a span also
-# requires that its own line carries no PARTIALITY/contrast cue: a sentence that mentions a row set
-# while limiting, postponing or comparing it is not claiming it. Rejecting a span only costs the
-# endpoint read (an understating `finding`), while accepting one costs a false PASS.
-_PARTIALITY_RE = re.compile(
-    r"\bonly\b|\bof\b|un\w*changed\b|untouched|unaffected|across\b|\bbar\b|\blater\b|\bsee\b"
-    r"|deferred|outstanding|pending|in\s+progress|part(?:ial|ly)?\b|between\b",
+# ⛔ A RANGE SPANS ONLY WHEN IT IS THE WHOLE CLAIM — a POSITIVE marker, never a blocklist of prose.
+# `Closes #13036 (rows V1–V6)` claims six; `(row V2 of V1–V6)`, `(rows V1–V6, see the evidence doc)`
+# and `(rows V1–V6 are the capstone)` claim ONE and merely REFER to the set. Two rounds were spent
+# blocking "cue" words and each round the next spelling leaked through — `of`, `bar`, `unchanged` … —
+# so the rule is now the one that TERMINATES: the range must be the entire claim of its CLAUSE,
+# modulo a leading row noun (`rows`, `all six rows`, `rows from`). Everything else is a MENTION: its
+# ids are NOT claims at all — neither the span nor the two endpoints (counting the endpoints told a
+# complete close to "claim only V1, V6") — so the verdict falls to AMBIGUOUS, which this arm already
+# carries as a first-class, counted, printed answer. A non-answer is honest; a wrong `clean` (the
+# measured defect: #13036 is titled `## The bar — all six must be measured`, so naming the bar by its
+# id range is the natural sentence) and a wrong `finding` (on a complete close) are both not.
+_BARE_PREFIX = re.compile(
+    r"^(?:all\s+(?:\w+\s+)?)?(?:rows?|ids?|items?|criteria|row\s+ids?)(?:\s+from)?$",
     re.IGNORECASE)
+_FILLER = " \t,;:.\u2013\u2014-()[]"
 
 
-def _row_range_span(text: str, rows: list[str]) -> set[str]:
-    """The rows a DECLARED range in `text` spans — `V1–V6` over `#13036`'s six is all six, not two.
+def _range_matches(text: str, rows: list[str]) -> list[re.Match]:
+    """Every DECLARED range mention in `text` — both endpoints must be declared rows.
 
-    ⛔ GROUNDED IN THE ISSUE'S OWN ORDER, and only where BOTH endpoints are declared rows, so the
-    expansion can never invent a row: the span is a slice of `rows`, not an arithmetic sequence.
-
-    ⚠️ RESIDUAL (narrow, and in the flagging direction): an endpoint the issue does not declare
-    cannot anchor a span — `rows V1..V9` on a six-row issue reads as `V1` alone, because `V9` is not
-    a row this issue has. Guessing its position is how the arm would start inventing rows.
-
-    ⛔ AND A SPAN NEEDS A CLAIM, NOT JUST TWO DECLARED ENDPOINTS (`_ROW_NOUN_BEFORE`): expanding
-    unconditionally made `(row V2 of V1–V6)` and `(the V1–V6 bar is unchanged)` claim all six, so the
-    measured defect read `clean` as soon as its author named the bar — the false PASS this arm ranks
-    worst, and undeclared in the direction that matters. Only a plural row noun before the range, or
-    a range that IS the whole text (the `Satisfies #N: V2–V4` clause), spans.
+    Grounded in the issue's own ORDER and membership, so a range can never invent a row: the span is a
+    slice of `rows`, not an arithmetic sequence. An endpoint the issue does not declare cannot anchor a
+    match at all (`rows V1..V9` on a six-row issue), which is how the read refuses to guess.
     """
     if len(rows) < 2:
-        return set()
+        return []
     alternation = "|".join(re.escape(row) for row in sorted(rows, key=len, reverse=True))
     pattern = re.compile(rf"(?<![A-Za-z0-9])(?P<a>{alternation}){_RANGE_JOIN}"
                          rf"(?P<b>{alternation})(?![A-Za-z0-9])")
+    return list(pattern.finditer(text))
+
+
+def _range_is_the_whole_claim(text: str, match: re.Match, rows: list[str]) -> bool:
+    """Is this range the ENTIRE claim of the clause it sits in (see `_BARE_PREFIX`)?
+
+    ⛔ AND NOT WHEN A SIBLING CLAUSE ON THE SAME LINE NAMES ROWS: `Closes #N (rows V1–V6; V2 is what
+    this PR proves)` reaches a bare range clause, but the line as a whole says ONE row is what it
+    proves — the sentence a lane naturally writes while narrowing a partial close, and reading it as
+    complete would be the false PASS this arm ranks worst. A naming sibling makes the bare range a
+    MENTION, so the explicit ids decide the claim (safe: an understating finding, never a pass).
+    """
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    line_end = text.find("\n", match.end())
+    line = text[line_start:line_end if line_end != -1 else len(text)]
+    start, end = match.start() - line_start, match.end() - line_start
+    spans = _clause_spans(line, rows)
+    for c_start, c_end in spans:
+        if c_start <= start and end <= c_end:
+            pre = line[c_start:start].strip()
+            post = line[end:c_end].strip(_FILLER)
+            if post != "" or not (pre == "" or bool(_BARE_PREFIX.match(pre))):
+                return False
+            own = (c_start, c_end)
+            break
+    else:
+        return False
+    for c_start, c_end in spans:
+        if (c_start, c_end) == own:
+            continue
+        other = line[c_start:c_end]
+        if any(re.search(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", other) for row in rows):
+            return False
+    return True
+
+
+def _row_range_span(text: str, rows: list[str]) -> set[str]:
+    """The rows a BARE range claim in `text` spans — `V1–V6` over `#13036`'s six is all six, not two.
+
+    ⛔ GROUNDED IN THE ISSUE'S OWN ORDER, and only where BOTH endpoints are declared rows, so the
+    expansion can never invent a row.
+
+    ⛔ AND ONLY WHERE THE RANGE IS THE WHOLE CLAIM (`_range_is_the_whole_claim`): expanding
+    unconditionally made `(row V2 of V1–V6)` and `(the V1–V6 bar is unchanged)` claim all six, so the
+    measured defect read `clean` as soon as its author named the bar — the false PASS this arm ranks
+    worst. A mention is therefore not a claim on its endpoints either; `_ids_in` BLANKS it, because
+    counting the endpoints instead flagged the CORRECT close `(rows V1–V6, see the evidence doc)` with
+    remediation telling its author to claim two rows of six.
+    """
     order = {row: i for i, row in enumerate(rows)}
     spanned: set[str] = set()
-    for match in pattern.finditer(text):
-        before, after = text[:match.start()], text[match.end():]
-        # See `_ROW_NOUN_BEFORE`: a mention of the row SET is not a claim on it…
-        if not (before.strip() == "" and after.strip() == "") and not _ROW_NOUN_BEFORE.search(before):
-            continue
-        # …and not even the noun settles it (`_PARTIALITY_RE`): the same noun introduces a set the
-        # sentence might be limiting, postponing or comparing rather than claiming.
-        line_start = text.rfind("\n", 0, match.start()) + 1
-        line_end = text.find("\n", match.end())
-        line = text[line_start:line_end if line_end != -1 else len(text)]
-        if _PARTIALITY_RE.search(line):
+    for match in _range_matches(text, rows):
+        if not _range_is_the_whole_claim(text, match, rows):
             continue
         lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
         spanned |= set(rows[lo:hi + 1])
@@ -1492,20 +1517,28 @@ def _row_range_span(text: str, rows: list[str]) -> set[str]:
 
 
 def _ids_in(text: str, rows: list[str]) -> set[str]:
-    """Which of `rows` this text NAMES — whole tokens (so `R1` is not found inside `R10`/`AR1`), plus
-    every row a range shorthand SPANS.
+    """Which of `rows` this text CLAIMS — whole tokens (so `R1` is not found inside `R10`/`AR1`), plus
+    every row a bare range claim spans.
 
     The range read is not cosmetic: `Closes #13036 (rows V1–V6)` is a COMPLETE close of all six, and
     reading it as its two endpoints flagged it as a partial claim naming four unclaimed rows — a false
     positive on the correct behaviour this arm exists to encourage, with remediation that told the
     author to claim two rows of six.
 
-    ⛔ BUT A RANGE THAT ONLY NAMES THE SET IS NOT A CLAIM ON IT (`_row_range_span`): the span is taken
-    only where a plural row noun introduces it or the range IS the whole text, so `(row V2 of V1–V6)`
-    keeps its endpoints and stays a finding.
+    ⛔ A RANGE THAT IS NOT THE WHOLE CLAIM IS A MENTION, AND ITS IDS ARE BLANKED (`_row_range_span`):
+    `(row V2 of V1–V6)` claims V2 ALONE — not V1 and V6 as well, which is what counting the endpoints
+    did, and not all six, which is what the bare span did.
     """
     named = {row for row in rows
              if re.search(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", text)}
+    mentions = _range_matches(text, rows)
+    if mentions:
+        chars = list(text)
+        for match in mentions:
+            for i in range(match.start(), match.end()):
+                chars[i] = " "
+        named = {row for row in rows
+                 if re.search(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", "".join(chars))}
     return named | _row_range_span(text, rows)
 
 
@@ -1530,26 +1563,32 @@ _DISCLAIMER_RE = re.compile(
 _CLAUSE_SPLIT_RE = re.compile(r"[;()\[\]]|\s+[—–]\s+|(?<=[.!?])\s+")
 
 
-def _clauses(line: str, rows: list[str]) -> list[str]:
-    """Split a closing line into CLAUSES at the points where a claim ends and a disclaimer begins.
+def _clause_spans(line: str, rows: list[str]) -> list[tuple[int, int]]:
+    """The CLAUSE offsets of one line — the boundaries where a claim ends and a disclaimer begins.
 
     The polarity read (see `_closing_line_claim`) is per clause, because a single line routinely says
     both things: `Closes #N (row V2 only); V1, V3, V4, V5, V6 remain unmeasured`. Deciding polarity for
     the whole LINE would either drop the real claim or accept the disclaimer's ids as claims — the
-    false PASS this reads out. A spaced dash between two declared row ids is a range, not a boundary.
+    false PASS this reads out. A spaced dash between two declared row ids is a range, not a boundary,
+    and offsets (not strings) are returned so the range read can find a match's OWN clause.
     """
-    out: list[str] = []
+    spans: list[tuple[int, int]] = []
     start = 0
     for match in _CLAUSE_SPLIT_RE.finditer(line):
-        if match.group().strip() in {"—", "–"}:
+        if match.group().strip() in {"\u2014", "\u2013"}:
             before, after = line[:match.start()].rstrip(), line[match.end():].lstrip()
             if (any(re.search(rf"(?<![A-Za-z0-9]){re.escape(r)}$", before) for r in rows)
                     and any(re.match(rf"{re.escape(r)}(?![A-Za-z0-9])", after) for r in rows)):
                 continue
-        out.append(line[start:match.start()])
+        spans.append((start, match.start()))
         start = match.end()
-    out.append(line[start:])
-    return out
+    spans.append((start, len(line)))
+    return spans
+
+
+def _clauses(line: str, rows: list[str]) -> list[str]:
+    """The clause TEXTS of one line — see `_clause_spans` for the boundaries."""
+    return [line[a:b] for a, b in _clause_spans(line, rows)]
 
 
 def _closing_line_claim(pr_body: str, issue: int,
@@ -1596,11 +1635,17 @@ def _closing_line_claim(pr_body: str, issue: int,
             if _ids_in(line, rows) and _DISCLAIMER_RE.search(line):
                 disclaimed = True
             continue
-        for clause in _clauses(line, rows):
-            if _DISCLAIMER_RE.search(clause):
+        # ⛔ THE LINE IS THE UNIT, the clause is the polarity boundary: `_ids_in` needs the whole line
+        # to see a SIBLING clause that narrows a bare range (`(rows V1–V6; V2 is what this PR proves)`
+        # is not a complete claim), so the disclaimed clauses are BLANKED in place of being skipped.
+        # Skipping them read each clause in isolation, where that bare range looked like a claim on
+        # all six and the line reported `clean` on a one-row PR.
+        chars = list(line)
+        for a, b in _clause_spans(line, rows):
+            if _DISCLAIMER_RE.search(line[a:b]):
                 disclaimed = True
-                continue
-            named |= _ids_in(clause, rows)
+                chars[a:b] = " " * (b - a)
+        named |= _ids_in("".join(chars), rows)
     return named, disclaimed
 
 
