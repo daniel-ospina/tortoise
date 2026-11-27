@@ -1,0 +1,1940 @@
+{
+  "receipt_version": 1,
+  "run_id": "w2b-251b908737a3",
+  "date": "2026-11-27T09:28:10Z",
+  "run_status": "completed",
+  "verdict": "regression",
+  "failure_origin": "gate_regression",
+  "commit": "234d7db4be",
+  "corpus_hash": "sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc",
+  "judge_pin": "w2-write-path-mechanical-v2",
+  "resolved_config": {
+    "lanes": [
+      "verbatim",
+      "facts",
+      "dream"
+    ],
+    "mode": "BPRE",
+    "harness": "all",
+    "seed": 42,
+    "extractor_posture": "llm"
+  },
+  "cost_usd": 0.0,
+  "metrics": {
+    "salient_unit_survival_macro": 0.4444444444444444,
+    "salient_unit_survival_strict": 0.4444444444444444,
+    "distractor_leakage_per_run": 0,
+    "sessions_emitting": 1.0,
+    "quote_fidelity": 1.0,
+    "provenance_accuracy": 1.0
+  },
+  "quote_spans_total": 0,
+  "justification": null,
+  "session_results": [
+    {
+      "session_id": "wp01_quarry_debug",
+      "emitted": true,
+      "macro": {
+        "survived": 9,
+        "total": 16
+      },
+      "strict": {
+        "survived": 9,
+        "total": 16
+      },
+      "leaked": [],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 28,
+        "total": 28
+      },
+      "memory_points": 28,
+      "operator_counts": {
+        "IMPL": 4,
+        "NAND": 2,
+        "INPUT": 6
+      },
+      "extraction_warnings": [
+        "value-bearing point 'The root cause is a duplicate-processing race: two workers g' resolved to turn 8 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+        "MITIGATES target edge materialized (#2552 mint-before-wire): the declared target IMPL ('pt_3c01cfef7de877a212b8de3bf47aa8016d8b0' \u2192 'pt_c63c432842cf2041c2c44c296ad720073fd53') was not emitted as its own operator \u2014 added so the dampener has its target",
+        "S3 identity unresolved (S3 skipped: active backend is FalkorDBLite (embedded) \u2014 the real graph (FalkorDB via docker/redis URI or hosted API) is required, not FalkorDBLite): the existing-item lookup did not run for 42 of 42 candidate(s)",
+        "value-normalizer: 5 point(s) carried an amount that was not typed \u2014 no_currency_anchor \u00d75 (prose only \u2014 each value is a drop, never a guess)"
+      ],
+      "planted_operators": [
+        {
+          "id": "wp01_quarry_debug_op_01",
+          "expected_kind": "SUPPORTS",
+          "verdict": "edge_correct",
+          "edge_correct": true,
+          "forms_found": [
+            "IMPL"
+          ]
+        },
+        {
+          "id": "wp01_quarry_debug_op_02",
+          "expected_kind": "MITIGATES",
+          "verdict": "edge_missing",
+          "edge_correct": false,
+          "forms_found": null
+        }
+      ],
+      "failed_units": [
+        {
+          "id": "wp01_quarry_debug_u_05",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp01_quarry_debug_u_06",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp01_quarry_debug_u_07",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp01_quarry_debug_u_08",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp01_quarry_debug_u_09",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp01_quarry_debug_u_11",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp01_quarry_debug_u_16",
+          "failure": "content_missing"
+        }
+      ]
+    },
+    {
+      "session_id": "wp02_lumen_refactor",
+      "emitted": true,
+      "macro": {
+        "survived": 4,
+        "total": 13
+      },
+      "strict": {
+        "survived": 4,
+        "total": 13
+      },
+      "leaked": [],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 25,
+        "total": 25
+      },
+      "memory_points": 25,
+      "operator_counts": {
+        "NAND": 4,
+        "IMPL": 12,
+        "INPUT": 16
+      },
+      "extraction_warnings": [
+        "entity 'the admin screen' lifecycle='changed' is not expressible in the Layer-1 payload \u2014 changed-ness is attribute/value state and must ride on points/events, not on an Object transition",
+        "value-bearing point 'Reusing the tt_ prefix keeps operators on a single key-famil' resolved verbatim in turn 3, but the quoted text carries no value \u2014 the span would address words that do not hold it, so it carries no source span (the value cannot be re-read verbatim)",
+        "MITIGATES target edge materialized (#2552 mint-before-wire): the declared target IMPL ('pt_62fe53c2a63b603db0679347fa31a3ec0a031' \u2192 'pt_ed91c49157269a96b9064f4e355b6e0337906') was not emitted as its own operator \u2014 added so the dampener has its target",
+        "S3 identity unresolved (S3 skipped: active backend is FalkorDBLite (embedded) \u2014 the real graph (FalkorDB via docker/redis URI or hosted API) is required, not FalkorDBLite): the existing-item lookup did not run for 46 of 46 candidate(s)",
+        "value-normalizer: 2 point(s) carried an amount that was not typed \u2014 no_currency_anchor \u00d72 (prose only \u2014 each value is a drop, never a guess)"
+      ],
+      "planted_operators": [
+        {
+          "id": "wp02_lumen_refactor_op_01",
+          "expected_kind": "MITIGATES",
+          "verdict": "from_content_missing",
+          "edge_correct": false,
+          "forms_found": null
+        }
+      ],
+      "failed_units": [
+        {
+          "id": "wp02_lumen_refactor_u_01",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp02_lumen_refactor_u_02",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp02_lumen_refactor_u_03",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp02_lumen_refactor_u_04",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp02_lumen_refactor_u_05",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp02_lumen_refactor_u_08",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp02_lumen_refactor_u_09",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp02_lumen_refactor_u_10",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp02_lumen_refactor_u_12",
+          "failure": "content_missing"
+        }
+      ]
+    },
+    {
+      "session_id": "wp03_ember_design",
+      "emitted": true,
+      "macro": {
+        "survived": 6,
+        "total": 15
+      },
+      "strict": {
+        "survived": 6,
+        "total": 15
+      },
+      "leaked": [],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 25,
+        "total": 25
+      },
+      "memory_points": 25,
+      "operator_counts": {
+        "IMPL": 18,
+        "NAND": 2,
+        "INPUT": 20
+      },
+      "extraction_warnings": [
+        "value-bearing point 'The on-call pager fired twelve times per week on average las' resolved to turn 0 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+        "point when '2025-09' is not a valid ISO date \u2014 dropped",
+        "value-bearing point 'Tomas pulled double duty for three weeks in September while ' resolved to turn 2 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+        "value-bearing point 'Roughly thirty percent of alerts were unactionable because t' resolved to turn 4 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+        "source_turn_id 10 contradicts the quote's turn 11 \u2014 deterministic match wins",
+        "value-bearing point 'Four actionable pages per week is a two-thirds cut from toda' resolved verbatim in turn 11, but the quoted text carries no value \u2014 the span would address words that do not hold it, so it carries no source span (the value cannot be re-read verbatim)",
+        "point 'Maintenance window declarations stay hum' has no resolvable source turn (no quote match)",
+        "point 'The design doc was the next step after t' has no resolvable source turn (no quote match)",
+        "S3 identity unresolved (S3 skipped: active backend is FalkorDBLite (embedded) \u2014 the real graph (FalkorDB via docker/redis URI or hosted API) is required, not FalkorDBLite): the existing-item lookup did not run for 48 of 48 candidate(s)",
+        "value-normalizer: 2 point(s) carried an amount that was not typed \u2014 no_currency_anchor \u00d72 (prose only \u2014 each value is a drop, never a guess)"
+      ],
+      "planted_operators": [
+        {
+          "id": "wp03_ember_design_op_01",
+          "expected_kind": "MITIGATES",
+          "verdict": "edge_correct",
+          "edge_correct": true,
+          "forms_found": [
+            "mitigated_by(1a21c5a1df1-91a57a02a2b8)"
+          ]
+        },
+        {
+          "id": "wp03_ember_design_op_02",
+          "expected_kind": "MITIGATES",
+          "verdict": "to_content_missing",
+          "edge_correct": false,
+          "forms_found": null
+        },
+        {
+          "id": "wp03_ember_design_op_03",
+          "expected_kind": "MITIGATES",
+          "verdict": "to_content_missing",
+          "edge_correct": false,
+          "forms_found": null
+        }
+      ],
+      "failed_units": [
+        {
+          "id": "wp03_ember_design_u_01",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_02",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_03",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_04",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_06",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_07",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_08",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_09",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp03_ember_design_u_11",
+          "failure": "content_missing"
+        }
+      ]
+    },
+    {
+      "session_id": "wp04_aurora_perf",
+      "emitted": true,
+      "macro": {
+        "survived": 6,
+        "total": 13
+      },
+      "strict": {
+        "survived": 6,
+        "total": 13
+      },
+      "leaked": [],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 23,
+        "total": 23
+      },
+      "memory_points": 23,
+      "operator_counts": {
+        "IMPL": 14,
+        "INPUT": 14
+      },
+      "extraction_warnings": [
+        "value-bearing point 'Before the October 5 release the aurora dashboard load endpo' resolved to turn 2 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+        "MITIGATES target edge materialized (#2552 mint-before-wire): the declared target IMPL ('pt_519512e1a73387ebd35f0a45d2060b4e0fbe4' \u2192 'pt_76b04163d176c2137b0324f911d24ed69ec71') was not emitted as its own operator \u2014 added so the dampener has its target",
+        "MITIGATES target edge materialized (#2552 mint-before-wire): the declared target IMPL ('pt_519512e1a73387ebd35f0a45d2060b4e0fbe4' \u2192 'pt_d00649f0a845e995bf617498a59237042bb65') was not emitted as its own operator \u2014 added so the dampener has its target",
+        "S3 identity unresolved (S3 skipped: active backend is FalkorDBLite (embedded) \u2014 the real graph (FalkorDB via docker/redis URI or hosted API) is required, not FalkorDBLite): the existing-item lookup did not run for 41 of 41 candidate(s)",
+        "value-normalizer: 8 point(s) carried an amount that was not typed \u2014 no_currency_anchor \u00d78 (prose only \u2014 each value is a drop, never a guess)"
+      ],
+      "planted_operators": [
+        {
+          "id": "wp04_aurora_perf_op_01",
+          "expected_kind": "SUPPORTS",
+          "verdict": "edge_missing",
+          "edge_correct": false,
+          "forms_found": null
+        },
+        {
+          "id": "wp04_aurora_perf_op_02",
+          "expected_kind": "MITIGATES",
+          "verdict": "edge_correct",
+          "edge_correct": true,
+          "forms_found": [
+            "mitigated_by(1a21c5b6c04-092f917dfcee)",
+            "mitigated_by(1a21c5b7175-494f6febc806)"
+          ]
+        },
+        {
+          "id": "wp04_aurora_perf_op_03",
+          "expected_kind": "MITIGATES",
+          "verdict": "edge_missing",
+          "edge_correct": false,
+          "forms_found": null
+        }
+      ],
+      "failed_units": [
+        {
+          "id": "wp04_aurora_perf_u_01",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp04_aurora_perf_u_02",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp04_aurora_perf_u_04",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp04_aurora_perf_u_05",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp04_aurora_perf_u_06",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp04_aurora_perf_u_11",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp04_aurora_perf_u_12",
+          "failure": "content_missing"
+        }
+      ]
+    },
+    {
+      "session_id": "wp05_retro_writeup",
+      "emitted": true,
+      "macro": {
+        "survived": 8,
+        "total": 15
+      },
+      "strict": {
+        "survived": 8,
+        "total": 15
+      },
+      "leaked": [],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 17,
+        "total": 17
+      },
+      "memory_points": 17,
+      "operator_counts": {
+        "NAND": 2,
+        "IMPL": 10,
+        "INPUT": 12
+      },
+      "extraction_warnings": [
+        "NAND direction canonicalized (#909 \u2014 new-claim-attacks-existing): src was asserted before dst; swapped so the newer counter-claim is src ('pt_eca3b97f2019e1dab39e1468ea9fadeb464bc8196c745fa7348704a0b' \u2194 'pt_10d3cb4f10c688479a1890b99fe67ce18fbcbf0474b8e538a6689290e')",
+        "operator dropped: src/dst did not resolve to an emitted point/event ('The retro is to be published company-wide; incident writeups are opt-out by default, a decision made after the August incident' \u2192 'The retro is to be published company-wide; incident writeups are opt-out by default, a decision made after the August incident')",
+        "chain 'ruleLifecycle' emitted 'rule' but its next step 'rationale' is missing \u2014 the chain is incomplete",
+        "S3 identity unresolved (S3 skipped: active backend is FalkorDBLite (embedded) \u2014 the real graph (FalkorDB via docker/redis URI or hosted API) is required, not FalkorDBLite): the existing-item lookup did not run for 45 of 45 candidate(s)",
+        "value-normalizer: 8 point(s) carried an amount that was not typed \u2014 no_currency_anchor \u00d78 (prose only \u2014 each value is a drop, never a guess)"
+      ],
+      "planted_operators": [
+        {
+          "id": "wp05_retro_writeup_op_01",
+          "expected_kind": "NEGATE",
+          "verdict": "edge_correct",
+          "edge_correct": true,
+          "forms_found": [
+            "NAND"
+          ]
+        },
+        {
+          "id": "wp05_retro_writeup_op_02",
+          "expected_kind": "SUPPORTS",
+          "verdict": "edge_correct",
+          "edge_correct": true,
+          "forms_found": [
+            "IMPL"
+          ]
+        }
+      ],
+      "failed_units": [
+        {
+          "id": "wp05_retro_writeup_u_03",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp05_retro_writeup_u_05",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp05_retro_writeup_u_06",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp05_retro_writeup_u_07",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp05_retro_writeup_u_10",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp05_retro_writeup_u_11",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp05_retro_writeup_u_13",
+          "failure": "content_missing"
+        }
+      ]
+    },
+    {
+      "session_id": "wp06_quarry_rollout",
+      "emitted": true,
+      "macro": {
+        "survived": 5,
+        "total": 9
+      },
+      "strict": {
+        "survived": 5,
+        "total": 9
+      },
+      "leaked": [],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 19,
+        "total": 19
+      },
+      "memory_points": 19,
+      "operator_counts": {
+        "IMPL": 22,
+        "INPUT": 22
+      },
+      "extraction_warnings": [
+        "point 'The lease-before-claim fix could be roll' has no resolvable source turn (no quote match)",
+        "value-bearing point 'The race can only re-enter if two workers can claim one batc' resolved to turn 8 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+        "point 'The lease guarantee is scope-independent' has no resolvable source turn (no quote match)",
+        "value-bearing point 'One flag is one switch to pull' resolved to turn 16 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+        "point 'The residual worry that a mid-rollout fl' has no resolvable source turn (no quote match)",
+        "point 'The harness confirmed the boundary case ' has no resolvable source turn (no quote match)",
+        "value-bearing point 'The cutoff stays September 30 as agreed' resolved to turn 20 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+        "value-bearing point 'Maya drives the flip \u2014 she owns the ingest queue service and' resolved to turn 19 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+        "S3 identity unresolved (S3 skipped: active backend is FalkorDBLite (embedded) \u2014 the real graph (FalkorDB via docker/redis URI or hosted API) is required, not FalkorDBLite): the existing-item lookup did not run for 33 of 33 candidate(s)",
+        "value-normalizer: 1 point(s) carried an amount that was not typed \u2014 no_currency_anchor \u00d71 (prose only \u2014 each value is a drop, never a guess)"
+      ],
+      "planted_operators": [
+        {
+          "id": "wp06_quarry_rollout_op_01",
+          "expected_kind": "SUPPORTS",
+          "verdict": "to_content_missing",
+          "edge_correct": false,
+          "forms_found": null
+        }
+      ],
+      "failed_units": [
+        {
+          "id": "wp06_quarry_rollout_u_03",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp06_quarry_rollout_u_06",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp06_quarry_rollout_u_07",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp06_quarry_rollout_u_08",
+          "failure": "content_missing"
+        }
+      ]
+    },
+    {
+      "session_id": "wp07_bluepeak_followup",
+      "emitted": true,
+      "macro": {
+        "survived": 2,
+        "total": 9
+      },
+      "strict": {
+        "survived": 2,
+        "total": 9
+      },
+      "leaked": [],
+      "quotes": {
+        "grounded": 0,
+        "total": 0
+      },
+      "provenance": {
+        "provenanced": 23,
+        "total": 23
+      },
+      "memory_points": 23,
+      "operator_counts": {
+        "NAND": 12,
+        "IMPL": 6,
+        "INPUT": 18
+      },
+      "extraction_warnings": [
+        "entity 'the all-at-once rollout' lifecycle=superseded with no supersedes ref is not expressible in the Layer-1 payload \u2014 set supersedes=<existing id/name> for the supersession to ride payload['supersessions']",
+        "entity 'the lease' lifecycle='changed' is not expressible in the Layer-1 payload \u2014 changed-ness is attribute/value state and must ride on points/events, not on an Object transition",
+        "entity 'the clock-skew risk' lifecycle='changed' is not expressible in the Layer-1 payload \u2014 changed-ness is attribute/value state and must ride on points/events, not on an Object transition",
+        "entity 'per-service flags' supersedes='the all-at-once rollout' does not resolve to an S3 search result \u2014 the supersession is DROPPED (no graph id to record it against)",
+        "point 'The all-at-once rollout was believed to ' has no resolvable source turn (no quote match)",
+        "point 'The overnight hydrate-queue anomaly was ' has no resolvable source turn (no quote match)",
+        "point 'The flag-raced-renewal hypothesis was re' has no resolvable source turn (no quote match)",
+        "point 'The actual cause was clock skew: the reg' has no resolvable source turn (no quote match)",
+        "point 'The lease behaved as designed under a dr' has no resolvable source turn (no quote match)",
+        "point 'The grace period was sized to thirty sec' has no resolvable source turn (no quote match)",
+        "point 'Any lease expiry landing inside the grac' has no resolvable source turn (no quote match)",
+        "value-bearing point 'The global flag made one bad region a fleet-wide event and h' resolved to turn 18 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+        "value-bearing point 'Per-service flags change the reversibility model so each ser' resolved to turn 19 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+        "MITIGATES target edge materialized (#2552 mint-before-wire): the declared target IMPL ('pt_89897e674e8326f003414426d838b45f32a0d' \u2192 'pt_3b807f5a5ba76faabb4dbcda49ddcd6e8cc54') was not emitted as its own operator \u2014 added so the dampener has its target",
+        "S3 identity unresolved (S3 skipped: active backend is FalkorDBLite (embedded) \u2014 the real graph (FalkorDB via docker/redis URI or hosted API) is required, not FalkorDBLite): the existing-item lookup did not run for 40 of 40 candidate(s)"
+      ],
+      "planted_operators": [
+        {
+          "id": "wp07_bluepeak_followup_op_02",
+          "expected_kind": "NEGATE",
+          "verdict": "to_content_missing",
+          "edge_correct": false,
+          "forms_found": null
+        },
+        {
+          "id": "wp07_bluepeak_followup_op_03",
+          "expected_kind": "MITIGATES",
+          "verdict": "edge_missing",
+          "edge_correct": false,
+          "forms_found": null
+        },
+        {
+          "id": "wp07_bluepeak_followup_op_04",
+          "expected_kind": "SUPERSEDE",
+          "verdict": "edge_missing",
+          "edge_correct": false,
+          "forms_found": null
+        }
+      ],
+      "failed_units": [
+        {
+          "id": "wp07_bluepeak_followup_u_01",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp07_bluepeak_followup_u_02",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp07_bluepeak_followup_u_03",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp07_bluepeak_followup_u_04",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp07_bluepeak_followup_u_05",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp07_bluepeak_followup_u_06",
+          "failure": "content_missing"
+        },
+        {
+          "id": "wp07_bluepeak_followup_u_07",
+          "failure": "content_missing"
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "wp01_quarry_debug: capture ok=True extraction_mode=llm:deepseek-direct extracted=28",
+    "wp02_lumen_refactor: capture ok=True extraction_mode=llm:deepseek-direct extracted=25",
+    "wp03_ember_design: capture ok=True extraction_mode=llm:deepseek-direct extracted=25",
+    "wp04_aurora_perf: capture ok=True extraction_mode=llm:deepseek-direct extracted=23",
+    "wp05_retro_writeup: capture ok=True extraction_mode=llm:deepseek-direct extracted=17",
+    "wp06_quarry_rollout: capture ok=True extraction_mode=llm:deepseek-direct extracted=19",
+    "wp07_bluepeak_followup: capture ok=True extraction_mode=llm:deepseek-direct extracted=23",
+    "dream EP pass: total_affected=65 coverage=0.8441558441558441 converged_all=True",
+    "operator drops (#8503): the operator pass logged 1 drop warning(s), and the replace/retraction channel logged 2 refusal(s) \u2014 a refused replace or retraction record is an extractor-side cause of a missing edge too, so an edge_missing on a SUPERSEDE row may be the resolver rather than the model",
+    "operator-edge audit (#2514): 5/15 planted operator edges graded edge_correct (audit dimension only \u2014 not yet a gated metric). #2552: endpoint anchors + mitigation reasons grade verbatim-first with the #2405-style paraphrase band \u2014 a correctly wired edge whose endpoint claim was distilled still grades edge_correct",
+    "operator persistence (#2552): 54/54 reified operator Points entered the retrievable memory layer (eventId-stamped) \u2014 a lower numerator is the structural drop the layer-2 WIRE fix closed",
+    "quote_fidelity 1.0 is VACUOUS: the corpus gold contains no double-quoted spans (quote_spans_total=0) \u2014 this number is a floor, not a fidelity bar; it will not hold under a future corpus that quotes",
+    "cost not tracked: the extractor seam reported no llm_cost_usd in any session (mock/unknown adapter) \u2014 receipt cost_usd is 0.0 with this note, never a silently-fake measured figure"
+  ],
+  "log": [
+    "parser round-trip ok (codex, 26 turns)",
+    "parser round-trip ok (codex, 22 turns)",
+    "parser round-trip ok (pi, 24 turns)",
+    "parser round-trip ok (pi, 20 turns)",
+    "parser round-trip ok (claude-desktop, 23 turns)",
+    "parser round-trip ok (codex, 22 turns)",
+    "parser round-trip ok (codex, 22 turns)",
+    "metrics: {\"salient_unit_survival_macro\": 0.4444, \"salient_unit_survival_strict\": 0.4444, \"distractor_leakage_per_run\": 0, \"sessions_emitting\": 1.0, \"quote_fidelity\": 1.0, \"provenance_accuracy\": 1.0}"
+  ],
+  "operator_audit": {
+    "planted": 15,
+    "edge_correct": 5,
+    "content_ok": 10,
+    "operators_total": 54,
+    "operators_provenanced": 54,
+    "drop_warnings": {
+      "total": 3,
+      "operator_drops": 1,
+      "supersede_refusals": 2,
+      "by_session": {
+        "wp05_retro_writeup": [
+          "operator dropped: src/dst did not resolve to an emitted point/event ('The retro is to be published company-wide; incident writeups are opt-out by default, a decision made after the August incident' \u2192 'The retro is to be published company-wide; incident writeups are opt-out by default, a decision made after the August incident')"
+        ],
+        "wp07_bluepeak_followup": [
+          "entity 'the all-at-once rollout' lifecycle=superseded with no supersedes ref is not expressible in the Layer-1 payload \u2014 set supersedes=<existing id/name> for the supersession to ride payload['supersessions']",
+          "entity 'per-service flags' supersedes='the all-at-once rollout' does not resolve to an S3 search result \u2014 the supersession is DROPPED (no graph id to record it against)"
+        ]
+      }
+    },
+    "results": {
+      "wp01_quarry_debug_op_01": {
+        "id": "wp01_quarry_debug_op_01",
+        "expected_kind": "SUPPORTS",
+        "verdict": "edge_correct",
+        "edge_correct": true,
+        "cause": null,
+        "forms_found": [
+          "IMPL"
+        ],
+        "edge_op_ids": [
+          "1a21c575a7f-458f25872d46"
+        ],
+        "endpoints": {
+          "from": [
+            {
+              "post_ref": "pt_c63c432842cf2041c2c44c296ad720073fd530caa68aa1db6791ca7f2b718a",
+              "pre_ref": "pt_c63c432842cf2041c2c44c296ad720073fd530caa68aa1db6791ca7f2b718a",
+              "remapped": false,
+              "resolves": true
+            }
+          ],
+          "to": [
+            {
+              "post_ref": "pt_3c01cfef7de877a212b8de3bf47aa8016d8b0f8e8f4fe40853be9ff70cb695",
+              "pre_ref": "pt_3c01cfef7de877a212b8de3bf47aa8016d8b0f8e8f4fe40853be9ff70cb695",
+              "remapped": false,
+              "resolves": true
+            }
+          ]
+        },
+        "persisted": true,
+        "from_session": "wp01_quarry_debug",
+        "to_session": "wp01_quarry_debug",
+        "owner_session": "wp01_quarry_debug"
+      },
+      "wp01_quarry_debug_op_02": {
+        "id": "wp01_quarry_debug_op_02",
+        "expected_kind": "MITIGATES",
+        "verdict": "edge_missing",
+        "edge_correct": false,
+        "cause": "edge_missing: both endpoint claims are present in the memory layer but no qualifying MITIGATES edge connects them \u2014 the edge was never emitted, or the commit dropped it",
+        "forms_found": [],
+        "edge_op_ids": [],
+        "endpoints": {
+          "from": [
+            {
+              "post_ref": "pt_d32d6ca55d3f3e2ed8fe31a881cb82aa25f9ea2b1406636d561bfc2efbeca9",
+              "pre_ref": "pt_d32d6ca55d3f3e2ed8fe31a881cb82aa25f9ea2b1406636d561bfc2efbeca9",
+              "remapped": false,
+              "resolves": true
+            }
+          ],
+          "to": [
+            {
+              "post_ref": "pt_c63c432842cf2041c2c44c296ad720073fd530caa68aa1db6791ca7f2b718a",
+              "pre_ref": "pt_c63c432842cf2041c2c44c296ad720073fd530caa68aa1db6791ca7f2b718a",
+              "remapped": false,
+              "resolves": true
+            }
+          ]
+        },
+        "persisted": false,
+        "from_session": "wp01_quarry_debug",
+        "to_session": "wp01_quarry_debug",
+        "owner_session": "wp01_quarry_debug"
+      },
+      "wp02_lumen_refactor_op_01": {
+        "id": "wp02_lumen_refactor_op_01",
+        "expected_kind": "MITIGATES",
+        "verdict": "from_content_missing",
+        "edge_correct": false,
+        "cause": "from_content_missing: no memory Point carries the from-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)",
+        "forms_found": [],
+        "edge_op_ids": [],
+        "endpoints": {
+          "from": [],
+          "to": [
+            {
+              "post_ref": "pt_fc042a5273828d66a6064f6e1e2eb9188cc09ca8c2874ce48d8d31f59969fb",
+              "pre_ref": "pt_fc042a5273828d66a6064f6e1e2eb9188cc09ca8c2874ce48d8d31f59969fb",
+              "remapped": false,
+              "resolves": true
+            }
+          ]
+        },
+        "persisted": false,
+        "from_session": "wp02_lumen_refactor",
+        "to_session": "wp02_lumen_refactor",
+        "owner_session": "wp02_lumen_refactor"
+      },
+      "wp03_ember_design_op_01": {
+        "id": "wp03_ember_design_op_01",
+        "expected_kind": "MITIGATES",
+        "verdict": "edge_correct",
+        "edge_correct": true,
+        "cause": null,
+        "forms_found": [
+          "mitigated_by(1a21c5a1df1-91a57a02a2b8)"
+        ],
+        "edge_op_ids": [
+          "1a21c5a0b33-fca9c18d06a2"
+        ],
+        "endpoints": {
+          "from": [
+            {
+              "post_ref": "pt_4caccac0adcb55ffaaa781016f99e9cb21aef0b8dca7fa2c444b049feb8542",
+              "pre_ref": "pt_4caccac0adcb55ffaaa781016f99e9cb21aef0b8dca7fa2c444b049feb8542",
+              "remapped": false,
+              "resolves": true
+            }
+          ],
+          "to": [
+            {
+              "post_ref": "pt_ffac7e7d3e3f0433cc8625ce904f535335ee100c96f90acdf8c230b5be3d2c",
+              "pre_ref": "pt_ffac7e7d3e3f0433cc8625ce904f535335ee100c96f90acdf8c230b5be3d2c",
+              "remapped": false,
+              "resolves": true
+            }
+          ]
+        },
+        "persisted": true,
+        "from_session": "wp03_ember_design",
+        "to_session": "wp03_ember_design",
+        "owner_session": "wp03_ember_design"
+      },
+      "wp03_ember_design_op_02": {
+        "id": "wp03_ember_design_op_02",
+        "expected_kind": "MITIGATES",
+        "verdict": "to_content_missing",
+        "edge_correct": false,
+        "cause": "to_content_missing: no memory Point carries the to-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)",
+        "forms_found": [],
+        "edge_op_ids": [],
+        "endpoints": {
+          "from": [
+            {
+              "post_ref": "pt_2d7d6a137292393d1e4f3e978b806b6829a9df6f0f3cc5e29e55a8d4956629",
+              "pre_ref": "pt_2d7d6a137292393d1e4f3e978b806b6829a9df6f0f3cc5e29e55a8d4956629",
+              "remapped": false,
+              "resolves": true
+            }
+          ],
+          "to": []
+        },
+        "persisted": false,
+        "from_session": "wp03_ember_design",
+        "to_session": "wp03_ember_design",
+        "owner_session": "wp03_ember_design"
+      },
+      "wp03_ember_design_op_03": {
+        "id": "wp03_ember_design_op_03",
+        "expected_kind": "MITIGATES",
+        "verdict": "to_content_missing",
+        "edge_correct": false,
+        "cause": "to_content_missing: no memory Point carries the to-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)",
+        "forms_found": [],
+        "edge_op_ids": [],
+        "endpoints": {
+          "from": [
+            {
+              "post_ref": "pt_e6d5ca9d75729fbe7b1be1fc4f0fbdba3454d101576c3aec885e8f1f7a6c57",
+              "pre_ref": "pt_e6d5ca9d75729fbe7b1be1fc4f0fbdba3454d101576c3aec885e8f1f7a6c57",
+              "remapped": false,
+              "resolves": true
+            }
+          ],
+          "to": []
+        },
+        "persisted": false,
+        "from_session": "wp03_ember_design",
+        "to_session": "wp03_ember_design",
+        "owner_session": "wp03_ember_design"
+      },
+      "wp04_aurora_perf_op_01": {
+        "id": "wp04_aurora_perf_op_01",
+        "expected_kind": "SUPPORTS",
+        "verdict": "edge_missing",
+        "edge_correct": false,
+        "cause": "edge_missing: both endpoint claims are present in the memory layer but no qualifying SUPPORTS edge connects them \u2014 the edge was never emitted, or the commit dropped it",
+        "forms_found": [],
+        "edge_op_ids": [],
+        "endpoints": {
+          "from": [
+            {
+              "post_ref": "pt_cdf10cfd9ac6591f9223a33a2e095912a57514144b208e524d18429c68db41",
+              "pre_ref": "pt_cdf10cfd9ac6591f9223a33a2e095912a57514144b208e524d18429c68db41",
+              "remapped": false,
+              "resolves": true
+            }
+          ],
+          "to": [
+            {
+              "post_ref": "pt_8c44477161336ef48f94aa594e4134680055b299173b2e2ff10a8f7f26c370",
+              "pre_ref": "pt_8c44477161336ef48f94aa594e4134680055b299173b2e2ff10a8f7f26c370",
+              "remapped": false,
+              "resolves": true
+            }
+          ]
+        },
+        "persisted": false,
+        "from_session": "wp04_aurora_perf",
+        "to_session": "wp04_aurora_perf",
+        "owner_session": "wp04_aurora_perf"
+      },
+      "wp04_aurora_perf_op_02": {
+        "id": "wp04_aurora_perf_op_02",
+        "expected_kind": "MITIGATES",
+        "verdict": "edge_correct",
+        "edge_correct": true,
+        "cause": null,
+        "forms_found": [
+          "mitigated_by(1a21c5b6c04-092f917dfcee)",
+          "mitigated_by(1a21c5b7175-494f6febc806)"
+        ],
+        "edge_op_ids": [
+          "1a21c5b579c-514531b09665",
+          "1a21c5b59fb-5719a290cf23"
+        ],
+        "endpoints": {
+          "from": [
+            {
+              "post_ref": "pt_9f9991e47e30916fe61a51ba522b89ba1d84569a63d27a34ae53b465cfeaae",
+              "pre_ref": "pt_9f9991e47e30916fe61a51ba522b89ba1d84569a63d27a34ae53b465cfeaae",
+              "remapped": false,
+              "resolves": true
+            }
+          ],
+          "to": [
+            {
+              "post_ref": "pt_d00649f0a845e995bf617498a59237042bb6533004a928e920a67c02d6e117",
+              "pre_ref": "pt_d00649f0a845e995bf617498a59237042bb6533004a928e920a67c02d6e117",
+              "remapped": false,
+              "resolves": true
+            }
+          ]
+        },
+        "persisted": true,
+        "from_session": "wp04_aurora_perf",
+        "to_session": "wp04_aurora_perf",
+        "owner_session": "wp04_aurora_perf"
+      },
+      "wp04_aurora_perf_op_03": {
+        "id": "wp04_aurora_perf_op_03",
+        "expected_kind": "MITIGATES",
+        "verdict": "edge_missing",
+        "edge_correct": false,
+        "cause": "edge_missing: both endpoint claims are present in the memory layer but no qualifying MITIGATES edge connects them \u2014 the edge was never emitted, or the commit dropped it",
+        "forms_found": [],
+        "edge_op_ids": [],
+        "endpoints": {
+          "from": [
+            {
+              "post_ref": "pt_32b3567742df13a372fed98a13ec30bb640b5a0383d64a1aaca3f8582a2a51",
+              "pre_ref": "pt_32b3567742df13a372fed98a13ec30bb640b5a0383d64a1aaca3f8582a2a51",
+              "remapped": false,
+              "resolves": true
+            }
+          ],
+          "to": [
+            {
+              "post_ref": "pt_2a3c867b721b3d436fb85af6e2a7ed7b5987f6d3a6a309aec9c8ce3839497a",
+              "pre_ref": "pt_2a3c867b721b3d436fb85af6e2a7ed7b5987f6d3a6a309aec9c8ce3839497a",
+              "remapped": false,
+              "resolves": true
+            }
+          ]
+        },
+        "persisted": false,
+        "from_session": "wp04_aurora_perf",
+        "to_session": "wp04_aurora_perf",
+        "owner_session": "wp04_aurora_perf"
+      },
+      "wp05_retro_writeup_op_01": {
+        "id": "wp05_retro_writeup_op_01",
+        "expected_kind": "NEGATE",
+        "verdict": "edge_correct",
+        "edge_correct": true,
+        "cause": null,
+        "forms_found": [
+          "NAND"
+        ],
+        "edge_op_ids": [
+          "1a21c5c9c4e-729af1dc2c12"
+        ],
+        "endpoints": {
+          "from": [
+            {
+              "post_ref": "pt_10d3cb4f10c688479a1890b99fe67ce18fbcbf0474b8e538a6689290e9569e",
+              "pre_ref": "pt_10d3cb4f10c688479a1890b99fe67ce18fbcbf0474b8e538a6689290e9569e",
+              "remapped": false,
+              "resolves": true
+            },
+            {
+              "post_ref": "pt_1a36b18cf9267fa38b062d3f6b92dda484023e01711cdbb61e763cafad6dfc",
+              "pre_ref": "pt_1a36b18cf9267fa38b062d3f6b92dda484023e01711cdbb61e763cafad6dfc",
+              "remapped": false,
+              "resolves": true
+            },
+            {
+              "post_ref": "pt_2ef8a939d380f1922423a3beea2b1f80a1ded743713f8eff616d9542d58201",
+              "pre_ref": "pt_2ef8a939d380f1922423a3beea2b1f80a1ded743713f8eff616d9542d58201",
+              "remapped": false,
+              "resolves": true
+            }
+          ],
+          "to": [
+            {
+              "post_ref": "pt_eca3b97f2019e1dab39e1468ea9fadeb464bc8196c745fa7348704a0b71b4b",
+              "pre_ref": "pt_eca3b97f2019e1dab39e1468ea9fadeb464bc8196c745fa7348704a0b71b4b",
+              "remapped": false,
+              "resolves": true
+            }
+          ]
+        },
+        "persisted": true,
+        "from_session": "wp05_retro_writeup",
+        "to_session": "wp05_retro_writeup",
+        "owner_session": "wp05_retro_writeup"
+      },
+      "wp05_retro_writeup_op_02": {
+        "id": "wp05_retro_writeup_op_02",
+        "expected_kind": "SUPPORTS",
+        "verdict": "edge_correct",
+        "edge_correct": true,
+        "cause": null,
+        "forms_found": [
+          "IMPL"
+        ],
+        "edge_op_ids": [
+          "1a21c5ca463-2c9446e0719b"
+        ],
+        "endpoints": {
+          "from": [
+            {
+              "post_ref": "pt_2ef8a939d380f1922423a3beea2b1f80a1ded743713f8eff616d9542d58201",
+              "pre_ref": "pt_2ef8a939d380f1922423a3beea2b1f80a1ded743713f8eff616d9542d58201",
+              "remapped": false,
+              "resolves": true
+            }
+          ],
+          "to": [
+            {
+              "post_ref": "pt_10d3cb4f10c688479a1890b99fe67ce18fbcbf0474b8e538a6689290e9569e",
+              "pre_ref": "pt_10d3cb4f10c688479a1890b99fe67ce18fbcbf0474b8e538a6689290e9569e",
+              "remapped": false,
+              "resolves": true
+            },
+            {
+              "post_ref": "pt_1a36b18cf9267fa38b062d3f6b92dda484023e01711cdbb61e763cafad6dfc",
+              "pre_ref": "pt_1a36b18cf9267fa38b062d3f6b92dda484023e01711cdbb61e763cafad6dfc",
+              "remapped": false,
+              "resolves": true
+            },
+            {
+              "post_ref": "pt_2ef8a939d380f1922423a3beea2b1f80a1ded743713f8eff616d9542d58201",
+              "pre_ref": "pt_2ef8a939d380f1922423a3beea2b1f80a1ded743713f8eff616d9542d58201",
+              "remapped": false,
+              "resolves": true
+            }
+          ]
+        },
+        "persisted": true,
+        "from_session": "wp05_retro_writeup",
+        "to_session": "wp05_retro_writeup",
+        "owner_session": "wp05_retro_writeup"
+      },
+      "wp06_quarry_rollout_op_01": {
+        "id": "wp06_quarry_rollout_op_01",
+        "expected_kind": "SUPPORTS",
+        "verdict": "to_content_missing",
+        "edge_correct": false,
+        "cause": "to_content_missing: no memory Point carries the to-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)",
+        "forms_found": [],
+        "edge_op_ids": [],
+        "endpoints": {
+          "from": [
+            {
+              "post_ref": "pt_88f7664390f095311b056a49269f471c55bd96d51ab4bcd86e7197fb885f16",
+              "pre_ref": "pt_88f7664390f095311b056a49269f471c55bd96d51ab4bcd86e7197fb885f16",
+              "remapped": false,
+              "resolves": true
+            }
+          ],
+          "to": []
+        },
+        "persisted": false,
+        "from_session": "wp06_quarry_rollout",
+        "to_session": "wp06_quarry_rollout",
+        "owner_session": "wp06_quarry_rollout"
+      },
+      "wp07_bluepeak_followup_op_02": {
+        "id": "wp07_bluepeak_followup_op_02",
+        "expected_kind": "NEGATE",
+        "verdict": "to_content_missing",
+        "edge_correct": false,
+        "cause": "to_content_missing: no memory Point carries the to-anchor claim \u2014 the extractor emitted no claim for that endpoint (content-level miss, not an edge miss)",
+        "forms_found": [],
+        "edge_op_ids": [],
+        "endpoints": {
+          "from": [
+            {
+              "post_ref": "pt_6281399d188897e113c63001f0d893804c16b7484a7393fe40efc674c57708",
+              "pre_ref": "pt_6281399d188897e113c63001f0d893804c16b7484a7393fe40efc674c57708",
+              "remapped": false,
+              "resolves": true
+            },
+            {
+              "post_ref": "pt_39be2d9328452fe5f62671032cd7200067f6b0884789cbc7b41e532f12a013",
+              "pre_ref": "pt_39be2d9328452fe5f62671032cd7200067f6b0884789cbc7b41e532f12a013",
+              "remapped": false,
+              "resolves": true
+            }
+          ],
+          "to": []
+        },
+        "persisted": false,
+        "from_session": "wp07_bluepeak_followup",
+        "to_session": "wp07_bluepeak_followup",
+        "owner_session": "wp07_bluepeak_followup"
+      },
+      "wp07_bluepeak_followup_op_03": {
+        "id": "wp07_bluepeak_followup_op_03",
+        "expected_kind": "MITIGATES",
+        "verdict": "edge_missing",
+        "edge_correct": false,
+        "cause": "edge_missing: both endpoint claims are present in the memory layer but no qualifying MITIGATES edge connects them \u2014 the edge was never emitted, or the commit dropped it",
+        "forms_found": [],
+        "edge_op_ids": [],
+        "endpoints": {
+          "from": [
+            {
+              "post_ref": "pt_3b807f5a5ba76faabb4dbcda49ddcd6e8cc54d9a6bc0915a068bd3b7e09084",
+              "pre_ref": "pt_3b807f5a5ba76faabb4dbcda49ddcd6e8cc54d9a6bc0915a068bd3b7e09084",
+              "remapped": false,
+              "resolves": true
+            },
+            {
+              "post_ref": "pt_89897e674e8326f003414426d838b45f32a0d36c4365cc810cd42c245b1e94",
+              "pre_ref": "pt_89897e674e8326f003414426d838b45f32a0d36c4365cc810cd42c245b1e94",
+              "remapped": false,
+              "resolves": true
+            }
+          ],
+          "to": [
+            {
+              "post_ref": "pt_3b807f5a5ba76faabb4dbcda49ddcd6e8cc54d9a6bc0915a068bd3b7e09084",
+              "pre_ref": "pt_3b807f5a5ba76faabb4dbcda49ddcd6e8cc54d9a6bc0915a068bd3b7e09084",
+              "remapped": false,
+              "resolves": true
+            }
+          ]
+        },
+        "persisted": false,
+        "from_session": "wp07_bluepeak_followup",
+        "to_session": "wp07_bluepeak_followup",
+        "owner_session": "wp07_bluepeak_followup"
+      },
+      "wp07_bluepeak_followup_op_04": {
+        "id": "wp07_bluepeak_followup_op_04",
+        "expected_kind": "SUPERSEDE",
+        "verdict": "edge_missing",
+        "edge_correct": false,
+        "cause": "edge_missing: both endpoint claims are present in the memory layer but no qualifying SUPERSEDE edge connects them \u2014 the edge was never emitted, or the commit dropped it",
+        "forms_found": [],
+        "edge_op_ids": [],
+        "endpoints": {
+          "from": [
+            {
+              "post_ref": "pt_aab8822381b1bbd38f50e60a8cda3c8be11af53ceea905bc715138db438bb9",
+              "pre_ref": "pt_aab8822381b1bbd38f50e60a8cda3c8be11af53ceea905bc715138db438bb9",
+              "remapped": false,
+              "resolves": true
+            },
+            {
+              "post_ref": "pt_fd49f59747193c83156a8a705ee25836d9998e265f3ad6bce6a3e1ed3fe3ab",
+              "pre_ref": "pt_fd49f59747193c83156a8a705ee25836d9998e265f3ad6bce6a3e1ed3fe3ab",
+              "remapped": false,
+              "resolves": true
+            }
+          ],
+          "to": [
+            {
+              "post_ref": "pt_544555b586466bbd62d445ecae70f5965ab2c47c7b1633caed97f8b2c34a87",
+              "pre_ref": "pt_544555b586466bbd62d445ecae70f5965ab2c47c7b1633caed97f8b2c34a87",
+              "remapped": false,
+              "resolves": true
+            }
+          ]
+        },
+        "persisted": false,
+        "from_session": "wp07_bluepeak_followup",
+        "to_session": "wp06_quarry_rollout",
+        "owner_session": "wp07_bluepeak_followup"
+      }
+    }
+  },
+  "graph_census": {
+    "sessions": {
+      "wp01_quarry_debug": {
+        "session_id": "wp01_quarry_debug",
+        "objects": {
+          "total": 7,
+          "the_prefixed": 0,
+          "the_share": 0.0,
+          "with_derivation_link": 0
+        },
+        "derivation_edges": {
+          "extractedFrom": {
+            "total": 28,
+            "anchored": 28
+          },
+          "references": {
+            "total": 1,
+            "anchored": 1,
+            "containment_excluded": 0,
+            "identity_excluded": 0
+          }
+        },
+        "object_edges": {
+          "ownedBy": 2,
+          "hasPart": 1,
+          "dependsOn": 1
+        },
+        "object_edges_missing": [],
+        "object_edges_basis": "write-leg-record-verified",
+        "object_edges_incident": {
+          "hasPart": 1,
+          "dependsOn": 1
+        }
+      },
+      "wp02_lumen_refactor": {
+        "session_id": "wp02_lumen_refactor",
+        "objects": {
+          "total": 8,
+          "the_prefixed": 6,
+          "the_share": 0.75,
+          "with_derivation_link": 0
+        },
+        "derivation_edges": {
+          "extractedFrom": {
+            "total": 25,
+            "anchored": 25
+          },
+          "references": {
+            "total": 1,
+            "anchored": 1,
+            "containment_excluded": 0,
+            "identity_excluded": 0
+          }
+        },
+        "object_edges": {
+          "ownedBy": 2,
+          "dependsOn": 1
+        },
+        "object_edges_missing": [],
+        "object_edges_basis": "write-leg-record-verified",
+        "object_edges_incident": {
+          "dependsOn": 1
+        }
+      },
+      "wp03_ember_design": {
+        "session_id": "wp03_ember_design",
+        "objects": {
+          "total": 10,
+          "the_prefixed": 0,
+          "the_share": 0.0,
+          "with_derivation_link": 0
+        },
+        "derivation_edges": {
+          "extractedFrom": {
+            "total": 25,
+            "anchored": 25
+          },
+          "references": {
+            "total": 1,
+            "anchored": 1,
+            "containment_excluded": 0,
+            "identity_excluded": 0
+          }
+        },
+        "object_edges": {
+          "related": 1,
+          "hasPart": 3,
+          "ownedBy": 1
+        },
+        "object_edges_missing": [],
+        "object_edges_basis": "write-leg-record-verified",
+        "object_edges_incident": {
+          "related": 1,
+          "hasPart": 3
+        }
+      },
+      "wp04_aurora_perf": {
+        "session_id": "wp04_aurora_perf",
+        "objects": {
+          "total": 10,
+          "the_prefixed": 8,
+          "the_share": 0.8,
+          "with_derivation_link": 0
+        },
+        "derivation_edges": {
+          "extractedFrom": {
+            "total": 23,
+            "anchored": 23
+          },
+          "references": {
+            "total": 1,
+            "anchored": 1,
+            "containment_excluded": 0,
+            "identity_excluded": 0
+          }
+        },
+        "object_edges": {
+          "IMPL": 3,
+          "ownedBy": 2,
+          "dependsOn": 3
+        },
+        "object_edges_missing": [],
+        "object_edges_basis": "write-leg-record-verified",
+        "object_edges_incident": {
+          "IMPL": 3,
+          "dependsOn": 3
+        }
+      },
+      "wp05_retro_writeup": {
+        "session_id": "wp05_retro_writeup",
+        "objects": {
+          "total": 14,
+          "the_prefixed": 12,
+          "the_share": 0.8571428571428571,
+          "with_derivation_link": 0
+        },
+        "derivation_edges": {
+          "extractedFrom": {
+            "total": 17,
+            "anchored": 17
+          },
+          "references": {
+            "total": 1,
+            "anchored": 1,
+            "containment_excluded": 0,
+            "identity_excluded": 0
+          }
+        },
+        "object_edges": {
+          "IMPL": 2,
+          "related": 2,
+          "ownedBy": 4
+        },
+        "object_edges_missing": [],
+        "object_edges_basis": "write-leg-record-verified",
+        "object_edges_incident": {
+          "related": 2,
+          "IMPL": 2
+        }
+      },
+      "wp06_quarry_rollout": {
+        "session_id": "wp06_quarry_rollout",
+        "objects": {
+          "total": 9,
+          "the_prefixed": 8,
+          "the_share": 0.8888888888888888,
+          "with_derivation_link": 0
+        },
+        "derivation_edges": {
+          "extractedFrom": {
+            "total": 19,
+            "anchored": 19
+          },
+          "references": {
+            "total": 1,
+            "anchored": 1,
+            "containment_excluded": 0,
+            "identity_excluded": 0
+          }
+        },
+        "object_edges": {
+          "ownedBy": 1,
+          "related": 2,
+          "dependsOn": 1
+        },
+        "object_edges_missing": [],
+        "object_edges_basis": "write-leg-record-verified",
+        "object_edges_incident": {
+          "related": 1,
+          "dependsOn": 1
+        }
+      },
+      "wp07_bluepeak_followup": {
+        "session_id": "wp07_bluepeak_followup",
+        "objects": {
+          "total": 11,
+          "the_prefixed": 10,
+          "the_share": 0.9090909090909091,
+          "with_derivation_link": 0
+        },
+        "derivation_edges": {
+          "extractedFrom": {
+            "total": 23,
+            "anchored": 23
+          },
+          "references": {
+            "total": 1,
+            "anchored": 1,
+            "containment_excluded": 0,
+            "identity_excluded": 0
+          }
+        },
+        "object_edges": {
+          "NAND": 1,
+          "IMPL": 1,
+          "ownedBy": 1
+        },
+        "object_edges_missing": [],
+        "object_edges_basis": "write-leg-record-verified",
+        "object_edges_incident": {
+          "IMPL": 1,
+          "NAND": 1
+        }
+      }
+    },
+    "aggregate": {
+      "sessions": 7,
+      "sessions_with_objects": 7,
+      "sessions_errored": [],
+      "objects": {
+        "total": 69,
+        "the_prefixed": 44,
+        "the_share": 0.6376811594202898,
+        "with_derivation_link": 0
+      },
+      "derivation_edges": {
+        "extractedFrom": {
+          "total": 160,
+          "anchored": 160
+        },
+        "references": {
+          "total": 7,
+          "anchored": 7,
+          "containment_excluded": 0,
+          "identity_excluded": 0
+        }
+      },
+      "object_edges": {
+        "ownedBy": 13,
+        "hasPart": 4,
+        "dependsOn": 6,
+        "related": 5,
+        "IMPL": 6,
+        "NAND": 1
+      },
+      "object_edges_total": 35,
+      "object_edges_basis": {
+        "write-leg-record-verified": 7
+      },
+      "object_edges_missing": [],
+      "object_edges_unattributed": [],
+      "object_edges_sessions": [
+        "wp01_quarry_debug",
+        "wp02_lumen_refactor",
+        "wp03_ember_design",
+        "wp04_aurora_perf",
+        "wp05_retro_writeup",
+        "wp06_quarry_rollout",
+        "wp07_bluepeak_followup"
+      ],
+      "object_edges_incident": {
+        "hasPart": 4,
+        "dependsOn": 6,
+        "related": 4,
+        "IMPL": 6,
+        "NAND": 1
+      },
+      "object_edges_incident_total": 21
+    }
+  },
+  "extractor": {
+    "module": "tortoise.extractor_v2",
+    "qualname": "extract_session_v2",
+    "source_file": "/home/cmux/tortoise/.worktrees/tm-10360/tortoise/extractor_v2.py",
+    "real": true
+  },
+  "relation_write": {
+    "sessions": [
+      "wp01_quarry_debug",
+      "wp02_lumen_refactor",
+      "wp03_ember_design",
+      "wp04_aurora_perf",
+      "wp05_retro_writeup",
+      "wp06_quarry_rollout",
+      "wp07_bluepeak_followup"
+    ],
+    "written": 35,
+    "dropped": 0,
+    "fold_accounting": "recorded",
+    "folded": 0,
+    "write_paths": {
+      "structural": 28,
+      "direct": 7
+    },
+    "edges": [
+      {
+        "src_id": "1a21c56b16a-4eb4a2dabb3b",
+        "dst_id": "1a21c56af7b-a4dee51d4fa5",
+        "predicate": "ownedBy",
+        "write_path": "structural",
+        "stated_predicate": "ownedBy",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp01_quarry_debug"
+      },
+      {
+        "src_id": "1a21c56b4e3-44537381db4c",
+        "dst_id": "1a21c56af7b-a4dee51d4fa5",
+        "predicate": "ownedBy",
+        "write_path": "structural",
+        "stated_predicate": "ownedBy",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp01_quarry_debug"
+      },
+      {
+        "src_id": "1a21c56a8cc-0ff32b911f37",
+        "dst_id": "1a21c56a550-c954bb6e3a6a",
+        "predicate": "hasPart",
+        "write_path": "structural",
+        "stated_predicate": "hasPart",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp01_quarry_debug"
+      },
+      {
+        "src_id": "1a21c56ab30-b660a5e4484e",
+        "dst_id": "1a21c56a550-c954bb6e3a6a",
+        "predicate": "dependsOn",
+        "write_path": "structural",
+        "stated_predicate": "dependsOn",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp01_quarry_debug"
+      },
+      {
+        "src_id": "1a21c587e66-e9713970e2d4",
+        "dst_id": "1a21c587810-ec15a1a06c3d",
+        "predicate": "ownedBy",
+        "write_path": "structural",
+        "stated_predicate": "ownedBy",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp02_lumen_refactor"
+      },
+      {
+        "src_id": "1a21c587c54-a1367d4f3f4a",
+        "dst_id": "1a21c587ad1-3b876fdbb753",
+        "predicate": "dependsOn",
+        "write_path": "structural",
+        "stated_predicate": "dependsOn",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp02_lumen_refactor"
+      },
+      {
+        "src_id": "1a21c5881cd-5e2a9bc53257",
+        "dst_id": "1a21c587fea-4e22bc91e0c5",
+        "predicate": "ownedBy",
+        "write_path": "structural",
+        "stated_predicate": "ownedBy",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp02_lumen_refactor"
+      },
+      {
+        "src_id": "1a21c599a4b-d0f02056554a",
+        "dst_id": "1a21c599c45-e18ba6a36ae7",
+        "predicate": "related",
+        "write_path": "structural",
+        "stated_predicate": "related",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp03_ember_design"
+      },
+      {
+        "src_id": "1a21c59a806-5b8818eca7a8",
+        "dst_id": "1a21c599a4b-d0f02056554a",
+        "predicate": "hasPart",
+        "write_path": "structural",
+        "stated_predicate": "hasPart",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp03_ember_design"
+      },
+      {
+        "src_id": "1a21c59a931-43d4dc1934d6",
+        "dst_id": "1a21c599a4b-d0f02056554a",
+        "predicate": "hasPart",
+        "write_path": "structural",
+        "stated_predicate": "hasPart",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp03_ember_design"
+      },
+      {
+        "src_id": "1a21c59ab1d-d120e40bf78b",
+        "dst_id": "1a21c599a4b-d0f02056554a",
+        "predicate": "hasPart",
+        "write_path": "structural",
+        "stated_predicate": "hasPart",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp03_ember_design"
+      },
+      {
+        "src_id": "1a21c587fea-4e22bc91e0c5",
+        "dst_id": "1a21c59a0fd-5818ec0f2926",
+        "predicate": "ownedBy",
+        "write_path": "structural",
+        "stated_predicate": "ownedBy",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp03_ember_design"
+      },
+      {
+        "src_id": "1a21c5ad529-f23152b6c2f5",
+        "dst_id": "1a21c5ad8b8-9049104696b0",
+        "predicate": "IMPL",
+        "write_path": "direct",
+        "stated_predicate": "causes",
+        "declared_by": null,
+        "mechanism": "IMPL",
+        "label": "causes",
+        "direction": "->",
+        "folded": [],
+        "session_id": "wp04_aurora_perf"
+      },
+      {
+        "src_id": "1a21c5ad8b8-9049104696b0",
+        "dst_id": "1a21c5ad2c4-6f82f7b5a6b4",
+        "predicate": "IMPL",
+        "write_path": "direct",
+        "stated_predicate": "causes",
+        "declared_by": null,
+        "mechanism": "IMPL",
+        "label": "causes",
+        "direction": "->",
+        "folded": [],
+        "session_id": "wp04_aurora_perf"
+      },
+      {
+        "src_id": "1a21c5ae652-84ef9ceb991f",
+        "dst_id": "1a21c5ae407-25211b98e0fb",
+        "predicate": "ownedBy",
+        "write_path": "structural",
+        "stated_predicate": "ownedBy",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp04_aurora_perf"
+      },
+      {
+        "src_id": "1a21c5ae652-84ef9ceb991f",
+        "dst_id": "1a21c5ae795-ca60a7c6e5c8",
+        "predicate": "ownedBy",
+        "write_path": "structural",
+        "stated_predicate": "ownedBy",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp04_aurora_perf"
+      },
+      {
+        "src_id": "1a21c5ade2b-f3530c572e8d",
+        "dst_id": "1a21c5adc97-96d30d7ce209",
+        "predicate": "dependsOn",
+        "write_path": "structural",
+        "stated_predicate": "dependsOn",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp04_aurora_perf"
+      },
+      {
+        "src_id": "1a21c5adfae-c3f28ddcee75",
+        "dst_id": "1a21c5ade2b-f3530c572e8d",
+        "predicate": "dependsOn",
+        "write_path": "structural",
+        "stated_predicate": "dependsOn",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp04_aurora_perf"
+      },
+      {
+        "src_id": "1a21c5ae0f0-ee283dd7b054",
+        "dst_id": "1a21c5adfae-c3f28ddcee75",
+        "predicate": "IMPL",
+        "write_path": "direct",
+        "stated_predicate": "supports",
+        "declared_by": null,
+        "mechanism": "IMPL",
+        "label": "supports",
+        "direction": "->",
+        "folded": [],
+        "session_id": "wp04_aurora_perf"
+      },
+      {
+        "src_id": "1a21c5ae26b-9f7144ecd38e",
+        "dst_id": "1a21c5ae407-25211b98e0fb",
+        "predicate": "dependsOn",
+        "write_path": "structural",
+        "stated_predicate": "dependsOn",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp04_aurora_perf"
+      },
+      {
+        "src_id": "1a21c5c1d4e-8038eeb176f2",
+        "dst_id": "1a21c5c1a9d-c503731f2bd4",
+        "predicate": "IMPL",
+        "write_path": "direct",
+        "stated_predicate": "causes",
+        "declared_by": null,
+        "mechanism": "IMPL",
+        "label": "causes",
+        "direction": "->",
+        "folded": [],
+        "session_id": "wp05_retro_writeup"
+      },
+      {
+        "src_id": "1a21c5c2066-815bbfe43fce",
+        "dst_id": "1a21c5c1a9d-c503731f2bd4",
+        "predicate": "IMPL",
+        "write_path": "direct",
+        "stated_predicate": "addresses",
+        "declared_by": null,
+        "mechanism": "IMPL",
+        "label": "addresses",
+        "direction": "->",
+        "folded": [],
+        "session_id": "wp05_retro_writeup"
+      },
+      {
+        "src_id": "1a21c5c2194-8513b061005a",
+        "dst_id": "1a21c5c1a9d-c503731f2bd4",
+        "predicate": "related",
+        "write_path": "structural",
+        "stated_predicate": "related",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp05_retro_writeup"
+      },
+      {
+        "src_id": "1a21c5c232b-366b2b1e5e1c",
+        "dst_id": "1a21c5c1964-b0f0dca11243",
+        "predicate": "related",
+        "write_path": "structural",
+        "stated_predicate": "related",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp05_retro_writeup"
+      },
+      {
+        "src_id": "1a21c5c24c3-df45aa0462f1",
+        "dst_id": "1a21c5c3bb6-1130cc685edb",
+        "predicate": "ownedBy",
+        "write_path": "structural",
+        "stated_predicate": "ownedBy",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp05_retro_writeup"
+      },
+      {
+        "src_id": "1a21c5c26a0-90e2f7b7b6a9",
+        "dst_id": "1a21c5c3c9a-d50716883b8d",
+        "predicate": "ownedBy",
+        "write_path": "structural",
+        "stated_predicate": "ownedBy",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp05_retro_writeup"
+      },
+      {
+        "src_id": "1a21c5c289e-340e9680883e",
+        "dst_id": "1a21c587e66-e9713970e2d4",
+        "predicate": "ownedBy",
+        "write_path": "structural",
+        "stated_predicate": "ownedBy",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp05_retro_writeup"
+      },
+      {
+        "src_id": "1a21c5c289e-340e9680883e",
+        "dst_id": "1a21c5c41a7-ed60f8d46391",
+        "predicate": "ownedBy",
+        "write_path": "structural",
+        "stated_predicate": "ownedBy",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp05_retro_writeup"
+      },
+      {
+        "src_id": "1a21c5c3bb6-1130cc685edb",
+        "dst_id": "1a21c56af7b-a4dee51d4fa5",
+        "predicate": "ownedBy",
+        "write_path": "structural",
+        "stated_predicate": "ownedBy",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp06_quarry_rollout"
+      },
+      {
+        "src_id": "1a21c5d3c11-e4dba93b16f3",
+        "dst_id": "1a21c5d3d21-f7a85168c8ef",
+        "predicate": "related",
+        "write_path": "structural",
+        "stated_predicate": "related",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp06_quarry_rollout"
+      },
+      {
+        "src_id": "1a21c5c3bb6-1130cc685edb",
+        "dst_id": "1a21c5d4f35-b6a431707226",
+        "predicate": "related",
+        "write_path": "structural",
+        "stated_predicate": "related",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp06_quarry_rollout"
+      },
+      {
+        "src_id": "1a21c5d4555-f0abeeb5de2f",
+        "dst_id": "1a21c5d3c11-e4dba93b16f3",
+        "predicate": "dependsOn",
+        "write_path": "structural",
+        "stated_predicate": "dependsOn",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp06_quarry_rollout"
+      },
+      {
+        "src_id": "1a21c5e5416-526e778ebfe9",
+        "dst_id": "1a21c5e522a-39ec4b25ddfe",
+        "predicate": "NAND",
+        "write_path": "direct",
+        "stated_predicate": "NAND",
+        "declared_by": null,
+        "mechanism": "NAND",
+        "label": "refutes",
+        "direction": "->",
+        "folded": [],
+        "session_id": "wp07_bluepeak_followup"
+      },
+      {
+        "src_id": "1a21c5e5b22-033b39e6f5ec",
+        "dst_id": "1a21c5e5cb7-4e833d2274e6",
+        "predicate": "IMPL",
+        "write_path": "direct",
+        "stated_predicate": "addresses",
+        "declared_by": null,
+        "mechanism": "IMPL",
+        "label": "addresses",
+        "direction": "->",
+        "folded": [],
+        "session_id": "wp07_bluepeak_followup"
+      },
+      {
+        "src_id": "1a21c587e66-e9713970e2d4",
+        "dst_id": "1a21c5e5e3e-2f6fab3b06cd",
+        "predicate": "ownedBy",
+        "write_path": "structural",
+        "stated_predicate": "ownedBy",
+        "declared_by": null,
+        "mechanism": null,
+        "label": null,
+        "direction": null,
+        "folded": [],
+        "session_id": "wp07_bluepeak_followup"
+      }
+    ],
+    "drops": [],
+    "collapsed": []
+  }
+}
