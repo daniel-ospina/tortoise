@@ -287,3 +287,32 @@ def test_undeclared_reversal_invents_no_contradiction(make_graph):
     live_ids = {r["id"] for r in _scan(sdk)}
     assert _pid(CERT) in live_ids
     assert _pid(AUDIT) in live_ids
+
+
+# ── the boundary with #14721/#14737: the closed interval is VISIBLE to a read ─
+def test_a_current_scope_query_no_longer_answers_with_the_contradicted_claim(
+        make_graph):
+    """#14592's failing probe, re-asked after the closure.
+
+    The report's `contradiction` probe ranked the claim doc-05 refutes FIRST
+    (`status: live`, conf 0.5) and never surfaced the refutation. That was the
+    representation gap showing through the read: the ranking half (#14721 /
+    #14737) is a different scope, but it can only ever be fixed if the closed
+    claim is marked closed. So the assertion here is deliberately about
+    VISIBILITY, not about ranking: a current-scope query for the old claim's
+    own wording no longer answers with it, and the terminal scope still does.
+    """
+    sdk, stats = make_graph("nand")
+    assert stats["supersessions_written"] == 1
+
+    current = sdk._tortoise_fts_query(
+        query="validated cold-chain certificate", kind="statement",
+        entity_type="point", limit=10)
+    assert _pid(CERT) not in {r["id"] for r in current}, (
+        "a claim whose interval is closed must not answer a current-scope query")
+
+    history = sdk._tortoise_fts_query(
+        query="validated cold-chain certificate", kind="statement",
+        entity_type="point", limit=10, include_terminal=True)
+    assert _pid(CERT) in {r["id"] for r in history}, (
+        "the record is truth: the closed claim must still be reachable")
