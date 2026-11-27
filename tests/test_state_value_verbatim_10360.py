@@ -7876,7 +7876,7 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     #    RUNS: `commit` is a HEAD label, the two control receipts carry an `arm`
     #    block that the runner at their label cannot write (that code first appears
     #    at `5fa9634cb9`, 9 min after the LAST control run and 13 after the first:
-#    12:31:07Z vs 12:21:57Z / 12:18:29Z), and no receipt
+    #    12:31:07Z vs 12:21:57Z / 12:18:29Z), and no receipt
     #    records an extractor content hash. Recording that limit is what stops the
     #    next reader inferring a content identity the artifacts never carried, so
     #    it is pinned rather than left to prose discipline.
