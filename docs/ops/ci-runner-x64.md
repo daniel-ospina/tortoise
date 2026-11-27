@@ -1331,9 +1331,9 @@ DB is absent and the DB-backed tests skipped silently.
 
 ### ⛔ The residual this does NOT close: capability is not headroom
 
-Three pool legs completed green in the same hour (`test (b)` on `pi-runner-x64-6` and `test (d)` on
-`pi-runner-c5-x64-3`, run `45964954107`; `test (b)` on `pi-runner-c5-x64-4`, run `45964252900`) and
-**one was killed at its own watchdog with ZERO test failures**:
+Three pool legs completed green in the same hour, each cited with the run it actually ran in — `test (b)` on
+`pi-runner-x64-6` (run `45967751519`) and `test (d)` on `pi-runner-c5-x64-3` (run `45964954107`), `test (b)`
+on `pi-runner-c5-x64-4` (run `45964252900`) — and **one was killed at its own watchdog with ZERO test failures**:
 
 ```text
 job 140392397172  test (b)  pi-runner-cell3-x64-1  conclusion: failure
@@ -1353,3 +1353,12 @@ slowest class would also let a genuinely hung HOSTED leg hold the aggregate red 
 regression #6135/#6145 exists to prevent. The leg names its own class and its own kill, so the red is
 attributable rather than silent; what it is not is free, because the rail merges with `--admin` and
 any red on the PR's tree blocks that head until it is re-run.
+
+⚠️ **The live engagement is itself an unrecorded adoption, and this page does not ratify it.** The only
+recorded decision on this departure is #6897 (2026-10-30): *"Making the pool a primary class for those
+legs is still **this issue's decision** … it is not a side effect of #10186, which ships the split off."*
+The variable measured above (`CI_SHARD_ROUTING=pool-split`, 2026-11-18) **is** that adoption already
+running in production, and the 28 m kill recorded in this section is #6897's own precondition — "a pool
+job wall within ~1.2× hosted on these rows" — coming out unmet. So the engagement is a state this page
+*records* because it is live and its cost is real; the decision that would authorise it belongs to issue #6897, and the measurement is relayed there
+(2026-11-27) rather than assumed here.
