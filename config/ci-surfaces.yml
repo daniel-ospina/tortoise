@@ -61,10 +61,15 @@ version: 1
 # ALREADY carries `tests/test_14691_structure_evidence.py` (`core`, at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) as #14723's row, not as this lane's (#14587 review cycle 11, P2: the
 # possessive spelling here credited the fold's own row to this branch. ⛔ NOT because "the two
-# manifests are byte-identical" that is FALSE and was measured so: the fold's two parents differ
-# by 124/118 lines, and this head differs from `origin/main` by 24/78. What IS measured is ROW
-# MEMBERSHIP — the row is present in `origin/main`'s manifest and absent from the PRE-FOLD BASE's,
-# so the fold brought it in) — the verb packs seven shards at 828.0 s (a, f, g, h, i, j, k) and four at
+# manifests are byte-identical" — that is FALSE, and what makes it false is a DURABLE fact rather than
+# a head-bound figure (#14587 review cycle 15, P2: this sentence carried a numstat pair for "this
+# head", which moved three times on this branch as its own prose was repaired — 24/78 → 24/81 →
+# 27/88 → 29/95 — so a reader checking it got a different number and distrusted the claim it
+# supported): the two manifests' DATA rows differ by ONE line in one row's inline note, while the
+# comment blocks account for the rest of the file's divergence — which is exactly why "byte-identical"
+# is the wrong test and ROW MEMBERSHIP is the right one. Measured so: the fold's own two parents
+# differ by `124/118` (a stable pair, both shas named), and the row is present in `origin/main`'s
+# manifest and ABSENT from the PRE-FOLD BASE's, so the fold brought it in) — the verb packs seven shards at 828.0 s (a, f, g, h, i, j, k) and four at
 # 827.9 s (b, c, d, e), so `ceil(828.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is
 # the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
 # `watchdog_headroom: 2.03` (1680 / 828.0 = 2.0290) on every one of the eleven shards, so the two
