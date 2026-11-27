@@ -299,25 +299,34 @@ M-overskip (feeders into a cycle dropped)  -> test_a_row_feeding_a_cycle…     
 
 ## 5.5 Fourth pass — the fold's re-measurement at `34345ffd36`
 
-The `origin/main` fold (`92e6dd5953`, folding `3f134560b6`) brought three peer commits, and two of
-them move a number this report had already recorded. Neither is a change of this diff's subject, and
-neither was re-derived by the earlier rounds: a proof-of-work block that no longer reproduces at the
-head it ships at is the defect the rows below close.
+The `origin/main` fold this pass started from (`92e6dd5953`, folding `3f134560b6`) brought three
+peer commits, and NONE of them moves a number this report records: the four files behind the two row
+values below are byte-identical at `c3f5191308` — this branch's side of that fold — and at HEAD
+(`git diff --numstat c3f5191308..HEAD` over `tests/test_13098_cypher_inventory.py`,
+`tools/cypher_inventory.py`, `config/surface-manifest.yml` and `tools/surface_manifest.py` is empty
+for all four), and a fold that touches none of them cannot move either value. The two rows moved ONE
+FOLD EARLIER: `0bb030fad13` (folding `32ce876fbff` over `152f0136bb8`) is the first fold whose
+history contains main's `#14741` commits `0204a219aa` and `234d7db4be`, and neither is an ancestor
+of `152f0136bb8` (`git merge-base --is-ancestor`, both directions measured). So §5.1's `(fold)`
+values are the pre-`0bb030fad13` state, and the rows below re-measure them at the head this document
+ships at — a proof-of-work block that no longer reproduces at the head it ships at is the defect the
+rows below close.
 
 ⛔ **The numbers below are measured at `34345ffd36`**, the head this pass started from. `55b79f9531`
 sits after it and changes ONE file, all of it comment prose in `config/ci-surfaces.yml` (two
 sentences naming the wrong pre-existing file and the wrong surface list — `git show --stat` shows no
 other file); no test, row, pin, count or emission figure is touched by it, and the guards that grade
 that block were re-run after rebasing this pass onto it (`-k "fast_shards or derivation or
-surface_claims or header_block or shard"`, below). So the measurements here are statements about
+surface_claims or header_block or shard"`; §5.5 re-measures none of those rows itself, so the run is
+not quoted here as a count). So the measurements here are statements about
 the tree this document ships in, not about a stale base.
 
 ### Re-run at this head, and what moved
 
-| row | pre-fold | at `34345ffd36` | why it moved |
+| row | before `0bb030fad13` (§5.1's `(fold)`) | at `34345ffd36` | what moved it |
 |---|---|---|---|
-| `tests/test_13098_cypher_inventory.py` | `128 passed, 15 skipped` | **`141 passed, 15 skipped`** | main's `#14741` fixes added the 13 rows exactly: `0204a219aa` adds 10 `def test_` lines in that file and `234d7db4be` adds 3 (counted off their diffs), and **156** collect at this head against the **143** the pre-fold row accounted for (128 + 15). Not this diff: `git diff --numstat c3f5191308..HEAD -- tests/test_13098_cypher_inventory.py` is empty |
-| `tools/surface_manifest.py check` | `39 tool rows, 73 retired, thirteen properties hold` | **`30 tool rows, 82 retired, fourteen properties hold`** | `config/surface-manifest.yml` is UNCHANGED since the reviewed head (`git diff --numstat c3f5191308..HEAD -- config/surface-manifest.yml` empty), and its own `counts` block reads `tools: 30, sdk_public_methods: 39, retired: 82` over a `rows` list of 69 addresses. So the old line put `39` — the SDK-METHOD count `render` prints as `30 tools, 39 SDK methods` — under the label "tool rows", and `73` matches no field of the shipped manifest (it is an earlier cut's retired count). It never described the artifact it cited, which is why nothing regenerated it |
+| `tests/test_13098_cypher_inventory.py` | `128 passed, 15 skipped` | **`141 passed, 15 skipped`** | main's `#14741` fixes added the 13 rows exactly: `0204a219aa` adds 10 `def test_` lines in that file and `234d7db4be` adds 3 (counted off their diffs; neither removes one), and **156** collect at this head against the **143** collected at `152f0136bb8` (128 + 15). Not this diff: from the reviewed head onwards the file does not change at all (`git diff --numstat c3f5191308..HEAD -- tests/test_13098_cypher_inventory.py` empty), and neither `#14741` commit is an ancestor of `152f0136bb8` while both are ancestors of `0bb030fad13` |
+| `tools/surface_manifest.py check` | `39 tool rows, 73 retired, thirteen properties hold` | **`30 tool rows, 82 retired, fourteen properties hold`** | `config/surface-manifest.yml` is byte-identical at the reviewed head and here (`git diff --numstat c3f5191308..HEAD -- config/surface-manifest.yml` empty), so THIS diff did not move it — main's re-cut did. The pre-fold file (`152f0136bb8:config/surface-manifest.yml`) is a DIFFERENT cut: its `counts` block reads `tools: 39, sdk_public_methods: 39, retired: 73` over a `rows` list of 78 addresses. So `39 tool rows, 73 retired` correctly described the artifact it cited — the two count fields coincided at that cut — and the earlier text here (that `39` was the SDK-method count mislabelled as rows, and that `73` "matches no field") was wrong: `73` is that cut's own `retired`. Main's re-cut moved the same two fields to `tools: 30, retired: 82` over 69 addresses |
 
 **Re-run at this head, unchanged**: `test_14721_superseded_never_outranks.py` → `14 passed`;
 `test_relationships_bounded.py` → `46 passed`; `tools/ci_selection.py --integrity` → `✅ all test
@@ -332,7 +341,7 @@ collects **294** at this head, and neither it nor the manifest changed since the
 (`git diff --numstat c3f5191308..HEAD -- tests/test_surface_manifest.py config/surface-manifest.yml`
 empty), so the `293 passed, 1 skipped` row is retained. The two private-docker-lane clusters (`208`,
 `407`) are likewise carried: measured at the pre-fold head on the private lane, and the fold moved
-none of their files — `git diff --numstat c3f5191308..HEAD` over all nine of their test modules is
+none of their files — `git diff --numstat c3f5191308..HEAD` over all ten of their test modules is
 empty, so no row of theirs is a statement about the fold.
 
 One body-level consequence, fixed with this pass: the PR body's Tests block quoted
