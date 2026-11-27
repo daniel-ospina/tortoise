@@ -9162,6 +9162,90 @@ _EMISSION_CLAUSE_RE = re.compile(
     r"(?: shards?)? at (?P<est>\d+\.\d) s \((?P<names>[a-z][a-z,\s\u2013\u2014-]*)\)")
 _EMISSION_CEIL_RE = re.compile(
     r"`ceil\((?P<est>\d+\.\d)/60 x (?P<headroom>\d+(?:\.\d+)?)\)` = (?P<minutes>\d+) m")
+#: The STATED HEADROOM RATIO that sits in the same sentence — `(1680 / 827.6 = 2.0300)`. ⛔ It is a
+#: FOURTH claim in that sentence and it was graded by NOTHING (#14623 review round 29, P3): mutating
+#: `2.0300` to `2.0400` left every `fast_shards`/emission/manifest/integrity arm GREEN (measured, 36
+#: passed). Read here so the ratio is DERIVED like its neighbours rather than asserted once by hand.
+#: Absence is legal (the block's doctrine is GRADED-OR-ABSENT — deleting the parenthetical drops the
+#: claim without falsifying it); a PRESENT ratio must be the one the code computes.
+_EMISSION_RATIO_RE = re.compile(
+    # ⛔ THE CONNECTORS ARE NOT ENUMERATED, because enumerating them only moves the escape to the
+    # next spelling and this arm's job is to grade a FIGURE. Measured on the first two cuts of this
+    # pattern: `/`+`=` only missed `÷` with a FALSE quotient (`52 passed`); adding `÷`/`per`/`≈`
+    # then missed `—`, `→`, `is` and `:` with a FALSE quotient (whole file green, #14623 round 31,
+    # P1). A connector is therefore ANY short non-digit token, which costs nothing: the value
+    # check below is what grades the claim, and an unrecognised connector can no longer make a
+    # false figure unread.
+    # ⛔ The optional `s` is admitted on EVERY operand, including the window (#14623 round 31, P2):
+    # `1680 / 827.6 s` was read while `1680 s / 827.6 s` — the same figures with units stated
+    # consistently — was refused as "a figure nobody reads", a false block on TRUE prose.
+    r"\((?P<window>\d[\d,]*(?:\.\d+)?)\s*s?\s*(?P<sep>[^\d\s]{1,6})\s*(?P<est>\d+\.\d+)\s*s?\s*"
+    r"(?P<rel>[^\d\s]{1,6})\s*(?P<ratio>\d+\.\d+)\s*s?\)")
+#: ⛔ THE SEPARATOR AND THE RELATION ARE OPEN SPELLINGS, not literals. The first cut of the pattern
+#: above admitted only `/` and `=`, so a PRESENT, FALSE ratio re-spelled `(1680 ÷ 827.6 = 2.0400)` —
+#: ONE character — passed every arm (measured, 52 passed; #14623 review round 30, P2). Widening the
+#: separator alone would just move the escape to the next spelling, so it is paired with a SHAPE
+#: detector below: a ratio-shaped parenthetical the reader does not consume REDs as a figure nobody
+#: reads, which is the same no-op-gate class `_EMISSION_UNREAD_SENTENCE_RE` closes for shard
+#: sentences. ⛔ The shape requires a DECIMAL ON BOTH SIDES of the relation, so ordinary prose
+#: parentheticals in this block ("(measured at 90.0 s = the row's weight)") do not trip it —
+#: measured: the live block carries exactly ONE such parenthetical, the real ratio.
+#: The two `key: value` figures the same sentence prints beside the derivation —
+#: `` `watchdog_minutes: 28` `` and `` `watchdog_headroom: 2.03` ``. ⛔ THEY WERE GRADED BY NOTHING
+#: (#14623 round 36, P2): mutating either to `29` / `2.04` left the WHOLE FILE green (`503 passed, 1
+#: skipped`), while the two figures BESIDE them (`= 28 m` and `(1680 / 827.6 = 2.0300)`) both RED when
+#: falsified — so the sentence read as fully graded and was not. The block asserts that “a carried
+#: figure reds a required leg instead of shipping”; these ARE carried figures, and nothing redded. Read
+#: here and compared to the live emission, under the same GRADED-OR-ABSENT rule the ratio uses:
+#: deleting them is legal, printing a different number is not.
+#: ⛔ AND THE `key` ITSELF IS GRADED, NOT SPELLED (#14623 round 37, measured). The first cut of this
+#: reader required the exact form `` `watchdog_minutes: 28` `` — lower case, backticked, no space
+#: before the colon — so the SAME figure re-spelled one keystroke away was not merely tolerated, it
+#: was read as ABSENT: `Watchdog_minutes: 29` and `watchdog_minutes : 29` each left the whole file
+#: GREEN over a falsified figure, which is the "a figure nobody reads is not an absent figure" class
+#: the comment above names. The key is therefore read case-insensitively with whitespace around the
+#: colon admitted (TRUE prose must not be refused for its spacing — that is the false-block twin),
+#: and `_EMISSION_KEY_SHAPE_RE` below is the backstop that refuses a spelling nobody consumed.
+#: ⛔ THE SEPARATOR IS `\W{0,8}`, NOT `\s*:\s*` (#14623 round 37, measured). The colon-only form
+#: still let the SAME figure through under `=` and under the emitted JSON spelling —
+#: `watchdog_headroom = 2.04` and `"watchdog_headroom": 2.04` matched NEITHER the reader nor the
+#: backstop (the backstop carried the same `\s*:`), so a falsified figure passed every arm. A
+#: separator of up to eight non-word characters admits all three without turning the pattern into
+#: a prose matcher. ⛔ RESIDUAL, declared: a key followed by a WORD for its figure
+#: (`watchdog_minutes: twenty-eight`) is not read by the READER, but the backstop catches it — by
+#: design, since an unread figure must RED rather than pass as absence.
+_EMISSION_MINUTES_KEY_RE = re.compile(
+    r"\bwatchdog_minutes\b[^\w()]{0,8}(?P<minutes>\d+)", re.IGNORECASE)
+_EMISSION_HEADROOM_KEY_RE = re.compile(
+    r"\bwatchdog_headroom\b[^\w()]{0,8}(?P<headroom>\d+(?:\.\d+)?)", re.IGNORECASE)
+#: ⛔ THE SHAPE BACKSTOP for the two keys — the sibling of `_EMISSION_RATIO_SHAPE_RE` below, and the
+#: half the round-36 arm was missing. Every occurrence of EITHER key must be consumed by the reader
+#: anchored at the same offset; a re-spelling that is not REDs as a figure nobody reads instead of
+#: passing as absence — INCLUDING a word-spelled figure (`watchdog_minutes: twenty-eight`), which is
+#: why the backstop carries no digit lookahead. The cost, stated: prose that mentions one of these
+#: keys without any figure would RED. MEASURED on this block — `_emission_block_header` on the live
+#: manifest — each key occurs ONCE, and that one mention carries its figure (`watchdog_minutes: 28`,
+#: `watchdog_headroom: 2.03`), so the cost is not paid here. No count is quoted beyond that: a
+#: spelling of the count is still a count nothing grades.
+_EMISSION_KEY_SHAPE_RE = re.compile(
+    r"\bwatchdog_(?P<which>minutes|headroom)\b[^\w()]{0,8}(?=\w)", re.IGNORECASE)
+_EMISSION_RATIO_SHAPE_RE = re.compile(
+    # Anchored on an unambiguous DIVISION SIGN (`/`, `÷`) rather than on a relation glyph: a stated
+    # headroom ratio IS a quotient, so this catches a division statement the reader did not consume
+    # however its relation is spelled. The trailing `[^()]*\d+\.\d+` requires a third figure, so a
+    # bare two-figure parenthetical — the live block carries `(827.4/827.5)` as a shrunk pair with
+    # no relation — does not trip it (measured: exactly ONE shape in the live header, the real
+    # ratio).
+    r"\([^()]*\d+\s*s?\s*(?:/|\u00f7)\s*\d+\.\d+[^()]*\d+\.\d+[^()]*\)")
+#: ⛔ THE RESIDUAL, declared rather than papered over: the reader above takes a ONE-TOKEN connector
+#: (any non-digit run up to six characters), so a ratio re-spelled with a WORDY connector — `(1680
+#: divided by 827.6 equals 2.0300)` — is not consumed, and the shape backstop only fires on a
+#: division SIGN, so that spelling passes as absence. Widening the reader to swallow spaces is what
+#: would turn it into a prose matcher, and every wider cut of it has either missed a glyph (measured:
+#: `÷`, then `—`, `→`, `is`, `:`) or begun refusing TRUE sentences. So the RULE is: a ratio stated
+#: in this block is spaced as `<window> <sign> <est> <sign> <ratio>`; anything else is not graded,
+#: and that is a residual of reading arithmetic with a pattern rather than a property this arm can
+#: keep. Named here so the next round widens it knowingly instead of re-deriving it.
 _EMISSION_RANGE_RE = re.compile(r"(?P<lo>[a-z])\s*[\u2013\u2014-]\s*(?P<hi>[a-z])")
 #: A shard-figure sentence the CLAUSE parser above cannot read: a seconds figure
 #: immediately followed by a shard-name list opener. `_EMISSION_CLAUSE_RE` needs one
@@ -9216,6 +9300,357 @@ _HISTORICAL_LETTERS_RE = re.compile(
 #: form (the header's own history clause until #14415 folded it away, reproduced by the fixture
 #: below) puts it 14 characters after the operand.
 _DERIVATION_LOOKAHEAD = 60
+#: A test file the block calls a `durations` ROW. The map's own vocabulary separates a ROW (an
+#: entry in `durations`) from a surface REGISTRATION, and calling a registration a row is a false
+#: claim about the map. ⛔ A registration is an entry on ANY `surfaces` key — `fast_pool()` folds
+#: every one of them — but it is NEITHER necessary NOR sufficient for pool membership, and both
+#: directions mislead: the call also folds `tier1`, so a `tier1`-only file is in the pool with no
+#: registration at all, and it then subtracts `slow_files`, `ENV_BROKEN_FILES`, `carve_out` and
+#: `on_demand`, so a file can be registered on three surfaces and still be outside the pool. `core`
+#: is the common case, `eval` a real one (the block's own `#14544` sentence is carried by an `eval`
+#: registration alone).
+#: ⛔ The row is NOT the map's only place a weight is recorded, and this arm must not claim it is:
+#: `durations_floors` can additionally PIN a declared value (`{value: N, pinned: true}`, e.g.
+#: `test_lane_stash.py`), so a pinned file's weight appears in both blocks. The distinction graded
+#: here is row-vs-REGISTRATION, not "the only carrier of a weight".
+#: ⛔ MEASURED 2026-11-25 on `4cdd732ab7ab`: `tests/test_fly_secret_declaration_report.py` is
+#: `core`-registered on `main` and carries NO `durations` row (measured: 0 rows in the map), which
+#: is why this PR's own review had the clause read "drift-reporter registration". The fold kept
+#: `main`'s copy of that paragraph — where it reads "drift-reporter row" — and silently REVERTED
+#: the fix. The diff is comment-only, so no executable arm could notice; the WORD is the whole
+#: claim, which is why the word is graded rather than the sentence trusted.
+#: Both ADJACENT shapes are read, because a matcher narrowed to one shape is how the same word
+#: rotted twice: `<file>` row — the shape the block uses at this head — and `row (<file>`, which is
+#: the shape `origin/main`'s copy of this sentence uses and therefore the shape a `merge=union`
+#: fold reverts this clause TO. ⛔ The live block's `row (` spelling carries a SURFACES
+#: parenthetical with no `tests/…py` in it, so it contributes no name; the second pattern is
+#: therefore exercised by the fixture below rather than by a live `<file>` list, and saying "the
+#: spellings the block uses" would be a false claim in a comment whose job is to be precise.
+#: ⛔ NO COUNT AND NO QUOTATION IS RESTATED HERE, on purpose (#14623 round 23, P3): an earlier
+#: revision claimed `\brows? \(` occurs ONCE and quoted the parenthetical verbatim, and a later
+#: edit to that very sentence staled the quotation — the restated-figure class this block exists
+#: to remove, inside the sentence forbidding it. The parenthetical is re-derived by reading the
+#: block, and an absent name is what the assertion below grades.
+#: ⛔ THE POSSESSIVE SHAPE WAS GRADED BY NOTHING (#14612 review round 6, P2). The block described
+#: `tests/test_14407_alert_delivery.py`'s `core` row while the map carries NO `durations` row for
+#: that file, and this matcher required `row` ADJACENT to the path — so `'s `core` ` between them
+#: hid a live, false row claim. MEASURED before the fix: `_row_claims` on that very sentence
+#: returned `[]`, and every header-block arm that existed at that head stayed GREEN over the block
+#: that contained it — no count is restated here, because the number of arms moves with the block.
+#: The optional middle group now admits it, and the fixture drives the shape so a re-narrowing
+#: reds.
+#: ⛔ THE CARRY SHAPE WAS GRADED BY NOTHING (#14612 review round 3, P2) — the names PRECEDE the
+#: verb there, so neither anchor above could reach it: `… `<file>`, `<file>` and `<file>` carry an
+#: explicit `2.0` `durations` row, while `…` carry NO row`. That is the row-vs-default sentence the
+#: block relies on, and planting a FALSE claim in that spelling left this arm GREEN (measured).
+#: `_ROW_CLAIM_CARRY_RE` below reads it in BOTH directions — the same sentence states absences, so
+#: a matcher that collected every path in the window would red five TRUE statements and then be
+#: narrowed back to nothing — and it reads the STATED VALUE too (`carry an explicit `2.0` …`), which
+#: is the half a value-blind pattern leaves ungraded: a row that moved to `3.1` under a sentence
+#: still claiming `2.0` is a false claim no "does the row exist" arm can see.
+#: The file group admits subdirectories and hyphens: `durations` carries 50 keys with a `/`
+#: (`eval/retrieval/test_run.py`, …), and a pattern narrowed to bare `tests/*.py` would silently
+#: leave every one of them ungraded — the same "matcher narrowed to one shape" class.
+#: ⛔ FOUR shapes are read, and the arm's remit is the shapes it actually reads rather than a
+#: universal property: `<file>` row, `row (`A`, `B`)`, `rows:` then a comma-separated run, and the
+#: CARRY run (`#1's `A`, #2's `B` and #3's `C` … carry an explicit `N` `durations` row` — the
+#: paragraph that sorts the block's named files into rows and registrations uses this one, with the
+#: files several tokens away from the word). MEASURED at this head: `_row_claims` returns every
+#: row-carrying file the block names IN ONE OF THOSE FOUR SHAPES, each one carries a `durations`
+#: row, and deleting the row for any of them reds this arm — including
+#: `tests/test_sdk_privatise_sweep.py` (the `#14548` residue RATCHET),
+#: `tests/test_14559_reaper_schedule.py` (`#14565`) and `#14415`'s files, which earlier revisions of
+#: the block or of this arm could not reach at all.
+#: ⛔ The `#14544` paragraph's row claim for `tests/test_dod_5090_probe.py` IS graded here — and it
+#: took a REWORDING to get there, which is worth recording because the failure was silent. While
+#: that sentence read "the weight comes from the file's own `durations` row", the path and the word
+#: `row` were separated by `… `durations` `, so no anchor above reached it and deleting the row left
+#: THIS arm GREEN (measured). `ee49c4f3` moved the path beside the word — "the weight comes from
+#: `tests/test_dod_5090_probe.py` row in `durations`" — which is the `<file>` row shape from the
+#: paragraph above, so `_row_claims` returns it (MEASURED at this head) and deleting the row reds.
+#: ⛔ So the residual for this claim is NONE, and the lesson is the SHAPE rather than the file: a
+#: fold that rewords it back into `… the file's own `durations` row` drops the claim out of every
+#: shape read here with no arm able to see it. The word `row` next to the path is what makes it
+#: gradable, and `--integrity`'s coverage check is a 0.90 RATIO that cannot see one missing row.
+#: The CARRY sentence's ABSENCE half
+#: is graded separately (`test_the_fast_shards_header_block_grades_the_carry_row_spelling`), because
+#: handing a file the block says has NO row to an arm that reds on absence would invert its meaning.
+#: ⛔ NO COVERAGE COUNT IS STATED HERE: a number of graded files written as a figure goes stale the
+#: moment the prose it describes moves, which is the rot this whole block is about — the relation
+#: above is what holds.
+#: ⛔ CASE-INSENSITIVE ON PURPOSE (#14612 review round 3, P3). This block states its own vocabulary
+#: in CAPS — "A REGISTRATION IS NOT A ROW", "A ROW is an entry in `durations`" — so a matcher bound
+#: to lowercase `row` is bound to a spelling the block does not itself use. MEASURED: re-spelling
+#: "drift-reporter registration (`tests/test_fly_secret_declaration_report.py`)" as "drift-reporter
+#: **ROW** (`…`)" left `missing == []` and the arm GREEN, over exactly the false claim it exists to
+#: catch. Markdown emphasis around the word (`**ROW**`) is admitted for the same reason.
+_ROW_CLAIM_AFTER_FILE_RE = re.compile(
+    r"`tests/(?P<file>[\w/.-]+\.py)`(?:\s*'s\s*(?:`[^`]+`)?)?[\s*_]+"
+    #: `entry`/`entries` is the block's OWN definitional synonym ("A ROW is an entry in
+    #: `durations`"), and `_ROW_CLAIM_CARRY_RE` already accepts it. Reading only `row` here made
+    #: a truth-preserving rewrite of one enumeration item unread, and the reach arm told the
+    #: editor to undo it. ⛔ THE QUALIFIER IS NOT OPTIONAL: `entry` alone is the word the block
+    #: uses for the OPPOSITE claim (its own words: "A REGISTRATION is a surface entry on ANY
+    #: `surfaces` key" — quoted WITHOUT backticks around "surface entry", which an earlier
+    #: revision of this comment added and thereby quoted a sentence no version of the block
+    #: carries), so an optional `in `durations`` read `entry in `surfaces``, `entry in `durations_floors``
+    #: and a bare `entry` as `durations` row claims — measured, each returned the path, and the
+    #: reach arm then graded a TRUE registration statement as a false row claim and told the
+    #: editor to delete it. The qualifier is part of the synonym, so it is part of the match.
+    r"(?:rows?\b|entr(?:y|ies)\s+in\s+`?durations`?\b)", re.IGNORECASE)
+#: The name-list shape: `row (`A`, `B`, `core`)`. It captures the WHOLE parenthesised list and
+#: every `tests/…py` inside it, because the FIRST-NAME-ONLY form graded one name and left the rest
+#: read by nothing. Measured on `#14607`'s own spelling — "two new `core` rows
+#: (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`)" — the first name was
+#: graded and the second, which is the one a later fold is free to leave behind, was not: the same
+#: "a claim graded by nothing rots" class this block exists to warn about, reproduced inside the
+#: arm cut to catch it.
+_ROW_CLAIM_BEFORE_LIST_RE = re.compile(
+    r"\brows?\b[\s*_]{0,4}\((?P<names>(?:[^()]|\([^()]*\))*)\)", re.IGNORECASE)
+#: The COLON shape — `rows: `A`, `B`` — which is a second spelling of the same claim and was graded
+#: by nothing. It has no closing paren to bound the capture, so this pattern takes only a
+#: comma-separated RUN of test paths; anything else after the colon ends the run.
+_ROW_CLAIM_BEFORE_COLON_RE = re.compile(
+    r"\brows?\b[\s*_]{0,4}:\s*(?P<names>`?tests/[\w/.-]+\.py`?"
+    r"(?:\s*,\s*`?tests/[\w/.-]+\.py`?)*)", re.IGNORECASE)
+_ROW_CLAIM_PATH_IN_LIST_RE = re.compile(r"`?tests/(?P<file>[\w/.-]+\.py)`?")
+#: The CARRY spelling — a RUN of named files followed by the claim verb: `… `<file>`, `<file>` and
+#: `<file>` **carry an explicit `2.0` `durations` row**`, and `… **carry NO row**`. The run may
+#: interleave an issue label before each path (`#14409`'s `<file>`) and may separate its items with
+#: a comma OR `and`, which is how the live sentence is written; `\s` spans the line breaks the
+#: comment block wraps at, so a re-wrap does not un-grade it. The label admits OPTIONAL backticks
+#: around the number (`#14415's` beside ``#14415`'s`): the live sentence uses the bare form, and a
+#: matcher bound to one of them leaves the other spelling ungraded — the class this whole arm
+#: exists to close. The polarity is part of the match
+#: (`positive` value vs `negative`), not a filter applied afterwards: the two halves of that
+#: sentence make OPPOSITE claims about the same map, so folding them together would grade five
+#: true absences as five missing rows.
+_ROW_CLAIM_CARRY_RE = re.compile(
+    r"(?P<names>`?tests/[\w/.-]+\.py`?"
+    r"(?:\s*,\s*(?:`?#\d+`?\s*'s\s*)?`?tests/[\w/.-]+\.py`?"
+    r"|\s+and\s+(?:`?#\d+`?\s*'s\s*)?`?tests/[\w/.-]+\.py`?)*)"
+    r"\s+carr(?:y|ies)\s+"
+    #: ⛔ THE VERB NUMBER IS PROSE TOO, and it is the last one-word lock in this unit (#14623 review
+    #: round 25). MEASURED at `1b34f53f55a0`: `carries a `2.0` `durations` row` — the identical
+    #: claim with singular agreement, which is what a sentence naming ONE file says — emptied
+    #: `positive` exactly as the adjective did one round earlier, so the arm reported the block as
+    #: naming NO file. `carry`/`carries` is the same FOUR-character stem (`carr`) and neither
+    #: touches the VALUE group or the polarity, so admitting both cannot widen what is graded; the
+    #: fixture below pins it rather than trusting the prose. ⛔ The stem length is stated as the
+    #: measured fact (`carr`, four characters) rather than as the "three-character" this note said
+    #: before a review counted it (#14623 round 27, P3): a figure in a comment is a claim, and this
+    #: block is where claims get graded.
+    #: The unit is optional and INSIDE the value. ⛔ NOT because the block states it with a unit —
+    #: it does not: this PR's own restructure replaced the `flat `2.0 s`` spelling with
+    #: ``row in `durations` — `core`-registered``, so the justification that stood here cited prose
+    #: the block no longer carries, and the carry rows' own notes say "takes the header's flat
+    #: `DEFAULT_FAST_WEIGHT`" with no number and no unit (#14623 review round 5, P2). The unit is
+    #: admitted because `2.0 s` is a TRUE rewrite of those rows — `durations` carries 2.0 for each —
+    #: and the fixture below pins it, so the arm grades the CLAIM rather than the spelling. Requiring
+    #: the bare number made a unit-preserving TRUE rewrite empty `positive`, and the arm then
+    #: reported the block as naming no file at all — a false block, reproduced on `2.0` -> `2.0 s`.
+    #: ⛔ `explicit` IS OPTIONAL FOR THE SAME REASON, and it was the SAME defect one word over
+    #: (#14623 review round 24, P3): the positive branch required the literal word `explicit`, so
+    #: `carry a `2.0` `durations` row` — a TRUE rewrite that states the identical claim — emptied
+    #: `positive` and the arm reported the block as naming NO file, the inverse of its own text.
+    #: The graded PROPERTY is "names a file as carrying a `durations` row of THIS value"; the
+    #: adjective, like the unit, is prose. The polarity mutation (a row whose value moved) still reds
+    #: — that is the fixture's job, not this alternation's.
+    r"(?:(?:an?\s+)?(?:explicit\s+)?`?(?P<value>\d+(?:\.\d+)?)(?:\s*s)?`?\s+`?durations`?\s+"
+    r"(?:rows?|entr(?:y|ies))"
+    # ⛔ THE VALUE AFTER THE NOUN. This note's own sentence states the graded PROPERTY as "names a
+    # file as carrying a `durations` row of THIS value" — the post-noun order — and the alternation
+    # above required the opposite one, so a TRUE rewrite of the live sentence
+    # ("… carry an explicit `durations` row of `2.0`") matched NOTHING. ⛔ THE FAILURE MODE IS A
+    # DESTRUCTIVE FALSE BLOCK, not a harmless red: `positive` empties, the non-vacuity assert
+    # reports the block as naming no file, and the obvious repair — silencing that assert — removes
+    # the ONLY grading of the four positive row claims (#14623 review round 29, P2; the same class as
+    # `explicit` at round 24 and the unit at rounds 5/6, this being the last of the three free
+    # choices in the value phrase). Pinned by a fixture below, so narrowing this branch REDs.
+    r"|(?:an?\s+)?(?:explicit\s+)?`?durations`?\s+(?:rows?|entr(?:y|ies))\s+(?:of|at)\s+"
+    r"`?(?P<value_after>\d+(?:\.\d+)?)(?:\s*s)?`?"
+    r"|no\s+(?:`?durations`?\s+)?(?:rows?|entr(?:y|ies)))",
+    re.IGNORECASE,
+)
+
+
+def _unquoted_block(header: str) -> str:
+    """The block with double-quoted spans masked, refusing to answer on ODD quote parity.
+
+    `"[^\"]*"` pairs quotes ACROSS the whole block, so ONE stray `\"` re-pairs with the next
+    span's opening quote and swallows the live prose IN BETWEEN. Every arm that reads the block
+    through this mask (the row word, the carry run, the row enumeration) inherits the parity
+    precondition from here, once: a guard that cannot read its subject must not certify it. `_splice_shingle_positions` already
+    RAISES rather than de-splicing around the mis-pairing, for exactly this reason.
+    """
+    quotes = header.count('"')
+    if quotes % 2:
+        raise AssertionError(
+            f"the `fast_shards` header block carries an ODD number of double quotes ({quotes}), "
+            "so the quoted-span mask would re-pair across live prose and this arm would grade a "
+            "block it cannot actually read — refusing to answer rather than answering `no row "
+            "claim` over a claim it silently masked")
+    return _QUOTED_SPAN_RE.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', header)
+
+
+def _unbalanced_parenthetical(header: str) -> str | None:
+    """The block's first parenthetical that no matching paren closes, or `None` when all balance.
+
+    A clause DELETED out of the middle of a sentence leaves its CLOSER behind and its opener gone,
+    so the prose still reads as a sentence-shaped run of words while the reason it was carrying is
+    absent — `#14623` shipped exactly that at `fd1726210be8`: the `git show --stat` paragraph lost
+    "a MERGE commit unless it is given `-m` (it falls back to the combined `--cc` form," and kept
+    "which lists a file only when it differs from EVERY parent)". Read on the MASKED block for the
+    same reason the other arms do: a double-quoted span is a record of someone else's text.
+
+    Balance is the GRAMMAR of the block rather than a list of its phrasings, which is the
+    direction this file's own comments ask for after thirteen rounds of guarding English negation
+    by vocabulary. It is a NECESSARY condition, not a sufficient one: a truncation that drops an
+    opener and its closer TOGETHER still balances, so this arm claims truncations that leave half
+    a pair behind and claims nothing else.
+    """
+    text = _unquoted_block(header)
+    depth = 0
+    for offset, char in enumerate(text):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0:
+                return text[max(0, offset - 150):offset + 60]
+    if depth:
+        return text[-200:]
+    return None
+
+
+def _carry_row_claims(header: str) -> tuple[dict[str, set[float]], set[str]]:
+    """Files the block says CARRY a `durations` row, split by the POLARITY it states.
+
+    Returns `(positive, negative)`: `positive` maps each file the sentence says carries a row to
+    the value the sentence states for it, and `negative` is the set it says carries NO row. Both
+    halves are real claims about the map, and they are graded in opposite directions by
+    `_carry_row_claim_violations`, so neither can be dropped without a red.
+
+    ⛔ THE TWO HALVES DO NOT RESOLVE EACH OTHER, and subtracting one from the other is a FAIL-OPEN
+    this arm shipped once. The pre-fix form returned `negative - set(positive)`, so a file named in
+    BOTH halves lost its ABSENCE claim. MEASURED on the exact shape a `merge=union` splice produces —
+    "`<A>` carry an explicit `2.0` `durations` row, while `<A>` carry NO row", which is what a fold
+    yields when `--refresh-durations` ADDS the row one side's sentence denies — `negative` came back
+    EMPTY and `_carry_row_claim_violations` answered `([], [], [])`: both arms GREEN over a stated
+    absence that is false. The two halves make OPPOSITE claims about one map, so a file in both is a
+    CONTRADICTION to be redded by the `has_a_row` direction (the absence claim is the false one
+    whenever the map carries the row), never a duplicate to drop.
+    """
+    return _carry_row_claims_in(_unquoted_block(header))
+
+
+def _carry_row_claims_in(unquoted: str) -> tuple[dict[str, set[float]], set[str]]:
+    """`_carry_row_claims` over ALREADY-MASKED text (the form `_row_claims` holds).
+
+    ⛔ A FILE MAY BE STATED AT MORE THAN ONE VALUE, and `positive` keeps EVERY value rather than
+    the last one. A plain `positive[name] = value` made the LAST match win, so a block stating the
+    same file at two weights was graded on whichever came later: MEASURED with
+    `durations == {"test_x.py": 2.0}` and a header saying `3.0` … then `2.0`, the predicate answered
+    `([], [], [])` — GREEN over the false `3.0` — and reversing the order redded it. That is the
+    same fail-open the positive-vs-negative split closed, one level in: the two halves did not
+    resolve each other, and now two statements of the same half cannot either.
+    """
+    positive: dict[str, set[float]] = {}
+    negative: set[str] = set()
+    for claim in _ROW_CLAIM_CARRY_RE.finditer(unquoted):
+        names = {m.group("file")
+                 for m in _ROW_CLAIM_PATH_IN_LIST_RE.finditer(claim.group("names"))}
+        # ⛔ EITHER group may carry the value: `value` is the value-BEFORE-noun branch and
+        # `value_after` the value-AFTER-noun one. Python's `re` cannot give two branches one group
+        # name, so the caller resolves them here rather than the pattern losing a legal spelling.
+        stated_value = claim.group("value") or claim.group("value_after")
+        if stated_value is None:
+            negative |= names
+        else:
+            stated = float(stated_value)
+            for name in names:
+                positive.setdefault(name, set()).add(stated)
+    return positive, negative
+
+
+def _carry_row_claim_violations(positive: dict[str, set[float]], negative: set[str],
+                                durations: dict) -> tuple[list, list, list]:
+    """The three ways a `carry` claim can be false, as `(wrong value, no row, has a row)`.
+
+    One predicate, used for the live block AND for the fixture that proves it bites, so the
+    fixture cannot drift into grading something the live assertion does not.
+
+    ⛔ EVERY stated value is checked, so a file the block states at two weights reds on
+    whichever of them is wrong — the block's own "a figure beside a weight re-stales" class.
+    """
+    wrong_value = sorted((name, sorted(stated), durations[name])
+                         for name, stated in positive.items()
+                         if name in durations
+                         and any(abs(durations[name] - v) > 1e-9 for v in stated))
+    no_row = sorted(name for name in positive if name not in durations)
+    has_a_row = sorted(name for name in negative if name in durations)
+    return wrong_value, no_row, has_a_row
+
+
+def _row_claims(header: str) -> list[str]:
+    """Every test file the block calls a `durations` ROW, in each of the FOUR shapes read here.
+
+    ⛔ THAT IS A REMIT, NOT A UNIVERSAL PROPERTY — and this docstring said "in any shape it spells
+    one" until a fresh-context review measured the difference (2026-11-26, P3). A fifth spelling
+    was live in this very block: "… and `#14671`'s
+    `tests/test_13450_ep_position_axis_participation.py` — `core`-registered, carrying its own
+    `durations` row …", where the claim word sat past a `core`-registered clause instead of
+    beside the path — six tokens away, measured on the OLD sentence quoted right here, so that
+    distance is fixed history rather than a figure restated from a run. ⛔ The token count is the
+    whole figure: a character span stood here and did not reproduce against the text it named — the
+    quoted sentence is wrapped, so its width depends on which form is measured — which is the
+    restated-figure class again, so no character span is stated.
+    MEASURED: `_row_claims` omitted the file, and DELETING its `durations` row left every arm of
+    this family GREEN — the exact "a claim graded by nothing rots" class the block exists to
+    warn about, reproduced in the matcher cut to catch it. The sentence was re-spelled to
+    `<path> row in `durations`` (the same repair the `#14544` paragraph took), so the claim is
+    now reachable and the row's deletion reds
+    `test_the_fast_shards_header_block_calls_a_row_only_what_has_one`.
+
+    The four shapes, stated so a new spelling has something to be checked against: `<file>` row,
+    `row (`A`, `B`)`, `rows:` then a comma-separated run, and the CARRY run (see the module
+    comment above `_ROW_CLAIM_AFTER_FILE_RE`). A comment claiming a row in a shape not listed here
+    is graded by NOTHING — re-spell it beside the path rather than trusting this docstring.
+
+    Double-quoted spans are masked FIRST, for the reason `_repeated_header_spans` masks them
+    (`_QUOTED_SPAN_RE`, below): this block legitimately QUOTES dead claims for the record, and
+    the record of a dead claim is not a live claim. Without the mask, a quotation would red this
+    arm and its "say `registration`" message would be the wrong repair for history.
+
+    ⛔ QUOTE PARITY IS A FAIL-CLOSED PRECONDITION HERE TOO (#14612 review round 3, P2).
+    `"[^\"]*"` pairs quotes ACROSS the whole block, so ONE stray `"` re-pairs with the next
+    span's opening quote and swallows the live prose IN BETWEEN. MEASURED on this arm:
+
+        header -> 'a stray " here, then `#1`'s drift-reporter row
+                   (`tests/test_fly_secret_declaration_report.py`), then "a quoted dead claim"'
+        before -> `_row_claims(...)` == []      # GREEN over a reverted `row` claim
+
+    — i.e. the arm answers "no row claim" over the very reversion it exists to catch. The
+    precondition now lives in `_unquoted_block`, which BOTH arms call, so the carry arm cannot
+    answer over a block this one would refuse: a guard that cannot read its subject must not
+    certify it, and a fail-open member of a fail-closed family is still a defect.
+
+    ⛔ It returns the files claimed to HAVE a row, from all FOUR spellings (`_ROW_CLAIM_AFTER_FILE_RE`,
+    the list/colon forms, and `_ROW_CLAIM_CARRY_RE`'s positive half). The carry sentence's NEGATIVE
+    half is graded by `test_the_fast_shards_header_block_grades_the_carry_row_spelling` instead —
+    a file the block says has NO row must not be handed to an arm that reds on absence.
+    """
+    unquoted = _unquoted_block(header)
+    found = {m.group("file") for m in _ROW_CLAIM_AFTER_FILE_RE.finditer(unquoted)}
+    carried, _ = _carry_row_claims_in(unquoted)
+    found |= set(carried)
+    for claim in _ROW_CLAIM_BEFORE_LIST_RE.finditer(unquoted):
+        found |= {m.group("file")
+                  for m in _ROW_CLAIM_PATH_IN_LIST_RE.finditer(claim.group("names"))}
+    for claim in _ROW_CLAIM_BEFORE_COLON_RE.finditer(unquoted):
+        found |= {m.group("file")
+                  for m in _ROW_CLAIM_PATH_IN_LIST_RE.finditer(claim.group("names"))}
+    return sorted(found)
 
 
 def _emission_names(phrase: str) -> set[str]:
@@ -9522,6 +9957,99 @@ def _emission_block_claims(
         f"`ci_selection.WATCHDOG_HEADROOM` = {cs.WATCHDOG_HEADROOM:g} — the `ceil(...)` operand "
         "no longer states the code's own multiplier, so the figures beside it are not the ones "
         "anything computes. Update the sentence, or the constant moved and the block is stale.")
+    # ⛔ THE STATED HEADROOM RATIO, checked against the code rather than trusted. The window is the
+    # emitted budget (`minutes x 60`) and the quotient is `ci_selection.watchdog_headroom`, so a
+    # block stating the right figure against the wrong estimate — or a hand-typed ratio that drifted
+    # — reds here instead of reading as verified. Tolerance is half the stated precision, so the
+    # block may round to as many places as it likes without the arm owning a spelling.
+    ceil_by_est = {float(e): int(m) for e, _h, m in ceil_matches}
+    # ⛔ THE `key: value` FIGURES BESIDE THE DERIVATION, graded against the live emission (#14623 round
+    # 36, P2). They sat in the same sentence as two figures that DO red when falsified (`= 28 m`, the
+    # ratio), so the sentence read as fully graded while these two were read by nothing: `28` -> `29`
+    # and `2.03` -> `2.04` each left the whole file green. GRADED-OR-ABSENT: no match = no claim, which
+    # is legal; a match that disagrees with what the tree emits is not.
+    if ceil_by_est:
+        governing_est = max(ceil_by_est)
+        governing_minutes = ceil_by_est[governing_est]
+        for stated_minutes in _EMISSION_MINUTES_KEY_RE.findall(header):
+            assert int(stated_minutes) == governing_minutes, (
+                f"the block prints `watchdog_minutes: {stated_minutes}` beside a derivation that emits "
+                f"{governing_minutes} for its governing estimate ({governing_est} s) — the printed key "
+                "is a carried figure, and the block's own claim is that a carried figure reds a "
+                "required leg rather than shipping. Re-emit it with the verb.")
+        for headroom_match in _EMISSION_HEADROOM_KEY_RE.finditer(header):
+            stated_headroom = headroom_match.group("headroom")
+            expected_headroom = round(cs.watchdog_headroom(governing_est, governing_minutes), 2)
+            assert abs(float(stated_headroom) - expected_headroom) < 1e-9, (
+                # ⛔ QUOTE THE MATCHED SPAN, not a reconstruction (#14623 round 38, P3): rebuilding
+                # `watchdog_headroom: {value}` printed a line that may not be in the manifest at all.
+                f"the block prints {headroom_match.group(0)!r} but "
+                f"`round(ci_selection.watchdog_headroom({governing_est}, {governing_minutes}), 2)` is "
+                f"{expected_headroom} — the printed key is a carried figure graded by nothing else in "
+                "the tree (`rg 'watchdog_headroom: 2'` outside this file finds no reader). Re-emit it "
+                "with the verb.")
+    # ⛔ AND A KEY THE READER DID NOT CONSUME IS A FIGURE NOBODY GRADES (#14623 round 37, MEASURED).
+    # The loops above only see the spelling the reader accepts; everything else ranged over this
+    # sentence reached nothing at all. Measured at the pre-fix head with the live block mutated in
+    # place: `Watchdog_minutes: 29` (one case change) and `watchdog_minutes : 29` (one space) each
+    # left the WHOLE arm GREEN over a falsified figure, while the ratio twenty words away RED its own
+    # false value — so the sentence's "GRADED-OR-ABSENT, like the ratio beside them" claim was true
+    # of the ratio and false of these two. The ratio's answer is the one used here: a grammar the
+    # reader cannot read REDs as UNREAD, never as absent, and the message names the spelling to use
+    # so the repair is mechanical rather than a re-derivation.
+    for shaped in _EMISSION_KEY_SHAPE_RE.finditer(header):
+        reader = (_EMISSION_MINUTES_KEY_RE if shaped.group("which").lower() == "minutes"
+                  else _EMISSION_HEADROOM_KEY_RE)
+        assert reader.match(header, shaped.start()) is not None, (
+            f"the block states `{shaped.group(0).strip()}` in a spelling the emission reader does "
+            "not consume, so that figure is graded by nothing — the same no-op-gate class as a "
+            "ratio-shaped parenthetical nobody reads. Spell it `watchdog_minutes: <int>` / "
+            "`watchdog_headroom: <decimal>` (case-insensitive, and `=`, quotes or `:` accepted as "
+            "the separator), or delete the WHOLE `key: value` span — an ABSENT figure is legal, an "
+            "ungraded one is not. Deleting only the value keeps the key, which is still an unread "
+            "claim.")
+    # ⛔ A FIGURE NOBODY READS IS NOT AN ABSENT FIGURE. Every ratio-SHAPED parenthetical must be
+    # CONSUMED by the reader below; one that is not is a live claim graded by nothing, which is this
+    # block's whole subject. This is what makes the widening above safe rather than one more
+    # spelling to escape: a future re-spelling REDs here as unread instead of passing as absence.
+    for shaped in _EMISSION_RATIO_SHAPE_RE.finditer(header):
+        assert _EMISSION_RATIO_RE.search(shaped.group(0)) is not None, (
+            "the block states a headroom ratio in a spelling the reader does not consume "
+            f"({shaped.group(0)!r}), so that figure is graded by NOTHING — the same no-op-gate "
+            "class `_EMISSION_UNREAD_SENTENCE_RE` closes for the shard sentences. Re-spell it in "
+            "the reader's form, or widen `_EMISSION_RATIO_RE` (this detector then covers the next "
+            "one).")
+    for ratio_match in _EMISSION_RATIO_RE.finditer(header):
+        window_str = ratio_match.group("window")
+        ratio_est = float(ratio_match.group("est"))
+        ratio_str = ratio_match.group("ratio")
+        assert ratio_est in ceil_by_est, (
+            f"the block states a headroom ratio for {ratio_est} s, which no `ceil(...)` clause in "
+            "the same block derives — the ratio is arithmetic on a budget nothing states, so it is "
+            "checked against nothing. Re-derive it beside the emission that produced it.")
+        minutes = ceil_by_est[ratio_est]
+        # ⛔ The WINDOW admits digit grouping and a decimal (`1,680`, `1680.0`), because the shape
+        # backstop below matches those and refusing them was a FALSE BLOCK on TRUE prose: the same
+        # figure, twice, refused as "a figure nobody reads" (#14623 round 32, P3).
+        # ⛔ COMPARED AS A FLOAT, never truncated. `int(float(...))` was the first cut and it made
+        # `1680.9`, `1,680.5` and `1680.99` — all FALSE windows — read as the budget, so the widening
+        # that removed a false block simultaneously converted three false figures from RED to GREEN
+        # (measured; #14623 round 33, P2). Equality keeps every legal spelling and refuses every
+        # figure that is not the budget.
+        assert float(window_str.replace(",", "")) == minutes * 60, (
+            f"the block states the headroom window as {window_str} s, but the emitted budget beside "
+            f"it is {minutes} m = {minutes * 60} s — the numerator is not the budget it divides.")
+        expected = cs.watchdog_headroom(ratio_est, minutes)
+        decimals = len(ratio_str.split(".")[1])
+        assert abs(float(ratio_str) - expected) <= 0.5 * 10 ** (-decimals), (
+            # ⛔ The QUOTED sentence is the matched text, not a reconstruction: rebuilding it from the
+            # named groups silently re-spelled the author's own separator (`÷` came back as `/`), so
+            # a reader searching the manifest for the diagnostic's quotation found nothing
+            # (#14623 round 31, P3).
+            f"the block states the headroom ratio as {ratio_match.group(0)!r}, "
+            f"but `ci_selection.watchdog_headroom({ratio_est}, {minutes})` is {expected:.6f} "
+            f"(={expected:.{decimals}f}) — the figure beside the emission is not the one the code "
+            "computes, so it will read as verified while it rots. Re-emit it with the verb.")
     if not groups:
         return None
     est_str, _headroom, minutes_str = ceil_matches[0]
@@ -9623,6 +10151,233 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
         "neighbours are graded by this test — re-spell it as `N shards at S.S s "
         "(names)`, or delete it. A rebase that splices two re-derivations is how it "
         "gets there.")
+    # ⛔ THE STATED HEADROOM RATIO, driven in BOTH directions and across SPELLINGS.
+    # The first cut of `_EMISSION_RATIO_RE` admitted only `/` and `=`, so a PRESENT, FALSE ratio
+    # re-spelled `(1680 ÷ 827.6 = 2.0400)` — ONE character — passed every arm (measured, 52 passed;
+    # #14623 review round 30, P2). These fixtures are what stop a re-narrowing going silent again:
+    # the reader must CONSUME each legal spelling (so it is graded, not skipped) and the SHAPE
+    # detector must RED an illegal one as "a figure nobody reads" rather than read it as absence.
+    def _ratio_header(rationale: str) -> str:
+        return ("# eleven shards at 827.6 s (a, b, c, d, e, f, g, h, i, j, k), so "\
+                "`ceil(827.6/60 x 2)` = 28 m governs " + rationale + "\n\nfast_shards: 11\n")
+
+    # ⛔ EVERY CONNECTOR GLYPH AND SHORT WORD the reviewer measured as an escape is now READ, and
+    # that is the point of the generic connector: enumerating `/`+`=` missed `÷` with a false
+    # quotient, then adding `÷`/`per`/`≈` missed `—`, `→`, `is` and `:` with a false quotient
+    # (whole file green, #14623 round 31, P1). The list below is those exact escapes, so a return to
+    # an enumerated connector REDs here.
+    for legal in ("(1680 / 827.6 = 2.0300)",
+                  "(1680 ÷ 827.6 = 2.0300)",
+                  "(1680 per 827.6 ≈ 2.0300)",
+                  "(1680 / 827.6 = 2.03)",
+                  "(1680 — 827.6 — 2.0300)",
+                  "(1680 → 827.6 → 2.0300)",
+                  "(1680 is 827.6 is 2.0300)",
+                  "(1680: 827.6: 2.0300)",
+                  # ⛔ THE UNIT IS ADMITTED ON EVERY OPERAND, including the window (#14623 round 31,
+                  # P2): `1680 / 827.6 s` was read while `1680 s / 827.6 s` — the same figures,
+                  # stated consistently — was REFUSED as "a figure nobody reads". A false block on
+                  # TRUE prose, so the symmetric spelling is pinned here.
+                  "(1680 s / 827.6 s = 2.0300)",
+                  "(1680 s / 827.6 = 2.03 s)",
+                  # ⛔ THE WINDOW'S NUMBER FORMAT, admitted so the shape backstop cannot refuse a
+                  # TRUE sentence on its digit grouping (#14623 round 32, P3).
+                  "(1,680 / 827.6 = 2.0300)",
+                  "(1680.0 / 827.6 = 2.0300)",
+                  "(1,680.0 / 827.6 = 2.0300)"):
+        # ⛔ ASSERT THE READ, not merely that the block parsed. The pre-fix assertion was
+        # `_emission_block_claims(...) is not None`, which is TRUE whenever the `ceil(...)` clause
+        # parses — so it passed over spellings the ratio reader never saw (measured: `(1680 divided
+        # by 827.6 equals 2.0300)` and `(1680 amounts 827.6 amounts 2.0300)` both returned non-None
+        # while `_EMISSION_RATIO_RE.search` returned None), and an enumerated connector could be
+        # restored with this arm GREEN. That is the fixture failing to discriminate — the very defect
+        # class the fixture exists to pin (#14623 round 32, P2).
+        matched = _EMISSION_RATIO_RE.search(legal)
+        assert matched is not None and float(matched.group("ratio")) == 2.03, (
+            f"the ratio reader did not READ the legal spelling {legal!r} (match={matched!r}), so this "
+            "fixture pins nothing about it — the assertion below only proves an unrelated clause "
+            "parsed. Re-point `_EMISSION_RATIO_RE` at the spelling, or widen its connector")
+        assert _emission_block_claims(_ratio_header(legal)) is not None, (
+            f"`_emission_block_claims` refuses the legal ratio spelling {legal!r}, so the arm "
+            "skips a figure it should grade — a widening that refused true prose would be the "
+            "false-block twin of the round-30 finding")
+    # ⛔ THE BACKSTOP STILL FIRES where the reader genuinely cannot parse: a DIVISION SIGN with a
+    # third figure the reader did not consume is a figure nobody reads, not an absent one.
+    for unread in ("(1680 ÷ 827.6 = and 2.0300 more)",
+                   "(1680 / 827.6 = or 2.0300 more)"):
+        try:
+            _emission_block_claims(_ratio_header(unread))
+        except AssertionError as exc:
+            assert "does not consume" in str(exc), (
+                f"the ratio {unread!r} was refused for the wrong reason — it must be reported as "
+                f"a figure nobody READS, not as a bad value: {exc}")
+        else:
+            raise AssertionError(
+                f"a ratio-shaped parenthetical in a spelling the reader does not consume "
+                f"({unread!r}) was read as ABSENT, so that figure is graded by nothing — the "
+                "class this PR exists to remove")
+    # …and the VALUE is still checked under a widened spelling, so the widening traded no grading
+    # for its tolerance: a false quotient must RED as a wrong figure under EACH connector.
+    for wrong in ("(1680 ÷ 827.6 = 2.0400)", "(1680 — 827.6 — 2.0400)",
+                  "(1680 is 827.6 is 2.0400)", "(1680 s / 827.6 s = 2.0400)"):
+        try:
+            _emission_block_claims(_ratio_header(wrong))
+        except AssertionError as exc:
+            assert "watchdog_headroom" in str(exc), (
+                f"the wrong quotient {wrong!r} was refused for the wrong reason: {exc}")
+        else:
+            raise AssertionError(
+                f"a FALSE quotient re-spelled as {wrong!r} passed every check — the widening "
+                "admitted the spelling without grading the figure, which is the round-30 P2 itself")
+    # ⛔ THE WINDOW IS REFUSED WHEN IT IS NOT THE BUDGET, including the truncation escape (#14623
+    # round 33, P2): `int(float(...))` made every `1680.x` a match, so these three FALSE windows
+    # passed GREEN under a comment claiming the numerator is checked. Pinned so equality cannot be
+    # traded back for truncation.
+    for not_the_budget in ("(1680.9 / 827.6 = 2.0300)",
+                           "(1,680.5 / 827.6 = 2.0300)",
+                           "(1680.99 / 827.6 = 2.0300)",
+                           "(16800 / 827.6 = 2.0300)"):
+        try:
+            _emission_block_claims(_ratio_header(not_the_budget))
+        except AssertionError as exc:
+            assert "numerator is not the budget" in str(exc), (
+                f"the window {not_the_budget!r} was refused for the wrong reason: {exc}")
+        else:
+            raise AssertionError(
+                f"a FALSE window {not_the_budget!r} passed as the emitted budget — the numerator is "
+                "truncated rather than compared, so a figure that is not the budget reads as "
+                "verified (#14623 round 33, P2)")
+    # ⛔ THE DIAGNOSTIC QUOTES THE AUTHOR'S OWN TEXT (#14623 round 31, P3): rebuilding the
+    # sentence from named groups silently re-spelled `÷` back to `/`, so a reader searching the
+    # manifest for the quoted figure found nothing.
+    try:
+        _emission_block_claims(_ratio_header("(1680 ÷ 827.6 = 2.0400)"))
+    except AssertionError as exc:
+        assert "÷" in str(exc), (
+            f"the failure message does not quote the spelling that is actually in the block, so it "
+            f"sends the reader looking for text that is not there: {exc}")
+    # ⛔ THE TWO `key: value` FIGURES: GRADED, NOT SPELLED (#14623 round 37, MEASURED). The round-36
+    # arm read only the exact form `` `watchdog_minutes: 28` `` — lower case, backticked, no space
+    # before the colon — so the SAME figure one keystroke away was read as ABSENT. Measured on the
+    # live block before this round: `Watchdog_minutes: 29` and `watchdog_minutes : 29` each left the
+    # whole file GREEN over a falsified figure, while the ratio twenty words away RED its own false
+    # value. Each direction is pinned below, so narrowing the reader back to a spelling, or dropping
+    # the shape backstop, REDs here instead of going silent.
+    def _key_header(keys: str) -> str:
+        return ("# eleven shards at 827.6 s (a, b, c, d, e, f, g, h, i, j, k), so "\
+                "`ceil(827.6/60 x 2)` = 28 m governs " + keys + "\n\nfast_shards: 11\n")
+
+    for legal_keys in ("`watchdog_minutes: 28` with `watchdog_headroom: 2.03`",
+                       "`Watchdog_Minutes: 28` with `WATCHDOG_HEADROOM: 2.03`",
+                       "`watchdog_minutes : 28` with `watchdog_headroom:2.03`",
+                       # ⛔ THE SEPARATORS THIS ROUND ADDED, fixtured (#14623 round 38, P2).
+                       # Reverting `[^\w()]{0,8}` to `\s*:\s*` left the WHOLE FILE green, because
+                       # every spelling below a colon was already pinned and none of these was.
+                       "`watchdog_minutes` = 28 with `watchdog_headroom` = 2.03",
+                       '"watchdog_minutes": 28 with "watchdog_headroom": 2.03',
+                       "`watchdog_minutes`=28 with `watchdog_headroom`=2.03"):
+        # ASSERT THE READ first: a fixture whose spelling the reader never consumes pins nothing
+        # about grading it (`_emission_block_claims` still returns non-None, because absence is
+        # legal) — the exact non-discriminating shape round 32 filed against this arm's sibling.
+        assert _EMISSION_MINUTES_KEY_RE.search(legal_keys) is not None, (
+            f"the minutes reader did not READ the legal spelling {legal_keys!r}, so the fixture "
+            "below pins nothing — widen `_EMISSION_MINUTES_KEY_RE`")
+        assert _EMISSION_HEADROOM_KEY_RE.search(legal_keys) is not None, (
+            f"the headroom reader did not READ the legal spelling {legal_keys!r} — widen "
+            "`_EMISSION_HEADROOM_KEY_RE`")
+        assert _emission_block_claims(_key_header(legal_keys)) is not None, (
+            f"`_emission_block_claims` REFUSED the legal key spelling {legal_keys!r} — a widening "
+            "that reds true prose is the false-block twin of the fail-open it closes")
+    # …and the VALUE is graded under EVERY spelling, so tolerating the spelling bought no tolerance
+    # for the figure.
+    for wrong_keys, blame in (
+            ("`Watchdog_minutes: 29` with `watchdog_headroom: 2.03`", "watchdog_minutes"),
+            ("`watchdog_minutes : 29` with `watchdog_headroom: 2.03`", "watchdog_minutes"),
+            ("`watchdog_minutes: 28` with `watchdog_headroom: 2.04`", "watchdog_headroom"),
+            ("`watchdog_minutes: 28` with `Watchdog_Headroom : 2.04`", "watchdog_headroom"),
+            # ⛔ AND UNDER THE `=` / JSON SEPARATORS (#14623 round 38, P2). Measured before this
+            # fixture existed: `watchdog_headroom = 2.04` and `"watchdog_headroom": 2.04` were read
+            # by NEITHER the reader nor the backstop, so a falsified figure passed as absence.
+            ("`watchdog_minutes` = 28 with `watchdog_headroom` = 2.04", "watchdog_headroom"),
+            ('"watchdog_minutes": 28 with "watchdog_headroom": 2.04', "watchdog_headroom"),
+            ("`watchdog_minutes` = 29 with `watchdog_headroom` = 2.03", "watchdog_minutes")):
+        try:
+            _emission_block_claims(_key_header(wrong_keys))
+        except AssertionError as exc:
+            assert blame in str(exc), (
+                f"the false key figure in {wrong_keys!r} was refused for the wrong reason: {exc}")
+        else:
+            raise AssertionError(
+                f"a FALSE `{blame}` figure re-spelled as {wrong_keys!r} passed every check — the "
+                "key spelling is tolerated while the figure it states is graded by nothing, which "
+                "is the round-36 P2 itself (measured GREEN at that head)")
+    # ⛔ A KEY THE READER CANNOT READ IS UNREAD, NOT ABSENT — the shape backstop's own direction.
+    for unread_keys in ("`watchdog_minutes: twenty-eight` with `watchdog_headroom: 2.03`",
+                        "`watchdog_minutes: 28` with `watchdog_headroom: two-point-oh-three`"):
+        try:
+            _emission_block_claims(_key_header(unread_keys))
+        except AssertionError as exc:
+            assert "does not consume" in str(exc), (
+                f"the unreadable key figure {unread_keys!r} was refused for the wrong reason — it "
+                f"must be reported as a figure nobody READS: {exc}")
+        else:
+            raise AssertionError(
+                f"a `key: value` figure in a spelling the reader does not consume "
+                f"({unread_keys!r}) was read as ABSENT, so that figure is graded by nothing — the "
+                "class this PR exists to remove")
+    # …and DELETING the keys is still legal: GRADED-OR-ABSENT, not "must print them".
+    assert _emission_block_claims(
+        _key_header("(1680 / 827.6 = 2.0300)")) is not None, (
+        "the arm now refuses a block that prints no `key: value` figures at all — an ABSENT figure "
+        "is legal and only an UNGRADED one is not")
+
+
+def test_the_derivation_surface_claims_are_graded_against_the_manifest():
+    """#14623 review: the derivation STATES these files' surfaces, and nothing read them.
+
+    ⛔ NO NUMERAL HERE, deliberately (#14623 review): an earlier count of these files was stale —
+    `test_expansion_fusion_14344.py` on `core`, named in the derivation above, was missing from the
+    assertions below while the sentence claimed their set was graded. That is an over-claim of
+    coverage written into the arm that exists to prevent over-claims. The stated set is the count.
+
+    The block named each file's surface while asserting, a few lines above, that "registration
+    status is a THIS-HEAD fact no arm in this block's family reads", and justified that gap with
+    "registration membership IS asserted by name elsewhere". Measured: mutating any of those
+    registrations in the manifest left every arm in this block's family GREEN, so the
+    justification did not hold for the files this derivation actually names.
+
+    `#14544` is the proof the fact MOVES — `e66997b81e` took `test_dod_5090_probe.py` out of
+    `core` — so a fold that drops `onboarding` below would have left THIS SENTENCE false with no
+    arm in this family grading it. ⛔ NOT "the block, silently", and NOT a dropped ROW either:
+    `config/ci-surfaces.yml` grades that "A REGISTRATION IS NOT A ROW", and `--integrity` stays
+    green on this fold — the file still classifies under `core`. What REDs is the SELECTION arm,
+    `test_the_own_site_fragment_guard_is_selected_by_every_tree_it_scans`, on the same fold
+    (measured, with this arm deselected). ⛔ THAT ONE REGISTRATION IS THE EXCEPTION, not the rule:
+    measured with `grep -rn` over `tests/`, no other arm asserts the surface membership of the
+    other files named here. So what went ungraded was the PROSE, not their registrations. The
+    values are TRUE at this head; what was missing was the arm that notices when they stop being.
+
+    ⛔ THE WHOLE SURFACE SET IS GRADED, not membership alone: the block's parenthetical describes
+    WHICH surfaces each file is on, so a file that GAINS one it does not name is equally a
+    sentence that needs re-deriving — and a membership-only assertion is green over exactly that.
+    """
+    m = cs.load_manifest()
+    stated = {
+        "test_expansion_fusion_14344.py": {"core"},
+        "test_14592_operating_model_evidence.py": {"core", "eval"},
+        "test_14592_read_parity.py": {"core", "api"},
+        "test_13450_ep_position_axis_participation.py": {"core"},
+        "test_own_site_fragment_targets.py": {"core", "onboarding"},
+    }
+    for fname, surfaces in stated.items():
+        actual = {name for name, members in m["surfaces"].items() if fname in members}
+        assert actual == surfaces, (
+            f"the derivation describes `{fname}` as {sorted(surfaces)} and the manifest has "
+            f"{sorted(actual)} — either re-derive that sentence or re-register the file; a "
+            f"registration claim no arm reads is the exact class this block exists to remove")
+    assert "test_14592_operating_model_evidence.py" in m["tier1"], (
+        "the derivation claims `test_14592_operating_model_evidence.py` is a `tier1` member and it "
+        "is not — re-derive the sentence")
 
 
 def test_the_fast_shards_header_block_states_no_span_twice():
@@ -9842,6 +10597,2883 @@ fast_shards: 11
     assert _repeated_header_spans(balanced), (
         "a spliced block whose quotes are BALANCED must still be reported — otherwise the parity "
         "check has become a way for a spliced header to pass")
+
+
+def test_the_fast_shards_header_block_calls_a_row_only_what_has_one():
+    """#14612: a file the block calls a `durations` ROW must actually have one.
+
+    The block's vocabulary is load-bearing: a ROW is an entry in `durations`, while a surface
+    REGISTRATION is the map's word for a `surfaces` entry and does not establish a row at all. A
+    registration is NEITHER necessary NOR sufficient for `fast_pool()` membership — that call folds
+    every surface AND `tier1`, then subtracts `slow_files`, `ENV_BROKEN_FILES`, `carve_out` and
+    `on_demand` — and `core` is its common case, not its definition. Measured
+    2026-11-25: `tests/test_fly_secret_declaration_report.py` is `core`-registered on `main` and
+    carries NO `durations` row, so this PR's review had the clause read "drift-reporter
+    registration". The `4cdd732ab7ab` fold kept `main`'s copy of the paragraph, where it reads
+    "drift-reporter row", and reverted that fix — a comment-only diff, so nothing noticed. This
+    arm is what notices: the word is the entire claim.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    rows = set(cs.load_manifest()["durations"])
+    claimed = _row_claims(header)
+    # NON-VACUITY: an empty subject set makes the assertion below decoration — the no-op-gate class
+    # this block's siblings name. The block still calls one file a row after the sentence is
+    # re-spelled, so if this ever empties, re-point the pattern rather than pass over nothing.
+    assert claimed, (
+        "the `fast_shards` header block names no test file as a `durations` row, so this arm "
+        "grades nothing at all — re-point the row-claim matchers ("
+        "`_ROW_CLAIM_AFTER_FILE_RE`, `_ROW_CLAIM_BEFORE_LIST_RE`, `_ROW_CLAIM_BEFORE_COLON_RE`, "
+        "`_ROW_CLAIM_CARRY_RE`) at the sentence the block "
+        "actually uses")
+    missing = [name for name in claimed if name not in rows]
+    assert not missing, (
+        f"the `fast_shards` header block calls {missing} a `durations` ROW, but the map carries "
+        "no row for it. A REGISTRATION is the map's word for a `surfaces` entry — NEITHER "
+        "necessary NOR sufficient for `fast_pool()` membership, which folds `tier1` too and then "
+        "subtracts `slow_files`, `ENV_BROKEN_FILES`, `carve_out` and `on_demand` — and it is not a "
+        "row: with no row the weight comes from `DEFAULT_FAST_WEIGHT`. "
+        "Say `registration`, or add the row.")
+    # …and every shape above is read while `registration` is deliberately not, and while a
+    # QUOTED dead claim and a SUBDIRECTORY row are both handled: measured on this PR, a
+    # one-spelling matcher is exactly how this word survived one review round and one fold, and a
+    # bare-`tests/*.py` matcher would leave `durations`' 50 slash-carrying keys ungraded.
+    # ⛔ `#6` is the MULTI-NAME shape, and it is why the name-list arm captures the whole paren
+    # rather than the first path: `#14607` wrote "two new `core` rows (`A`, `B`)", the earlier
+    # matcher read `A` and left `B` graded by nothing, and `B` is the name a fold is free to
+    # leave behind. Both names are claimed here, so a return to first-name-only reds.
+    fixture = (
+        "`#1`'s `tests/test_row_claim_after.py` row, `#2`'s drift-reporter row "
+        "(`tests/test_row_claim_before.py`, `core`, flat 2.0 s), `#3`'s "
+        "`tests/test_registration_not_a_row.py` registration, `#4`'s "
+        "`tests/eval/retrieval/test_row_claim_subdir.py` row, — quoted for the record, so not "
+        "a live claim — \"#5's `tests/test_row_claim_quoted.py` row\", and `#6`'s two `core` rows "
+        "(`tests/test_row_claim_list_first.py`, `tests/test_row_claim_list_second.py`), `#7`'s "
+        "drift-reporter **ROW** (`tests/test_row_claim_upper.py`) — the CAPS spelling this block "
+        "itself uses — `#8`'s drift-reporter rows: `tests/test_row_claim_colon.py`, #9's "
+        "`tests/test_row_claim_enum_a.py`, #10's `tests/test_row_claim_enum_b.py` and #11's "
+        "`tests/test_row_claim_enum_c.py` carry an explicit `2.0` `durations` row, and #12's "
+        "`tests/test_row_claim_possessive.py`'s `core` row — the POSSESSIVE spelling a matcher "
+        "bound to an adjacent `row` cannot see — and #13's "
+        "`tests/test_row_claim_after_upper.py` **ROW** — the CAPS + EMPHASIS spelling of the "
+        "AFTER-FILE shape, which only `_ROW_CLAIM_AFTER_FILE_RE` can reach, so the two tolerances "
+        "that matcher documents (`re.IGNORECASE` and its emphasis character class) are graded by "
+        "this fixture rather than by the comment beside them")
+    assert _row_claims(fixture) == [
+        "eval/retrieval/test_row_claim_subdir.py",
+        "test_row_claim_after.py",
+        "test_row_claim_after_upper.py",
+        "test_row_claim_before.py",
+        "test_row_claim_colon.py",
+        "test_row_claim_enum_a.py",
+        "test_row_claim_enum_b.py",
+        "test_row_claim_enum_c.py",
+        "test_row_claim_list_first.py",
+        "test_row_claim_list_second.py",
+        "test_row_claim_possessive.py",
+        "test_row_claim_upper.py",
+    ], (
+        "the row-claim matcher no longer reads every reversion shape (a file then `row`, "
+        "`row (` then the files, `rows:` then the files, the POSSESSIVE `<file>`'s `label` row, "
+        "and a run of files followed by `carry an explicit `N` `durations` row`), or it misses a "
+        "SUBDIRECTORY row, or "
+        "it reads only the FIRST name of a `row (`…`, `…`)` LIST while its siblings go ungraded, "
+        "or it is bound to lowercase while this block spells the concept in CAPS, or it reads a "
+        "`registration` as a row, or it grades a QUOTED dead claim as a live one: "
+        f"{_row_claims(fixture)!r}")
+    # ⛔ …and an ODD number of quotes is REFUSED, never read as "no row claim" (#14612 review
+    # round 3, P2). MEASURED before this guard: a stray `"` before a reverted
+    # `drift-reporter row (…)` claim re-paired with the next span's opening quote and swallowed the
+    # claim, so `_row_claims` answered `[]` — a GREEN over the very reversion this arm exists to
+    # catch. The masked-span technique is only sound on a block whose quotes PAIR, so the arm must
+    # fail closed when they do not, exactly as `_splice_shingle_positions` already does.
+    try:
+        _row_claims(
+            'a stray " here, then `#1`\'s drift-reporter row '
+            '(`tests/test_row_claim_before.py`), then "a quoted dead claim"')
+    except AssertionError as exc:
+        assert "ODD number of double quotes" in str(exc), exc
+    else:  # pragma: no cover - the guard regressed
+        raise AssertionError(
+            "an ODD number of double quotes no longer makes `_row_claims` refuse to answer: the "
+            "quoted-span mask re-pairs across live prose and this arm grades a block it cannot "
+            "read — measured, that is how a reverted `drift-reporter row (…)` claim passes it "
+            "GREEN")
+
+
+#: The `#14544` exemption paragraph, bounded from its own opening sentence to the next `⛔`.
+#: It claims that ONE cause — `#14544`'s removal of `tests/test_dod_5090_probe.py` from the `core`
+#: surface — cannot move a bin, and it used to close with "… — neither of which `#14544` touched",
+#: where the anaphor bound BOTH nouns it followed: the `eval` registration AND the `durations` ROW.
+#: The registration half is TRUE; the ROW half is FALSE — `e66997b81e76` (`#14544`, on `main`) rewrote
+#: that row's weight in the same commit whose subject is the cut — and the weight is the SHARD-LAYOUT
+#: input, so the sentence told the reader the opposite of what it exists to establish. It also
+#: contradicted the row's own note, further down this same file.
+#: ⛔ THE ANAPHOR IS THE DEFECT, not the nouns: `neither of which` re-binds whatever nouns PRECEDE it,
+#: so one sentence can be true of one noun and false of the other with nothing in the text marking
+#: which — and a fold that re-wraps or re-orders the nouns silently repoints it. This paragraph may
+#: call the row untouched only by naming the row AGAIN explicitly; the pronoun form is refused here
+#: for the same reason `_unquoted_block` refuses an odd quote count, because it cannot be read
+#: reliably.
+_H_14544_EXEMPTION_OPEN_RE = re.compile(r"The one cause this paragraph does NOT claim")
+#: `neither of which` AT ALL, plus the paraphrase a fold would reach for instead — `#14544` never
+#: touched THAT ROW / THE WEIGHT. The anaphor form was the shipped defect; the paraphrase is the
+#: same claim spelled without the pronoun, so banning only the pronoun would grade the wording
+#: rather than the claim. ⛔ ITS OBJECT IS A RESIDUAL, stated rather than implied (#14623 review):
+#: both negated-change arms end on a ROW NOUN (`rows?` / `entr(?:y|ies)` / `weight`), so the
+#: PRONOUN spelling — "… and `#14544` never touched it" — is UNGRADED here (measured GREEN), and
+#: this comment previously over-claimed it as banned. It is left ungraded deliberately: a pronoun
+#: object bound to a DIFFERENT head ("the row's own note … never touched it") is TRUE prose, so
+#: widening the alternation to `it|them` would trade a silent pass for a false block. Spell the
+#: claim with a row-noun object, or it is not graded.
+#: ⛔ THE BAN IS APPLIED TO THE WHOLE BLOCK, and that half is load-bearing (measured at
+#: `d1f14298`, #14623 review round 4). The pre-fix form required `#14544` within 80 characters AFTER
+#: `which`, so the claim shipped GREEN in two shapes: label-first — “And `#14544`'s cut touched
+#: neither of which.” — and the same anaphor with its label padded past the window. ⛔ AND THE
+#: SUBJECT IS THE BLOCK, not the bounded paragraph: bounding the BAN at the next `⛔` made the graded
+#: region TEXT-CONTROLLED — one `⛔` inserted before “The weight is not restated here:” truncated it,
+#: and the RETIRED SENTENCE returned verbatim after the bound with this arm reporting GREEN. A ban
+#: that the graded text can move out from under is not a ban, so every NEGATIVE claim here reads the
+#: whole block; the POSITIVE ones stay paragraph-bounded, where a lost claim reds instead of passing.
+#: ⛔ ONE RULE IS PARAGRAPH-BOUNDED ON PURPOSE, and the exception is named rather than implied: the
+#: WEIGHT rule reads the corrected paragraph, not the block, because the block legitimately quotes
+#: figures that are not a row's weight (the shard minutes, the headroom ratio) and
+#: widening it refuses that true prose (measured, #14623 review round 13, F1). Consequence, stated:
+#: an inserted `⛔` inside the paragraph moves a restated figure out of the graded region — a
+#: text-controlled bound for THIS rule alone, carried as a residual on #14715 rather than closed by
+#: a widening that re-opens a false block.
+#: ⛔ IT IS NOT A UNIVERSAL BAN AND SAYS SO. Graded, in the whole block and per SENTENCE: (1) the
+#: bare pronoun form `neither of which`, in a sentence that names this row (so a TRUE `neither of
+#: which` about two shard figures is not refused — measured RED, #14623 review round 5 F4); (2) a
+#: NEGATED change attributed to the cut — `#14544 … never/not/didn't/does not/has not … touch /
+#: change / move / rewrite / re-read / edit / alter / affect / modify / shift`, the cut named
+#: first and the verb within 80 characters (padding the cut past 400 escapes it — measured at
+#: `49a6dd89`); (3) the same claim PASSIVE, row/weight first — `<row|durations|weight> … was/were/
+#: has/had not … touched` — graded only in a sentence that also names the cut, so "the row was not
+#: touched by the reaper" is NOT this claim (measured, #14623 round 4/5); (4) the required claims
+#: stated the other way round (`both halves … exempt`, `paragraph DOES exclude`).
+#: ⛔ THE BOUNDS ARE STATED BECAUSE THEY ARE REAL: a noun or verb outside that list, and a
+#: formulation that names no subject at all, are NOT read. A phrase-level guard cannot be widened
+#: into honesty — the next noun or verb form is always one edit away — so the graded set is what is
+#: claimed here, and this paragraph is the record of what is not. The unit is the SENTENCE because
+#: the block is JOINED into one string by `_emission_block_header`: a `⛔`-bounded region is
+#: truncatable by one character (measured `d1f14298`, the retired sentence returned verbatim with
+#: this arm GREEN), and the alternative to a sentence is a character window, which the padding
+#: measurements above show is escapable in both directions.
+_H_14544_SENTENCES_RE = re.compile(r"(?<=[.!?])\s+")
+_H_14544_ANAPHOR_RE = re.compile(r"neither\s+of\s+which", re.IGNORECASE)
+#: The subjects that make a sentence a claim about THIS row: the cut, and the row / weight it carries.
+_H_14544_ROW_SUBJECT_RE = re.compile(
+    r"#14544|`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b", re.IGNORECASE)
+#: …and the ACTOR, which the PASSIVE form needs in the same sentence or it grades unrelated prose.
+_H_14544_ACTOR_RE = re.compile(r"#14544|that\s+cut|the\s+cut", re.IGNORECASE)
+_H_14544_NEGATION = (
+    r"(?:\bnever\b|\bnot\b|did\s+not|didn['\u2019]?t|does\s+not|doesn['\u2019]?t"
+    r"|has\s+not|hasn['\u2019]?t|had\s+not|was\s+not|wasn['\u2019]?t|is\s+not|isn['\u2019]?t"
+    r"|were\s+not|weren['\u2019]?t"
+    # ⛔ THE MODAL AND CONTRACTED FORMS are this claim too, and `\bnot\b` does not fire inside
+    # `cannot`: measured at #14623 review round 11, the block's OWN `cannot move a bin`
+    # construction, folded to name the row, shipped CLEAN at all three preceding heads.
+    r"|cannot|can['\u2019]?t|won['\u2019]?t|wouldn['\u2019]?t|couldn['\u2019]?t"
+    r"|shouldn['\u2019]?t|mustn['\u2019]?t)")
+_H_14544_CHANGE_VERB = (
+    r"(?:touch|chang|mov|rewr|re-read|reread|edit|alter|affect|modif|shift)")
+#: ACTIVE order: the cut named FIRST, then a negation, then the change verb, and — ⛔ THE OBJECT IS
+#: READ, not assumed — the row/weight as the thing the verb acts on, within 40 characters. Without
+#: that third clause this arm refused the TRUE sentences the paragraph exists to establish: a
+#: review measured RED on “`#14544` did not touch that `eval` registration, so the file stays in the
+#: pool”, on the live `cannot move a bin` rewritten as `does not move a bin`, and on the honest
+#: clause pair with its halves swapped (#14623 review round 6, F1). A negated change of a
+#: REGISTRATION or of a BIN is the paragraph's own true claim, so only a negated change of the ROW
+#: is the retired one.
+#: A gap INSIDE one clause: any character except end punctuation, and a comma only when it does not
+#: introduce a new clause. Measured RED on the LIVE paragraph without this (#14623 review round 8):
+#: "… a cause this paragraph does NOT exclude, and the row's WEIGHT is that cut's re-read …" chained
+#: the paragraph's TRUE `NOT exclude` into the next clause's `re-read` and refused the live block. A
+#: plain comma stays legal, because the claim's own adverbial carries them — "never, in that commit
+#: or any other, touched".
+#: ⛔ NO SUBORDINATOR LIST: this arm carried `_H_14544_SUBORDINATOR` with ONE reference (its own
+#: definition) — an inert enforcer, the same class as `_H_14544_FOREIGN_AGENT_RE` one round earlier
+#: (measured, #14623 review round 13, F2). The clause keeps its punctuation + coordinator bound
+#: (`_H_14544_SAME_CLAUSE`); the object of a change verb is ANCHORED on determiners instead, so no
+#: word list decides it and nothing here depends on a subordinator.
+_H_14544_SAME_CLAUSE = (
+    r"(?:[^,;.!?]|,(?!\s*(?:and|but|so|which|that|then|because)\b))")
+#: The object is ANCHORED instead: a negated change takes the row as its object only when nothing
+#: but determiners stand between them, so no word list can decide it. ⛔ THE DETERMINER SET IS
+#: DELIBERATELY WIDE and admits a PARTITIVE: a first cut carried only `the|that|this|its|their|his|
+#: her|a|an|any|which`, and MEASURED at #14623 review round 11 that dropped NINE shapes the previous
+#: head banned — `any of the`, `some of the`, `either of the`, `all of the`, `these`, `those`, `no`,
+#: `both`, and an adverb (`directly`). That is a false PASS, not a false block, so the set is wide.
+#: ⛔ AND THE QUANTIFIER LIST IS CLOSED, WHICH IS THE RESIDUE R4 ON #14715 (declared, filed, with a
+#: comment on that issue): `none`, `most`, `several`, `a couple`, `half`, `a number`, `every one` and
+#: any other quantifier this list does not name still ship CLEAN. That residue is a VOCABULARY one,
+#: not the clause-parsing R1/R2/R3, and the comment below says so instead of claiming the class is
+#: closed. Do not read "admits a partitive" as "admits every partitive".
+_H_14544_OBJECT_DETERMINERS = (
+    r"(?:the|that|this|its|their|his|her|a|an|any|which|no|every|each|some|both|all|either"
+    r"|neither|these|those|my|our|your|whose|none|most|several|many|half|few|number|couple"
+    r"|majority|plenty|one|two|three|four|five|anyone)\s+")
+_H_14544_PARTITIVE = r"(?:of\s+(?:the|these|those|them|which)\s+)?"
+#: A bounded ADVERB allowance, because `did not touch DIRECTLY the row` is the same claim. It is a
+#: CLOSED list on purpose: a catch-all `\w+` here read `move a bin` as a reach for the row and
+#: re-opened the false block the anchor exists to close (measured, #14623 review round 11).
+_H_14544_OBJECT_ADVERBS = r"(?:directly|actually|ever|really|even|still|then)\s+"
+_H_14544_NEGATED_ACTOR_CHANGE_RE = re.compile(
+    r"(?:#14544|that\s+cut|the\s+cut)" + _H_14544_SAME_CLAUSE + r"{0,400}?" + _H_14544_NEGATION
+    + _H_14544_SAME_CLAUSE + r"{0,80}?" + r"(?<!un)" + _H_14544_CHANGE_VERB + r"[a-z]{0,6}\s+"
+    + r"(?:" + _H_14544_OBJECT_DETERMINERS + r"|" + _H_14544_OBJECT_ADVERBS + r"){0,3}"
+    + _H_14544_PARTITIVE
+    # ⛔ THE ROW NOUN MUST BE THE HEAD, not a premodifier of a different head (#14623 review round 11,
+    # P3): with the bare alternation, "does not move the `durations` row's BIN" matched `durations`
+    # as the object and red the paragraph's own TRUE bin claim.
+    # ⛔ AND THE EXCLUSION IS NARROW, ON PURPOSE (#14623 review round 13, P2): a blanket
+    # `(?!['’]s)` could not tell the paragraph's TRUE "row's bin" / "row's registration" from the
+    # RETIRED "row's weight" / "row's fields", so the claim in possessive form shipped CLEAN. Only
+    # the possessed nouns the paragraph's own true sentences name are excluded; every other
+    # possessive is still the claim.
+    # ⛔ THE TRAILING `\b` MATTERS (#14623 review round 13, P2): without it `rows?` matched
+    # `rowboat`, `entr(?:y|ies)` matched `entrypoints` and `weight` matched `weights`/`weighted`, so
+    # the block's own pluralised shard-weight sentence was refused.
+    + r"(?:`durations`\s+)?(?:rows?|entr(?:y|ies)|weight)\b"
+    + r"(?![\u2019']s\s+(?:bins?|registrations?)\b)",
+    re.IGNORECASE)
+#: PASSIVE order: `row|row(s)|entry|entries|durations|weight` FIRST, then a negation, then the
+#: change verb. Two guards — the caller also requires `_H_14544_ACTOR_RE` in the SENTENCE, and the
+#: negation here is restricted to the PAST/PERFECT/`BE` forms — `was/were/is/are/has/had never`, the
+#: `… not` forms, and a bare `never` ONLY when the change verb is past (`never moved`, `never
+#: changed`, `never touched`) — so the TRUE sentences the reviews measured as false blocks are NOT
+#: this claim: "the row was not touched by the reaper" (no cut in the sentence), "the row does not
+#: touch the shard layout, and `#14544`'s cut is separate" (present ACTIVE: the row is the agent),
+#: and "the row never touches the shard layout, and `#14544`'s cut is separate" (present tense, not a
+#: past change). All three are fixtures, beside the claim fixture "The weight never moved when that
+#: cut landed." — which the TENSE rule keeps, and a BE-verb-only rule dropped (measured at
+#: `5741a56b`).
+_H_14544_ROW_NEGATION = (
+    r"(?:(?:was|were|is|are|has|had)\s+never\b"
+    # a BARE `never` is read only when the change verb is PAST — "the weight never MOVED when that
+    # cut landed" is the claim, while "the row never TOUCHES the shard layout" is honest prose (the
+    # row is the agent). The tense, not the adverb, is what separates them.
+    r"|\bnever\s+(?=(?:moved|changed|rewrote|rewritten|edited|altered|affected|modified|shifted"
+    r"|touched|re-read)\b)"
+    r"|did\s+not|didn['\u2019]?t|has\s+not|hasn['\u2019]?t|had\s+not"
+    r"|was\s+not|wasn['\u2019]?t|is\s+not|isn['\u2019]?t|were\s+not|weren['\u2019]?t)")
+_H_14544_NEGATED_ROW_CHANGE_RE = re.compile(
+    r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[\s\S]{0,20}?" + _H_14544_ROW_NEGATION
+    # ⛔ `(?<!un)` — the ADJECTIVE is not the verb: "the `durations` row was never UNTOUCHED by
+    # `#14544`" is TRUE (it is the paragraph's own correction) and `untouched` contains `touch`, so
+    # without this the row arm read it as the claim (#14623 review round 15, P3).
+    + r"[\s\S]{0,40}?(?<!un)" + _H_14544_CHANGE_VERB,
+    re.IGNORECASE)
+#: …and the ADJECTIVE forms of the same claim, which reverse the word order and so reach neither
+#: arm above: `<row|weight> … untouched / unchanged / left alone … `#14544``, and the transposed
+#: deleted sentence `` `#14544` touched neither that row nor its weight ``. Measured GREEN before
+#: this arm existed (#14623 review round 6, F4).
+#: …and a FOREIGN agent after the change verb — `by the reaper`, `by a retime` — which means the
+#: negation belongs to another clause's actor, not to the cut. Measured RED before this guard, on
+#: two TRUE sentences (#14623 review round 7): "`#14544`'s cut is separate, and the row was not
+#: touched by the reaper." and "The `durations` row was not touched by the reaper; that is separate
+#: from `#14544`'s cut." Sentence granularity merges the two clauses, and an actor-anywhere rule
+#: then reads the cut as the negated subject.
+#: ⛔ ANCHORED TO THE CHANGE VERB, never to the sentence — the first cut read `\bby\s+<not the
+#: cut>\w` ANYWHERE, so `… was never touched by `#14544`, by design.` was read as FOREIGN and the
+#: retired claim shipped CLEAN (#14623 review round 7, P1). The block itself carries plain
+#: `by <word>` prose ("is not touched by this line", "S is chosen by that formula"), so the
+#: actor-anywhere form fails open on the live file. `verb … by <agent>` is the shape that
+#: distinguishes "touched by the reaper" (foreign) from "touched by `#14544`, by design" (the cut).
+#: ⛔ DELETED, and the reason is recorded rather than the constant: this arm carried
+#: `_H_14544_FOREIGN_AGENT_RE` for two rounds with exactly ONE reference (its own definition), so
+#: narrowing or widening it changed NOTHING while its comment presented it as the round-7 P1
+#: guard — an inert enforcer (measured, #14623 review round 12, F4). The rule lives in
+#: `_h_14544_foreign_agent` below, where its measured boundaries are documented.
+#: What may sit between the claim's verb and its agent before the excuse applies: whitespace, or a
+#: comma plus one short adverb. Anything else — another clause, another verb — is not this verb's
+#: agent. Measured on the five shapes in `test_the_14544_exemption_paragraph_states_what_14544_did…`.
+_H_14544_FOREIGN_BEFORE_RE = re.compile(
+    r"^\s*(?:,?\s*(?:even|also|really)\s+)?\s*(?:at\s+any(?:\s+single)?\s+point\s+)?$",
+    re.IGNORECASE)
+#: Where an agent PHRASE ends: end punctuation, or a comma that opens a new clause. A bare comma does
+#: NOT end it — the appositive form "by the commit …, `#14544`" names the cut across one.
+_H_14544_AGENT_PHRASE_END_RE = re.compile(r"[;.!?]|,\s*(?:and|but|so)\b", re.IGNORECASE)
+#: An agent NOUN PHRASE: a backticked span in ANY case (this repo's convention, and requiring the
+#: closing backtick separates an identifier from a bare idiom), an issue ref, a capitalised name, or
+#: a determiner plus a noun. The stoplist is the idiom set, because `by the way` has the shape of an
+#: agent and is not one.
+_H_14544_AGENT_NP_RE = re.compile(
+    r"^\s*(?:`[A-Za-z][\w./-]*`|`?#\d+|`?[A-Z][\w.-]*|(?:the|a|an|its|their|his|her|this|that)\s+"
+    r"(?!way\b|design\b|construction\b|default\b|hand\b|then\b|now\b|contrast\b|definition\b"
+    r"|time\b|far\b|mistake\b|accident\b)\w)")
+
+
+def _h_14544_foreign_agent(sentence: str, match: re.Match[str]) -> bool:
+    """True when the change verb's `by <agent>` names someone OTHER than the cut.
+
+    The pattern above excludes only the cut's OWN label, so a phrase that DESCRIBES the cut — "by
+    the commit that took the file off `core`, `#14544`" — read as foreign and the retired claim
+    shipped CLEAN (measured, #14623 review round 8, F2). The agent's own words are read here
+    instead, up to the clause: if the cut is named in them, the agent is the cut.
+    """
+    # ⛔ A COMMA DOES NOT END THE AGENT PHRASE: the descriptive form is an APPOSITIVE — "by the commit
+    # that took the file off `core`, `#14544`" — so the read stops at `;`/`.`/`?`/`!` and not at `,`.
+    # Stopping at the comma shipped that claim GREEN (#14623 review round 8, F2); allowing the whole
+    # rest of the sentence would re-open the round-7 false block, where the cut is named in a LATER
+    # clause after a `;`.
+    #: ⛔ PLUS THREE THINGS, each measured (#14623 review rounds 9-10):
+    #:   • THE PHRASE ENDS AT A COMMA THAT OPENS A NEW CLAUSE (`, and|but|so`) — otherwise "even by the
+    #:     reaper, and `#14544`'s cut is separate" reads the cut out of the NEXT clause and refuses a
+    #:     TRUE sentence (measured RED before this; the appositive above is unaffected because it has
+    #:     no coordinator).
+    #:   • THE AGENT MUST BE AN AGENT NOUN PHRASE. Without that, `by design`, `by construction`,
+    #:     `by default` and `by the way` all read as FOREIGN and shipped the retired claim CLEAN.
+    #:   • A PHRASE MUST START WHERE A PHRASE CAN: whitespace or a comma-plus-adverb after the verb,
+    #:     so a `by` belonging to a later clause is never reached.
+    # ⛔ THE MATCH ENDS AT THE VERB STEM (`touch` in `touched`), so the position is advanced past the
+    # rest of that word before the agent is read — otherwise `ed by …` is not a phrase start and
+    # EVERY agent sentence is refused (#14623 review round 10, measured on nine fixtures).
+    pos = match.end()
+    while pos < len(sentence) and (sentence[pos].isalnum() or sentence[pos] in "_'\u2019-"):
+        pos += 1
+    tail = sentence[pos:]
+    first_by = re.search(r"\bby\s+", tail)
+    if first_by is None or first_by.start() > 40:
+        return False
+    if _H_14544_FOREIGN_BEFORE_RE.match(tail[:first_by.start()]) is None:
+        return False
+    rest = tail[first_by.end():]
+    end = _H_14544_AGENT_PHRASE_END_RE.search(rest)
+    agent = rest[:end.start()] if end else rest
+    if _H_14544_AGENT_NP_RE.match(agent) is None:
+        return False
+    return _H_14544_ACTOR_RE.search(agent) is None
+_H_14544_ROW_ADJECTIVAL_RE = re.compile(
+    # ⛔ ONE CLAUSE PER GAP (`[^,;.!?]`), not `[\s\S]`: measured at #14623 review round 7, the
+    # clause-bridging form read the REGISTRATION's adjective as the ROW's — "The `durations` row is
+    # `#14544`'s own edit, and the `eval` registration was left alone by that cut." — two TRUE
+    # statements in one sentence, refused. Both gaps stop at clause punctuation.
+    # ⛔ THE AGENT IS `by`, not `since`/`after`/`following`: measured RED at #14623 review round 8
+    # (F4) on the TRUE "the `durations` entry … is unchanged SINCE `#14544`" — a temporal relation
+    # asserts the opposite of "that cut did not change it", so only the agent preposition is graded.
+    r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,80}?"
+    # ⛔ NOT a NEGATED adjective: "the `durations` row was NEVER untouched by `#14544`" is TRUE and
+    # was refused as the claim (#14623 review round 15, P3).
+    r"(?<!not )(?<!never )un(?:touched|changed|altered|affected|modified|edited|shifted|moved|rewritten|re-read)"
+    r"[^,;.!?]{0,40}?\bby\s+(?:`?#14544|that\s+cut|the\s+cut)"
+    r"(?!\s*\w)"
+    # ⛔ NOT a NEGATED adjective: "the `durations` row was NOT left alone by `#14544`" is the
+    # paragraph's own CORRECTION and was refused as the claim (#14623 review round 15, P3).
+    r"|(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)"
+    r"[^,;.!?]{0,80}?(?<!not )(?<!never )left\s+(?:alone|un\w+)"
+    r"\s+by\s+(?:`?#14544|that\s+cut|the\s+cut)(?!\s*\w)"
+    # ⛔ …AND THE ATTRIBUTION FORM, where the agent arrives after a comma as an ascription rather than
+    # as the `by`-agent: "the `durations` row is unchanged, as that cut's own note records" states the
+    # claim, while the temporal "unchanged since" does not. Measured GREEN at #14623 review round 8.
+    r"|(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweight\b)[^,;.!?]{0,80}?"
+    r"(?:un(?:touched|changed|altered|affected|modified|edited|shifted|moved|rewritten|re-read)"
+    r"|left\s+(?:alone|un\w+))(?:\s*,\s*as\b|,?\s*(?:per|according\s+to)\b)"
+    r"[^,;.!?]{0,60}?(?:#14544|that\s+cut|the\s+cut)"
+    # neither … nor, in EITHER conjunct order: the round-8 reviewer swapped the two nouns of this
+    # very fixture and the claim shipped GREEN.
+    r"|#14544[^,;.!?]{0,40}?touch(?:ed|es|ing)?\s+neither[^,;.!?]{0,80}?\bnor\b",
+    re.IGNORECASE)
+#: …and the IMPERSONAL form, where the negation is the subject rather than an adverb — "Nothing about
+#: that row changed in `#14544`" is the retired claim with no adverb at all, and it reached neither
+#: arm above (measured GREEN, #14623 review round 8, F2). Graded by the same three parts: a
+#: negation word, a change verb, and the cut named in the clause.
+_H_14544_IMPERSONAL_NEGATION_RE = re.compile(
+    # ⛔ THE WHOLE SENTENCE'S WORD ORDER IS GRADED, not one order: round 15 narrowed this to
+    # `<row-noun> … nothing … verb`, which made FOUR spellings the parent red ship GREEN —
+    # "Nothing changed in `#14544` about that row.", "Nothing moved in `#14544` for the `durations`
+    # row.", "Nothing altered the weight in `#14544`." and "Nothing touched that row in `#14544`."
+    # (measured by differential against the parent, #14623 review round 16, P2). The object is graded
+    # by EXCLUSION instead (`_H_14544_NONROW_OBJECT_RE` in the helper), so a negated change of a
+    # REGISTRATION or of a BIN — the paragraph's own TRUE claims — is still not this claim.
+    r"\bnothing\b[^,;.!?]{0,80}?" + _H_14544_CHANGE_VERB
+    + r"[^,;.!?]{0,80}?(?:#14544|that\s+cut|the\s+cut)",
+    re.IGNORECASE)
+#: The OBJECTS that make an impersonal negation the paragraph's OWN true claim rather than the
+#: retired one: the registration, the bin, the pool, a shard reading. Read to EXCLUDE, because
+#: listing the row's own nouns as a positive requirement is what shipped four shapes GREEN.
+_H_14544_NONROW_OBJECT_RE = re.compile(
+    r"\b(?:registration|registrations|bin|bins|pool|pools|shard|shards|letter|letters)\b",
+    re.IGNORECASE)
+#: ⛔ THE DECLARED RESIDUAL, in the artifact rather than implied — filed as #14715 with six measured
+#: reproductions. This family reads clause structure off PUNCTUATION plus a subordinator list, which
+#: is a partial parser of English prose, so three shapes still escape it: (R1) a comma-set-off adjunct
+#: or a coordinated object puts the row noun in what this code calls another clause; (R2) the
+#: ROW-first arm's two gaps are still `[\s\S]` and can bridge a clause; (R3) a foreign agent in
+#: SUBJECT position is invisible, because the excuse is read only from a post-verbal `by …`. ⛔ Every
+#: round that bounded one of those gaps produced the opposite error on a sibling arm (rounds 7, 8 and
+#: 9 each did — measured), so they are filed rather than circled: the guard closes the classes a fold
+#: actually reintroduces, and #14715 carries the acceptance fixtures for the rest. What this arm does
+#: NOT do is certify the paragraph is true; the shapes that have shipped are fixtures here.
+#: …and the QUANTIFIER negator, a negation role this family had none for (#14623 review round 14,
+#: P3): "`#14544`'s cut changed none of the `durations` rows.", "None of the `durations` rows was
+#: changed by `#14544`." and "None of the `durations` rows changed in `#14544`." all shipped CLEAN.
+#: The OBJECT must be the row or its weight, so the paragraph's own TRUE claims — "changed none of
+#: the shard minutes", "touched none of the bins" — stay GREEN.
+_H_14544_QUANTIFIER_NEGATION_RE = re.compile(
+    r"(?:#14544|that\s+cut|the\s+cut)[^;.!?]{0,80}?" + _H_14544_CHANGE_VERB
+    + r"[^;.!?]{0,40}?\bnone\s+of\s+(?:the|these|those|its)\s+(?:[a-z]+\s+){0,2}"
+    # ⛔ NO `\b` AFTER THE BACKTICKED OPTION — a closing backtick is a non-word character, so
+    # `` `durations`\b `` could never match and the whole alternative was dead (measured here).
+    r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweights?\b)"
+    r"|\bnone\s+of\s+(?:the|these|those|its)\s+(?:[a-z]+\s+){0,2}"
+    r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bweights?\b)[^;.!?]{0,40}?"
+    r"(?:was|were|is|are|has|had)?\s*" + _H_14544_CHANGE_VERB,
+    re.IGNORECASE)
+#: The required claims stated the OTHER way round, beside the true one — measured GREEN at
+#: `148ab7c` (#14623 review round 5, F1d/F1e): keep `The REGISTRATION is the ONLY half exempt` and
+#: add "though both halves are exempt"; keep the true conclusion and add "this paragraph DOES
+#: exclude it". Keeping a true sentence beside its inverse satisfies every positive pin.
+#: ⛔ THE PREDICATE IS REQUIRED (#14623 review round 6, P3). A bare `both halves` was banned, so a
+#: TRUE sentence about this paragraph — "both halves of this paragraph are graded by an arm each"
+#: — red the arm with a diagnostic quoting a claim it never made. The inverse is `both halves …
+#: exempt`, so the predicate is what makes it the inverse; the non-vacuity assertions beside the
+#: arm pin both spellings it must still read.
+_H_14544_INVERTED_RE = re.compile(
+    # ⛔ `\b` AFTER EACH PREDICATE: without it `exempt` matched the paragraph's own noun `exemption`
+    # (and `exempted`), so TRUE prose — "Both halves of the exemption are graded by an arm each." —
+    # was refused with a diagnostic quoting an inverse it never makes (#14623 review round 12, F2).
+    r"both\s+halves[\s\S]{0,20}?(?:exempt\b|excluded\b)|both\s+(?:are|stay)\s+exempt\b"
+    r"|neither\s+half\s+is\s+excluded\b(?!\s+from)|row\s+half\s+is\s+exempt\b"
+    # ⛔ THE NATURAL NEGATION OF `_H_14544_SCOPE_RE`, and the row-half spellings — measured GREEN
+    # beside the true claim at #14623 review round 8, F1: the inverse ban read five spellings and not
+    # the one a fold reaches for first when it wants the row exempt again.
+    r"|not\s+the\s+ONLY\s+half|row\s+half\s+is\s+the\s+exempt|exempts\s+the\s+row"
+    # ⛔ AND THE AFFIRMATIVE FORMS OF THE SPELLINGS THE PINS NOW ACCEPT (#14623 review round 15, P2):
+    # widening the positive pin to three spellings without widening this ban left `The exempt half is
+    # the row.`, `The row alone is the only half exempt.` and the conclusion's `forecloses|rules out|
+    # excludes` shipping CLEAN — the very keep-the-true-sentence-add-its-inverse shape this ban is for.
+    r"|exempt\s+half\s+is\s+the\s+row|row\s+alone\s+is\s+the\s+(?:only\s+)?half"
+    r"|paragraph\s+(?:forecloses|rules\s+out|excludes)\b"
+    # ⛔ AND THE NEGATION AFTER THE PINNED SPAN: `_H_14544_SCOPE_RE` stops at `half`, so "the
+    # REGISTRATION is the ONLY half that is NOT exempt" satisfied it while stating the inverse
+    # (#14623 review round 12, F1). Comma-tolerant, because one spelling crosses a comma.
+    r"|ONLY\s+half[^;.!?]{0,60}?\b(?:not|never)\b[^;.!?]{0,20}?exempt\b"
+    r"|paragraph\s+DOES\s+exclude"
+    # …and the provenance claim kept only to be RETRACTED (#14623 review round 12, F5).
+    r"|own\s+edit[^.;!?]{0,40}?(?:which\s+is\s+(?:false|untrue|wrong)|is\s+(?:false|untrue|wrong))",
+    re.IGNORECASE)
+#: ⛔ AND THE SECOND-NOUN FORMS THE WIDENED POSITIVE PIN ADMITS (#14623 rounds 25-27). The round-24
+#: widening added `REGISTRATION(?:\s+half|\s+alone)?\s+is\s+exempt` to `_H_14544_SCOPE_RE` — a
+#: pattern used with `.search`, so a sentence that STATES the scope claim and then grants the SECOND
+#: HALF satisfies it. "The REGISTRATION is exempt, and so is the row" states the exact reading
+#: `#14612` deletes and matched no alternative here, so the arm stayed GREEN over it — measured on
+#: this tree by substituting that sentence into the live paragraph: GREEN, where the pre-round-24 pin
+#: RED'd it.
+#: ⛔ THAT CLASS IS NOT GRADED IN THIS REGEX, and the reason is a lesson rather than a preference: an
+#: ENUMERATED list of conjunctions cannot close a semantically open class, and each widening bought
+#: one gap for another. Measured on the two rounds that tried: round 25 added `so is the row` and
+#: left its twin `as is the row` admitting "The REGISTRATION alone is exempt, as is the row's
+#: weight"; round 26 added the twin and still missed ONE INSERTED WORD — `as is the durations row` —
+#: because the alternative was pinned to the literal phrase `the row`; and the bare `row is too`
+#: alternative introduced a FALSE BLOCK, reding everyday English ("The row is too specific to
+#: summarise at this altitude.") whose only relation to this paragraph was the noun. So the class is
+#: graded by `_h_14544_row_exempted` below, which reads the STRUCTURE of a sentence — is the row the
+#: subject of an exemption, or the complement of an additive marker — rather than a list of spellings
+#: of it. The non-vacuity loops beside the arm drive that function directly, in both directions.
+#: THE ROW-EXEMPTION CLASS, graded STRUCTURALLY (#14623 — the round table below is the history).
+#: The paragraph's false reading is that the `durations` ROW is exempt as well as the REGISTRATION.
+#: English says that two ways, and both are GRAMMATICAL:
+#:   * the row (or its weight, in EITHER order — `the row's weight` / `the weight of the row`) is
+#:     the SUBJECT of an exemption predicate; and
+#:   * the row is the COMPLEMENT of an additive marker — `so is` / `as is` / `as well as` /
+#:     `likewise` / `along with` / an elliptical `…, and the row is too`.
+#: ⛔ THE HISTORY BELOW, AND WHAT IT TAUGHT — read every row before widening ANY of it. Each row
+#: narrowed one class and bought one gap by opening another:
+#:   26  enumerated conjunctions               -> `as is the durations row` (ONE inserted adjective)
+#:                                             escaped, and `row is too` FALSE-BLOCKED ordinary English
+#:   27  enumerated the copula+adverb run      -> the elliptical `…, and the row is too` went GREEN
+#:                                             (its fixture was deleted with the alternative), and the
+#:                                             row noun lost its boundary so `rows` was refused
+#:   28  turned it into a function             -> the adverb run was STILL an enumerated six-item list,
+#:                                             so `the row is equally exempt` escaped
+#:   29  graded the post-copula run as tokens -> the adverb run stopped being a six-item list and
+#:                                             became a token run; the VERB kept its own membership
+#:                                             test, which is the gap round 31 measured
+#:   30  graded the noun phrase's SECOND ORDER -> the phrase was `the row's weight` and the additive
+#:                                             branch anchored the noun AT its marker, so the reverse
+#:                                             `as is the weight of the row` went GREEN in five
+#:                                             spellings (`_H_14544_ROW_NOUN`'s prefix stops one
+#:                                             word short of `row` there); the ORDER of a noun
+#:                                             phrase is as open a class as an adverb list
+#:   31  graded the VERB as a token too        -> round 29's fix graded the words AFTER the verb as
+#:                                             a run while leaving the VERB itself a membership test
+#:                                             against `_H_14544_COPULA`, and that set is NOT closed:
+#:                                             `becomes` / `seems` / `appears` / `turns` / `gets` /
+#:                                             `goes` all returned `None`, so `The row becomes
+#:                                             exempt.` shipped GREEN — and the note beside the
+#:                                             constant justified the enumeration as EXHAUSTIVE
+#:                                             ("every English spelling … passes through a form of
+#:                                             be, remain or stay"), which was false in the one
+#:                                             place a later widener reads
+#:   32  admitted a PARENTHETICAL between     -> round 31 graded the verb as a token but anchored the
+#:       the noun and its predicate            slot IMMEDIATELY after the noun, so ONE inserted
+#:                                             punctuation mark bought the same gap ONE inserted word
+#:                                             bought at round 26: `The row, too, is exempt.`, `The
+#:                                             row, like the REGISTRATION, is exempt.`, `The row (as
+#:                                             well as the REGISTRATION) is exempt.` and `The row is,
+#:                                             in effect, exempt.` all returned `None` (measured at
+#:                                             round 31's head); and two ELLIPTICAL spellings the
+#:                                             marker list never had — `…; the row as well.` and
+#:                                             `… and so too the row.` — also returned `None`
+#:   33  graded EVERY match, not the first -> `.search` returned the FIRST row claim and stopped, so
+#:                                             a NEGATED first claim HID a later un-negated one:
+#:                                             `The row is not exempt, but the row's weight is
+#:                                             exempt.` shipped GREEN (measured at round 32's head)
+#: ⛔ RULE 1 — NEVER ENUMERATE AN OPEN LEXICAL CLASS — and the COPULA is one, which is the correction
+#: round 31 forced. An adverb list is open (no six items cover `equally` / `similarly` / `therefore`
+#: / `fully` / `just as`), and so is the verb slot: `become` / `seem` / `appear` / `turn` / `grow` /
+#: `get` / `go` are copular substitutions, so the earlier claim that a be/remain/stay set is
+#: "exhaustive" was the same enumeration defect one level up. The WHOLE predicate is therefore graded
+#: structurally — ONE verb token, then a run that may not CROSS A CLAUSE BOUNDARY (up to 60
+#: characters, no `.` `;` `:` `!` `?` and no em-dash — Rule 1b), then `exempt` — never as membership
+#: in any list. ⛔ NOT "a run of up to three words", which is what this note said at round 32: round
+#: 29 graded three tokens and round 31 replaced that bound with the clause, because a four-word
+#: adverbial run was certified CLEAN under the token count (measured). `_H_14544_COPULA` is NOT used
+#: here at all: it is the admitted spellings of the two
+#: MARKER idioms (`so is` / `as is`, the elliptical `… is too`) and of the scope pin's positive forms,
+#: where the set is what the pattern READS rather than a limit on what the writer may write.
+#: ⛔ RULE 2 — NEGATION IS TOLERATED, AND IT IS LOCAL (NOT "anywhere in the sentence", which is what
+#: this note said at round 32): a negation must sit in a WINDOW around the matched phrase
+#: (`_H_14544_NEGATION_WINDOW_BEFORE` / `_AFTER`, round 30), AND NOT CROSS A CLAUSE BOUNDARY
+#: (Rule 2b below, round 33 — `but` / `yet` / `;` / em-dash truncate the window), because EVERY
+#: sentence of the graded paragraph already contains one — `does NOT claim`, `cannot move`,
+#: `no-per-file-weight` — so a sentence-wide veto was OFF for exactly the rewrite a fold produces.
+#: Within the window it is
+#: tolerated: `The row is NOT exempt.`, `No \`durations\` row is exempt from being a packing cause.`
+#: and `The \`durations\` row is exempt from nothing.` are GREEN — all TRUE, all of them refused by
+#: round 28's predicate, which had no negation carve-out at all and only tolerated the first by
+#: accident (the bare `not` happened to fall outside its adverb list). ⛔ AND EVERY MATCH IS
+#: CONSIDERED, not only the first (round 33): see `_h_14544_first_unnegated` below.
+#: ⛔ RULE 3 — `too` MUST END ITS SENTENCE. `too` has three readings here: the ELLIPSIS (`…, and the
+#: row is too.` — the false claim), the INTENSIFIER (`the row is too specific to summarise` — TRUE
+#: prose about a row), and the APPOSITIVE (`that row, too, is a packing cause` — TRUE, and the block
+#: says exactly this). Only the ellipsis ends a sentence; the other two continue past `too`. A
+#: lookahead admitting `,` conflates the appositive with the ellipsis, which round 28 did.
+#: ⛔ AND WHAT THIS DOES NOT COVER, stated rather than implied (the previous list named two residuals
+#: and was wrong on one of them, so this one names the shapes it cannot read):
+#:   * an exemption that never spells the substring `exempt` at all (`the row is spared the
+#:     ratchet` — measured `None` at round 32). ⛔ The wording that used to stand here named `the row
+#:     keeps its exemption` as unread and that was FALSE, measured: `exempt` carries no right
+#:     boundary, so it reads the `exempt` INSIDE `exemption` and `… keeps its exemption` is refused;
+#:   * an INCLUSIVE `too` at the end of a sentence (the fourth reading: `The ratchet reads the row's
+#:     weight too.` — TRUE prose that is NOT about exemption, measured REFUSED at round 32 whenever
+#:     the preceding sentence says `exempt`, because Rule 3 reads a clause-terminal `too` as the
+#:     ellipsis). A deliberate precedence choice, recorded rather than widened: nothing in the
+#:     pattern can tell the inclusive reading from the elliptical one;
+#:   * `…; the row as well.` — the same ellipsis spelled with `as well` — for the reason directly
+#:     above: widening the sentence-final marker to a second word widens the SAME false block;
+#:   * an additive marker whose exemption sits MORE than one sentence earlier;
+#:   * a NEGATION in a sentence that nonetheless affirms the row's exemption (`No one disputes that
+#:     the row is also exempt`) — Rule 2 is a precedence choice, not a parser;
+#:   * a FALSE row claim coordinated with `and` to a negated clause (`The row is not exempt, and the
+#:     weight of the row is exempt.` — measured GREEN at round 33). Rule 2b does NOT break at `and`,
+#:     because the anaphoric ellipsis inherits the elided predicate (`The row is not exempt, and so
+#:     is the weight of the row.` is TRUE) and nothing here tells the two apart;
+#:   * an ANAPHORIC weight that names no row at all (`as is the weight it carries`, `as is its
+#:     weight`) — the noun phrase is required to NAME one, in either order (round 30);
+#:   * a sentence that REPORTS what the row says — `The row states that the REGISTRATION is exempt.`
+#:     — is READ, although it is TRUE prose (measured `READ` at round 34's head, with `states` /
+#:     `records` / `shows` / `says` / `explains` all reading): the run Rule 1b bounds is the same run
+#:     that reads `The row notes that the weight of the row is exempt.`, which IS the false claim, and
+#:     nothing in the pattern tells a reporting verb from an assertive one. A FALSE BLOCK on a shape
+#:     a fold is unlikely to produce, accepted rather than narrowed, because the narrowing would
+#:     reopen the fail-open beside it — and this list says which way the choice went rather than
+#:     leaving it to be rediscovered;
+#:   * a verb-to-`exempt` run LONGER THAN 60 CHARACTERS, or one that CROSSES A CLAUSE BOUNDARY —
+#:     the two bounds Rule 1b actually grades, measured at round 33: `The row is with a great
+#:     deal of confidence and after much discussion among the authors exempt.` (94 characters) and an
+#:     interposed comma group over 60 characters both return `None`. ⛔ The two examples this note
+#:     used to give were BOTH false at the head that carried them, and both are READ fixtures now:
+#:     `the row would eventually be exempt` (round 32) and `the row can be expected to be exempt`
+#:     (round 33 — measured READ, not `None` as the round-32 wording claimed). The run is
+#:     clause-bounded rather than word-counted, so a longer verb phrase is read.
+_H_14544_COPULA = (
+    r"(?:is|are|was|were|stays|remains|stayed|remained"
+    # ⛔ THE SUBSTITUTION COPULAS (#14623 round 31). `become` / `seem` / `appear` state the SAME
+    # exemption as `is`; omitting them made `The REGISTRATION becomes exempt.` a FALSE BLOCK in the
+    # scope pin (a positive pin that REFUSES a true claim) and an unread shape in the row branches.
+    # They are here rather than in a second list because a private copula run per arm is how the two
+    # drift apart (§ the note above `_H_14544_SCOPE_RE`).
+    r"|becomes|became|seems|seemed|appears|appeared)")
+#: The row, and the names this family uses for the SAME row. ``the `durations` ENTRY`` is an
+#: accepted TRUE rewording elsewhere in this block (`_H_14544_ROW_PROVENANCE_RE`), so a ban that
+#: read only `row` left the false claim reachable by renaming its subject (measured round 29).
+#: ⛔ THE DETERMINER RUN ADMITS BACKTICKS (`[`\w]+`): this block writes ``No `durations` row``, and a
+#: bare `\w+` cannot span the code span, so the match started at `row` and the `No` fell OUTSIDE the
+#: negation window — refusing TRUE prose (measured).
+_H_14544_ROW_NOUN = (r"(?:(?:the|that|this|its|a|no|durations)\s+(?:[`\w]+\s+){0,2})?"
+                     r"(?:row\b(?:['\u2019]s)?(?:\s+weight\b)?"
+                     r"|`durations`\s+entry)")
+#: ⛔ THE SAME NOUN PHRASE IN THE REVERSE ORDER — `the weight of the row`, `the weight carried by
+#: that row`, `the weight on the row` — which `_H_14544_ROW_NOUN` cannot reach: its determiner
+#: prefix allows two words before `row`, and this order puts three there (`the weight of the`).
+#: ⛔ MEASURED FAIL-OPEN AT ROUND 29's OWN HEAD, and it is round 26's lesson one level down: the
+#: additive branch anchors the noun phrase AT THE MARKER, so `The REGISTRATION is the ONLY half
+#: exempt, as is the weight of the row.` shipped GREEN through `_h_14544_banned_claim` — the arm
+#: that exists to refuse exactly that reading — in FIVE additive spellings (`as is` / `likewise` /
+#: `as well as` / `along with` / `so is`). The SUBJECT branch caught it, which is what hid the hole:
+#: `.search` finds `the row is exempt` INSIDE `the weight of the row …`, so only the anchored
+#: spellings escaped. The order is not a spelling — this paragraph's own subject is `that row's
+#: WEIGHT`, so `the weight of the row` is the natural way to write it (#14623 round 30).
+_H_14544_ROW_WEIGHT_REVERSE = (
+    r"(?:the|that|this)\s+(?:\w+\s+){0,2}weight\s+"
+    r"(?:of|on|in|carried\s+by|from|belonging\s+to)\s+"
+    r"(?:the|that|this)\s+(?:\w+\s+){0,2}row\b")
+#: Either order of the row noun, LONGEST FIRST so a failure names the weight phrase rather than the
+#: `the row` inside it. Used by EVERY branch below — the reverse order is not a spelling of the
+#: subject test alone.
+_H_14544_ROW_NOUN_ANY = r"(?:" + _H_14544_ROW_WEIGHT_REVERSE + r"|" + _H_14544_ROW_NOUN + r")"
+#: Rule 1: the verb AND the run between it and `exempt` are graded as tokens, never as a list of
+#: members — the verb slot included, because a copula set is an open lexical class (round 31).
+#: ⛔ IT IS ONE TOKEN, and the reason is MEASURED rather than argued: one token closes the class that
+#: was measured escaping (`becomes` / `seems` / `appears` / `turns` / `gets` / `goes`), while a
+#: `(?:\w+\s+){0,3}` slot was ALSO measured against every TRUE-prose fixture here and read none of
+#: them, so it is not refused on a false-block ground it does not have. It is left narrower because
+#: escaping a token (`the row would eventually be exempt`) is a residual DECLARED below — widen it
+#: when a shape is measured shipping, not before.
+#: ⛔ NOT `_H_14544_ROW_SUBJECT_RE` — that name is TAKEN (`:10309`, the anaphor check's row-subject
+#: guard), and reusing it here silently re-pointed that check at this narrower pattern: the retired
+#: `neither of which` sentence stopped being read and the non-vacuity pin beside the arm REDed. A
+#: name collision between two unrelated guards is invisible at the definition site and only shows up
+#: as a guard that no longer fires.
+#: ⛔ RULE 1a — A PARENTHETICAL DOES NOT BREAK THE CLAIM (#14623 round 32). Round 31 graded the verb
+#: as a token — and kept the slot anchored IMMEDIATELY after the noun, so ONE inserted punctuation mark
+#: defeated the subject branch exactly as ONE inserted word defeated round 26. Measured at round 31's
+#: head, `_h_14544_row_exempted` returned `None` for every one of these, i.e. the paragraph shipped
+#: CLEAN: `The row, too, is exempt.` / `The \`durations\` row, too, is exempt.` / `The row's weight,
+#: too, is exempt.` / `The row, like the REGISTRATION, is exempt.` / `The row (as well as the
+#: REGISTRATION) is exempt.` / `The row is, in effect, exempt.`
+#: ⛔ A COMMA IS NOT A LEXICAL CLASS EITHER, which is why this is not a list of the adverbs that may
+#: sit there (`too`, `likewise`, `however`, …): ANY bracket group or comma-delimited clause of bounded
+#: width is admitted. Admitted on BOTH sides of the verb, because `the row is, in effect, exempt` puts
+#: the parenthetical AFTER it — the two slots are one rule, not two spellings of a list.
+_H_14544_INTERPOSED = r"(?:[(][^()]{1,60}[)]|,[^,.;:!?()]{1,60},)"
+_H_14544_ROW_EXEMPT_SUBJECT_RE = re.compile(
+    _H_14544_ROW_NOUN_ANY
+    + r"(?:\s*" + _H_14544_INTERPOSED + r")?"
+    + r"\s+\w+\s*"
+    + r"(?:" + _H_14544_INTERPOSED + r"\s*)?"
+    # ⛔ RULE 1b — THE RUN IS BOUNDED BY THE CLAUSE, NOT BY A TOKEN COUNT (#14623 round 30). Round 29
+    # graded `(?:\w+\s+){0,3}` and the bound was UNDRIVEN: loosening it to `{0,9}` left the arm GREEN,
+    # while a four-word adverbial run (`the row is in every relevant respect exempt`), a comma-embedded
+    # one (`the row is, all else equal, exempt`) and a three-word one (`more or less equally`) were all
+    # certified CLEAN. What bounds this claim is that the run may not CROSS a clause boundary — no
+    # `.` `;` `:` `!` `?` and no em-dash — not an arbitrary number of words.
+    + r"(?P<run>[^.;:!?\u2014\n]{0,60}?)exempt", re.IGNORECASE)
+#: Rule 3: `too` is clause-terminal only when it ENDS the sentence — `[.!?]` or end of string.
+#: Closed auxiliary set (Rule 1): every spelling of "so <aux> the row". The peer's round-31 finding that
+#: the COPULA is an open class is honoured in the SUBJECT branch's `\w+` verb slot; here the marker is
+#: `so`/`as` + a light verb, which is a closed paradigm, so it is enumerated — and it must include
+#: `do`/`does`/`did`, because `The REGISTRATION is exempt, and so does the row.` is the same claim and
+#: was certified CLEAN at round 29.
+#: ⛔ DERIVED FROM `_H_14544_COPULA`, never hand-written beside it — a second hand-written copula list
+#: is exactly how two arms drift apart, and it had: COPULA carries `seemed` / `appeared` and AUX did
+#: not, so `The REGISTRATION is exempt, and so seemed the row.` was certified CLEAN (measured).
+#: The extras are the LIGHT VERBS that take the same marker.
+_H_14544_AUX = (_H_14544_COPULA[:-1]
+                + r"|do|does|did|has|have|had|will|would|can|could|becomes|became|seems|appears"
+                r"|turns|gets|goes)")
+#: ⛔ RULE 4 — WHICH BRANCH MAY READ THE PREVIOUS SENTENCE IS A PROPERTY OF THE BRANCH, and it is
+#: expressed as NAMED GROUPS rather than as a test on the matched text. The anaphoric markers elide
+#: the predicate their antecedent stated, so they may read one sentence back:
+#:   `anaph` — `so is the row` / `as did the row's weight` / `so too the row` / `so is its weight`
+#:   `anaph_too` — `so too the row` with the copula DROPPED (round 34)
+#:   `anaph_likewise` — `Likewise, the weight of the row.` (round 34)
+#:   `anaph_same` — `The same goes for the row.` (round 34)
+#:   `ellip` — `…, and the row is too.`
+#: ⛔ ONE TUPLE, so a branch that elides its predicate cannot be spelled without being tagged: a
+#: marker that REPLACES the predicate (a pro-form — `so`/`as`/`likewise`/`so too`/`the same` — or a
+#: bare clause-terminal `too`) can only be read against the sentence before it, and a marker that
+#: ATTACHES to a predicate the same sentence carries (`as well as` / `along with` / `as well` /
+#: `included`) must not read back. The three groups added at round 34 spell the elision WITHOUT a
+#: copula and stood beside the coordinated markers, so they were classified as coordination and
+#: could never fire in a sentence of their own.
+_H_14544_ANAPHORIC_GROUPS = ("anaph", "anaph_too", "anaph_likewise", "anaph_same",
+                             "anaph_as_well", "anaph_too_weight", "ellip")
+#: A COORDINATION carries its OWN subject and may NOT: `along with the row's weight` is this block's
+#: own TRUE statement of fact about `durations_floors`, and carrying an `exempt` from the sentence
+#: before REFUSED it end-to-end (measured round 30). ⛔ A first attempt tested the match's first
+#: token instead of tagging the branch, and that silently excluded the ELLIPTICAL form — the branch
+#: that needs the antecedent most.
+_H_14544_ROW_ADDITIVE_RE = re.compile(
+    r"(?:"
+    r"(?P<anaph>(?:so|as)\s+(?:too\s+)?" + _H_14544_AUX + r"\s+(?:"
+    + _H_14544_ROW_NOUN_ANY + r"|(?:its|the|that|this)\s+weight\b))"
+    # ⛔ `so too the row` — the marker with the copula DROPPED (#14623 round 32, the peer's finding):
+    # the `so|as` alternative above REQUIRES a light verb, so this spelling returned `None`. The verb
+    # is optional only AFTER `so too`, which is unambiguous; making it optional after a bare `so`/`as`
+    # would refuse TRUE prose like `As the row above states, …`.
+    # ⛔ AND IT IS ANAPHORIC (#14623 round 34): with the copula DROPPED this marker states NOTHING
+    # on its own — `so too` is a pro-form for the previous sentence's predicate — so it must be
+    # TAGGED, or Rule 4 refuses it the antecedent it cannot do without. Measured at round 33's head:
+    # `The REGISTRATION is exempt from the cut. So too the row.` shipped GREEN end-to-end through
+    # `_h_14544_banned_claim` — the branch matched, then the `exempt` gate found no exemption in ITS
+    # OWN sentence and returned None. The coordinated spelling (`… exempt and so too the row.`)
+    # read, because its antecedent is in the SAME sentence, which is what hid this: only the
+    # same-sentence form was ever measured.
+    + r"|(?P<anaph_too>so\s+too\s+(?:" + _H_14544_AUX + r"\s+)?" + _H_14544_ROW_NOUN_ANY + r")"
+    # …and the same pro-form with the WEIGHT as its complement (`so too its weight`), which the
+    # row-only form above cannot reach — measured CLEAN at round 33's head (#14623).
+    + r"|(?P<anaph_too_weight>so\s+too\s+(?:its|the|that|this)\s+weight\b)"
+    # coordination that names the row without restating the predicate it modifies. ⛔ `likewise` is
+    # NOT one of these, although it stood here until round 34: unlike `as well as` / `along with`,
+    # which attach to a predicate the same sentence states, `likewise` REPLACES that predicate, so in
+    # a sentence of its own it needs the antecedent. Measured at round 33's head:
+    # `The REGISTRATION is exempt from the cut. Likewise, the weight of the row.` shipped GREEN, and
+    # the comma spelling matched no alternative here at all.
+    + r"|(?:as\s+well\s+as|along\s+with)\s+" + _H_14544_ROW_NOUN_ANY
+    + r"|(?P<anaph_likewise>likewise\s*,?\s+" + _H_14544_ROW_NOUN_ANY + r")"
+    # ⛔ AND THESE TWO ELIDE THEIR PREDICATE AS WELL (#14623, measured): `The row as well.` and
+    # `The row included.` name no exemption of their own — they are pro-forms for the previous
+    # sentence's predicate — so untagged they could not fire in the only shape they exist for, one
+    # sentence after the exemption, and both shipped GREEN there. They are tagged for the same reason
+    # `so too the row` and `the same goes for the row` are.
+    + r"|(?P<anaph_as_well>" + _H_14544_ROW_NOUN_ANY + r"\s+as\s+well\b"
+    + r"|" + _H_14544_ROW_NOUN_ANY + r"\s+included\b)"
+    # ⛔ A PRO-FORM TOO — `the same` names no exemption either — so it is tagged for the same reason
+    # as `so too the row`. Measured GREEN in its own sentence at round 33's head.
+    + r"|(?P<anaph_same>the\s+same\s+goes\s+for\s+" + _H_14544_ROW_NOUN_ANY + r")"
+    # the ELLIPTICAL form, which is ANAPHORIC. ⛔ `too` must END its sentence (Rule 3): an intensifier
+    # takes an adjective (`the row is too specific to summarise`) and an appositive continues
+    # (`that row, too, is a packing cause`) — both TRUE, both refused by a bare `too\b`.
+    + r"|(?P<ellip>" + _H_14544_ROW_NOUN_ANY
+    + r"\s*(?:" + _H_14544_COPULA + r")?\s*,?\s*too\s*(?:[.!?]|$))"
+    + r")", re.IGNORECASE)
+#: Rule 2. `n't` is listed because a contraction negates as surely as `not` does.
+#: ⛔ `cannot` IS ITS OWN WORD, and this block uses it ("dropping that REGISTRATION cannot move a
+#: bin"). `not` and `n't` cover the spaced and contracted forms and NEITHER matches `cannot`, so the
+#: paragraph's own thesis restated negatively was REFUSED as false prose (measured: `The row cannot
+#: be exempt.` RED, `The row can not be exempt.` GREEN).
+_H_14544_NEGATION_RE = re.compile(
+    r"\b(?:no|not|never|none|nothing|neither|nor|cannot)\b|n['\u2019]t\b", re.IGNORECASE)
+
+
+#: ⛔ RULE 2 — NEGATION IS LOCAL, NEVER SENTENCE-WIDE (#14623 round 30, P1). Round 29 tolerated a
+#: sentence containing ANY negation, and EVERY sentence of the graded paragraph contains one already
+#: — `does NOT claim`, `cannot move`, `not restated`, `no-per-file-weight`, `does NOT exclude`. The
+#: measured consequence: appending the false claim as a CLAUSE to a live sentence was certified GREEN,
+#: while the same claim as its own sentence was RED. The ban was OFF for exactly the rewrite a fold
+#: produces. A negation must therefore sit in a WINDOW around the exemption it negates.
+#: ⛔ 12, not 30 (#14623, measured): at 30 the window reached a negation belonging to a DIFFERENT
+#: noun phrase — `is not a gate,` licensed a `the row` 18 characters later — so ordinary block prose
+#: with a folded clause was certified CLEAN. The negation that matters sits AT the match start
+#: (`No `durations` row`) or inside the run (`the row is not exempt`).
+_H_14544_NEGATION_WINDOW_BEFORE = 12
+_H_14544_NEGATION_WINDOW_AFTER = 25
+#: Rule 2b: the boundaries a negation does NOT reach across — a sentence end, an em-dash, and a
+#: CONTRASTIVE conjunction. `and` is excluded on purpose (see `_h_14544_negated`).
+_H_14544_CLAUSE_BREAK_RE = re.compile(
+    r"[;.!?\u2014]|\b(?:but|yet|however|although|whereas)\b", re.IGNORECASE)
+
+
+def _h_14544_negated(sentence: str, match: re.Match[str]) -> bool:
+    """Whether a negation sits in the WINDOW around `match` — Rule 2, scoped.
+
+    ⛔ AND IT DOES NOT REACH ACROSS A CLAUSE BOUNDARY (#14623 round 33). The window was symmetric and
+    unbounded, so a negation in the PREVIOUS clause covered the next clause's affirmative claim:
+    measured at round 32's head, both of these shipped GREEN through `_h_14544_banned_claim` —
+
+        The row is not exempt, but the row's weight is exempt.
+        The row is not exempt; the weight of the row is exempt.
+
+    — because `not` sat 20 characters before the second claim. A negation's scope is the clause it
+    sits in, so the window is truncated at a sentence end (`;` `.` `!` `?`) or an em-dash, and at a
+    CONTRASTIVE conjunction (`but` / `yet` / `however` / `although` / `whereas`), which turns the
+    claim around. ⛔ `and` is deliberately NOT a boundary: the anaphoric ellipsis inherits the
+    predicate it elides (`The row is not exempt, and so is the weight of the row.` is TRUE and must
+    stay tolerated), and nothing in the pattern can tell that from a coordinated second clause — a
+    residual stated on the rules above rather than guessed at here.
+    """
+    if _H_14544_NEGATION_RE.search(match.group(0)):
+        return True    # `the row is NOT exempt` — the negation is INSIDE the claim
+    before = sentence[max(0, match.start() - _H_14544_NEGATION_WINDOW_BEFORE):match.start()]
+    after = sentence[match.end():match.end() + _H_14544_NEGATION_WINDOW_AFTER]
+    before = _H_14544_CLAUSE_BREAK_RE.split(before)[-1]
+    after = _H_14544_CLAUSE_BREAK_RE.split(after)[0]
+    return _H_14544_NEGATION_RE.search(before + " " + after) is not None
+
+
+#: ⛔ THE ANTECEDENT'S POLARITY IS READ LOCALLY TOO (#14623 round 35, MEASURED). The anaphoric branch
+#: asked whether ANY negation appeared in the antecedent, which is the sentence-wide test Rule 2
+#: above forbids — and every sentence of the graded block carries one for reasons that have nothing
+#: to do with the exemption (`cannot move a bin`, `not restated`, `no-per-file-weight`). Measured at
+#: round 34's head, all of these shipped GREEN through `_h_14544_banned_claim`:
+#:
+#:     The REGISTRATION is exempt from being a packing cause, and dropping that REGISTRATION cannot
+#:     move a bin. So is the row.                                 GREEN
+#:     … The same goes for the row.                               GREEN
+#:     … Likewise, the weight of the row.                          GREEN
+#:     … So too the row. / … The row as well. / … The row included. GREEN
+#:     Dropping that REGISTRATION cannot move a bin, and the REGISTRATION is exempt. So too the row.
+#:                                                               GREEN
+#:
+#: A fold that merges the exemption with the block's own `cannot` thesis is the rewrite this
+#: paragraph's history produces (a spliced clause is how the false sentence arrived in the first
+#: place), so the tolerance was OFF for exactly that shape. The polarity that matters is the one on
+#: the ANTECEDENT'S OWN `exempt`, so the same window rule is applied to that token — with one
+#: difference that is measured rather than stylistic: the BEFORE side is bounded by the clause and
+#: its coordinators, NOT by 12 characters, because the negation that makes `No `durations` row is
+#: exempt` TRUE is a sentence-initial determiner three words from `exempt` (the same miss the subject
+#: branch's determiner run was widened for at round 34). The AFTER side stays bounded, and at a
+#: coordinator, because a negation past `and` / `,` belongs to the NEXT clause — which is what keeps
+#: `… exempt, and dropping that REGISTRATION cannot move a bin` reading as AFFIRMATIVE, the reading
+#: that must be refused once a marker follows it.
+_H_14544_EXEMPT_SCOPE_BREAK_RE = re.compile(
+    r"[;.!?\u2014,]|\b(?:and|but|yet|or|nor|however|although|whereas|which|that|so|because|while"
+    r"|when|if|since)\b", re.IGNORECASE)
+
+
+#: ⛔ `not only` / `not merely` / `not just` ASSERT what follows — the negation scopes over the
+#: focus particle, never over the predicate — so this phrase is not a negated exemption.
+_H_14544_FOCUS_PARTICLE_RE = re.compile(
+    r"\b(?:not|never)\s+(?:only|merely|just|simply|solely)\b", re.IGNORECASE)
+
+
+def _h_14544_exempt_negated(text: str) -> bool:
+    """Whether the LAST `exempt` in `text` is negated inside ITS OWN clause.
+
+    Rule 2 scoped to the ANTECEDENT: the anaphoric marker inherits the polarity of the exemption
+    before it, so an unrelated negation elsewhere in that sentence (`cannot move a bin`) must not
+    tolerate the marker — measured at round 34's head as six GREEN claims, all the same root.
+    """
+    hits = list(re.finditer(r"exempt", text, re.IGNORECASE))
+    if not hits:
+        return False    # no exemption stated at all: the caller's context gate refuses it
+    hit = hits[-1]
+    before = _H_14544_EXEMPT_SCOPE_BREAK_RE.split(text[:hit.start()])[-1]
+    after = _H_14544_EXEMPT_SCOPE_BREAK_RE.split(text[hit.end():])[0]
+    after = after[:_H_14544_NEGATION_WINDOW_AFTER]
+    # ⛔ A FOCUS PARTICLE IS NOT A NEGATION OF THE EXEMPTION (#14623, measured). `not only exempt` /
+    # `not merely exempt` / `not just exempt` ASSERT the exemption — the `not` scopes over the
+    # particle — so counting it suppressed the very claim this guard exists to keep RED:
+    #     The REGISTRATION is not only exempt, and so is the row.    GREEN   <- banned sentence
+    #     The REGISTRATION is only exempt, and so is the row.        RED     <- same claim, no garnish
+    # Masking the particle phrase out of the window is exact: it removes only the affirmative idiom.
+    scope = _H_14544_FOCUS_PARTICLE_RE.sub(
+        lambda hit: " " * len(hit.group(0)), before + " " + after)
+    return _H_14544_NEGATION_RE.search(scope) is not None
+
+
+#: ⛔ A NEGATED PREDICATE NOMINATIVE — `A REGISTRATION IS NOT A ROW` — is not an exemption claim
+#: about a row, so it is masked before the scan.
+#: ⛔ AND IT MUST END ITS CLAUSE (#14623, measured). Matching on syntax alone cannot tell the thesis
+#: (`IS NOT A ROW`, full stop) from a row that is the SUBJECT of a negated predicate whose predicate
+#: follows (`the row is not a row the ratchet exempts` — TRUE prose: the row is NOT exempt). Masking
+#: the second deletes its negation and leaves `exempts` to match affirmatively, which was a FALSE
+#: BLOCK. The lookahead requires the predicate nominative to be complete, so only the thesis is
+#: masked. ⛔ And the contraction alternative closes on `n` inside `isn't`, where there is no `\b` —
+#: so it could never fire, and it is written as `can`-style free text instead of pretending.
+_H_14544_NOT_A_ROW_RE = re.compile(
+    r"\b(?:not|never)\s+(?:a|the|any|either|one)?\s+row\b"
+    # ⛔ ENDED BY PUNCTUATION **OR BY A COORDINATOR** (#14623, measured). Punctuation alone left a
+    # boundary-less thesis unmasked — `A REGISTRATION IS NOT A ROW and the row is exempt too` — and
+    # its own `NOT` then sat in Rule 2's before-window and READ AS NEGATING THE NEXT CLAUSE'S CLAIM,
+    # so ONE DROPPED COMMA turned the banned sentence GREEN. `and` / `but` / `so` complete the
+    # predication exactly as a comma does; a RELATIVE pronoun does not, which is why
+    # `the row is not a row the ratchet EXEMPTS` stays unmasked and stays GREEN.
+    # ⛔ A HYPHEN AND AN EN-DASH COMPLETE IT TOO (#14623, measured): the em-dash was covered only
+    # incidentally, by the clause-break regex, so `A REGISTRATION IS NOT A ROW - the row is exempt
+    # too` and its en-dash twin left the thesis unmasked and shipped GREEN — the same one-keystroke
+    # hole this rule exists to close. All three dash lengths now complete the predication.
+    r"(?=\s*(?:[,;:.!?)\]\u2013\u2014-]|and\b|but\b|so\b|$))",
+    re.IGNORECASE)
+
+
+def _h_14544_first_unnegated(pattern: re.Pattern[str],
+                            sentence: str) -> re.Match[str] | None:
+    """The FIRST match of `pattern` that no negation in its window covers, or None.
+
+    ⛔ `pattern.search` IS NOT ENOUGH, and the gap it leaves is measured (#14623 round 33): the first
+    match wins, so a sentence whose FIRST row claim is negated returned None and never looked at a
+    LATER, un-negated claim in the same sentence. Measured at round 32's head, all of these shipped
+    GREEN through `_h_14544_banned_claim`:
+
+        The row is not exempt, but the row's weight is exempt.
+        The row is not exempt; the weight of the row is exempt.
+        The row is not exempt, but the `durations` entry is exempt.
+
+    A negated row claim is TRUE prose and must be tolerated; that is not a licence to stop reading
+    the sentence. This grades the PROPERTY — "no un-negated row claim in this sentence" — instead of
+    "the first one happens to be true".
+    """
+    # ⛔ AND THE NEGATED PREDICATE NOMINATIVE IS MASKED, not merely skipped (#14623, measured). These
+    # patterns span the whole clause to reach `exempt`, so a tolerated match SWALLOWS every candidate
+    # inside its own span and a sentence certified CLEAN while its trailing clause stated the claim:
+    #     ⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted, and the
+    #     row is exempt too.                                             GREEN
+    # `A REGISTRATION IS NOT A ROW` is this block's thesis: the `row` in it is the OBJECT of a negated
+    # predicate nominative, so neither it nor its `not` may be read as an exemption claim. Masking it
+    # out (same length, so every offset is preserved) removes only what must not count.
+    # ⛔ The obvious resume rule does NOT work and was measured failing: resuming one character past a
+    # match start re-matches `No `durations` row is exempt` at `row`, dropping its `No` and turning
+    # TRUE prose RED.
+    # ⛔ TWO MASKS, applied ONCE, and both are needed by BOTH readers (#14623, measured). The
+    # `not only` mask started life inside `_h_14544_exempt_negated` — the ANAPHORIC antecedent's
+    # reader only — so the SUBJECT branch, which reads polarity through `_h_14544_negated`, still
+    # counted the particle's `not` as a negation and certified the retired claim:
+    #     The `durations` row is ONLY exempt, its weight is the shard-layout input.        RED
+    #     The `durations` row is not only exempt, its weight is the shard-layout input.    GREEN
+    # One claim, one garnish, opposite verdicts. `A FOCUS PARTICLE ASSERTS THE EXEMPTION`, so the
+    # phrase is masked here, where every reader inherits it.
+    masked = _H_14544_NOT_A_ROW_RE.sub(lambda hit: "\x00" * len(hit.group(0)), sentence)
+    masked = _H_14544_FOCUS_PARTICLE_RE.sub(lambda hit: " " * len(hit.group(0)), masked)
+    for m in pattern.finditer(masked):
+        if not _h_14544_negated(masked, m):
+            return m
+    return None
+
+
+def _h_14544_row_exempted(sentence: str, previous: str = "") -> str | None:
+    """The row-exemption phrase in ONE sentence, or None.
+
+    A function rather than one regex because the branches are CONDITIONAL — on a LOCAL negation
+    (Rule 2), on the block asserting an exemption at all, and on whether this marker is anaphoric
+    enough to read the preceding sentence (Rule 4) — and encoding conditionals as lookaheads is the
+    kind of cleverness that reads as correct and grades nothing. `previous` is the preceding
+    sentence: the block states the exemption once and then reads `So is the row.`.
+
+    ⛔ EACH BRANCH IS SCANNED FOR THE FIRST UN-NEGATED MATCH (round 33), not merely the first match:
+    a negated subject claim no longer hides a later additive one, nor the reverse.
+    """
+    masked = _H_14544_NOT_A_ROW_RE.sub(lambda hit: "\x00" * len(hit.group(0)), sentence)
+    m = _h_14544_first_unnegated(_H_14544_ROW_EXEMPT_SUBJECT_RE, masked)
+    if m is not None:
+        return sentence[m.start():m.end()]
+    m = _h_14544_first_unnegated(_H_14544_ROW_ADDITIVE_RE, masked)
+    if m is None:
+        return None
+    # Rule 4: only the anaphoric branches may read the sentence before it. ⛔ EVERY anaphoric group
+    # is named in `_H_14544_ANAPHORIC_GROUPS` — a branch that elides its predicate but is missing
+    # from that tuple MATCHES and then finds no `exempt`, which is a GREEN over the very claim it
+    # was added for (how `so too the row` and `the same goes for the row` behaved at round 33's
+    # head), so the two lists are asserted against each other beside the arm.
+    anaphoric = any(m.groupdict().get(name) for name in _H_14544_ANAPHORIC_GROUPS)
+    # ⛔ AN ANAPHORIC MARKER INHERITS ITS ANTECEDENT'S POLARITY (#14623, measured). `The row is not
+    # exempt, and so is the weight of the row.` states that the WEIGHT is not exempt either — `so is`
+    # carries the negation FORWARD, it does not undo it. The window around the marker cannot see a
+    # negation belonging to the clause before, so the antecedent is checked explicitly. ⛔ Anaphoric
+    # branches ONLY: a coordination carries its own subject AND its own polarity.
+    # ⛔ AND THE POLARITY IS READ ON THE ANTECEDENT'S OWN `exempt` — never sentence-wide (round 35,
+    # MEASURED; two lanes reached this defect independently and this is the reconciled form). Both
+    # failures are the SAME root: `search()` over the whole antecedent tolerates the marker whenever
+    # ANY negation appears anywhere in it, and every sentence of the graded block carries one for
+    # reasons that have nothing to do with the exemption (`cannot move a bin`, `does NOT exclude`,
+    # `not restated`, `no-per-file-weight`). Measured GREEN through `_h_14544_banned_claim` with that
+    # test in place — the retired claim, laundered by the block's own vocabulary:
+    #
+    #     The REGISTRATION is exempt from being a packing cause, and dropping that REGISTRATION
+    #     cannot move a bin. So is the row.            (and `the same goes`, `likewise`, `so too`)
+    #     The REGISTRATION alone is exempt, and it does not gate anything, and so is the row.
+    #     Dropping that REGISTRATION cannot move a bin, and the REGISTRATION is exempt. So too the row.
+    #
+    # So the negation that matters is the one in the SAME CLAUSE as the antecedent's `exempt`, and
+    # `_h_14544_exempt_negated` grades exactly that. ⛔ ONE THING ALMOST DROPPED AND DELIBERATELY NOT:
+    # `previous` stays in the antecedent. Dropping it (a candidate fix) also closes the folds above,
+    # but it refuses the one-sentence-apart form of this arm's own TRUE fixture — `The row is not
+    # exempt. So is the weight of the row.` states the same true thing as `The row is not exempt, and
+    # so is the weight of the row.`, which the FALSE-prose list beside the arm requires to stay GREEN.
+    # Scoping fixes the laundering; dropping the sentence would have bought it with a false block.
+    if anaphoric and not _h_14544_negated(masked, m):
+        antecedent = (previous + " " + masked[:m.start()]) if previous else masked[:m.start()]
+        if _h_14544_exempt_negated(antecedent):
+            return None
+    context = previous + " " + sentence if previous and anaphoric else sentence
+    if not re.search(r"exempt", context, re.IGNORECASE):
+        return None
+    # the offsets index the MASKED copy (same length), so the phrase is sliced from the real one
+    return sentence[m.start():m.end()]
+
+
+def _h_14544_banned_claim(block: str) -> str | None:
+    """The first SENTENCE in `block` that states the retired claim, or `None`.
+
+    The graded set, and what it does not cover, are stated on the constants above rather than left
+    implicit: a phrase guard that claimed to grade `any distance`, `both orders` or `any noun` would
+    be false one edit later (measured — `49a6dd89`'s comment claimed a distance the regex did not
+    read, and #14623 round 5 shipped a false sentence GREEN through the same gap).
+    """
+    sentences = _H_14544_SENTENCES_RE.split(block)
+    for index, sentence in enumerate(sentences):
+        # ⛔ AND THE ACTOR, not only the subject: `weight` is in the subject set because the row
+        # carries one, so requiring the subject alone refused a TRUE sentence about two shard
+        # figures — "the weight of shard a and the weight of shard b are 827.2 s and 827.3 s,
+        # neither of which moved" (measured, #14623 review). A `neither of which` is this claim only
+        # when the cut is named in the same sentence.
+        if (_H_14544_ANAPHOR_RE.search(sentence)
+                and _H_14544_ROW_SUBJECT_RE.search(sentence)
+                and _H_14544_ACTOR_RE.search(sentence)):
+            return sentence.strip()
+        if _H_14544_NEGATED_ACTOR_CHANGE_RE.search(sentence):
+            return sentence.strip()
+        row_change = _H_14544_NEGATED_ROW_CHANGE_RE.search(sentence)
+        if (row_change
+                and _H_14544_ACTOR_RE.search(sentence)
+                and not _h_14544_foreign_agent(sentence, row_change)):
+            return sentence.strip()
+        if _H_14544_ROW_ADJECTIVAL_RE.search(sentence):
+            return sentence.strip()
+        if (_H_14544_IMPERSONAL_NEGATION_RE.search(sentence)
+                and _H_14544_NONROW_OBJECT_RE.search(sentence) is None):
+            return sentence.strip()
+        if _H_14544_QUANTIFIER_NEGATION_RE.search(sentence):
+            return sentence.strip()
+        # ⛔ THE ROW-EXEMPTION CLASS, graded STRUCTURALLY (the rules and round table above): the row
+        # (or its weight) as the SUBJECT of an exemption, or as the COMPLEMENT of an additive marker
+        # in a sentence that asserts one. Sentence-scoped on purpose — the live paragraph's scope
+        # claim SHARES a sentence with `that row's WEIGHT is \`#14544\`'s own edit`, so a whole-block
+        # row-and-exempt co-occurrence test would refuse the very prose this arm certifies.
+        # `previous` is the sentence before: the block states the exemption once and then reads
+        # `So is the row.`, and the additive markers are one sentence away from the word they modify.
+        if _h_14544_row_exempted(sentence, sentences[index - 1] if index else ""):
+            return sentence.strip()
+    return None
+
+
+#: The POSITIVE half: the paragraph must state the row's provenance as `#14544`'s own edit, with the
+#: POLARITY pinned — `row IS `#14544`'s own edit`, never `is NOT`. Without the polarity the pattern
+#: certified the exact false sentence this PR deletes (measured: `IS` -> `is NOT` kept it GREEN), and
+#: without the direction at all a fold could satisfy the anaphor ban by simply DELETING the row
+#: clause, which loses the correction rather than making it. ⛔ NO REFLOW CAN RED THIS ARM, and what
+#: used to be written here was false in BOTH halves (#14623 round 21, P3): it claimed "a reflow inside
+#: a TRUE clause reds this arm (a false block)" — measured GREEN with the live clause wrapped in
+#: `config/ci-surfaces.yml`, because `_emission_block_header` joins comment line breaks before this
+#: pattern sees the block and the gap below is `[\s\S]`, which spans one either way (no arm is added
+#: for it: an assertion nothing can redden is dead weight). And "the clause runs 39 characters today"
+#: belongs to the restated-figure class this block exists to remove, so NO figure is restated in its
+#: place: re-derive the span you mean from the pattern and the block rather than reading a number
+#: here. ⛔ The sentence it replaced said "reproduces for NO span of the live clause", which was
+#: FALSE at that head: the live clause runs hundreds of characters, so a span of any length below
+#: that exists in it — the quantifier was only true while the parenthetical listing the three spans
+#: this family actually measured was still in the line, and round 24 deleted that parenthetical
+#: while keeping the "NO" it qualified (measured on round 24's shipped sentence by the fix pass, not
+#: by a reviewer — the same overreach, in prose, as a restated figure). ⛔ That is not fastidiousness:
+#: the correction which replaced "39" first re-stated three span lengths, and one of them (the
+#: `durations`-to-copula gap) was off by one against the anchor it named, so a `+/-1` correction of a
+#: figure sentence was itself a false figure sentence (#14623 round 24, P3). The figure is what rots;
+#: the measurement is one expression away. The window is the pattern's own `{0,400}`
+#: gap: code, so it cannot rot. `which is` and `durations`-first spellings are
+#: accepted because a TRUE rewording that this pattern refused was measured as a false block (#14623
+#: review round 4, P3): “the `durations` entry for it, which is `#14544`'s own edit”.
+#: ⛔ THE COPULA IS A SET, not `IS|is|which is` (measured on this head: “the row's WEIGHT remains
+#: `#14544`'s own edit” REDs this arm, and the diagnostic then tells the editor the paragraph “no
+#: longer records” a fact it records in front of them — a false block on true prose, the class
+#: `#14730` files for the row-NOUN matchers, reproduced here in a PROVENANCE pin). The set is bounded
+#: on purpose: each alternative is a copula that leaves the claim “this weight is #14544's edit”
+#: standing present-tense-or-continuing, and the polarity check below negates whichever one the live
+#: match carries, so widening the copula does not widen the polarity.
+_H_14544_ROW_PROVENANCE_RE = re.compile(
+    r"(?:row\s+in\s+`durations`|`durations`[\s#]{0,3}(?:row|entry))[\s\S]{0,400}?"
+    r"(?:which\s+)?(?:IS|is|was|remains)(?:\s+(?:still|now))?\s+"
+    r"(?:`#14544`['\u2019]s\s+own\s+edit|an\s+edit\s+by\s+`#14544`)",
+    re.IGNORECASE)
+#: The SCOPE half: the paragraph must state that ONE half — the REGISTRATION — is exempt, with the
+#: polarity pinned. Measured at `d1f14298`: inverting it to “Both halves stay exempt” (the commit's
+#: own subject reversed) left this arm GREEN, because nothing graded the sentence that scopes the
+#: exemption. Without this, the paragraph can grant the exemption to the row it exists to implicate.
+#: ⛔ THE PROPERTY IS GRADED, NOT A SPELLING SET — and the difference is the whole point of this
+#: note. A single-spelling POSITIVE pin is a lock that reds a TRUE rewording with a diagnostic
+#: asserting the opposite of what the paragraph says (#14623 review round 14, P3). Naming an
+#: explicitly enumerated LIST of spellings reproduces that defect one step later (#14623 review
+#: round 24, P3: `The REGISTRATION alone is exempt` states the identical scope claim and matched
+#: none of the three, so the pin had been widened from one spelling to three and no further).
+#: ⛔ ROUND 24's OWN WIDENING REPRODUCED IT A THIRD TIME, and the comment beside it is what makes
+#: that findable rather than arguable: it claimed the SHAPE was admitted "in either word order …
+#: with `half` / `alone` / no qualifier between", and MEASURED against the alternation it actually
+#: shipped (`1b34f53f55a0`), three TRUE statements of the identical claim matched NOTHING —
+#: `The REGISTRATION half alone is exempt.` (BOTH qualifiers; `(?:\s+half|\s+alone)?` admits only
+#: one at a time), `The only exempt half is the REGISTRATION.` (the same copula inverted), and
+#: `It is only the REGISTRATION that is exempt.` (a cleft). Each would red this arm on true prose
+#: with a diagnostic asserting the paragraph named no scope at all — precisely the false block this
+#: note exists to forbid, shipped inside the note. A comment that claims a shape while shipping an
+#: enumeration is a false claim in the one place a later widener reads, which is why this survived
+#: three rounds: the fixture asserted six spellings and the prose claimed a shape, so nothing could
+#: disagree with it.
+#: SO THE NOTE STATES AN ADMISSION, NOT AN ORDER — and the difference is the defect, not the
+#: wording. ⛔ ROUND 24's replacement claimed the four attested ORDERS were covered while its
+#: alternation shipped ONE spelling per order, so TWO TRUE rewordings *inside* an admitted order
+#: still matched NOTHING — `The exempt half is ONLY the REGISTRATION.` (the `ONLY` moved inside the
+#: predicate) and `REGISTRATION is the exempt half.` (predicate `the exempt half` instead of
+#: `the ONLY half` / bare `exempt`), each of which reds this arm on true prose with a diagnostic
+#: asserting the paragraph named no scope at all (#14623 review of `bd8f854a3fcc`, P3; re-measured on
+#: this tree at `ff37992863df`, where BOTH were `NO`). An ORDER is an abstraction that no assertion
+#: can disagree with, so it re-creates the very defect this note exists to forbid — the pin is
+#: therefore WIDENED to make the alternation symmetric and the note is written as the ADMISSIONS the
+#: pattern actually carries, each one driven as a fixture beside the arm:
+#:   1. noun-first — `REGISTRATION [half|alone|side]… COPULA (exempt | the ONLY half | the [only]
+#:      exempt half)`;
+#:   2. `only`-first — `only the REGISTRATION [half|alone] [COPULA] exempt`;
+#:   3. the cleft — `it COPULA only the REGISTRATION that [COPULA] exempt`;
+#:   4. predicate-first — `the [only] exempt half COPULA [only] the REGISTRATION`;
+#:   5. the relative-clause subject — `the half that|which COPULA exempt COPULA the REGISTRATION`.
+#: ⛔ `COPULA` IS THE SHARED `_H_14544_COPULA` SET, deliberately, and NOT a private `is|stays|remains`
+#: run: a second hand-written copula list is how the two arms drift apart, and the drift is not
+#: cosmetic. Measured on this tree before the set was shared, the row half already graded the PAST
+#: tense this block's own subject matter makes natural (`this block describes a PAST commit`, see
+#: `_H_14544_COPULA`) while the scope pin refused every past-tense spelling of the SAME claim —
+#: `The REGISTRATION was exempt.`, `The exempt half was ONLY the REGISTRATION.`, `It was only the
+#: REGISTRATION that was exempt.` and `The half that was exempt was the REGISTRATION.` all matched
+#: NOTHING (#14623 round 29), i.e. four TRUE rewordings reding the arm inside structures 1-5 with a
+#: diagnostic asserting the paragraph named no scope at all. The plural forms (`are` / `were`) are
+#: unreachable for the singular `REGISTRATION` in TRUE prose; they are kept because one set for both
+#: arms cannot drift, and EVERY copula in it is driven POSITIVELY as a fixture below, with the two
+#: the PAST tense makes reachable (`was` / `were`) driven against the inverse as well — a negated
+#: claim and the plural half-swap — so the widening is graded in both directions, not just one.
+#: ⛔ ONE RESIDUAL SHAPE INSIDE THE STRUCTURES IS REFUSED, and it is named here because the sentence
+#: above would otherwise imply that anything built from these five skeletons passes: the exemption
+#: predicate may be spelled as a RELATIVE CLAUSE in the PREDICATE (`The REGISTRATION is the half
+#: that is exempt.`, structure 1 with structure 5's clause moved to the predicate), which matched
+#: NOTHING at `30972df4fffe`. A TRUE rewording that reuses NONE of those five structures is refused
+#: as well — e.g. `The exemption applies to the REGISTRATION alone.` Both are residuals of reading
+#: English with an alternation, named so a later round widens them knowingly instead of re-deriving.
+#: ⛔ AND SO IS A `to be` COMPLEMENT inside the copula slot (`The exempt half appears to be the
+#: REGISTRATION.`), measured NOT read at round 31: the set admits the copula and not the infinitive
+#: that follows it. It is named rather than widened because the same slot in the ROW branches is a
+#: single token (Rule 1), and one `(?:\w+\s+){0,2}` there reads the appositive Rule 3 keeps GREEN.
+#: The POLARITY is NOT widened with any of them: every structure names the REGISTRATION on the
+#: exempt side and none tolerates a negation between noun and copula, so the half-swap mutation and
+#: "Both halves stay exempt" still red — see the fixtures in the arm.
+_H_14544_SCOPE_RE = re.compile(
+    # 1. noun-first: the REGISTRATION as the SUBJECT of the exemption. `the [only] exempt half` is
+    #    the same claim as bare `exempt` with the half named as a predicate instead of an adjective.
+    r"REGISTRATION(?:\s+(?:half|alone|side)){0,2}\s+" + _H_14544_COPULA +
+    r"\s+(?:(?:the\s+)?ONLY\s+half|the\s+(?:only\s+)?exempt\s+half|exempt)"
+    # 2. `only`-first
+    r"|only\s+the\s+REGISTRATION(?:\s+(?:half|alone))?\s+(?:" + _H_14544_COPULA + r"\s+)?exempt"
+    # 3. the cleft
+    r"|it\s+" + _H_14544_COPULA + r"\s+only\s+the\s+REGISTRATION\s+that\s+(?:" +
+    _H_14544_COPULA + r"\s+)?exempt"
+    # 4. predicate-first, with `ONLY` admitted on EITHER side of the copula — it is one modifier of
+    #    one noun phrase, and admitting only its leading position was the asymmetry that red a TRUE
+    #    rewording (#14623 review of `bd8f854a3fcc`, P3).
+    r"|the\s+(?:only\s+)?exempt\s+half\s+" + _H_14544_COPULA +
+    r"\s+(?:only\s+)?the\s+REGISTRATION"
+    # 5. the relative-clause subject, which is a STRUCTURE rather than another spelling of #4.
+    r"|the\s+half\s+(?:that|which)\s+" + _H_14544_COPULA + r"\s+exempt\s+" +
+    _H_14544_COPULA + r"\s+the\s+REGISTRATION",
+    re.IGNORECASE)
+#: The CONCLUSION half: the paragraph's own payoff sentence — a packing change attributed to that row
+#: is a cause it does NOT exclude. Measured at `d1f14298`: flipping `NOT` -> nothing (i.e. “…is a
+#: cause this paragraph DOES exclude”, the exact reading `#14612` deletes) left this arm GREEN — it
+#: graded the anaphor ban and the provenance tokens and never the sentence that draws the
+#: conclusion, so a paragraph stating the OPPOSITE of the correction was certified clean.
+#: …and the same for the conclusion: `foreclose` and a `that`-cleft are the paragraph's own claim
+#: spelled another way, and both RED as one-spelling locks (#14623 review round 14, P3).
+_H_14544_CONCLUSION_RE = re.compile(
+    r"cause\s+(?:that\s+)?this\s+paragraph\s+does\s+NOT\s+(?:exclude|rule\s+out|foreclose)",
+    re.IGNORECASE)
+#: The FOURTH graded claim, which the docstring named while nothing graded it (#14623 review round
+#: 6, F3): the paragraph must not restate a per-file weight. It may name the row, its provenance and
+#: the commit; the figure lives in `durations`, graded there by `_carry_row_claim_violations`. The
+#: pattern is a DECIMAL, so issue numbers and shas (`e66997b81e76`) are not read.
+_H_14544_WEIGHT_FIGURE_RE = re.compile(
+    # ⛔ THE FIGURE MUST BE THE ROW'S, and the DECIMAL ALONE is not evidence: measured RED at #14623
+    # review round 8 (F3) on the TRUE "the weight of shard a and the weight of shard b are 827.2 s
+    # and 827.3 s, neither of which moved" — the block itself quotes shard weights, shard minutes
+    # and a headroom ratio, and this block's rule is about a PER-FILE (row) weight only.
+    r"(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bfile\b)[^,;.!?]{0,60}?\b\d+\.\d+\b"
+    r"|\b\d+\.\d+\b[^,;.!?]{0,40}?(?:`durations`|\brows?\b|\bentr(?:y|ies)\b|\bfile\b)"
+    # ⛔ AND THE PARAGRAPH'S OWN PHRASING (#14623 review round 12, F3): "The file's weight is 90.0 s."
+    # and "That weight beside it is 90.0 s." shipped GREEN under the noun bound alone. A bare
+    # `weight … is/to/at/= NN.N` is a stated value; the shard figures use "are … 827.2 s", which is
+    # what keeps that TRUE fixture green.
+    r"|\bweight\b[^,;.!?]{0,30}?\b(?:is|at|to|=|:)\s*\d+\.\d+\b")
+
+
+def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
+    """The `#14544` exemption must be scoped to the noun it is TRUE of (`#14612` review, P3).
+
+    The paragraph establishes one thing: dropping the `core` REGISTRATION cannot push
+    `tests/test_dod_5090_probe.py` out of `fast_pool()`, because membership comes from the `eval`
+    registration alone. It closed with "— neither of which `#14544` touched", binding the
+    `durations` ROW as well — and that half is false. `git show e66997b81e76 -- config/ci-surfaces.yml`
+    rewrites that very row's WEIGHT, in the commit whose subject is the cut, so the row's weight at
+    this head IS `#14544`'s own edit (the ROW itself predates it — `#10465` introduced it, and this
+    cut replaced its note with its own reading — which is what the block now states); the weight it
+    carries is what `fast_pool()`'s shard layout measures, so the
+    clause invited the exact reading the paragraph exists to forbid (that `#14544` is not implicated
+    in a packing change).
+
+    Both directions are graded, because either alone is satisfiable the wrong way: banning the
+    anaphor while saying nothing about the row lets a fold DELETE the correction, and requiring the
+    provenance while permitting the anaphor lets the old sentence return verbatim.
+
+    ⛔ WHAT THIS ARM DOES NOT DO: it does not certify the paragraph is TRUE. It grades the claim
+    SHAPES that have actually shipped (the anaphor, and a negated touch/change in either order,
+    attributed to the cut or to the row/weight), the INVERSE of each required claim, and the
+    POLARITY of the four claims the paragraph must state (provenance, scope, conclusion,
+    no-restated-weight). A noun, verb or formulation outside that set is not read, and no phrase
+    guard could read it — the graded set and its bounds are stated on the constants above, so this
+    docstring is not a promise the arm cannot keep. The residual is named rather than papered over:
+    a NEW false claim in other words passes, which is why the paragraph does not carry figures and
+    why the row's provenance is also recorded on the row itself.
+    """
+    header = _unquoted_block(_emission_block_header(cs.MANIFEST.read_text(encoding="utf-8")))
+    opening = _H_14544_EXEMPTION_OPEN_RE.search(header)
+    assert opening is not None, (
+        "the block no longer opens the `#14544` exemption paragraph with `The one cause this "
+        "paragraph does NOT claim` — re-point this arm at the sentence the block uses rather than "
+        "letting it grade nothing")
+    end = header.find("⛔", opening.end())
+    assert end != -1, (
+        "the `#14544` exemption paragraph has no `⛔` marker after its opening, so it runs to the "
+        "end of the block and this arm would grade every sentence after it — restore the bound")
+    paragraph = header[opening.start():end]
+    assert "tests/test_dod_5090_probe.py" in paragraph, (
+        "the bounded `#14544` paragraph no longer names `tests/test_dod_5090_probe.py`, so this "
+        "arm grades a paragraph that is no longer about the row it exists to correct — re-point "
+        "the bound")
+    # ⛔ THE BAN READS THE WHOLE BLOCK, per SENTENCE: a bound that the graded text can move past
+    # (one `⛔`) is a bound the claim walks out of — measured at `d1f14298`, the retired sentence
+    # returned verbatim after a single inserted marker with this arm GREEN — and a character window
+    # is escapable by padding in BOTH directions (measured at `148ab7c`, `49a6dd89`).
+    banned = _h_14544_banned_claim(header)
+    assert banned is None, (
+        "the `#14544` paragraph states the retired claim again (or its paraphrase), in the sentence "
+        f"{banned!r}: `neither of which` re-binds whatever nouns precede it, and a NEGATED change "
+        "attributed to the cut or to the row/weight states the same falsehood without the pronoun. "
+        "The registration half is TRUE, the `durations` ROW half is FALSE: `e66997b81e76` "
+        "(`#14544`) rewrote that row's weight in the commit whose subject is the cut, and that "
+        "weight is the shard-layout input. State the REGISTRATION as the exempt half and the row "
+        "as `#14544`'s OWN edit, and do not restate the weight (the no-per-file-weight rule above "
+        "binds the figure).")
+    # ⛔ THE FOURTH CLAIM, graded rather than named: a per-file WEIGHT restated in this paragraph was
+    # GREEN while no assertion read it (#14623 review round 6, F3) — the figure belongs on the row,
+    # where `_carry_row_claim_violations` checks it against the map.
+    assert _H_14544_WEIGHT_FIGURE_RE.search(paragraph) is None, (
+        "the `#14544` paragraph restates a per-file weight "
+        f"({_H_14544_WEIGHT_FIGURE_RE.search(paragraph).group(0)!r}) — the no-per-file-weight rule "
+        "above binds it, and the figure belongs on the row in `durations`, where it is graded "
+        "against the map rather than against prose")
+    # ⛔ (a) MASKING and (c) THE 12-CHARACTER WINDOW, pinned through the whole checker because both
+    # are block-shaped properties, not phrase-shaped ones. Each was removable with the arm GREEN
+    # before these pins: the mask (`_H_14544_NOT_A_ROW_RE`) had NO fixture containing `not a row`,
+    # and setting `_H_14544_NEGATION_WINDOW_BEFORE` back to 30 left the arm passing.
+    assert _h_14544_banned_claim(
+        "⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted.") is None, (
+        "the block's own thesis — `A REGISTRATION IS NOT A ROW` — is a negated predicate nominative, "
+        "not an exemption claim, and must stay GREEN")
+    assert _h_14544_banned_claim(
+        "⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted, and the row "
+        "is exempt too.") is not None, (
+        "the negated predicate nominative MASKED the claim that followed it: a tolerated match "
+        "swallows every candidate inside its own span, so the trailing clause shipped CLEAN")
+    # ⛔ A FOCUS PARTICLE ASSERTS THE EXEMPTION (#14623, measured): `not only exempt` / `not merely
+    # exempt` scoped their `not` over the particle, and counting it suppressed the banned claim, so
+    # the sentence below was GREEN while `… is only exempt, …` was RED. Pinned in both directions.
+    assert _h_14544_banned_claim(
+        "The REGISTRATION is not only exempt, and so is the row.") is not None, (
+        "a focus particle negates itself, not the exemption — reading it as a negated exemption "
+        "let `not only exempt` launder the banned claim GREEN")
+    assert _h_14544_banned_claim(
+        "The REGISTRATION is not merely exempt, and so is the row.") is not None, (
+        "same for `not merely` — it asserts the exemption")
+    # ⛔ AND THE MASK MUST COVER A THESIS ENDED BY A COORDINATOR, not only by punctuation (#14623,
+    # measured): one DROPPED COMMA left the thesis unmasked and its own `NOT` then read as negating
+    # the next clause's claim, turning the banned sentence GREEN. Both comma'd and uncomma'd forms of
+    # the TRUE thesis must stay GREEN as well, which is the other half of the pin.
+    # ⛔ THE SUBJECT BRANCH READS POLARITY THROUGH A DIFFERENT FUNCTION than the anaphoric one, and the
+    # focus mask started life only in the latter — so the same claim in a plain subject sentence
+    # shipped GREEN (#14623, measured). Pinned here so the mask cannot drift back to one reader.
+    for focus in ("not only", "not merely", "not just"):
+        assert _h_14544_banned_claim(
+            f"The `durations` row is {focus} exempt, its weight is the shard-layout input.") is not None, (
+            f"{focus!r} asserts the exemption, so the SUBJECT branch must not read its `not` as a "
+            "negation — one claim, one garnish, opposite verdicts")
+    assert _h_14544_banned_claim(
+        "The row is not only not exempt, and so is the weight of the row.") is None, (
+        "a focus particle over a REAL negated exemption is still TRUE prose — the mask must not "
+        "launder it")
+    # ⛔ AND EACH COORDINATOR AND DASH IS PINNED INDIVIDUALLY (#14623, measured): `but` and `so` were
+    # in the lookahead with no fixture, so DROPPING them — a tightening — left the arm GREEN while the
+    # banned sentence reverted to GREEN. A hyphen / en-dash were not covered at all.
+    for boundary in ("but", "so", "-", "\u2013", "\u2014"):
+        assert _h_14544_banned_claim(
+            f"A REGISTRATION IS NOT A ROW {boundary} the row is exempt too.") is not None, (
+            f"{boundary!r} completes the thesis's predication, so it must mask like a comma does — "
+            "without it one keystroke turns the banned sentence GREEN")
+    assert _h_14544_banned_claim(
+        "A REGISTRATION IS NOT A ROW and the row is exempt too.") is not None, (
+        "the boundary-less thesis was not masked, so its `NOT` licensed the following clause — one "
+        "dropped comma from the banned sentence")
+    assert _h_14544_banned_claim(
+        "⛔ A REGISTRATION IS NOT A ROW and this sentence is GRADED rather than trusted.") is None, (
+        "the boundary-less thesis is still TRUE prose and must stay GREEN")
+    assert _h_14544_banned_claim(
+        "The `durations` row is not a row the ratchet exempts.") is None, (
+        "the mask deleted the negation of a `not … row that …` FALSE BLOCK — the row there is the "
+        "SUBJECT of a negated predicate, not a predicate nominative, and the sentence is TRUE prose")
+    assert _h_14544_banned_claim(
+        "A gate that is red where it lands and absent where it gates is not a gate, and the row is "
+        "exempt too.") is not None, (
+        "a negation belonging to a DIFFERENT noun phrase, 18 characters before the claim, licensed "
+        "it — this is what narrowed `_H_14544_NEGATION_WINDOW_BEFORE` from 30 to 12")
+    assert _h_14544_banned_claim(
+        "The REGISTRATION alone is exempt, and dropping it cannot move a bin. So is the row.") is not None, (
+        "a negation in the PRECEDING sentence licensed the anaphoric marker: every sentence of the "
+        "graded paragraph contains one, so carrying it inverted the guard")
+    assert _h_14544_banned_claim(
+        "The REGISTRATION alone is exempt, and it does not gate anything, and so is the row.") is not None, (
+        "a negation in the same sentence but on a DIFFERENT verb (`does not gate`) licensed the "
+        "marker — the negation must sit beside the `exempt` it negates")
+    assert _H_14544_INVERTED_RE.search(header) is None, (
+        "the block states a required claim the OTHER way round — “both halves [are] exempt” or "
+        f"“this paragraph DOES exclude”: {_H_14544_INVERTED_RE.search(header).group(0)!r}. Keeping "
+        "the true sentence beside its inverse satisfies every positive pin while asserting the "
+        "reading `#14612` deletes (measured GREEN at `148ab7c`, #14623 review round 5); drop the "
+        "inverse")
+    # ⛔ NON-VACUITY, in the direction the narrowing could break: a pattern that reads NOTHING is the
+    # no-op gate this block's siblings exist to prevent, and this one has no fixture elsewhere — it
+    # is asserted only against the live block, so narrowing it is invisible. Both spellings the
+    # failure message names must still be READ, and the bare token pair with no exempt predicate
+    # beside it must NOT be (that is a TRUE sentence about the paragraph, not the inverse).
+    for inverse in ("both halves are exempt", "this paragraph DOES exclude it"):
+        assert _H_14544_INVERTED_RE.search(inverse), (
+            f"the inverted-claim pattern no longer reads {inverse!r}, so the assertion above passes "
+            "over any spelling of the reading `#14612` deletes — re-point `_H_14544_INVERTED_RE`")
+    # ⛔ AND THE ROW-EXEMPTION CLASS IS DRIVEN HERE, against the PREDICATE that grades it rather than
+    # against a spelling list — because the list is what failed. Each case below is a rewrite a fold
+    # reaches for, and every one of them shipped GREEN while an enumerated ban held the class: the
+    # possessive twin of `so is`, the one-inserted-word defeat of a phrase pinned to `the row`, and
+    # the bare additive. Non-vacuity in BOTH directions, since the property replaced an enumeration
+    # that produced a false PASS *and* a false BLOCK.
+    #: ⛔ EVERY GUARD IN `_h_14544_row_exempted` HAS A FIXTURE HERE, because a guard no fixture
+    #: drives can be deleted with the arm GREEN — measured at round 29, where loosening the
+    #: clause-terminal `too` lookahead left the arm passing. The two lists are laid out so each
+    #: block names the rule it drives (the rules are stated on the constants above).
+    for row_exemption in (
+            # the row as the SUBJECT of an exemption
+            "The row is exempt",
+            "The REGISTRATION half is exempt, and the row is too",
+            "The REGISTRATION is exempt; the row is likewise exempt",
+            # ⛔ (d) AUX IS DERIVED FROM COPULA. Restoring the pre-delta hand-written list — the one
+            # without `seemed` / `appeared` — left the arm GREEN until this pin existed.
+            "The REGISTRATION is exempt, and so seemed the row",
+            "The REGISTRATION is exempt, and so appeared the row",
+            "The REGISTRATION alone is exempt; the row's weight is exempt too",
+            # ⛔ RULE 1 (round 29, P1): an ADVERB between copula and `exempt` is not a membership
+            # test. Each of these was GREEN end-to-end when the run was a six-item list.
+            "The REGISTRATION is exempt; the row is equally exempt",
+            "The REGISTRATION is exempt; the row is therefore exempt",
+            "The REGISTRATION is exempt; the row is similarly exempt",
+            "The REGISTRATION is exempt; the row is fully exempt",
+            "The REGISTRATION is exempt; the row is every bit exempt",
+            "The REGISTRATION is exempt; the row is just as exempt",
+            # other attested copulas — this block describes a PAST commit, and `stays`/`remains` are
+            # the same claim in the present. ⛔ NOT because the copula set is "exhaustive" — that
+            # claim was FALSE and round 31 measured it: the subject branch used to require a member
+            # of `_H_14544_COPULA`, so `becomes` / `seems` / `appears` / `turns` / `gets` / `goes`
+            # all returned `None` and `The row becomes exempt.` shipped GREEN. The verb slot is a
+            # TOKEN now, and the six substitutions below are fixtures because they were the
+            # measured gap, not because they complete a list.
+            "The REGISTRATION was exempt, and so was the row",
+            "The REGISTRATION remains exempt; the row stays exempt",
+            "The row becomes exempt",
+            "The REGISTRATION is exempt; the row seems exempt",
+            "The REGISTRATION is exempt; the row appears exempt",
+            "The REGISTRATION is exempt; the row turns exempt",
+            "The REGISTRATION is exempt; the row gets exempt",
+            "The REGISTRATION is exempt; the row goes exempt",
+            "The REGISTRATION alone is exempt; the row's weight becomes exempt",
+            "The REGISTRATION is exempt; the weight of the row becomes exempt too",
+            "The REGISTRATION is exempt; the `durations` entry becomes exempt",
+            # ⛔ THE ADDITIVE MARKERS, including the ELLIPTICAL form (round 27's fail-open): the
+            # false reading with NO predicate after the row at all.
+            "The REGISTRATION is exempt, and so is the row",
+            "The REGISTRATION is exempt as well as the row",
+            "The row is exempt as well as the REGISTRATION",
+            "The REGISTRATION alone is exempt, as is the row's weight",
+            "The REGISTRATION alone is exempt, as is the durations row",
+            "The REGISTRATION is exempt; so is the ROW half",
+            "The REGISTRATION alone is exempt, and so too is the row",
+            "The REGISTRATION is exempt; so are the row's durations entries",
+            # ⛔ THE ROW'S OTHER NAME (round 29, P3): the block accepts ``the `durations` ENTRY`` as
+            # this row, so a ban that read only `row` left the false claim reachable by renaming it.
+            "The REGISTRATION is exempt; so is the `durations` entry",
+            "The REGISTRATION is exempt, and the `durations` entry is too",
+            # ⛔ THE REVERSE ORDER OF THE SAME NOUN PHRASE (#14623 round 30, measured at round 29's
+            # head): the additive branch anchors the noun phrase AT the marker, and
+            # `_H_14544_ROW_NOUN`'s determiner prefix stops one word short of `row` when `weight`
+            # leads — so FIVE additive spellings returned `None` and the sentence shipped CLEAN
+            # end-to-end through `_h_14544_banned_claim`. The SUBJECT and ELLIPTICAL spellings were
+            # already caught (`.search` finds `the row is exempt` / `the row is too` inside them)
+            # and are kept as the controls that stop the two orders drifting apart again.
+            "The REGISTRATION is exempt, as is the weight of the row",
+            "The REGISTRATION is exempt, likewise the weight of that row",
+            "The REGISTRATION is exempt, as well as the weight carried by the row",
+            "The REGISTRATION is exempt, along with the weight of the row",
+            "The REGISTRATION is exempt, and so is the weight on the row",
+            "The REGISTRATION is exempt; the weight of the row is exempt too",
+            "The REGISTRATION is exempt, and the weight of the row is too",
+            # ⛔ THE PARENTHETICAL SLOT (#14623 round 32): ONE inserted punctuation mark defeated
+            # round 31's token slot exactly as ONE inserted word defeated round 26. Every case here
+            # returned `None` at round 31's head (measured), so the paragraph shipped CLEAN. Both
+            # sides of the verb, both delimiters, and the reverse noun order — because the slot is
+            # one structural rule, and a fixture per delimiter is what stops one of them rotting.
+            "The row, too, is exempt.",
+            "The REGISTRATION is exempt; the `durations` row, too, is exempt.",
+            "The REGISTRATION is exempt; the row's weight, too, is exempt.",
+            "The REGISTRATION is exempt; the row, like the REGISTRATION, is exempt.",
+            "The REGISTRATION is exempt; the row (as well as the REGISTRATION) is exempt.",
+            "The REGISTRATION is exempt; the row is, in effect, exempt.",
+            "The row would eventually be exempt.",
+            # ⛔ EVERY MATCH, NOT ONLY THE FIRST (#14623 round 33): the first row claim in each of
+            # these is NEGATED and TRUE, the later one is affirmative and FALSE. `pattern.search`
+            # read the first and stopped, so the whole sentence shipped GREEN (measured at round
+            # 32's head). Both noun orders, the entry rename, and the clause-bounded longer verb
+            # phrase the residual list used to — falsely — name as unread.
+            "The row is not exempt, but the row's weight is exempt.",
+            "The row is not exempt; the weight of the row is exempt.",
+            "The row is not exempt, but the `durations` entry is exempt.",
+            "The row can be expected to be exempt.",
+            # ⛔ AND THE TWO ELLIPTICAL SPELLINGS THE MARKER LIST NEVER HAD (#14623 round 32):
+            # `as well` as the terminal ellipsis, and `so too` with the copula DROPPED. Both were
+            # measured `None` at round 31's head.
+            "The REGISTRATION is exempt and so too the row.",
+            "The REGISTRATION is exempt and so too is the row."):
+        assert _h_14544_row_exempted(row_exemption) is not None, (
+            f"the row-exemption predicate no longer reads {row_exemption!r}, so a paragraph that "
+            "exempts the `durations` row as well as the REGISTRATION passes every pin above — "
+            "re-point `_H_14544_ROW_EXEMPT_SUBJECT_RE` / `_H_14544_ROW_ADDITIVE_RE`")
+    for not_a_row_exemption in (
+            # The TRUE half of the claim, spelled every way the pins accept.
+            "The REGISTRATION is the ONLY half exempt",
+            "Only the REGISTRATION half is exempt",
+            "The exempt half is the REGISTRATION, not the row.",
+            # ⛔ RULE 2 (round 29, P2): an explicit NEGATION is tolerated. Round 28's predicate had
+            # no carve-out at all — `no`, `nothing`, `from nothing` were all REFUSED as TRUE prose,
+            # including the paragraph's own thesis restated negatively.
+            "The row is NOT exempt.",
+            # ⛔ (b) `cannot` IS A NEGATION and this block's own word. Removing `|cannot` from
+            # `_H_14544_NEGATION_RE` turned both of these into false blocks and NOTHING in the arm
+            # noticed until they were pinned here.
+            "The row cannot be exempt.",
+            "The `durations` row cannot be exempt from being a packing cause.",
+            "The row is not exempt from being a packing cause.",
+            "No `durations` row is exempt from being a packing cause.",
+            "No row is exempt.",
+            "The `durations` row is exempt from nothing.",
+            "A marker naming the row is not a claim that it is exempt.",
+            # ⛔ RULE 2 (round 33): the fix above must NOT refuse the TRUE reading, in which a
+            # negation covers the pronoun too — `so is the weight of the row` inherits the `not`
+            # from the clause before it, and the weight is therefore NOT exempt.
+            "The row is not exempt, and so is the weight of the row.",
+            "The REGISTRATION is exempt from nothing, and the weight of the row is not exempt"
+            " either.",
+            # ⛔ AND THE CORRECTIVE-`but` CONTROLS FOR RULE 2b (round 33). Rule 2b truncates the
+            # negation window at `but`, so these must carry their OWN negation — and they do. The
+            # contrastive reading is the one the literature describes: contrast does NOT recover the
+            # first conjunct's negation into the second, so a second conjunct that is meant to be
+            # negative must say so. Each of these is TRUE prose, each stays tolerated.
+            "The row is not exempt, but neither is the weight of the row.",
+            "The row is not exempt, but the weight of the row is not exempt either.",
+            "The row is not exempt, yet the weight of the row is not exempt.",
+            # ⛔ RULE 3 (round 29, P2): `too` as an INTENSIFIER takes an adjective — TRUE prose about
+            # a row. The `: The row is too specific` case below is the one that DRIVES the
+            # clause-terminal lookahead: it contains `exempt` in the same sentence, so the additive
+            # branch really runs and only the lookahead stops it. Loosening the lookahead to `too\b`
+            # REDs on it — pinning the mechanism the comment credits.
+            "The row is too specific to summarise at this altitude.",
+            "The REGISTRATION is the ONLY half exempt: The row is too specific to summarise at "
+            "this altitude.",
+            "The row is also what restores `durations` coverage above the 90% floor.",
+            # ⛔ AND THE APPOSITIVE `too`, which is TRUE and which the block states: a lookahead
+            # admitting `,` conflates it with the ellipsis.
+            "The REGISTRATION is the ONLY half exempt; that row, too, is a packing cause.",
+            "The REGISTRATION is the ONLY half exempt; the row's weight, too, is the bin's input.",
+            "The REGISTRATION is the ONLY half exempt, and that row's weight, too, is `#14544`'s "
+            "own edit.",
+            # ⛔ THE PLURAL `rows` — this block's ordinary word for its own subject. Round 27's noun
+            # had no trailing boundary and REFUSED these end-to-end.
+            "The paragraph names the registrations as well as the rows.",
+            "The paragraph lists the rows it describes.",
+            # ⛔ AN ADDITIVE MARKER WITH NO EXEMPTION — this block's own statement of fact:
+            # `durations_floors` pins a declared value ALONGSIDE a row's weight.
+            "`durations_floors` pins a declared value along with the row's measured weight.",
+            # ⛔ AND THE LIVE BLOCK'S OWN SHAPE: the scope claim sharing a sentence with the row's
+            # PROVENANCE clause. This is the case a whole-block co-occurrence test refuses.
+            "The REGISTRATION is the ONLY half exempt: the bin is held by the "
+            "`tests/test_dod_5090_probe.py` row in `durations`, and that row WEIGHT is `#14544` "
+            # ⛔ THE WEIGHT WORD ORDER THAT IS NOT A CLAIM — the reverse order must be READ without
+            # becoming a FALSE BLOCK: a sentence that names the weight and states no exemption, or
+            # negates it, is TRUE prose about this block's own subject.
+            "The weight of the row is 90.0 s.",
+            "The weight of the row is not exempt.",
+            "The weight of the row was re-read by the cut.",
+            # ⛔ AND THE SUBSTITUTION VERBS IN TRUE PROSE (round 31): widening the verb slot from a
+            # copula list to a token must not turn the negation carve-out or the `too` rule off.
+            # `… becomes exempt from nothing` / `… never becomes exempt` are TRUE and are read by
+            # the token slot only because Rule 2 runs FIRST; deleting that precedence REDs them.
+            "The row becomes exempt from nothing.",
+            "The row never becomes exempt.",
+            "A row that becomes exempt from nothing is still a packing cause.",
+            "The `durations` row seems too specific to summarise at this altitude.",
+            "The REGISTRATION is the ONLY half exempt; that row, too, becomes a packing cause.",
+            # ⛔ THE PARENTHETICAL SLOT MUST NOT REFUSE TRUE PROSE (#14623 round 32). These drive the
+            # two-sided `_H_14544_INTERPOSED` slot in BOTH directions: a comma- and a bracket-delimited
+            # parenthetical followed by a predicate that is NOT an exemption, and one followed by a
+            # NEGATED exemption (Rule 2 still outranks the structural match).
+            "The REGISTRATION is the ONLY half exempt; that row, too, is a packing cause.",
+            "The REGISTRATION is the ONLY half exempt; that row (as the paragraph above says) is a "
+            "packing cause.",
+            "The REGISTRATION is exempt; the row is, in effect, NOT exempt.",
+            "The REGISTRATION is the ONLY half exempt, and that row's weight, too, becomes the "
+            "bin's input.",
+            "own edit."):
+        assert _h_14544_row_exempted(not_a_row_exemption) is None, (
+            f"the row-exemption predicate refuses TRUE prose ({not_a_row_exemption!r}) — that is "
+            "the false block it replaced an enumeration to stop, and it reds the live block itself "
+            "in the last case")
+    # ⛔ AND THE ONE-SENTENCE-APART FORM, which needs `previous`: the block states the exemption once
+    # and then reads `So is the row.`  Without the argument the additive marker has no exemption to
+    # attach to, so this spelling was GREEN (round 29, P3).
+    #: ⛔ AND EVERY MARKER THAT ELIDES ITS PREDICATE MUST BE IN THIS LOOP (#14623 round 34), not only
+    #: the two that carry a copula. A marker spelled WITHOUT one matches the additive pattern and
+    #: then finds no `exempt` in its own sentence, so it reads as GREEN — measured at round 33's head
+    #: for all three of `So too the row.` / `The same goes for the row.` / `Likewise, the weight of
+    #: the row.`, each after an exempt antecedent. `likewise` is in this loop rather than in the
+    #: coordinated set because it REPLACES the predicate instead of attaching to one.
+    for carried, implied in (("The REGISTRATION is exempt", "So is the row."),
+                             ("The REGISTRATION is exempt", "So too the row."),
+                             ("The REGISTRATION is exempt", "So too the weight of the row."),
+                             ("The REGISTRATION is exempt", "The same goes for the row."),
+                             ("The REGISTRATION is exempt", "Likewise the weight of the row."),
+                             ("The REGISTRATION is exempt", "Likewise, the weight of the row."),
+                             ("The REGISTRATION is exempt", "The row is too."),
+                             # ⛔ (e) `anaph_as_well` and (f) `anaph_too_weight`: each was removable
+                             # with the arm GREEN because neither appeared here. `anaph_too_weight`
+                             # had ZERO coverage — the earlier `anaph_too` alternative shadows it for
+                             # `So too the weight of the row.`, so ONLY the `its weight` form reaches
+                             # it, and only this pin exercises that form.
+                             ("The REGISTRATION is exempt", "The row as well."),
+                             ("The REGISTRATION is exempt", "The row included."),
+                             ("The REGISTRATION is exempt", "So too its weight."),
+                             # ⛔ AND AN UNRELATED NEGATION IN THE ANTECEDENT MUST NOT TOLERATE THEM
+                             # (#14623 round 35, P1 — the same P1 the reconciled polarity hunk above
+                             # states). The block's own sentences carry `cannot` / `no` for reasons
+                             # that have nothing to do with the exemption, and every anaphoric marker
+                             # after such a sentence shipped GREEN. Each is a fold this paragraph's
+                             # history produces: splice the exemption into the `cannot` thesis, then
+                             # restate the claim one sentence later.
+                             ("The REGISTRATION is exempt from being a packing cause, and dropping "
+                              "that REGISTRATION cannot move a bin", "So is the row."),
+                             ("The REGISTRATION is exempt from being a packing cause, and dropping "
+                              "that REGISTRATION cannot move a bin", "The same goes for the row."),
+                             ("The REGISTRATION is exempt from being a packing cause, and dropping "
+                              "that REGISTRATION cannot move a bin", "Likewise, the weight of the "
+                              "row."),
+                             ("The REGISTRATION is exempt from being a packing cause, and dropping "
+                              "that REGISTRATION cannot move a bin", "So too the row."),
+                             ("Dropping that REGISTRATION cannot move a bin, and the REGISTRATION "
+                              "is exempt", "So too the row."),
+                             ("The REGISTRATION is exempt and no bin moves", "The row as well.")):
+        assert _h_14544_row_exempted(implied, carried) is not None, (
+            f"the additive markers only read an exemption stated in the SAME sentence, so "
+            f"{implied!r} after {carried!r} goes GREEN — pass the preceding sentence in")
+    #: ⛔ AND THE POLARITY OF THAT ANTECEDENT IS STILL HONOURED (#14623 round 35): scoping the check
+    #: to the antecedent's OWN `exempt` must not turn a TRUE `so is …` — one that inherits a
+    #: NEGATED exemption — into a false block. A negation does not have to sit in the same clause
+    #: as `exempt` to negate it (`No `durations` row is exempt` puts its determiner words away, and
+    #: an exemption can be negated by its own complement: `exempt from nothing`).
+    for carried, implied in (("The row is not exempt, and no bin moves",
+                              "So is the weight of the row."),
+                             ("No `durations` row is exempt, and no bin moves",
+                              "So is the weight of the row."),
+                             ("The REGISTRATION is exempt from nothing, and no bin moves",
+                              "So is the row."),
+                             # ⛔ AND ACROSS THE SENTENCE BOUNDARY, which is the shape a candidate fix
+                             # would have refused: dropping `previous` from the polarity check closes
+                             # the folds above, but it also refuses this — the one-sentence-apart form
+                             # of this arm's own TRUE fixture, which states the identical true thing
+                             # about a negated exemption. Rule 4 lets an anaphoric marker READ the
+                             # previous sentence's `exempt`; the polarity must travel with that read.
+                             ("The row is not exempt.", "So is the weight of the row."),
+                             ("No `durations` row is exempt.", "So is its weight.")):
+        assert _h_14544_row_exempted(implied, carried) is None, (
+            f"{implied!r} inherits a NEGATED exemption from {carried!r}, so it is TRUE prose and "
+            "must stay tolerated — the scoped polarity check must still reach a negation the "
+            "exemption carries itself")
+    #: ⛔ AND THE TAG IS NOT A LICENCE TO READ BACK (#14623 round 34): each marker above is driven
+    #: against a preceding sentence with NO exemption, where Rule 4's context gate must still say no.
+    #: Without these controls, tagging a coordinate marker anaphoric would silently accept the
+    #: block's own TRUE statement of fact (`along with the row's measured weight`) as a claim.
+    for carried, implied in (("The bin is held by that row in `durations`", "So too the row."),
+                             ("The bin is held by that row in `durations`",
+                              "The same goes for the row."),
+                             ("The bin is held by that row in `durations`",
+                              "Likewise, the weight of the row.")):
+        assert _h_14544_row_exempted(implied, carried) is None, (
+            f"{implied!r} is refused although {carried!r} states no exemption — the anaphoric tag "
+            "must carry the claim, not manufacture one")
+    for coordinated in ("`durations_floors` pins a declared value along with the row's measured "
+                        "weight.",):
+        assert _h_14544_row_exempted(coordinated) is None, (
+            f"{coordinated!r} attaches to a predicate the SAME sentence carries, so it must not be "
+            "in `_H_14544_ANAPHORIC_GROUPS` — a coordinated marker that reads the previous sentence "
+            "refuses this block's own TRUE statement of fact")
+    assert set(_H_14544_ROW_ADDITIVE_RE.groupindex) == set(_H_14544_ANAPHORIC_GROUPS), (
+        "a named group on `_H_14544_ROW_ADDITIVE_RE` is missing from `_H_14544_ANAPHORIC_GROUPS` (or "
+        "names a group the pattern does not carry), so it matches and then cannot read its "
+        "antecedent — that is the GREEN this round closed, and it is invisible at the definition "
+        "site")
+    assert _h_14544_row_exempted("So is the row.", "The bin is held by that row in `durations`") is None, (
+        "carrying the previous sentence must not manufacture an exemption that was never stated — "
+        "a sentence about the row with no `exempt` in it cannot license `So is the row.`")
+    assert _H_14544_INVERTED_RE.search(
+        "both halves of this paragraph are graded by an arm each") is None, (
+        "the inverted-claim pattern refuses the bare token pair with no exempt predicate near it, "
+        "so it reds a TRUE sentence about the paragraph with a diagnostic that quotes an inverse "
+        "the sentence never makes")
+    provenance = _H_14544_ROW_PROVENANCE_RE.search(paragraph)
+    assert provenance is not None, (
+        "the `#14544` exemption paragraph no longer records that the `durations` row is `#14544`'s "
+        "OWN edit — deleting the row clause instead of correcting it loses the fact that the "
+        "weight is that cut's input, which is why the old sentence was false")
+    # ⛔ THE SCOPE AND THE CONCLUSION are graded too, because both are claims the paragraph can
+    # contradict while every assertion above stays satisfied — measured GREEN at `d1f14298` for each.
+    scope = _H_14544_SCOPE_RE.search(paragraph)
+    assert scope is not None, (
+        "the `#14544` exemption paragraph no longer scopes the exemption to the REGISTRATION "
+        "(`The REGISTRATION is the ONLY half exempt`) — the paragraph then reads as exempting both "
+        "nouns, which is the false reading `#14612` deletes: `#14544` DID rewrite the `durations` "
+        "row, so the row half is not exempt from being a packing cause")
+    conclusion = _H_14544_CONCLUSION_RE.search(paragraph)
+    assert conclusion is not None, (
+        "the `#14544` exemption paragraph no longer states its conclusion — that a packing change "
+        "attributed to that row is a cause this paragraph does NOT exclude. Without it the "
+        "paragraph can state the anaphor-free OPPOSITE (`DOES exclude`) and still satisfy the "
+        "provenance clause, which is the exact false sentence `#14612` deletes")
+    # NON-VACUITY: the retired sentence trips the anaphor arm, and the same paragraph with the
+    # provenance removed trips the positive one — so neither assertion is decoration.
+    retired = (
+        "The one cause this paragraph does NOT claim is `#14544`'s removal of "
+        "`tests/test_dod_5090_probe.py` from the `core` surface: dropping that REGISTRATION cannot "
+        "move a bin, because the file's pool entry comes from the `eval` registration ALONE and the "
+        "bin is held by the `tests/test_dod_5090_probe.py` row in `durations` — neither of which "
+        "`#14544` touched.")
+    assert _h_14544_banned_claim(retired) is not None, (
+        "the anaphor pattern no longer reads the sentence it was cut for, so this arm passes over "
+        f"any spelling of it — re-point it at: {retired!r}")
+    assert not _H_14544_ROW_PROVENANCE_RE.search(retired), (
+        "the provenance pattern reads the RETIRED sentence as stating the row's provenance, so the "
+        "positive direction proves nothing: the old clause says `neither of which `#14544` "
+        "touched`, which is the opposite claim")
+    # ⛔ POLARITY, measured rather than assumed: NEGATING the copula inside the LIVE match must lose
+    # the match. Without this the pattern certified the false sentence it exists to delete, because
+    # it bound `#14544`'s own edit` without reading the word before it. The negation is driven off
+    # the MATCH rather than off a literal `row IS`, so a TRUE rewording of the same clause ('that
+    # `durations` entry IS …', '…, which is …') still gets graded instead of reddening on a spelling.
+    # ⛔ THE LAST COPULA, not the first: in “…, which is the bin's input and which is `#14544`'s own
+    # edit” the first copula belongs to another clause, and negating it refused a TRUE sentence
+    # (measured RED, #14623 review round 5, F3b).
+    copulas = list(re.finditer(r"\b(?:which\s+)?(?:IS|is|was|remains)\b", provenance.group(0)))
+    assert copulas, (
+        "the matched provenance clause carries no copula to negate, so the polarity check below "
+        f"grades nothing — re-point it at: {provenance.group(0)!r}")
+    last = copulas[-1]
+    negated = (provenance.group(0)[:last.start()] + "is NOT"
+               + provenance.group(0)[last.end():])
+    assert negated != provenance.group(0), (
+        "the polarity check did not change the matched clause, so it grades nothing — re-point it "
+        f"at: {provenance.group(0)!r}")
+    assert not _H_14544_ROW_PROVENANCE_RE.search(negated), (
+        "the provenance pattern still matches when the clause is NEGATED (`row is NOT `#14544`'s "
+        f"own edit`, measured on {negated!r}) — it reads the row's name and the words `own edit` "
+        "without the polarity, so a fold that restored the false reading would keep this arm GREEN")
+    # ⛔ THE COPULA SET IS GRADED, not only documented — the defect this closes was a positive pin
+    # whose COMMENT claimed a rewording was accepted while the pattern matched `IS|is|which is`
+    # alone; measured on this head, “the row's WEIGHT remains `#14544`'s own edit” RED, with the
+    # diagnostic below telling the editor the paragraph “no longer records” a fact it records. That
+    # is the same ungraded-tolerance class as `_ROW_CLAIM_AFTER_FILE_RE`'s two flags, so each
+    # alternative is driven through the pattern HERE, and the SAME copula negated must still be
+    # refused — otherwise a widening of the copula would widen the polarity with it.
+    for copula in ("is", "IS", "was", "remains", "which is", "is still", "remains now"):
+        reworded = ("The REGISTRATION is the ONLY half exempt: the row in `durations` "
+                    f"{copula} `#14544`'s own edit.")
+        assert _H_14544_ROW_PROVENANCE_RE.search(reworded), (
+            f"the provenance pin does not read the copula {copula!r}, so a TRUE rewording of the "
+            "paragraph REDs this arm with the message above — which asserts the opposite of what "
+            f"the paragraph then says: {reworded!r}")
+        cut = reworded.rindex(copula)
+        copula_negated = reworded[:cut] + f"{copula} NOT" + reworded[cut + len(copula):]
+        assert not _H_14544_ROW_PROVENANCE_RE.search(copula_negated), (
+            f"the provenance pin reads the NEGATED copula {copula!r} as the claim, so the polarity "
+            f"half above grades nothing for that spelling: {copula_negated!r}")
+    # ⛔ NON-VACUITY for the WEIGHT rule and the INVERSE ban, so neither is decoration: the same
+    # paragraph with a figure in it must red, and the inverse pattern must READ each spelling it
+    # claims to refuse (a constant nothing exercises is a constant anyone can blank — measured
+    # GREEN with `_H_14544_INVERTED_RE` replaced by `(?!)`, #14623 review round 6, F2).
+    assert _H_14544_WEIGHT_FIGURE_RE.search(paragraph + " The weight beside that row is 90.0 s."), (
+        "the weight rule no longer reads a decimal figure, so it grades nothing — re-point it")
+    for inverse in (
+            "The REGISTRATION is the ONLY half exempt, though both halves are exempt",
+            "Both are exempt.",
+            "The row half is exempt too.",
+            "Neither half is excluded.",
+            "The REGISTRATION is not the ONLY half exempt.",
+            "The ROW half is the exempt one.",
+            "The exempt half is the row.",
+            "The row alone is the only half exempt.",
+            "a cause this paragraph forecloses.",
+            "a cause this paragraph rules out.",
+            "a cause this paragraph excludes.",
+            "This paragraph exempts the row too.",
+            # …and the SHAPES that extend the exemption without re-spelling `exempts the row`
+            # (#14623 review round 25 — driven as a mutation of the live sentence, shipped GREEN):
+            "The REGISTRATION is exempt, and so is the row.",
+            "The REGISTRATION is exempt; the row is exempt too.",
+            "The REGISTRATION stays exempt, and the row remains exempt.",
+            # ⛔ ONE FIXTURE PER ADMITTED SPELLING, because the run is only as graded as the fixtures
+            # that reach it (#14623 review round 25, P3). These spellings are now graded by
+            # `_h_14544_row_exempted` inside `_h_14544_banned_claim` (round 27 replaced the
+            # enumerated subject-form alternation with that property), and each fixture below is a
+            # sentence that really does grant the row the exemption, so removing a copula or an
+            # adverb from the property REDs instead of letting the reading `#14612` deletes ship.
+            # ⛔ THE MEASUREMENT THIS PARAGRAPH ONCE CARRIED WAS WRONG, and the correction is kept
+            # rather than quietly re-worded (#14623 review round 26, P3): against the round-25
+            # ENUMERATED form, FOUR of its six tokens were ungraded — `stays`, `also`, `still`,
+            # `now` — while `is` and `remains` were already graded by the `so is the row`/`exempt
+            # too` pair and by the `stays exempt, and the row remains exempt` line. An earlier
+            # revision of this comment said "ANY copula or adverb", and the commit message that
+            # shipped it tabulated `remains` as ungraded; both were false, and an over-stated
+            # measurement is the class this block exists to delete.
+            "The REGISTRATION is exempt, and the row is also exempt.",
+            "The REGISTRATION is exempt, and the row is still exempt.",
+            "The REGISTRATION is exempt, and the row is now exempt.",
+            "The REGISTRATION is exempt, and the row stays exempt.",
+            "The REGISTRATION stays exempt, and the row stays exempt.",
+            "The REGISTRATION remains exempt, and the row remains exempt.",
+            "On the record's own numbers this paragraph DOES exclude it."):
+        # ⛔ THE ARM'S GUARD SET, not one constant (#14623 round 27): the row-continuation class is
+        # graded by `_h_14544_row_exempted` inside `_h_14544_banned_claim`, the other inverse
+        # classes by `_H_14544_INVERTED_RE`, and the arm asserts BOTH. A fixture bound to either one
+        # reds the moment a class moves between them — grading the IMPLEMENTATION rather than the
+        # claim — so this loop drives the pair the arm actually relies on.
+        assert (_H_14544_INVERTED_RE.search(inverse) is not None
+                or _h_14544_banned_claim(inverse) is not None), (
+            f"the inverse guards miss {inverse!r} — a constant no fixture exercises can be blanked "
+            "and the arm stays GREEN, so the inverse of a required claim would ship clean")
+    # …and the SAME widening must not have turned the ban into a false block: the true claim with the
+    # row explicitly NOT exempt is TRUE prose, and a ban that refuses it would red the paragraph this
+    # arm exists to certify. Both directions, because a one-way pin is the defect being repaired.
+    for true_prose in ("The REGISTRATION is exempt, and the row is not.",
+                       "The REGISTRATION is exempt; the row is not exempt.",
+                       "The row is too specific to summarise at this altitude.",
+                       "Neither half is excluded from the pack."):
+        assert (_H_14544_INVERTED_RE.search(true_prose) is None
+                and _h_14544_banned_claim(true_prose) is None), (
+            f"the widened inverse ban now refuses {true_prose!r} — that is the TRUE claim, so the "
+            "ban would false-block the paragraph it exists to certify, the opposite failure")
+    # …and the SCOPE and CONCLUSION pins read their polarity the same way: each mutant is the live
+    # paragraph with that ONE claim inverted, so a pattern that lost its polarity direction reds here
+    # instead of certifying the inversion.
+    # ⛔ BOTH FIXTURES ARE DERIVED FROM THE LIVE MATCH, so a TRUE rewording is a GRADE rather than a
+    # false block on a literal spelling (#14623 review round 6, F5). ⛔ BUT THE SCOPE MUTATION SWAPS
+    # THE HALF, it does not insert a negation (#14623 review round 7, P2): `_H_14544_SCOPE_RE`'s only
+    # polarity is WHICH half, and inserting `not the` before `ONLY` keeps `ONLY` contiguous, so the
+    # mutant only proved the words are adjacent — a pattern blind to the half (`(?:REGISTRATION|row)
+    # is the ONLY half`) satisfied it while the row half was exempt again.
+    scope_inverted = scope.group(0).replace("REGISTRATION", "row", 1)
+    assert scope_inverted != scope.group(0), (
+        "the matched scope clause does not name the REGISTRATION, so the half-swap below grades "
+        f"nothing — re-point it at: {scope.group(0)!r}")
+    assert not _H_14544_SCOPE_RE.search(scope_inverted), (
+        "the scope pattern still matches when the OTHER half holds the exemption ("
+        "`row is the ONLY half`) — it grades the word `exempt`/`ONLY` rather than WHICH half, so a "
+        "fold that exempted the row again would keep this arm GREEN")
+    # ⛔ THE ADMITTED SPELLINGS ARE FIXTURES, not prose in the comment above (#14623 review round
+    # 24, P3). This pin had NO positive fixture — it was asserted only against the live block, so a
+    # re-narrowing to one spelling stayed GREEN on the paragraph while redding any TRUE rewording
+    # of it with a diagnostic asserting the paragraph named no scope at all. MEASURED on the
+    # pre-fix alternation: `The REGISTRATION alone is exempt` and `The REGISTRATION half is exempt`
+    # matched none of its three spellings. The `scope_inverted` swap above does not cover this: it
+    # only proves WHICH half is graded, never that a differently-spelled TRUE claim is read.
+    #: ⛔ THE FIRST SIX ARE ROUND 24's SET; the ones after them are the spellings ROUND 24's OWN
+    #: COMMENT CLAIMED AND ITS ALTERNATION MISSED (measured at `1b34f53f55a0`: `half alone` — both
+    #: qualifiers — plus the predicate-first and cleft orders), and the LAST FOUR are the two
+    #: asymmetries the ORDERS phrasing hid until a review re-measured it at `ff37992863df` (`ONLY`
+    #: inside the predicate; `the exempt half` as the predicate) plus the relative-clause subject.
+    #: A six-item fixture beside a "the SHAPE is admitted" comment is exactly how this defect
+    #: survived three rounds, so the fixture now covers every ADMISSION the note lists, and a
+    #: narrowing of any one of the five structures REDs here rather than on the live paragraph.
+    for scope_spelling in (
+            "The REGISTRATION is the ONLY half exempt.",
+            "The REGISTRATION alone is the ONLY half exempt.",
+            "The REGISTRATION alone is exempt.",
+            "The REGISTRATION half is exempt.",
+            "Only the REGISTRATION half is exempt.",
+            "The exempt half is the REGISTRATION, not the row.",
+            # …the three orders the round-24 alternation still MISSED:
+            "The REGISTRATION half alone is exempt.",
+            "The only exempt half is the REGISTRATION.",
+            "It is only the REGISTRATION that is exempt.",
+            # …and the copulas the shape admits without changing the claim:
+            "The REGISTRATION stays exempt.",
+            "The REGISTRATION half remains exempt.",
+            # …and the TRUE rewordings the ORDERS phrasing over-claimed (#14623 review of
+            # `bd8f854a3fcc`, P3). ⛔ THREE of these four matched NOTHING before this round's
+            # widening; `The ONLY exempt half is the REGISTRATION.` DID already match and is kept
+            # as the predicate-first anchor beside its mirrored `ONLY`-after-copula twin — the
+            # asymmetry between the two was the finding, so grading only one of them no longer
+            # proves anything.
+            "The ONLY exempt half is the REGISTRATION.",
+            "The exempt half is ONLY the REGISTRATION.",
+            "REGISTRATION is the exempt half.",
+            "The half that is exempt is the REGISTRATION.",
+            # …and EVERY copula in the SHARED set the note now points at, in structure 1, then one
+            # spelling of each of structures 2-5 with a PAST copula. ⛔ THIS IS THE ROUND-29 FINDING:
+            # the pin carried a private `is|stays|remains` run while the row half of this same arm
+            # graded the past tense this block's subject matter makes natural, so four TRUE
+            # rewordings red the arm with a diagnostic asserting the paragraph named no scope at
+            # all (#14623 round 29 — each of these past-tense fixtures matched NOTHING before).
+            # `are`/`were` are unreachable for the singular `REGISTRATION` in true prose; they are
+            # driven anyway so the shared set is graded rather than trusted.
+            *(f"The REGISTRATION {copula} exempt." for copula in
+              ("is", "are", "was", "were", "stays", "remains", "stayed", "remained",
+               # ⛔ THE SUBSTITUTION COPULAS (#14623 round 31): `becomes` states the SAME exemption as
+               # `is`, so the scope pin refusing it was a FALSE BLOCK on true prose — the diagnostic
+               # asserting the paragraph named no scope at all. Each is driven here because the note
+               # above claims every copula in the shared set is graded positively.
+               "becomes", "became", "seems", "seemed", "appears", "appeared")),
+            "Only the REGISTRATION was exempt.",
+            "It was only the REGISTRATION that was exempt.",
+            "The exempt half was ONLY the REGISTRATION.",
+            "The half that was exempt was the REGISTRATION."):
+        assert _H_14544_SCOPE_RE.search(scope_spelling), (
+            f"the scope pin no longer reads {scope_spelling!r} — a TRUE statement of the scope the "
+            "paragraph makes would red this arm, and the diagnostic would assert the opposite of "
+            "what the paragraph says (the spelling lock #14623 review round 24 measured)")
+    # …and widening it must not have widened the POLARITY with it: neither half-swapped inverse may
+    # read, or the pin now certifies the reading `#14612` deletes. ⛔ ONE INVERSE PER NEW STRUCTURE:
+    # the two predicate widenings and the relative clause each name a half, so each is driven with
+    # the ROW in that half — otherwise the widening itself is ungraded and a pattern that lost the
+    # half (`(?:REGISTRATION|row)`) would still pass every fixture above.
+    for scope_inverse in ("Both halves stay exempt.", "The row alone is the only half exempt.",
+                          # …plus the NEGATION the copula run makes
+                          # reachable: a widened copula must not also admit `is not` / `was not`.
+                          "The REGISTRATION is not the ONLY half exempt.",
+                          "The REGISTRATION half is not exempt.",
+                          "The REGISTRATION was not exempt.",
+                          "Only the REGISTRATION was not exempt.",
+                          # …the plural copulas the shared set admits, in the plural INVERSE that is
+                          # the only place true prose puts them (so widening to `were` cannot pass
+                          # the inverse on the way past).
+                          "Both halves were exempt.",
+                          # …and the mirrored predicate / relative-clause forms with the ROW exempt,
+                          # in the past tense the widening makes reachable.
+                          "The row is the exempt half.",
+                          "The exempt half is ONLY the row.",
+                          "The half that is exempt is the row.",
+                          "The row was the exempt half.",
+                          "The exempt half was ONLY the row.",
+                          "The half that was exempt was the row.",
+                          # …and the substitution copulas the round-31 widening admits, driven with
+                          # the ROW in the exempt half, so widening the verb run cannot smuggle the
+                          # half-swap past the pin on the way in.
+                          "The row became the exempt half.",
+                          "The exempt half became ONLY the row.",
+                          "The half that became exempt was the row.",
+                          "The row seems the exempt half."):
+        assert _H_14544_SCOPE_RE.search(scope_inverse) is None, (
+            f"the widened scope pin reads {scope_inverse!r}, so the half it exists to name is no "
+            "longer graded — the widening admitted the SHAPE of the true claim, not its inverse")
+    conclusion_inverted = re.sub(
+        r"\bnot\b\s+", "", conclusion.group(0), count=1, flags=re.IGNORECASE)
+    assert conclusion_inverted != conclusion.group(0), (
+        "the matched conclusion clause carries no `NOT` to drop, so the inversion check below "
+        f"grades nothing — re-point it at: {conclusion.group(0)!r}")
+    assert not _H_14544_CONCLUSION_RE.search(conclusion_inverted), (
+        "the conclusion pattern still matches when the conclusion is INVERTED (`… is a cause this "
+        "paragraph DOES exclude`) — it grades `exclude` without the polarity, so a fold that "
+        "restored the false reading `#14612` deletes would keep this arm GREEN")
+    # …and the anaphor ban reads the paraphrase too, not only the pronoun form it was cut for, in
+    # BOTH orders — the shapes measured GREEN at `d1f14298` and `148ab7c1` are fixtures now.
+    # ⛔ BOTH ORDERS, because the ban is only as wide as the reading order it asserts: a `#14544`-first
+    # arm certifies `that row was never touched by `#14544`` as CLEAN (measured at `148ab7c1`, when
+    # this comment already claimed "both orders"). The two orders are separate alternatives
+    # above, and each is asserted here rather than assumed.
+    # ⛔ AND THE NOUN AND DISTANCE BOUNDS ARE FIXTURES, not prose promises, and they are stated as the
+    # constants actually implement them. ⛔ Each arm's cut-to-verb span is its TWO GAPS plus the
+    # negation that sits between them, and the gaps are the pattern's own code — `{0,400}` then
+    # `{0,80}` in the ACTIVE arm, `{0,20}` then `{0,40}` in the PASSIVE one. ⛔ NO DERIVED SPAN IS
+    # STATED HERE, deliberately: this family's span has been restated and measurably wrong in more
+    # than one round — each repair is on this line's git history, with the figure it corrected and
+    # the way it was wrong. The span is arithmetic; this block's subject is prose that re-states
+    # arithmetic, so the gaps are named and the span is not — and no COUNT of those rounds is stated
+    # either, because a count is a derived figure of the same kind. Read the span off the pattern if
+    # you need the number.
+    # The one property that IS asserted: the ACTIVE bound is wide enough for the negated-change
+    # verbs below and the PASSIVE one names the cut in the sentence at all, which the fixtures here
+    # drive in BOTH orders rather than promise. The pronoun form is scoped by SUBJECT rather than by
+    # distance.
+    # Widening past those is NOT claimed — the residual is declared above, and a phrase guard that
+    # claimed it would be false one noun later.
+    for paraphrase in (
+            "`#14544` never touched that row",
+            "`#14544`'s cut did not touch the row",
+            "that row was not touched by `#14544`",
+            "the row itself was never touched by `#14544`",
+            "the `durations` entry was never touched by `#14544`",
+            "And `#14544`'s cut touched neither of which.",
+            "neither of which " + "x" * 95 + " `#14544` touched",
+            "`#14544`'s cut took the file off `core`, and that row was never touched",
+            # INSIDE the ACTIVE bound, counted from the pattern's own `{0,400}` gap rather than
+            # decomposed here (a "pad + backtick = 400" spelling was measurably one short: the space
+            # before the negation is the addend it omitted). The bound is a
+            # fixture, and padding PAST it is the declared residual, not a graded case.
+            "`#14544`" + "y" * 398 + " never touched that row",
+            # the negated-change VERBS the round-5 review shipped GREEN: `touch` was not enough
+            "`#14544` never rewrote the weight of that row.",
+            "The weight never moved when that cut landed.",
+            "`#14544` did not at any single point touch that row.",
+            # the PEER round-3 shapes: the same claim with a PLURAL noun and with the block's own
+            # `durations entry` spelling — the noun alternation is a fixture, not a promise.
+            "the rows were never touched by `#14544`",
+            "That row was untouched by `#14544`.",
+            "The row's weight was unchanged by `#14544`.",
+            "`#14544` touched neither that row nor its weight.",
+            "`#14544` touched neither its weight nor that row.",
+            "That row was not touched by the commit that took the file off `core`, `#14544`.",
+            "Nothing about that row changed in `#14544`.",
+            # round-14 P3: the QUANTIFIER negator, the claim with no adverb at all
+            "`#14544`'s cut changed none of the `durations` rows.",
+            "None of the `durations` rows was changed by `#14544`.",
+            "None of the `durations` rows changed in `#14544`.",
+            # …and the attribution form WITHOUT its comma
+            "The `durations` row is unchanged per `#14544`'s own note.",
+            "The `durations` row's weight is unchanged, as that cut's own note records.",
+            "The `durations` row was left alone, according to `#14544`'s cut.",
+            "the `durations` entries were not touched by `#14544`",
+            # ⛔ THE CUT IS STILL THE NEGATED AGENT when a FOREIGN `by …` follows it — the shape an
+            # actor-anywhere rule read as foreign and shipped CLEAN (#14623 review round 7, P1).
+            "The `durations` row was never touched by `#14544`, by design.",
+            "Held by the `durations` map, the row was never touched by `#14544`",
+            # NOT honest prose, though it reads like it: it asserts the row's weight `was never
+            # re-read` in the same sentence that names the cut which DID re-read it — the claim is
+            # false, and refusing it is the guard working (the alternative, dropping the row-first
+            # arm, leaves “the weight never moved when that cut landed” GREEN).
+            "the row's weight was never re-read, and `#14544` cut its cases",
+            # ⛔ THE `un-` FAMILY OF EVERY CHANGE VERB states this claim: reading only
+            # `untouched|unchanged` shipped each of these CLEAN (#14623 review rounds 9-10, P1).
+            "The `durations` row is unaltered by `#14544`.",
+            "The row's weight was unaffected by `#14544`.",
+            "The `durations` row was left unmodified by `#14544`.",
+            # ⛔ `by <idiom>` IS NOT A FOREIGN AGENT — read as one, it excused the claim.
+            "The `durations` row was never touched by design, and `#14544`'s cut is separate.",
+            "The `durations` row was never touched by the way, as `#14544`'s own note records.",
+            # ⛔ A PHRASE THAT DESCRIBES THE CUT IS THE CUT: the appositive crosses a comma, so an
+            # agent phrase that stopped at every comma read this as foreign (#14623 round 8, F2).
+            "The `durations` row was never touched by the commit that took the file off `core`, "
+            "`#14544`.",
+            # ⛔ THE OBJECT'S DETERMINER AND PARTITIVE VOCABULARY (#14623 review round 11, P1): a
+            # first anchored cut carried eight determiners, and nine such shapes went CLEAN. A partitive
+            # is spelled out, and a bounded adverb is admitted, because an over-narrow object is a
+            # false PASS rather than a false block.
+            "`#14544` did not touch any of the `durations` rows.",
+            "`#14544` did not touch all of the `durations` rows.",
+            "`#14544` did not touch both `durations` rows.",
+            "`#14544` did not touch those `durations` rows.",
+            "`#14544` did not touch directly the `durations` row.",
+            # ⛔ THE QUANTIFIER FAMILY: `none`/`most`/`several`/`a couple`/`half`/`every one` all
+            # shipped CLEAN while the comment claimed the partitive was admitted (#14623 round 11).
+            # The list is closed and that closure is RESIDUE R4 on #14715, declared.
+            "`#14544` did not touch none of the `durations` rows.",
+            "`#14544` did not touch most of the `durations` rows.",
+            "`#14544` did not touch several of the `durations` rows.",
+            "`#14544` did not touch a couple of the `durations` rows.",
+            "`#14544` did not touch half of the `durations` rows.",
+            "`#14544` did not touch every one of the `durations` rows.",
+            # ⛔ A POSSESSIVE OF THE ROW'S OWN CONTENT IS STILL THE CLAIM (#14623 round 13, P2): a
+            # blanket possessive rejection let these ship CLEAN. Only `row's bin` / `row's
+            # registration` — the nouns the paragraph's TRUE claims name — are excluded.
+            "`#14544` did not touch the `durations` row's weight.",
+            "`#14544` did not touch that row's fields.",
+            # ⛔ `\bnot\b` DOES NOT FIRE INSIDE `cannot` — the block's OWN auxiliary, folded to name
+            # the row, shipped CLEAN at three preceding heads.
+            "`#14544`'s removal of the file from the `core` surface cannot touch the `durations` row.",
+            "`#14544`'s cut can't touch that row."):
+        assert _h_14544_banned_claim(paraphrase) is not None, (
+            f"the retired-claim ban misses the paraphrase {paraphrase!r} — it grades the pronoun "
+            "rather than the claim, bounds it by a DISTANCE the fixture exceeds, reads only ONE "
+            "ORDER of the claim, or reads only the verb `touch`, so a false reading in other words "
+            "passes clean")
+    # …and it must NOT red honest prose: an ACTIVE sentence whose subject is not the row, and the
+    # paragraph's own TRUE statements, are not this claim. Without these the arm is a false block.
+    for honest in (
+            "the row was not touched by the reaper",
+            # present ACTIVE: the row is the AGENT, not the thing said to be unchanged — the shape
+            # that makes a blanket "row … not … touch" rule a false block (peer round 3, graded
+            # here so the restricted negation list cannot silently widen back).
+            "the row does not touch the shard layout, and `#14544`'s cut is separate",
+            # ⛔ THE OBJECT IS READ: these are TRUE — a negated change of a REGISTRATION, of a BIN,
+            # or of a layout — and the round-6 reviewer measured all three as false blocks before
+            # the object clause existed.
+            "`#14544` did not touch that `eval` registration, so the file stays in the pool.",
+            "`#14544`'s cut is separate, and the row does not touch the shard layout.",
+            # the round-7 composites: the negation's actor is ANOTHER clause's, so the cut is named
+            # in the sentence but is not the negated subject.
+            "`#14544`'s cut is separate, and the row was not touched by the reaper.",
+            "The `durations` row was not touched by the reaper; that is separate from "
+            "`#14544`'s cut.",
+            # round-8 TRUE prose: a TEMPORAL relation (unchanged SINCE), shard weights that are not a
+            # per-file weight, and two true statements in one sentence whose adjectives differ.
+            "The `durations` entry for that file is unchanged since `#14544`.",
+            "The weight of shard a and the weight of shard b are 827.2 s and 827.3 s, neither of "
+            "which moved.",
+            "The `durations` row is `#14544`'s own edit, and the `eval` registration was left alone "
+            "by that cut.",
+            "`#14544`'s cut does not move a bin since the bin is held by the `durations` row.",
+            # …and the TRUE siblings of the quantifier/attribution claims
+            "`#14544`'s cut changed none of the shard minutes.",
+            "`#14544` touched none of the bins.",
+            "The `durations` row is unchanged as the cut landed.",
+            # …and the paragraph's own CORRECTION forms: a negated adjective is TRUE
+            "The `durations` row was not left alone by `#14544`.",
+            "The `durations` row was never untouched by `#14544`.",
+            "Nothing about that `eval` registration changed in `#14544`.",
+            "Nothing about the bin changed in `#14544`.",
+            "another row's weight was retimed; the retime does not touch the shard layout, and "
+            "`#14544`'s cut is separate",
+            # ⛔ ONE CLAUSE AT A TIME: both statements are TRUE and the sentence pairs them, so an
+            # arm whose gaps cross a comma reads the REGISTRATION's adjective as the ROW's (#14623
+            # review round 7, P2), and one whose OBJECT clause crosses a comma reads a negated BIN
+            # as a negated row.
+            "The `durations` row is `#14544`'s own edit, and the `eval` registration was left "
+            "alone by that cut.",
+            "`#14544`'s cut does not move a bin, and the row in `durations` is that edit.",
+            "`#14544`'s removal of the file from the `core` surface cannot move a bin",
+            # ⛔ THE SUBORDINATOR LIST IS NOT THE DECISION (#14623 review rounds 9-10, P2): the
+            # object is anchored to the verb, so a join by ANY subordinator — listed or not — leaves
+            # the paragraph's own bin claim alone. Four that were measured red are fixtures.
+            "`#14544`'s cut does not move a bin once the bin is held by the `durations` row.",
+            "`#14544`'s cut does not move a bin whilst the bin is held by the `durations` row.",
+            "`#14544`'s cut does not move a bin provided the bin is held by the `durations` row.",
+            "`#14544`'s cut does not move a bin in case the bin is held by the `durations` row.",
+            # ⛔ A LOWER-CASE BACKTICKED AGENT is this repo's own naming convention, and a comma or
+            # an adverb between the verb and its agent is still the VERB'S agent.
+            "The `durations` row was not touched by `pre-commit`; `#14544`'s cut is separate.",
+            "The `durations` row was not touched by `reaper`, and `#14544`'s cut is separate.",
+            "The `durations` row was never touched, even by the reaper, and `#14544`'s cut is "
+            "separate.",
+            "The `durations` row was not touched at any point by the reaper; `#14544`'s cut is "
+            "separate.",
+            # ⛔ …while a determiners/adverbs-free object keeps the paragraph's own claims clean: the
+            # bin, the `eval` registration, and the block's own `cannot move a bin`.
+            "`#14544` did not touch that `eval` registration, so the `durations` entry stands.",
+            "`#14544`'s removal of the file from the `core` surface cannot move a bin.",
+            "`#14544`'s cut does not move a bin once the bin is held by the `durations` row.",
+            # ⛔ THE ROW NOUN AS A PREMODIFIER IS NOT THIS CLAIM: "the `durations` row's BIN" is
+            # the bin the paragraph says the cut cannot move, and a head-blind object red it
+            # (#14623 review round 11, P3).
+            "`#14544`'s cut does not move the `durations` row's bin.",
+            "`#14544`'s cut does not touch the `durations` row's registration.",
+            # ⛔ THE HEAD NOUN NEEDS ITS WORD BOUNDARY (#14623 round 13, P2): without it `rows?`
+            # matched `rowboat`, `entr(?:y|ies)` matched `entrypoints` and `weight` matched
+            # `weights`, refusing the block's own shard-weight subject matter.
+            "`#14544` did not touch the weights of shard a and shard b.",
+            "`#14544` did not touch the entrypoints of the pipeline.",
+            "`#14544` did not touch the rowboat shard."):
+        assert _h_14544_banned_claim(honest) is None, (
+            f"the anaphor ban REDS honest prose ({honest!r}) — the passive arm is missing its BE "
+            "verb or the active arm ignores its subject, so the guard refuses a true sentence "
+            "rather than the claim")
+    # ⛔ THE LIVE READ IS MASKED, like the paragraph read above: this block legitimately QUOTES a
+    # dead claim for the record, and a quotation is not a live claim (#14623 review round 18, P2).
+    # Measured before this fix: appending
+    # `⛔ Quoted for the record: "`#14544` touched neither of which." · and it does not now.` to the
+    # live block made THIS assertion red, so the arm refused the block's own retraction — while the
+    # sibling paragraph read at the top of this test already masked, i.e. the two halves of one
+    # commit graded two different subjects. The mask is asserted below rather than trusted.
+    # …and the LIVE block must stay clean of all of them, or the ban is a false red rather than a
+    # grade: the shapes above are the claim, this is the prose the repository actually ships.
+    # ⛔ ONE EXPRESSION, used by the live assertion AND by the plant below, so the two cannot
+    # diverge and a revert of the mask REDS rather than quietly re-arming the false red.
+    def _read_live_block(manifest_text: str) -> str | None:
+        return _h_14544_banned_claim(_unquoted_block(_emission_block_header(manifest_text)))
+
+    raw_manifest = cs.MANIFEST.read_text(encoding="utf-8")
+    live_anaphor = _read_live_block(raw_manifest)
+    assert live_anaphor is None, (
+        "the block now contains a retired-claim reading, so the ban above reds the live prose "
+        f"rather than a fold's: {live_anaphor!r}")
+    # …and the MASK is what keeps that read honest, so it is graded in both directions ON THE LIVE
+    # SUBJECT rather than on a literal: a quoted record of the retired claim is PLANTED in a copy
+    # of this tree's own manifest — the shape the block's doctrine permits, since a quotation
+    # records a dead claim without re-stating it — and the same read must stay green over it while
+    # the same text UNMASKED must red.
+    # ⛔ THE PLANT GOES INSIDE THE BLOCK, not at the end of the file: `_emission_block_header` is
+    # everything BEFORE the `fast_shards:` key, so a record appended to the file lands outside the
+    # subject and grades nothing.
+    quoted_retired = (
+        '⛔ Quoted for the record: "`#14544` touched neither of which." · and it does not now.')
+    block_key = re.search(r"^fast_shards:", raw_manifest, re.MULTILINE)
+    assert block_key is not None, (
+        "the manifest carries no `fast_shards:` key, so the quoted-record plant below cannot be "
+        "placed inside the block this arm reads")
+    planted = (raw_manifest[:block_key.start()] + "# " + quoted_retired + "\n"
+               + raw_manifest[block_key.start():])
+    assert _h_14544_banned_claim(_emission_block_header(planted)) is not None, (
+        "the anaphor ban does not read the retired claim planted as a record, so the masked "
+        "assertion below would be decoration — re-point the ban at the claim first")
+    assert _read_live_block(planted) is None, (
+        "a QUOTED record of the retired claim is being read as a live claim: the quoted-span "
+        "mask has regressed (or this read stopped masking), and the repair this message would "
+        "push is to delete the block's record of why the sentence is gone")
+
+
+def test_the_fast_shards_header_block_grades_the_carry_row_spelling():
+    """The `carry an explicit `N` `durations` row` / `carry NO row` spelling is GRADED both ways.
+
+    #14612 review round 3 (P2): the block states the row-vs-default split in a THIRD spelling —
+    "`<A>`, `<B>` and `<C>` carry an explicit `2.0` `durations` row, while `<D>` … carry NO row" —
+    and `_row_claims` read NOTHING of it, because both of its matchers anchor on the `row` WORD
+    and take the names from what FOLLOWS it. MEASURED on that head: planting a false row claim in
+    this spelling left the arm GREEN, so the sentence the block leans on was graded by nothing.
+
+    Both halves are graded, and each direction is exercised by a fixture the predicate must red
+    on: a claim of a row the map does not carry, a claim of a row at the WRONG value, and a claim
+    that a file has NO row while the map carries one. One predicate
+    (`_carry_row_claim_violations`) runs over the live block and over the planted fixture, so the
+    fixture cannot drift into grading something the live assertion does not.
+    """
+    rows = cs.load_manifest()["durations"]
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    positive, negative = _carry_row_claims(header)
+    # NON-VACUITY, both polarities: if either half empties, the corresponding assertion below is
+    # decoration. The block states both halves at this head, so an empty one means the matcher
+    # stopped reading the sentence rather than that the sentence went away.
+    assert positive, (
+        "the `fast_shards` block names no file as carrying an explicit `durations` row, so the "
+        "`carry` arm grades nothing — re-point `_ROW_CLAIM_CARRY_RE` at the sentence the block "
+        "actually uses")
+    assert negative, (
+        "the `fast_shards` block names no file as carrying NO `durations` row, so the absence "
+        "half of the `carry` arm grades nothing — re-point `_ROW_CLAIM_CARRY_RE`")
+    assert _carry_row_claim_violations(positive, negative, rows) == ([], [], []), (
+        "the block's `carry`/`carry NO row` sentence is false of the map: "
+        f"(file, stated value, real value)={_carry_row_claim_violations(positive, negative, rows)[0]}, "
+        f"claimed-rowed-but-absent={_carry_row_claim_violations(positive, negative, rows)[1]}, "
+        f"claimed-rowless-but-rowed={_carry_row_claim_violations(positive, negative, rows)[2]}")
+    # …and the predicate BITES on every direction, planted in the SAME spelling the live sentence
+    # uses (so a matcher narrowed to one polarity, or to the wrong verb, reds here rather than
+    # passing over a fixture it never matched).
+    planted = (
+        "`#1`'s `tests/test_carry_planted_first.py`, `#2`'s `tests/test_carry_planted_second.py` "
+        "and `#3`'s `tests/eval/test_carry_planted_subdir.py` carry an explicit `3.5` "
+        "`durations` row, while `#4`'s `tests/test_carry_planted_absent.py` and `#5`'s\n"
+        "`tests/test_carry_planted_absent_two.py` carry NO row")
+    planted_positive, planted_negative = _carry_row_claims(planted)
+    assert planted_positive == {
+        "eval/test_carry_planted_subdir.py": {3.5},
+        "test_carry_planted_first.py": {3.5},
+        "test_carry_planted_second.py": {3.5},
+    }, f"the `carry` matcher no longer reads the run of names before the verb: {planted_positive!r}"
+    assert planted_negative == {
+        "test_carry_planted_absent.py",
+        "test_carry_planted_absent_two.py",
+    }, f"the `carry NO row` half is no longer read: {planted_negative!r}"
+    # ⛔ THE NOUN-INSERTED NEGATIVE: the POSITIVE half already admits
+    # `carry an explicit `2.0` `durations` row`, so "carry no `durations` row" is the same claim's
+    # natural spelling — and the negative branch was `no\s+(?:rows?|entr(?:y|ies))`, which allowed
+    # NOTHING between `no` and the noun. MEASURED before the fix (#14623 round 23, P3): a true
+    # rewrite of the block's own clause into that spelling made THIS arm RED, with the non-vacuity
+    # diagnostic blaming the matcher — a false block on true prose, and the two halves of one regex
+    # disagreeing about which spellings of one claim are legal.
+    for spelling in ("carry no `durations` row", "carry no durations row"):
+        _, noun_negative = _carry_row_claims(f"`tests/test_carry_planted_absent.py` {spelling}")
+        assert noun_negative == {"test_carry_planted_absent.py"}, (
+            f"the `carry` matcher does not read the noun-inserted absence ({spelling!r}), so a TRUE "
+            "rewrite of the block reds this arm and the diagnostic blames the matcher — the "
+            f"asymmetry the round-23 review measured: {noun_negative!r}")
+    # ⛔ THE UNIT-SPELLED VALUE, the positive half's mirror of the noun-inserted absence above.
+    # ⛔ NOT justified by the block's prose: this PR's own restructure replaced the `flat `2.0 s``
+    # `DEFAULT_FAST_WEIGHT` spelling with ``row in `durations` — `core`-registered``, and NONE OF
+    # THE ROWS THIS FIXTURE GRADES spells its weight with a unit — those four notes each say the row
+    # `takes the header's flat `DEFAULT_FAST_WEIGHT``, and `tests/test_7879_record_chain.py`'s note
+    # labels its own locally-measured seconds as context rather than the weight, so no unit-bearing
+    # reading in it is that row's weight. ⛔ NO COUNT AND NO INVENTED QUOTATION: an earlier spelling
+    # of this clause said `the one unit-bearing figure` (the note carries more than one — measured)
+    # and wrapped the note's own words in backticks the manifest does not carry, which is the
+    # invented-quotation defect this PR fixed at two other sites (#14623).
+    # ⛔ THAT SCOPE IS THE REPAIR, not a hedge: the sentence said "no `durations` row note carries a
+    # number with a unit", a claim about EVERY row in the map — which the map falsifies in bulk,
+    # because quoting a row's own reading WITH its unit is a normal spelling here (MEASURED on
+    # `test_10749_health_tail_under_transport_bound.py`'s `8.2` row, whose note carries `2.00 s`
+    # figures; a claim about the four rows this arm grades was written as a claim about the map, and
+    # nothing graded either form — the block's own doctrine, applied to its own sentence).
+    # The unit is admitted because `2.0 s` is a TRUE rewrite — `durations` carries
+    # 2.0 for those rows — and this fixture pins it (#14623 review round 6, P1 — the same false
+    # justification `b2bc3fd892266` corrected at the sibling site and left standing here).
+    # The matcher's value group read a bare number,
+    # so a unit-preserving TRUE rewrite of the one clause emptied `positive`, and the
+    # non-vacuity assertion above then reported that the block named NO file at all. False block on
+    # true prose, same class and same regex as the `no … row` asymmetry (MEASURED: `2.0` -> `2.0 s`
+    # red, `1 failed`).
+    for spelling in ("`2.0 s`", "2.0 s", "`2 s`"):
+        unit_positive, _ = _carry_row_claims(
+            f"`tests/test_carry_planted_first.py` carry an explicit {spelling} `durations` row")
+        assert unit_positive == {"test_carry_planted_first.py": {2.0}}, (
+            f"the `carry` matcher does not read the unit-spelled value ({spelling!r}), so a TRUE "
+            "rewrite of the block reds this arm and the diagnostic blames the matcher — the "
+            f"positive-side twin of the round-23 finding: {unit_positive!r}")
+    # ⛔ THE ADJECTIVE, the positive half's third optional word (#14623 review round 24, P3). The
+    # branch required the literal `explicit`, so a TRUE rewording — `carry a `2.0` `durations` row`
+    # — emptied `positive`, and the non-vacuity assertion at the top of this arm then reported the
+    # block as naming NO file: the inverse of its own text, on prose that states the same claim.
+    # MEASURED on the pre-fix alternation: `positive={}` for EVERY reworded spelling below, the
+    # live `an explicit` spelling alone surviving — which is why nothing redded while the lock was
+    # in place, the same shape as the unit and the noun-inserted absence beside it. A fixture is
+    # what stops it being re-narrowed, since the live sentence spells the adjective.
+    for claim in ("carry an explicit `2.0` `durations` row",
+                  "carry a `2.0` `durations` row",
+                  "carry `2.0` `durations` row",
+                  # …and the singular agreement the same claim takes for one file:
+                  "carries an explicit `2.0` `durations` row",
+                  "carries a `2.0` `durations` row"):
+        adjective_positive, _ = _carry_row_claims(
+            f"`tests/test_carry_planted_first.py` {claim}")
+        assert adjective_positive == {"test_carry_planted_first.py": {2.0}}, (
+            f"the `carry` matcher does not read {claim!r}, so a TRUE rewording of the block reds "
+            "this arm and the diagnostic blames the matcher — the adjective was a spelling lock "
+            f"(#14623 review round 24, P3): {adjective_positive!r}")
+    # ⛔ THE VALUE AFTER THE NOUN — the fourth and last free choice in the value phrase, and the one
+    # the alternation still locked (#14623 review round 29, P2). The note above states the graded
+    # PROPERTY as "names a file as carrying a `durations` row of THIS value", so the post-noun order
+    # is the spelling the note itself uses; the branch required value-BEFORE-noun, so this TRUE
+    # rewrite matched nothing. ⛔ The damage is destructive rather than a bare red: `positive` empties,
+    # the non-vacuity assertion fires with "names no file", and silencing it removes the only
+    # grading of the four positive row claims — so the fixture, not the live sentence, is what keeps
+    # the branch from being re-narrowed.
+    for claim in ("carry an explicit `durations` row of `2.0`",
+                  "carry a `durations` row of 2.0",
+                  "carries an explicit `durations` entry of `2.0`",
+                  "carry an explicit `durations` row at `2.0`"):
+        post_noun_positive, _ = _carry_row_claims(
+            f"`tests/test_carry_planted_first.py` {claim}")
+        assert post_noun_positive == {"test_carry_planted_first.py": {2.0}}, (
+            f"the `carry` matcher does not read the value AFTER the noun ({claim!r}), so a TRUE "
+            "rewording of the block reds this arm and the diagnostic blames the matcher — the "
+            f"fourth spelling lock in the value phrase (#14623 review round 29, P2): {post_noun_positive!r}")
+    # …and it keeps the POLARITY: a post-noun row whose value moved must still red.
+    post_noun_positive, _ = _carry_row_claims(
+        "`tests/test_carry_planted_first.py` carry a `durations` row of 2.0")
+    assert _carry_row_claim_violations(
+        post_noun_positive, set(), {"test_carry_planted_first.py": 3.1})[0] == [
+            ("test_carry_planted_first.py", [2.0], 3.1)], (
+        "the post-noun branch read a file but lost the weight it states, so a `durations` row that "
+        "moved while the sentence still claimed the old value would pass GREEN")
+    # …and making the adjective optional must not have dropped the VALUE the claim carries: the row
+    # whose weight moved under a sentence still stating the old one has to red, or the loosening
+    # traded a false block for a false PASS.
+    adjective_positive, _ = _carry_row_claims(
+        "`tests/test_carry_planted_first.py` carry a `2.0` `durations` row")
+    assert _carry_row_claim_violations(
+        adjective_positive, set(), {"test_carry_planted_first.py": 3.1})[0] == [
+            ("test_carry_planted_first.py", [2.0], 3.1)], (
+        "the adjective-less spelling read a file but lost the weight it states, so a `durations` "
+        "row that moved while the sentence still claimed the old value would pass GREEN")
+    # All three directions in one map: `second` carries the row at the wrong value, `subdir` has
+    # no row at all, and `absent` DOES carry one while the sentence says it does not.
+    planted_rows = {
+        "test_carry_planted_first.py": 3.5,
+        "test_carry_planted_second.py": 2.0,
+        "test_carry_planted_absent.py": 2.0,
+    }
+    assert _carry_row_claim_violations(
+        planted_positive, planted_negative, planted_rows) == (
+            [("test_carry_planted_second.py", [3.5], 2.0)],
+            ["eval/test_carry_planted_subdir.py"],
+            ["test_carry_planted_absent.py"],
+    ), ("the `carry` predicate does not red on all three false claims (wrong value, absent row, "
+        "row claimed absent) — measured, each of these was green under the pre-fix matchers:"
+        f" {_carry_row_claim_violations(planted_positive, planted_negative, planted_rows)!r}")
+    # ⛔ AND THE SPLICE SHAPE, which is the one this block is most likely to receive: a `merge=union`
+    # fold keeping one side's "carry an explicit `2.0` `durations` row" beside the other's "carry NO
+    # row" FOR THE SAME FILE. Neither half may resolve the other — the sentence states an absence
+    # that is false — so the `has_a_row` direction must red it. MEASURED on the pre-fix form
+    # (`negative - set(positive)`): `negative` came back EMPTY and this returned `([], [], [])`,
+    # i.e. both arms GREEN over the false absence.
+    spliced = ("`#1`'s `tests/test_carry_planted_first.py` carry an explicit `2.0` `durations` row, "
+               "while `#2`'s `tests/test_carry_planted_first.py` carry NO row")
+    spliced_positive, spliced_negative = _carry_row_claims(spliced)
+    assert spliced_positive == {"test_carry_planted_first.py": {2.0}}, (
+        f"the `carry` matcher lost the positive half of the spliced sentence: {spliced_positive!r}")
+    assert spliced_negative == {"test_carry_planted_first.py"}, (
+        "the positive half silently resolved the `carry NO row` half of the same sentence, so the "
+        "false absence it states is graded by NOTHING — the two halves are separate claims about "
+        f"one map and neither may subtract the other: negative={spliced_negative!r}")
+    assert _carry_row_claim_violations(
+        spliced_positive, spliced_negative, {"test_carry_planted_first.py": 2.0}) == (
+            [], [], ["test_carry_planted_first.py"]), (
+        "a file whose row the block claims AND whose absence it also claims did not red the "
+        "`has_a_row` direction — the splice would ship stating a false absence")
+    # ⛔ AND TWO STATEMENTS OF THE SAME HALF for one file. `positive` used to be a
+    # `dict[str, float]` assigned per match, so the LAST statement won: MEASURED with
+    # `durations == {"x": 2.0}` and a body saying `3.0` … then `2.0`, the predicate answered
+    # `([], [], [])` — GREEN over the false `3.0` — and redded only in the reversed order. Every
+    # stated value is kept now, so EITHER order reds on the one that is wrong.
+    fwd = ("`#1`'s `tests/test_carry_planted_first.py` carry an explicit `3.0` `durations` row, "
+           "while `#2`'s `tests/test_carry_planted_first.py` carry an explicit `2.0` `durations` row")
+    rev = ("`#1`'s `tests/test_carry_planted_first.py` carry an explicit `2.0` `durations` row, "
+           "while `#2`'s `tests/test_carry_planted_first.py` carry an explicit `3.0` `durations` row")
+    for case, label in ((fwd, "stale-first"), (rev, "fresh-first")):
+        pair_positive, pair_negative = _carry_row_claims(case)
+        assert pair_positive == {"test_carry_planted_first.py": {2.0, 3.0}}, (
+            f"the `carry` matcher collapsed two statements of one file ({label}) instead of "
+            f"keeping both: {pair_positive!r}")
+        assert _carry_row_claim_violations(
+            pair_positive, pair_negative, {"test_carry_planted_first.py": 2.0}) == (
+                [("test_carry_planted_first.py", [2.0, 3.0], 2.0)], [], []), (
+            f"a file the block states at TWO weights passed GREEN ({label}) — the last match won, "
+            "which is the fail-open this arm already closed once for positive-vs-negative")
+    # …and an ODD quote count refuses to answer here too, rather than masking across the sentence
+    # and reporting an empty claim (the fail-open shape the sibling arm already refuses).
+    with pytest.raises(AssertionError, match="ODD number of double quotes"):
+        _carry_row_claims('a stray " then `tests/test_carry_planted_first.py` carry an explicit '
+                          '`2.0` `durations` row')
+
+
+def test_the_row_claim_list_pattern_reads_an_inner_parenthetical():
+    """`row (`A` (core), `B`)` — an inner paren must not truncate the list (#14612 review, P3).
+
+    `_ROW_CLAIM_BEFORE_LIST_RE` captured `[^)]*`, so the FIRST `)` ended the capture. MEASURED on
+    the pre-fix pattern, on the sentence below: `['test_inner_note.py']` — the second name, the one
+    a fold is free to leave behind, was read by nothing. The pattern's own comment claims it
+    captures the WHOLE parenthesised list for exactly that reason, so the reach and the claim
+    disagreed. One level of balanced inner parens is admitted now; a second level is not claimed.
+    """
+    sentence = ("two `core` rows (`tests/test_inner_note.py` (core), "
+                "`tests/test_second_name.py`)")
+    assert _row_claims(sentence) == ["test_inner_note.py", "test_second_name.py"], (
+        "a `row (…)` list whose first item carries its own parenthetical lost every name after "
+        "the inner `)` — the first-name-only class `_ROW_CLAIM_BEFORE_LIST_RE` was widened to "
+        f"close, one level down: {_row_claims(sentence)!r}")
+
+
+#: A claim that the row enumeration is EXHAUSTIVE — a frame that is FALSE one `--refresh-durations`
+#: sweep after a named file is measured, because that sweep ADDS a row rather than editing the
+#: sentence. Matched on masked text (`_unquoted_block`), so a QUOTED record of a retired wording is
+#: not read as a live claim. The block carries no live one today: its enumeration is stated POSITIVE
+#: only, and the arm below is what keeps a `merge=union` fold from splicing the old frame back in.
+_COMPLETENESS_CLAIM_RE = re.compile(
+    r"enumeration\s+is\s+complete|is\s+a\s+completeness\s+claim"
+    r"|those\s+are\s+the\s+named\s+files", re.IGNORECASE)
+#: ⛔ DECLARED RESIDUAL — what this pattern does NOT grade, and why three widenings were REFUSED on
+#: measurement rather than attempted a fourth time (#14623 review). It reads three phrases, all of
+#: them this block's own RETRACTION wording, so a completeness frame spelled ANY OTHER WAY ships
+#: GREEN. That is declared here, in the block's own convention (the `#14544` pronoun-object
+#: paraphrase is declared the same way at the `_h_14544_banned_claim` arms), because every wider
+#: form was falsified:
+#:
+#: MEASURED GREEN over this pattern — four live frames (injected into the block header, whole arm
+#: run, 0/8 arms in the family RED for each):
+#:     "… a COMPLETE list of every row."   "The list above is complete."
+#:     "… every rowed file."               "This enumeration is exhausted."
+#: MEASURED RED by a wider form, i.e. still ungraded HERE, and named so the list is not a guess:
+#:     "a complete enumeration of the rows"  "the rows above are the complete set"
+#:     "these are the complete list of rows" "the file list below is a complete set"
+#:
+#: WHY NOT WIDEN — each attempt was caught by measurement, and the third is the one that settles it:
+#:   1. reading the bare word (`complete*`, `exhaust*`, `every … row*`) FALSE-BLOCKED THE LIVE BLOCK:
+#:      assertion 1 reads the WHOLE header, and `NO NUMERAL AND NO EXHAUSTIVE ENUMERATION` (the
+#:      block's own rule) matched, as did the TRUE "Every row item above is therefore spelled with
+#:      its path beside the word".
+#:   2. reading the adjective (`\bcomplete\s+(?:list|enumeration|set)\b`) FALSE-BLOCKED TRUE PROHIBITION
+#:      PROSE — "⛔ NO COMPLETE LIST OF ROWS IS CLAIMED HERE.", "Never call this a complete list: a
+#:      sweep adds a row." — and the arm's own message then told the maintainer the block FRAMES its
+#:      enumeration as complete, pushing the repair onto the prohibition instead of the claim.
+#:   3. predicating on a copula STILL RED a prohibition that embeds one ("DO NOT CLAIM THIS IS A
+#:      COMPLETE LIST"), and narrowing to `complete list of (every|all)` RED the arm's own pinned
+#:      prohibition with `EVERY` inserted ("NO COMPLETE LIST OF EVERY ROW IS CLAIMED HERE.") while
+#:      LOSING the four spellings listed above.
+#: A CLAIM and a PROHIBITION are separated by NEGATION SCOPE, not by a phrase shape, and a
+#: same-sentence negative lookbehind is the text-controlled pattern this file rejects elsewhere
+#: (a reflow moves the graded text out from under it). A guard that REDs on a maintainer's true
+#: prohibition is worse than one that grades fewer spellings, so the narrow form stays and the gap
+#: is declared.
+#: The row enumeration's OPENING, and the `⛔` that closes it: the arm below asserts a property of
+#: this list, so it is BOUNDED rather than read out of the whole block — an unbounded read would
+#: grade prose it does not own.
+_ROW_ENUMERATION_OPEN_RE = re.compile(r"A ROW is an entry in")
+
+
+def _row_enumeration(header: str) -> str:
+    """The row-vs-registration enumeration, bounded from its opening to the next `⛔` marker."""
+    unquoted = _unquoted_block(header)
+    opening = _ROW_ENUMERATION_OPEN_RE.search(unquoted)
+    assert opening is not None, (
+        "the block no longer opens its row enumeration with `A ROW is an entry in` — re-point this "
+        "arm at the sentence the block uses rather than letting it grade nothing")
+    end = unquoted.find("⛔", opening.end())
+    assert end != -1, (
+        "the row enumeration has no `⛔` marker after its opening, so it runs to the end of the "
+        "block and this arm would grade every sentence after it — restore the bound")
+    return unquoted[opening.start():end]
+
+
+def test_the_fast_shards_header_block_does_not_claim_its_row_list_is_complete():
+    """The row list is graded ONE-DIRECTIONALLY, and it must not regain a completeness frame.
+
+    The block carried "THAT ENUMERATION IS COMPLETE … those are the named files that carry a
+    `durations` entry" (`issuecomment-7172196903`). Nothing graded that and nothing CAN: a
+    `--refresh-durations` sweep ADDS a row the first time it measures a `fast_pool()` member, so
+    the claim is false one sweep after any named file is measured, with no arm able to see it —
+    the same sweep-falsifiable class as the absence claim this branch dropped in `e5310e39bf`.
+
+    MEASURED on the pre-fix block (`14a9bdb124d7`):
+
+        drop three of the four shorthand enumeration entries   -> every arm GREEN
+        delete `durations['test_expansion_fusion_14344.py']`   -> every arm GREEN
+            (the enumeration claimed that row, but `#14597`'s entry was a bare `#14597`'s,` with
+            no path beside it, so `_row_claims` never returned the file)
+
+    Two properties are asserted, and both hold of the POSITIVE-only text the block carries now: no
+    live completeness frame, and every path the list names returned by `_row_claims` with a row
+    behind it. This arm does NOT grade the list's SPELLING — whether an entry names its path at all
+    is `test_the_row_list_alone_reaches_every_item_it_names`'s subject, which requires the list to be
+    self-sufficient; keeping the two apart is what stops this one passing over an item it never read.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    rows = set(cs.load_manifest()["durations"])
+    # 1. No LIVE completeness frame in any spelling `_COMPLETENESS_CLAIM_RE` READS. That pattern
+    # grades three phrases only; the class it cannot read is DECLARED beside it, so this assertion
+    # must not be read as "no completeness frame exists in the block".
+    live_claim = _COMPLETENESS_CLAIM_RE.search(_unquoted_block(header))
+    assert live_claim is None, (
+        "the `fast_shards` block frames its row enumeration as COMPLETE "
+        f"({live_claim.group(0)!r}) — the list is graded one-directionally and cannot be graded "
+        "for completeness: `--refresh-durations` ADDS a row whenever a sweep measures a "
+        "`fast_pool()` member, so the frame is false one sweep later and no arm can see it. "
+        "State the list POSITIVE only (these named files carry a row) and drop the completeness "
+        "clause")
+    # …and the retired wording IS matched by that pattern, so assertion 1 is not decoration: this is
+    # the block's own pre-fix sentence.
+    retired = (
+        "A ROW is an entry in `durations` — among the files named above, `#14597`'s, `#14560`'s, "
+        "`tests/test_retired_row.py` row. ⛔ THAT ENUMERATION IS COMPLETE, and it is a completeness "
+        "claim about the files this paragraph names BY PATH, not a count of anything: those are "
+        "the named files that carry a `durations` entry. ⛔ It does NOT claim")
+    assert _COMPLETENESS_CLAIM_RE.findall(retired), (
+        "the completeness-frame pattern no longer reads the sentence it was cut for, so assertion "
+        "1 passes over any spelling of it — re-point `_COMPLETENESS_CLAIM_RE` at the block's own "
+        "retired wording")
+    # ⛔ …AND EACH ALTERNATIVE IS PINNED SEPARATELY. The fixture above carries ALL THREE phrases at
+    # once, so `findall` stays truthy while any ONE of them survives — measured at `f45d7655aa`:
+    # narrowing the pattern to a single alternative, or dropping either of the two later ones, left
+    # this arm GREEN (it read a fixture that matched on what remained). Phrase 3 is worth its own
+    # assertion because it is the only one that catches a TAIL-ONLY splice — the half-deleted-
+    # sentence class this very branch shipped at `fd1726210be8` — so losing it silently is exactly
+    # the false PASS the pattern exists to prevent. Each phrase is TRUE prose of the retired frame,
+    # so no assertion here can false-block the live block (which matches none of the three).
+    for _phrase, _which in (
+            ("that enumeration is complete", "the `enumeration is complete` alternative"),
+            ("it is a completeness claim", "the `is a completeness claim` alternative"),
+            ("those are the named files", "the `those are the named files` alternative")):
+        assert _COMPLETENESS_CLAIM_RE.search(_phrase) is not None, (
+            f"the completeness-frame pattern no longer reads {_which}. The fixture above carries "
+            f"all three phrases at once, so `findall` cannot see one going missing — a re-narrowed "
+            f"pattern would ship GREEN over the splice class it exists to catch")
+    # ⛔ …AND THE DECLARED RESIDUAL IS PINNED BY NEGATIVE FIXTURES. This arm grades three
+    # phrases, so the frames below are GREEN — that is the DECLARED gap beside the pattern, not a
+    # claim of coverage. The assertions here keep the assertion one-way: a future widening that
+    # started REDing on TRUE prose would fail HERE, which is the failure mode that killed all three
+    # earlier attempts (a maintainer's own prohibition read as a completeness claim).
+    # ⛔ EVERY WIDENING IS PAIRED WITH ITS INVERSE — the rule the sibling arms here use, and this
+    # inverse was MEASURED as a real false block, not added for symmetry. All four below are TRUE
+    # statements, so a RED here is a false block on correct prose.
+    for prohibition in (
+        # Two of these are the fixtures that CATCH attempts 1 and 2; the last two CATCH attempt 3
+        # (its copula form red `DO NOT CLAIM THIS IS A COMPLETE LIST`, its `of every` form red the
+        # `EVERY`-inserted prohibition below). Measured: attempt 3's pattern passes the first four
+        # GREEN and reds the last two, which is why the sentence above can say all THREE attempts
+        # are caught — without those two it certified a reach it did not have (#14623 review P1).
+        "A ROW is an entry in `durations` — ⛔ NO COMPLETE LIST OF ROWS IS CLAIMED HERE.",
+        "A ROW is an entry in `durations` — never call this a complete list: a sweep adds a row.",
+        "A ROW is an entry in `durations` — ⛔ NO NUMERAL AND NO EXHAUSTIVE ENUMERATION here either.",
+        "A ROW is an entry in `durations` — every row item above is spelled with its path beside the word.",
+        "A ROW is an entry in `durations` — DO NOT CLAIM THIS IS A COMPLETE LIST.",
+        "A ROW is an entry in `durations` — ⛔ NO COMPLETE LIST OF EVERY ROW IS CLAIMED HERE.",
+    ):
+        assert _COMPLETENESS_CLAIM_RE.search(_unquoted_block(prohibition)) is None, (
+            "the completeness-frame pattern FALSE-BLOCKS true prohibition prose "
+            f"{prohibition!r} — the RED would tell a maintainer the block FRAMES its enumeration as "
+            "complete, which is the opposite of what that sentence says, and push the repair onto "
+            "the prohibition instead of the claim"
+        )
+    # …and a QUOTED record of a retired frame is NOT a live claim: a guard that reds on its own
+    # retraction would force the block's history out of the file.
+    # ⛔ THE QUOTE SITS INSIDE THE `⛔`-BOUNDED SLICE ON PURPOSE: `_row_enumeration` stops at the
+    # FIRST `⛔`, so a fixture that puts its quoted frame after the bound never puts the quote in
+    # the text this arm reads — the assertion then stays GREEN under a mask regression, which is
+    # the dead-weight shape `#14623` round 16 named (F2). Measured both ways: with the frame after
+    # the bound, `_unquoted_block -> header` left the arm GREEN.
+    quoted_record = (
+        "A ROW is an entry in `durations` — `tests/test_quoted_record.py` row. it once said "
+        '"THAT ENUMERATION IS COMPLETE" · and does not now. ⛔ next sentence')
+    assert _COMPLETENESS_CLAIM_RE.search(_row_enumeration(quoted_record)) is None, (
+        "a QUOTED record of a retired completeness frame is being read as a live claim — the "
+        "quoted-span mask has regressed, and the repair this message would push is to delete the "
+        "block's record of why the frame is gone")
+    # 2. Every path the enumeration names IS graded against the map — the half that makes the
+    # surviving positive-only statement true, and the reach hole `#14597`'s row fell through.
+    enumeration = _row_enumeration(header)
+    named = {m.group(1) for m in re.finditer(r"`tests/([\w/.-]+\.py)`", enumeration)}
+    assert named, (
+        "the row enumeration names no file by path, so this arm grades nothing — re-point "
+        "`_row_enumeration` at the list the block actually writes")
+    ungraded = sorted(named - set(_row_claims(header)))
+    assert not ungraded, (
+        f"the row enumeration names {ungraded}, which `_row_claims` does not return as a row — a "
+        "row claim no matcher reaches is graded by nothing. Put the word `row` beside the path so "
+        "`test_the_fast_shards_header_block_calls_a_row_only_what_has_one` checks it")
+    rowless = sorted(named - rows)
+    assert not rowless, (
+        f"the row enumeration calls {rowless} a `durations` row, but the map carries none: the "
+        "weight then comes from `DEFAULT_FAST_WEIGHT`, not from a reading")
+
+
+def test_the_fast_shards_header_block_carries_no_half_deleted_parenthetical():
+    """A clause cut out mid-sentence must not leave its paren behind as a fragment.
+
+    MEASURED at `fd1726210be8`, by reading the block rather than by any arm: the `git show --stat`
+    paragraph lost its middle and kept its closer, so the block shipped
+
+        ⛔ AND MEASURED, NOT with `git show --stat` — that prints NO diff for a
+        which lists a file only when it differs from EVERY parent), and this block's whole
+
+    Every arm in this family was GREEN over it — the row, carry, enumeration and completeness
+    readers all grade CLAIMS, and a severed sentence asserts nothing they can parse. `22bd9521`
+    then closed the same class one paragraph down by deleting an orphan `)`, which removes the
+    fragment's evidence instead of the fragment. The block's parentheticals balance at this head
+    only because the deleted middle was restored, so this arm is what keeps a re-wrapping editor
+    from taking it out again.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    residue = _unbalanced_parenthetical(header)
+    assert residue is None, (
+        "the `fast_shards` block carries a parenthetical whose other half is GONE — a clause was "
+        "cut out of the middle of a sentence and its `)` was left behind, so the sentence still "
+        f"looks like prose while the reason it carried is absent: …{residue}… Restore the deleted "
+        "clause rather than deleting the orphan paren: the fragment is what a reader sees, and "
+        "deleting the leftover `)` only removes the evidence that something was cut")
+    # …and the checker READS that shape: the block's own pre-fix fragment, quoted verbatim from
+    # `fd1726210be8`, REDs. Without this the arm is decoration — a `_unquoted_block` regression or a
+    # balancer pointed at the wrong text would leave assertion 1 GREEN over every severing.
+    for severed in (
+        # the SHIPPED one: opener removed with its clause, closer kept
+        "⛔ AND MEASURED, NOT with `git show --stat` — that prints NO diff for a\n"
+        "which lists a file only when it differs from EVERY parent), and this block's whole "
+        "subject is merges",
+        # the MIRROR class, which `22bd9521` deleted a `)` to hide: the opener stays, nothing closes
+        "measured them — never carried into this derivation (carrying\n"
+        "`#14597`'s expansion fusion over the residue RATCHET",
+    ):
+        assert _unbalanced_parenthetical(severed) is not None, (
+            "the balancer does not read a HALF-DELETED parenthetical it was cut for: "
+            f"{severed!r} — it is grading something other than the block's parens, so any "
+            "severing ships GREEN")
+    # …and TRUE prose is not refused: the restored sentence carries the nested `-m`/`--cc` pair and
+    # must still pass, which is what stops this arm from being solved by deleting the parenthetical.
+    assert _unbalanced_parenthetical(
+        _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))) is None, (
+        "the balancer refuses the block's own restored sentence — it is reading punctuation its "
+        "subject does not own")
+
+
+#: The ISSUE shorthand a row item may be spelled with — `` `#14560`'s `` — and the rule the block
+#: states for it: "Every row item above is therefore spelled with its path beside the word", so
+#: inside the row LIST every issue label must carry its own path. `[\s#]*` spans the block's
+#: comment wrapping (`\n# `), which `\s*` alone does not: the live paragraph breaks between a label
+#: and its path, and a matcher bound to the unwrapped spelling reads a reachable item as unreached
+#: (the one-spelling class this block keeps re-learning).
+_ROW_ENUMERATION_ISSUE_RE = re.compile(r"`#(?P<issue>\d+)`'s")
+#: ⛔ THE NOUN IS THE SAME ALTERNATION the other two row-claim matchers carry, and it was NOT,
+#: which is #14730's third instance: `_ROW_CLAIM_AFTER_FILE_RE` was widened to the block's own
+#: definitional synonym (`entry in `durations``) and this one was left on `rows?\b`, so the SPELLING
+#: half of `test_the_row_list_alone_reaches_every_item_it_names` RED a TRUE rewrite of a live list
+#: item — with a diagnostic asserting the item had no path beside it, which it did (measured at
+#: `de311a35a2da`: rewriting `tests/test_14560_operator_vectors.py`'s item to
+#: ``entry in `durations`` reported `14560` as issue-only; reproduced on `#14597`'s and `#14565`'s
+#: items too). The QUALIFIER stays mandatory for the reason `_ROW_CLAIM_AFTER_FILE_RE` records: bare
+#: `entry` is the block's word for a REGISTRATION, the opposite claim.
+_ROW_ISSUE_SHORTHAND_RE = (r"`#%s`'s[\s#]*`tests/(?P<file>[\w/.-]+\.py)`\s*"
+                          r"(?:rows?\b|entr(?:y|ies)\s+in\s+`?durations`?\b)")
+
+
+def _issue_shorthand_row_file(unquoted: str, issue: str) -> str | None:
+    """The file `` `#<issue>`'s `<path>` row `` names, or `None` when the text never spells it.
+
+    One resolver, used for the live list AND for the fixture that proves it refuses a shorthand
+    with no path beside it, so the fixture cannot drift into grading something the live arm does
+    not.
+    """
+    match = re.search(_ROW_ISSUE_SHORTHAND_RE % re.escape(issue), unquoted)
+    return match.group("file") if match else None
+
+
+def _row_list_issue_shorthands(unreached: str) -> list[str]:
+    """The issue labels a row list spells with NO path beside them, IN THE LIST'S OWN TEXT.
+
+    The `reached` half of `test_the_row_list_alone_reaches_every_item_it_names`: a list that leaves
+    an entry as `` `#14560`'s `` resolves to no file inside the list, so the sentence that says every
+    item is spelled with its path beside it is false and no path-based arm can see it.
+    """
+    return sorted({m.group("issue") for m in _ROW_ENUMERATION_ISSUE_RE.finditer(unreached)
+                   if _issue_shorthand_row_file(unreached, m.group("issue")) is None})
+
+
+def test_the_row_list_alone_reaches_every_item_it_names():
+    """The row list must be SELF-SUFFICIENT, which is the invariant the block now states.
+
+    `#14612` review (`2ce50a8343`, P3) measured "Every row item above is therefore spelled with its
+    path beside the word" to be FALSE: three of the list's nine items were spelled `` `#14560`'s ``,
+    `` `#14565`'s `` and `` `#14552`'s ``, reachable only through the EARLIER emission paragraph. The
+    list now spells all three by path (`94ecd6b607be`), and that is the stronger repair — but a
+    repair the commit message MEASURES rather than one an arm HOLDS: re-introduce one issue-only
+    entry and every existing arm stays GREEN, because a list that names no path for an item leaves
+    the path-based checks nothing to read. That is the `#14415`/`#14597` defect one fold away.
+
+    Two halves, over the list ALONE (sliced `A ROW is an entry in` … `THE LIST IS POSITIVE ONLY`):
+    every path it names is a row claim `_row_claims` returns FROM THAT SLICE, and no issue label in
+    it sits without its own path beside it. The SPELLING half is driven against the list's own
+    pre-fix text below; the REACH half needs no fixture — it grades the live list, so an item the
+    list leaves unreachable reds it directly.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    enumeration = _row_enumeration(header)
+    rows = set(cs.load_manifest()["durations"])
+    named = {m.group(1) for m in re.finditer(r"`tests/([\w/.-]+\.py)`", enumeration)}
+    assert named, (
+        "the row list names no file by path, so this arm grades nothing — re-point "
+        "`_row_enumeration` at the list the block actually writes")
+    # 1. REACH: the list reaches every item it names, on its own text.
+    ungraded = sorted(named - set(_row_claims(enumeration)))
+    assert not ungraded, (
+        f"the row list names {ungraded} but `_row_claims` does not return it FROM THE LIST — the "
+        "item is only reachable through prose above, which is the issue-only spelling the block "
+        "says it no longer uses. Put the word `row` beside the path inside the list")
+    # ⛔ AND THE SYNONYM THE BLOCK ITSELF DEFINES: "A ROW is an entry in `durations`". The matcher
+    # read only the word `row`, while `_ROW_CLAIM_CARRY_RE` already accepted `entr(?:y|ies)` — so a
+    # truth-preserving rewrite of ONE item into the block's own definitional synonym went unread and
+    # the REACH assertion above told the editor to undo a correct edit (MEASURED: the
+    # `test_14560_operator_vectors.py` item rewritten as `entry in `durations`` red, `1 failed`).
+    for spelling in ("entry in `durations`", "entries in `durations`"):
+        synonym = _row_claims(f"`tests/test_row_claim_synonym.py` {spelling},")
+        assert synonym == ["test_row_claim_synonym.py"], (
+            f"the row-claim matcher does not read the block's own synonym ({spelling!r}), so a TRUE "
+            f"rewrite of one list item reds the reach arm: {synonym!r}")
+    # ⛔ AND THE QUALIFIER IS PART OF THE SYNONYM. `entry` alone is the block's word for the
+    # OPPOSITE claim (its own words: "A REGISTRATION is a surface entry on ANY `surfaces` key" —
+    # no backticks around "surface entry"), so an optional
+    # `in `durations`` reads a true registration statement as a `durations` ROW claim — and the
+    # REACH assertion above then calls the block false about a row the map does not carry, telling
+    # the editor to delete a correct registration. MEASURED before this pin, each of these returned
+    # the path: `entry in `surfaces``, `entry in `durations_floors``, and a bare `entry`.
+    for not_a_row in ("entry in `surfaces`", "entry in `durations_floors`", "entry",
+                      "entries in `surfaces_floors`"):
+        assert _row_claims(f"`tests/test_row_claim_synonym.py` {not_a_row},") == [], (
+            f"the row-claim matcher reads a NON-row claim ({not_a_row!r}) as a `durations` row, so "
+            "the reach arm grades a true registration statement as a false row claim")
+    rowless = sorted(named - rows)
+    assert not rowless, (
+        f"the row list calls {rowless} a `durations` row, but the map carries none: the weight "
+        "then comes from `DEFAULT_FAST_WEIGHT`, not from a reading")
+    # 2. SPELLING: no entry survives as an issue label with its path left elsewhere.
+    shorthands = _row_list_issue_shorthands(enumeration)
+    assert not shorthands, (
+        f"the row list spells {shorthands} by ISSUE with no path beside them, so the block's "
+        "\"every row item above is therefore spelled with its path beside the word\" is false and "
+        "no matcher can reach the files those labels mean — spell the path in the list")
+    # …and the checker REFUSES the pre-fix list, so half 2 is not decoration: this is that block's
+    # pre-fix list ABRIDGED to the three issue-only items `94ecd6b607be` fixed. ⛔ The elision is
+    # MARKED rather than silent, in this PR of all places: the full pre-fix text also named
+    # `tests/test_14592_operating_model_evidence.py`'s row, both `#14415` rows and the RATCHET, and
+    # a fixture that drops them while calling itself "the block's own text" would be a false
+    # provenance claim — the shorthand half reads none of the dropped items, so they are omitted.
+    pre_fix = (
+        "A ROW is an entry in `durations` — among the files named above, `#14597`'s "
+        "`tests/test_expansion_fusion_14344.py` row, `#14560`'s, `#14565`'s, `#14552`'s, "
+        "`#14592`'s `tests/test_14592_read_parity.py` row. ⛔ THE LIST IS POSITIVE ONLY")
+    assert _row_list_issue_shorthands(pre_fix) == ["14552", "14560", "14565"], (
+        "the issue-shorthand checker no longer reads the list it was written for, so half 2 passes "
+        f"over any spelling of it — got {_row_list_issue_shorthands(pre_fix)!r}")
+
+
+#: The DERIVATION paragraph — the fold's own item list, which opens "On THIS tree — `origin/main`"
+#: and closes at the block's `⛔ EVERY file named above` marker. It restates, item for item, the row
+#: list the arm above grades, and its SPELLING was graded by NOTHING: measured at `1a4fc4c2b2f0`,
+#: stripping `#14560`'s path so the item read only `` `#14560`'s row `` left EVERY arm in this
+#: family GREEN (three arms selected, `3 passed`). `_row_enumeration` bounds the list BELOW, so the
+#: reach half above never sees this copy — the same issue-only spelling the block says it no longer
+#: uses, one paragraph up. An item spelled this way is unreachable by `_row_claims`, so deleting the
+#: `durations` row it claims reds nothing either: the duplicate below still carries the file, which
+#: is exactly why the rot would be silent.
+_DERIVATION_OPEN_RE = re.compile(r"On THIS tree — `origin/main`")
+_DERIVATION_END = "⛔ EVERY file named above"
+#: ONE item of the derivation: an issue label and ITS OWN text, bounded by the NEXT label.
+#: ⛔ PER-LABEL, not "the text between this label and the next row noun": that span awards an item
+#: the NEXT item's path. MEASURED at `ea6876a918ce` on the block's own list — `#14548`'s item
+#: (`` `#14548`'s residue RATCHET ``) names no path, its neighbour `#14552` carries
+#: `tests/test_record_read_point_vector_keys.py`, and the between-text reader reported `#14548` as
+#: REACHED (`path: True`) while the per-label reader sees that item name no path at all. Where it
+#: BITES is one item over: an item that carries a path and NO row noun absorbs the row claim after
+#: it, so an unpathed row claim is read as reached — measured on the fixture below, `([], 1)` GREEN.
+#: The row NOUN is the block's own definitional synonym, the same one `_ROW_CLAIM_AFTER_FILE_RE`
+#: carries — the SAME ALTERNATION and the SAME `re.IGNORECASE`, both load-bearing for the reason
+#: that sibling's own comment records: a matcher bound to `row` alone would read a TRUE rewrite into
+#: `entry in `durations`` as no item at all, the one-spelling class `#14730` files, and this block
+#: spells its vocabulary in CAPS too, so a lowercase-bound noun drops a CAPS row claim out of the
+#: scan — measured before the flag was carried: `` `#14415`'s batch ROWS `` returned `([], 0)`, GREEN
+#: over an unpathed row claim, against `(['14415'], 1)` for the lowercase spelling. Only an item that
+#: carries the noun makes a ROW claim, which is why an item naming a registration (`` `#14574`'s
+#: drift-reporter registration ``) is not refused for the path it does not owe.
+_DERIVATION_LABEL_RE = re.compile(r"`#(?P<issue>\d+)`'s")
+_DERIVATION_ROW_NOUN_RE = re.compile(r"rows?\b|entr(?:y|ies)\s+in\s+`?durations`?\b", re.IGNORECASE)
+_DERIVATION_PATH_RE = re.compile(r"`tests/(?P<file>[\w/.-]+\.py)`")
+
+
+def _derivation_list(header: str) -> str:
+    """The derivation paragraph, bounded by the block's own opening clause and closing marker."""
+    unquoted = _unquoted_block(header)
+    opening = _DERIVATION_OPEN_RE.search(unquoted)
+    assert opening is not None, (
+        "the block no longer opens its derivation with \"On THIS tree — `origin/main`\" — re-point "
+        "this arm at the sentence the block uses rather than letting it grade nothing")
+    end = unquoted.find(_DERIVATION_END, opening.end())
+    assert end != -1, (
+        "the derivation carries no `⛔ EVERY file named above` marker after its opening, so the "
+        "slice runs into the row list and this arm would grade a paragraph it was not written for")
+    return unquoted[opening.start():end]
+
+
+def _derivation_items(derivation: str) -> list[tuple[str, str]]:
+    """`(label, its OWN item text)` for every labelled item in the derivation.
+
+    An item is bounded by the NEXT label, never by the next row noun: a noun-anchored span swallows
+    the neighbouring item's path and reports an item that names no path as reached (`ea6876a918ce`,
+    measured on the BETWEEN-TEXT matcher this arm carried there, `_DERIVATION_ROW_ITEM_RE`).
+    """
+    marks = list(_DERIVATION_LABEL_RE.finditer(derivation))
+    items: list[tuple[str, str]] = []
+    for i, mark in enumerate(marks):
+        stop = marks[i + 1].start() if i + 1 < len(marks) else len(derivation)
+        text = derivation[mark.end():stop]
+        hard = text.find("⛔")
+        items.append((mark.group("issue"), text if hard == -1 else text[:hard]))
+    return items
+
+
+def _derivation_row_labels_without_path(derivation: str) -> tuple[list[str], int]:
+    """Row items that name no file by path, and how many ROW items were read.
+
+    A ROW item is one whose own text carries the row NOUN (the block's own definition: "a ROW is an
+    entry in `durations`"). An item naming a RATCHET or a registration makes no row claim here, so
+    its missing path is not refused — the row claims those items stand beside are spelled with
+    their paths in the list below, and refusing them here would be the false block `#14730` files.
+    """
+    labels: set[str] = set()
+    items = 0
+    for issue, text in _derivation_items(derivation):
+        if not _DERIVATION_ROW_NOUN_RE.search(text):
+            continue
+        items += 1
+        if not _DERIVATION_PATH_RE.search(text):
+            labels.add(issue)
+    return sorted(labels), items
+
+
+def test_the_derivation_list_spells_a_path_beside_every_row_label():
+    """The derivation's items must be reachable, not only the row list's copy of them.
+
+    The block says every one of its row items is spelled with its path beside the word, and it says
+    WHY: an issue-only label (`` `#14415`'s batch rows ``) is a row claim no matcher reaches, so the
+    arm that grades the claim stays green over it. The arm above holds that for the LIST; the
+    derivation paragraph restates the same items and nothing held it there — measured on this head
+    by stripping `#14560`'s path from the derivation (`3 passed`, every arm in the family).
+
+    So the derivation's spelling is graded here, and a fold that drops a path from an item reds it
+    directly. ⛔ NOT a second lock on the same words: each item is read PER LABEL — its own text,
+    bounded by the NEXT label, so a ROW label whose own item names no path is refused even when the
+    item AFTER it names one (a label that makes no row claim — a RATCHET, a registration — owes no
+    path and is not refused; see the two-direction fixtures below) — and the noun set is the block's
+    own `entry in `durations`` synonym so a TRUE rewrite does not red as an item that vanished.
+
+    ⛔ AND THE BOUND IS THE GRADED PROPERTY, which is why this arm was rewritten at `d874b73f37f0`:
+    the span it read was "this label up to the next row NOUN", so it awarded every item the next
+    item's path. On THIS block that shows up as a mis-attributed reading rather than a missed
+    finding — `#14548`'s item (`` `#14548`'s residue RATCHET ``) names no path, its neighbour
+    `#14552` names `tests/test_record_read_point_vector_keys.py`, and the arm reported `#14548` as
+    `path: True` — while the comment above claimed "the check is per-LABEL, not per-between-text".
+    One item over it becomes a FALSE NEGATIVE: a path-carrying item with no row noun absorbs the row
+    claim that follows it, so an unpathed row claim reads as reached. MEASURED on the fixture below
+    under the between-text span: `([], 1)` — GREEN — where the per-label bound returns
+    `(["14560"], 1)`. The old fixtures could not see either shape: both put the missing path
+    immediately before its OWN noun.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    derivation = _derivation_list(header)
+    ungraded, items = _derivation_row_labels_without_path(derivation)
+    # ⛔ MORE THAN ONE: a reader that merges consecutive labels into one span (the defect the
+    # per-label bound exists to remove) returns 1 however many items the block names.
+    assert items >= 2, (
+        "the derivation was read as ONE row item, so the per-label bound is not splitting items — "
+        "re-point `_derivation_items` at the label spelling the block uses rather than letting it "
+        f"grade nothing (got {items})")
+    assert not ungraded, (
+        f"the derivation spells {['#' + i for i in ungraded]} by ISSUE with no path beside the "
+        "row noun, so `_row_claims` cannot reach those files and the `durations` row the item "
+        "claims is graded by nothing on this copy — spell the path beside the word, as the list "
+        "below does")
+    # …and the checker REFUSES the shape it was written for, so the assertion above is not
+    # decoration: `1a4fc4c2b2f0`'s derivation with `#14560`'s path stripped, plus the neighbouring
+    # item that DOES name one (the lenient-span trap: a per-SPAN check would read `#14560` as
+    # reached off `#14565`'s path).
+    pre_fix = (
+        "On THIS tree — `origin/main` `bbef0b8840d7` folded in, carrying "
+        "`#14560`'s row, `#14565`'s `tests/test_14559_reaper_schedule.py` row. "
+        "⛔ EVERY file named above")
+    assert _derivation_row_labels_without_path(_derivation_list(pre_fix)) == (["14560"], 2), (
+        "the derivation checker no longer reads the shape it was written for, so a fold can drop a "
+        f"path from an item and stay green — got {_derivation_row_labels_without_path(_derivation_list(pre_fix))!r}")
+    # ⛔ AND THE SYNONYM: a TRUE rewrite of an item into the block's own definitional word must be
+    # read as an item (so its path is checked), not dropped out of the scan as no item at all.
+    synonym = ("On THIS tree — `origin/main` `bbef0b8840d7` folded in, carrying "
+               "`#14560`'s entry in `durations`. ⛔ EVERY file named above")
+    assert _derivation_row_labels_without_path(_derivation_list(synonym)) == (["14560"], 1), (
+        "the derivation checker reads only the noun `row`, so the block's own `entry in `durations` "
+        "synonym walks past it — a TRUE rewrite would be graded by nothing")
+    # ⛔ …AND THE NOUN'S CASE TOLERANCE, which is the same one `_ROW_CLAIM_AFTER_FILE_RE` carries: this
+    # block states its vocabulary in CAPS, and a noun bound to lowercase drops a CAPS row claim OUT OF
+    # THE SCAN rather than refusing it — measured before the flag: `([], 0)`, ZERO items read, GREEN.
+    caps_synonym = ("On THIS tree — `origin/main` `bbef0b8840d7` folded in, carrying "
+                    "`#14415`'s batch ROWS. ⛔ EVERY file named above")
+    assert _derivation_row_labels_without_path(_derivation_list(caps_synonym)) == (["14415"], 1), (
+        "the derivation checker reads only a LOWERCASE row noun, so a CAPS spelling of the block's "
+        "own vocabulary — the spelling this very block uses elsewhere — drops the item out of the "
+        "scan entirely: "
+        f"{_derivation_row_labels_without_path(_derivation_list(caps_synonym))!r}")
+    # ⛔ THE FALSE NEGATIVE the between-text span admits, with the measured pre-fix answer beside it:
+    # `#14574`'s item carries a path and no row noun, so the old span ran on to `#14560`'s noun and
+    # called `#14560` reached off a path that is not its own — `([], 1)`, GREEN over an unpathed row
+    # claim. Per-label it reds, and the `items` count stays 1 because `#14574` makes no row claim.
+    absorbed = (
+        "On THIS tree — `origin/main` `bbef0b8840d7` folded in, carrying `#14574`'s drift-reporter "
+        "registration (`tests/test_fly_secret_declaration_report.py`), `#14560`'s row. "
+        "⛔ EVERY file named above")
+    assert _derivation_row_labels_without_path(_derivation_list(absorbed)) == (["14560"], 1), (
+        "the derivation checker reads an item's path out of the item BEFORE it — a path-carrying item "
+        "with no row noun absorbs the row claim that follows, so an unpathed row claim is graded by "
+        f"nothing: {_derivation_row_labels_without_path(_derivation_list(absorbed))!r}")
+    # ⛔ …AND THE OTHER DIRECTION, so the per-label bound is not a false block: an item that names a
+    # REGISTRATION and no row is not refused for the path it does not owe (`[]`, one item).
+    registration = (
+        "On THIS tree — `origin/main` `bbef0b8840d7` folded in, carrying "
+        "`#14574`'s drift-reporter registration, `#14552`'s "
+        "`tests/test_record_read_point_vector_keys.py` row. ⛔ EVERY file named above")
+    assert _derivation_row_labels_without_path(_derivation_list(registration)) == ([], 1), (
+        "the derivation checker refuses (or double-counts) an item that makes no row claim — it "
+        "names a registration, which owes no `durations` path, and refusing it is the false block "
+        f"`#14730` files: {_derivation_row_labels_without_path(_derivation_list(registration))!r}")
 
 
 def test_the_emission_block_guard_is_not_vacuous():
