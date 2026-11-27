@@ -3936,13 +3936,13 @@ def _record_column_value(table: str, column: str, value: Any, *,
     embedding text — carrying NO generic props). Measured 2026-11-26: the live
     `_update_point(pid, quote={...})` leaves no `quote`, while replaying
     `PointRevised{quote: ...}` leaves the previous one intact. ⛔ `search_keys` is NOT
-    simply that case: when the revision carries `new_content` the fold RE-DERIVES it
-    (#10203, `identifier_tokens_enabled()` ON by default), so a record-sourced NULL and
-    a replayed alias differ by that derivation. But a `search_keys`-only revision
-    carries no content, so there the fold keeps the old alias and this IS the
-    missing-prop case. So the two stores disagree — pre-existing WITHOUT this arm, and
-    `#2946`'s question. This arm guarantees the narrower thing: the record holds what
-    the write that produced it left behind.
+    simply that case: with `new_content` and not `skip_content` (a superseding
+    creation sets it) the fold RE-DERIVES it (#10203, `identifier_tokens_enabled()`
+    ON by default), so a record-sourced NULL and a replayed alias differ by that
+    derivation. But a `search_keys`-only revision carries no content, so there the
+    fold keeps the old alias and this IS the missing-prop case. So the two stores
+    disagree — pre-existing WITHOUT this arm, and `#2946`'s question. This arm
+    guarantees the narrower thing: the record holds what the write left behind.
     """
     if table == "point" and column in _POINT_FLATTEN_COLUMNS and isinstance(
             value, Mapping):
