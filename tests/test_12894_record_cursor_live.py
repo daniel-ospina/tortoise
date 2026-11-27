@@ -1200,17 +1200,20 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
     excluded from that stamp, so it still lands here and the sentence pinned
     below keeps being the one an operator reads on it.
 
-    ⛔ AND THE ENUMERATED ARM'S SENTENCE MUST NOT PROMISE A HEAL THIS CLASS
-    DENIES (a P3 the branch carried: the arm's remedy texts were UNPINNED, and
-    the enumerated copy read *"a replay heals the record UNLESS … a
-    `record_cursor` row"*). The writer below reaches this arm AS a
-    `RecordStatementError` — the class THIS LEG drives, and one whose remedy is
-    *not* a replay: a replay RE-EXECUTES the same statement and re-fails until
-    the data or the constraint is fixed. (⛔ NOT "the ONE class whose remedy is
-    not a replay": the store/CONFIG half is the other, which is why the shipped
-    sentence names BOTH — round 28 P2.) The old sentence sent that operator to a
-    chain that cannot work, which is the SAME defect this branch fixes in the
-    vocabulary home (`status_vocabulary.py`) and on `/health` (`monitoring.py`).
+    ⛔ AND NEITHER ARM'S SENTENCE MAY PROMISE A HEAL THIS CLASS DENIES. On the
+    enumerated arm the old copy read *"a replay heals the record UNLESS … a
+    `record_cursor` row"*; on the ARMED arm the old copy named an allocating
+    replay as the remedy for the WHOLE population (round 31 P3), and the leg
+    here PINNED that omission with its inverse assertion
+    (`"EXECUTED and failed" not in text`), so the correct message reddened it.
+    The writer below reaches both arms AS a `RecordStatementError` — one whose
+    remedy is *not* a replay: a replay RE-EXECUTES the same statement and
+    re-fails until the data or the constraint is fixed. (⛔ NOT "the ONE class
+    whose remedy is not a replay": the store/CONFIG half is the other, which is
+    why the shipped sentence names BOTH — round 28 P2.) The old sentences sent
+    that operator to a chain that cannot work, which is the SAME defect this
+    branch fixes in the vocabulary home (`status_vocabulary.py`) and on
+    `/health` (`monitoring.py`).
     Both arms are driven on the SAME exception so the assertion is about the
     arm's SENTENCE, not about which failure was produced.
     """
@@ -1245,10 +1248,31 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
             assert "a replay heals the record" not in text, (
                 f"the enumerated arm's sentence leaked onto the armed arm: "
                 f"{text[-400:]!r}")
-            assert "EXECUTED and failed" not in text, (
-                "the enumerated arm's OUTAGE/STATEMENT split leaked onto the "
-                f"armed arm, where every remedy is an allocating replay: "
+            # ⛔ THE SPLIT IS PINNED ON THIS ARM TOO (round 31 P3). The assertion
+            # that stood here was its INVERSE — `"EXECUTED and failed" not in
+            # text` — so it reddened on the CORRECT message and enforced the
+            # defect it should have caught. `allocate` names which WRITE ARM ran,
+            # not which CAUSE failed: this arm's population is the same three the
+            # enumerated arm names (an outage, a statement that executed and
+            # failed, a store/CONFIG refusal), and the allocating replay is the
+            # remedy for the FIRST only. An allocating replay re-executes a
+            # failed statement (it re-fails on `chk_point_baseline_complete`,
+            # #13207) and re-raises a tenant-scope/role refusal. The allocating
+            # FORM stays pinned above because a plain replay is refused on a
+            # cut-over graph.
+            assert "an OUTAGE is healed by an ALLOCATING replay" in text, (
+                "the ARMED arm's outage half lost the allocating form it needs "
+                "— a plain replay is refused on a cut-over graph: "
                 f"{text[-400:]!r}")
+            assert "statement that EXECUTED and failed re-fails" in text, (
+                "the ARMED arm still promises a heal to a statement that "
+                "executed and failed — an allocating replay RE-EXECUTES it and "
+                f"re-fails on the same data: {text[-400:]!r}")
+            assert "STORE/CONFIG refusal" in text, (
+                "the ARMED arm does not name the store/CONFIG half of its own "
+                "population: a tenant-scope/role refusal raised after the plan "
+                "build lands here on the allocated arm too, and its remedy is a "
+                f"DSN/role fix, not any replay: {text[-400:]!r}")
         else:
             # ⛔ EVERY CLAUSE OF THE SPLIT IS PINNED, because this sentence is
             # read on THREE populations (an outage, a statement that executed

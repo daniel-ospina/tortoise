@@ -4874,10 +4874,31 @@ def write_live_record(record: Mapping[str, Any], *,
                 "`record_allocator_cli.py status` for the mode"
             )
         else:
+            # ⛔ THIS ARM'S POPULATION IS THE SAME THREE CAUSES AS THE
+            # ENUMERATED ARM ABOVE (round 31 P3): `allocate` says which WRITE ARM
+            # ran, not which CAUSE failed. An OUTAGE is healed by an allocating
+            # replay; a statement that EXECUTED and failed RE-EXECUTES on that
+            # replay and re-fails until its own data or constraint is fixed; a
+            # STORE/CONFIG refusal RE-RAISES on any replay until the DSN or the
+            # role is fixed. Naming the allocating replay as the remedy for all
+            # three sent two of the three populations to a replay that cannot
+            # heal them — the same misdirection this change fixes on the
+            # enumerated arm, and the convergent external shape of the point is a
+            # `transient` / `correctable` / `permission-terminal` split with the
+            # retry named for the FIRST class only (Azure Well-Architected,
+            # Temporal, AdCP's `recovery modes`). The allocating FORM is still
+            # named here because the ROW is the discriminator, not the cause:
+            # `_refuse_an_enumerated_replay` refuses a plain replay on a cut-over
+            # graph, so the outage half is unreachable without it.
             remedy = (
-                "repair it with an ALLOCATING replay (`replay(allocate=True)`, "
-                "a CODE call — no CLI verb ships), not a plain one, which a "
-                "cut-over graph refuses"
+                "an OUTAGE is healed by an ALLOCATING replay "
+                "(`replay(allocate=True)`, a CODE call — no CLI verb ships), "
+                "not a plain one, which a cut-over graph refuses; a statement "
+                "that EXECUTED and failed re-fails on that replay too, until "
+                "its own cause (its data or a constraint) is fixed; a "
+                "STORE/CONFIG refusal (the tenant scope, a role that bypasses "
+                "RLS, the cutover guard's own read) re-raises until the DSN or "
+                "the role is fixed, on any replay"
             )
         _logger.warning(
             "the record write did not happen (write_failed) — %s; %s: "
