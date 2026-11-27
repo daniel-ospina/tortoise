@@ -124,11 +124,16 @@ version: 1
 # first-parent history carries self-merges there is no sound mechanical reading of “the fold this
 # head carries”, so the RULE survives and the label is re-pointed by hand on each fold — a residual
 # named on the artifact, which is the convention this block uses BELOW for the row-exemption class.
-# ⛔ EVERY file named above is `main`'s at this head. ⛔ Not claiming "and every one is `core`":
-# registration status is a THIS-HEAD fact no arm in this block's family reads, and `#14544` is the
-# proof it moves (the sentence below records that file leaving `core`) — the fold's own doctrine is
-# that a claim graded by nothing rots. ⛔ THE SCOPE IS THE ARM FAMILY, not every arm in the suite:
-# registration membership IS asserted by name elsewhere (`manifest["surfaces"]["core"]` and
+# ⛔ EVERY file named above is `main`'s — the claim is that none is a file this change ADDS, not
+# that none is touched: `tests/test_14560_operator_vectors.py` IS edited here (a two-line pin), so
+# the bare "is `main`'s at this head" the earlier wording carried was false on the face of
+# this diff. ⛔ Not claiming "and every one is `core`": registration status is a THIS-HEAD fact, and
+# `#14544` is the proof it moves (the sentence below records that file leaving `core`) — which is
+# why the registrations this derivation STATES are GRADED rather than trusted:
+# `test_the_derivation_surface_claims_are_graded_against_the_manifest` reads the four files whose
+# surfaces are named above and REDs if any of them moves. ⛔ THE SCOPE IS THE ARM FAMILY, not every
+# arm in the suite: registration membership IS asserted by name elsewhere
+# (`manifest["surfaces"]["core"]` and
 # siblings), so the unqualified "no arm reads" this sentence used to carry was itself the class of
 # claim this block exists to remove (#14623 review round 18, P3).
 # ⛔ NO PER-FILE WEIGHT IS QUOTED FOR THE FILES IN THE DERIVATION ABOVE, on purpose: a weight
@@ -237,7 +242,8 @@ version: 1
 # lives on the commit that took it (`git log`). An earlier spelling of this sentence claimed
 # "NEITHER copy described this tree: both stated" a single partition — which cannot be true of a
 # pair that disagreed, and was measured false. Neither copy was picked; the paragraph above is a
-# third fresh re-derivation.
+# fresh re-derivation on this merged tree and is not the Nth of anything — restating which
+# re-derivation it was would be a spelled-out count that no artifact records.
 # ⛔ NO WINDOW IS STATED HERE, and the reason is a measurement: "the folds after `a0cea310786d`
 # touched nothing" was FALSE in this very paragraph, because `bf16c791a489` landed after it and
 # moved seventeen lines of this block. The derivation reads ONCE because each fold was checked on

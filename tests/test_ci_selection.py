@@ -10332,6 +10332,37 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
         "is legal and only an UNGRADED one is not")
 
 
+def test_the_derivation_surface_claims_are_graded_against_the_manifest():
+    """#14623 review: the derivation STATES four files' surfaces, and nothing read them.
+
+    The block names per-file registration while, three lines earlier, asserting that
+    "registration status is a THIS-HEAD fact no arm in this block's family reads" and justifying
+    the gap with "registration membership IS asserted by name elsewhere". Measured: mutating any
+    of these four registrations in the manifest left all eleven header arms GREEN, so that
+    justification did not hold for the files this sentence actually names.
+
+    `#14544` is the proof the fact MOVES — `e66997b81e` took `test_dod_5090_probe.py` out of
+    `core` — so a fold that drops `onboarding` below would leave the block silently false. The
+    values are TRUE at this head; what was missing is the arm that notices when they stop being.
+    """
+    m = cs.load_manifest()
+    for fname, surface in (
+            ("test_14592_operating_model_evidence.py", "core"),
+            ("test_14592_operating_model_evidence.py", "eval"),
+            ("test_14592_read_parity.py", "core"),
+            ("test_14592_read_parity.py", "api"),
+            ("test_13450_ep_position_axis_participation.py", "core"),
+            ("test_own_site_fragment_targets.py", "core"),
+            ("test_own_site_fragment_targets.py", "onboarding")):
+        assert fname in m["surfaces"].get(surface, ()), (
+            f"the derivation claims `{fname}` is registered on `{surface}` and it is not — either "
+            f"re-derive that sentence or re-register the file; a registration claim no arm reads is "
+            f"the exact class this block exists to remove")
+    assert "test_14592_operating_model_evidence.py" in m["tier1"], (
+        "the derivation claims `test_14592_operating_model_evidence.py` is a `tier1` member and it "
+        "is not — re-derive the sentence")
+
+
 def test_the_fast_shards_header_block_states_no_span_twice():
     """#14481: a fold must not splice this block into a second copy of itself.
 
