@@ -376,13 +376,17 @@ def test_the_graph_store_round_trips_put_claim_defer_reclaim_park_complete():
     from tests.test_hosted_api import TEST_ORG_ID
 
     proj = ha._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+    # ⛔ THE PRODUCTION SEAM, not `proj.g.query`: the seam is what
+    # `_capture_intake_for_proj` wires, and `tools/sdk_privatise.py`'s
+    # untyped-receiver RATCHET counts a bare `proj.g.query` — a test is not a
+    # reason to raise it.
+    query = ha._graph_query_seam(proj)
     wipe = f"MATCH (i:{CAPTURE_INTAKE_LABEL}) DETACH DELETE i"
-    proj.g.query(wipe)
+    query(wipe, params={})
     clock = _Clock()
 
     def _queue() -> CaptureIntake:
-        return CaptureIntake(store=GraphIntakeStore(ha._graph_query_seam(proj)),
-                             now=clock)
+        return CaptureIntake(store=GraphIntakeStore(query), now=clock)
 
     q = _queue()
     try:
@@ -414,7 +418,8 @@ def test_the_graph_store_round_trips_put_claim_defer_reclaim_park_complete():
         # queued, the deferred HEAD being skipped is what proves the predicate:
         # FIFO would hand it out again immediately.
         assert q.defer(claimed, "capacity", delay_s=30) == IntakeState.QUEUED.value
-        refunded = [i for i in q.store.rows() if i.item_id == first.item_id][0]
+        refunded = next(i for i in q.store.rows()
+                        if i.item_id == first.item_id)
         assert refunded.attempts == 0, (
             "defer must REFUND the attempt it did not spend, or five transient "
             "conditions park a turn that was only waiting")
@@ -446,4 +451,4 @@ def test_the_graph_store_round_trips_put_claim_defer_reclaim_park_complete():
         assert [i.item_id for i in q.store.rows()] == [reclaimed.item_id], (
             "complete() deletes its own row and nothing else")
     finally:
-        proj.g.query(wipe)
+        query(wipe, params={})
