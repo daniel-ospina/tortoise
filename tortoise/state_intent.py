@@ -1146,8 +1146,8 @@ _COMMITMENT_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
 ROUTING_NOTE = """\
 \u26d4 WHICH STATE QUESTIONS ROUTE, so you can predict it (#14033). An ENDING question
 is answered from the ended records only when its wording is one of the shapes
-below; the cue is the question's own PREDICATE, never an ending word that
-happens to sit near a wh-word.
+below; routing needs the question's own PREDICATE, never an ending word that
+merely sits near a wh-word.
 
   ROUTES \u2014 rows from the ended population, each carrying how it ended:
     `has anything we relied on been withdrawn`
@@ -1166,11 +1166,18 @@ match, which may be empty or unrelated, and an EMPTY ANSWER HERE IS NOT EVIDENCE
 THAT NOTHING HAS ENDED. This tool takes no argument that forces the ended read,
 so the wording is the only way in. \u26d4 AND A ROUTED READ IS NOT ANNOUNCED IN THE
 ROW LIST either \u2014 this reply is the rows alone, with no field saying a state
-question was recognised. The `state_question` report (`{routed, population, cue,
-reason, hint}`) rides the HOSTED `GET /v1/search` response body, which is the one
-customer-facing channel for it; the same payload rides the private
-`TortoiseSDK._tortoise_fts_query(..., _state_question_out=...)` sink, so the
-line is: this MCP tool cannot report the distinction, the hosted route can.
+question was recognised. The `state_question` report rides the HOSTED
+`GET /v1/search` response body, which is the one customer-facing channel for it;
+the same payload rides the private
+`TortoiseSDK._tortoise_fts_query(..., _state_question_out=...)` sink. The report's
+keys, exactly: `{routed, population, cue}` on every payload \u2014 `cue` is the
+ending word that was SEEN (on a declined question it may be one that only
+MODIFIES a noun), so it is NOT proof that the route fired \u2014 plus `{shape}` on a
+routed read (the shape that fired), or `{reason, hint}` on a declined one
+(`reason` is a closed token: `shape` when no shape applied, `family` when a shape
+fired but the requested entity_type has no arm for that population; `hint` is the
+remedy). Branch on `routed`, never on the presence of `shape`. So the line is:
+this MCP tool cannot report the distinction, the hosted route can.
 """
 
 #: What a caller is told when a state CUE was seen and no shape applied. ONE
@@ -1209,11 +1216,25 @@ MISSED_ROUTE_FAMILY_HINT = (
     "stage+outcome, endedAt)."
 )
 
+#: The FAMILY arm of the COMMITMENTS population needs its own sentence too: the
+#: refusal there is the read's ``entity_type``, not the family's lifecycle \u2014 the
+#: commitment kinds ARE Object kinds (ONTOLOGY \u00a75) \u2014 so the remedy is
+#: ``entity_type='object'``, not "pick a family with a lifecycle".
+MISSED_ROUTE_COMMITMENTS_HINT = (
+    "this IS a commitment question, but the commitment kinds are OBJECT kinds "
+    "(ONTOLOGY \u00a75) and this read's entity_type has no arm for them, so the "
+    "RELEVANCE read answered instead \u2014 a point-scoped commitment question already "
+    "returns the live claims, so this may be the answer you wanted. For the "
+    "commitment population itself, re-read with entity_type='object'; every row "
+    "then carries the kind and the stage it stands on."
+)
+
 #: The reasons a strong cue can be seen without the population being served.
 #: CLOSED, because a caller branches on the value: ``shape`` is no shape applying
 #: (an appended constraint, an attributive participle), ``family`` is a shape that
-#: DID fire on a family the ended population does not exist for (``ended.py``'s
-#: own refusal).
+#: DID fire on a family the SERVED population does not exist for \u2014 either the
+#: ended population has no arm for the entity_type (``ended.py``'s own refusal) or
+#: the commitment kinds (Object kinds) have no arm for a non-object read.
 MISSED_ROUTE_REASONS = ("shape", "family")
 
 #: The frame a state CUE has to sit in before it counts as one. ⛔ This is the
@@ -1281,7 +1302,8 @@ def state_cue(text: str | None) -> str | None:
     return None
 
 
-def missed_route_payload(cue: str, reason: str) -> dict:
+def missed_route_payload(
+        cue: str, reason: str, population: str | None = None) -> dict:
     """The report a read owes the caller when it declined to serve the population.
 
     One shape for every reason, so a caller branches on ``reason`` rather than on
@@ -1293,17 +1315,34 @@ def missed_route_payload(cue: str, reason: str) -> dict:
     ``reason`` must be a member of :data:`MISSED_ROUTE_REASONS` \u2014 an open string
     would let a new arm ship a value no caller was told to expect, which is the
     same "documented term, invented value" defect ``read_status`` exists to prevent.
+
+    ``population`` names the population the DECLINE refused, and only a ``family``
+    refusal has one: a shape did not apply for ``shape``, so passing a population
+    with it is refused rather than silently ignored. Defaulted to :data:`ENDED`
+    because that was the only family refusal when this arm was written; the
+    COMMITMENTS refusal passes its own, or a caller would be told the wrong
+    population was declined.
     """
     if reason not in MISSED_ROUTE_REASONS:
         raise ValueError(
             f"unrecorded missed-route reason {reason!r}; the closed set is "
             f"{MISSED_ROUTE_REASONS!r}")
+    if reason == "shape":
+        if population is not None:
+            raise ValueError(
+                f"a 'shape' decline refused no population ({population!r}): no "
+                f"shape applied, so there was nothing to refuse")
+        population, hint = None, MISSED_ROUTE_HINT
+    else:
+        population = ENDED if population is None else population
+        hint = (MISSED_ROUTE_COMMITMENTS_HINT if population == COMMITMENTS
+                else MISSED_ROUTE_FAMILY_HINT)
     return {
         "routed": False,
-        "population": None if reason == "shape" else ENDED,
+        "population": population,
         "reason": reason,
         "cue": cue,
-        "hint": MISSED_ROUTE_HINT if reason == "shape" else MISSED_ROUTE_FAMILY_HINT,
+        "hint": hint,
     }
 
 

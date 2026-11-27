@@ -1241,6 +1241,51 @@ def test_a_routed_state_question_IS_declared_through_the_same_sink(sdk):
 
 
 @_docker_only
+def test_a_commitment_question_on_a_non_object_family_is_reported(sdk):
+    """A commitment shape the read's entity_type refuses says so, instead of silence.
+
+    #14033 acceptance 4, one population over (#14780 review, finding 1). The
+    commitment kinds ARE Object kinds, so a `point`-scoped commitment question is
+    answered by the relevance read \u2014 deliberately, and it may be the answer the
+    caller wanted. What was missing is the REPORT: the shape fired, the population
+    was refused, and the sink stayed empty, so a caller could not tell that from
+    "nothing is committed".
+
+    \u26d4 This is the ONLY publishing channel's shape: `GET /v1/search` never passes
+    `entity_type`, so its default `point` is what a customer's commitment question
+    gets. Without this arm the hosted report is absent for every such question.
+    """
+    from tortoise.state_intent import COMMITMENTS, MISSED_ROUTE_COMMITMENTS_HINT
+
+    out: dict = {}
+    rows = sdk._tortoise_fts_query("what are we currently committed to",
+                                   entity_type="point", _state_question_out=out)
+    assert isinstance(rows, list), (
+        "the declined read must still return its rows \u2014 the report is additive")
+    report = out.get("state_question")
+    assert report is not None, (
+        "the read recognised a commitment question and refused the population on "
+        "entity_type, and wrote no report: a caller cannot tell that from 'nothing "
+        "is committed' (#14033 item 4)")
+    assert report["routed"] is False
+    assert report["reason"] == "family", (
+        "a shape DID fire \u2014 this is a family/entity_type refusal, not 'no shape "
+        "applied'")
+    assert report["population"] == COMMITMENTS, (
+        "the decline must name the population IT refused; ENDED here would "
+        "misdescribe the question the caller asked")
+    assert report["hint"] == MISSED_ROUTE_COMMITMENTS_HINT
+
+    # …and the same question on the family that HAS the arm is routed, not refused.
+    routed_out: dict = {}
+    sdk._tortoise_fts_query("what are we currently committed to",
+                           entity_type="object", _state_question_out=routed_out)
+    routed_report = routed_out.get("state_question")
+    assert routed_report is not None and routed_report["routed"] is True
+    assert routed_report["population"] == COMMITMENTS
+
+
+@_docker_only
 def test_a_query_with_no_state_cue_writes_nothing(sdk):
     """The sink stays empty for every ordinary read, so nothing else changes.
 

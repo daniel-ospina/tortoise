@@ -1420,6 +1420,87 @@ def test_the_served_note_rides_the_live_search_door_and_stays_inside_the_budget(
         "then promise the ended population on a door that cannot serve it")
 
 
+#: The note's own spelling of a payload key set: `{a, b, c}`. Read as a contract, so a
+#: key the note advertises and no payload carries (or the reverse) reds.
+_NOTE_KEY_GROUP = re.compile(r"\{([a-z_, ]+)\}")
+
+
+def _note_key_groups(note: str) -> list[tuple[str, ...]]:
+    """Parse ``ROUTING_NOTE``'s payload-key groups into sorted key tuples."""
+    return [tuple(sorted(k.strip() for k in group.split(",") if k.strip()))
+            for group in _NOTE_KEY_GROUP.findall(note)]
+
+
+def test_the_served_report_contract_names_exactly_the_payloads_keys():
+    """The note's field list IS the payload — per arm, not as a union.
+
+    #14780 review, finding 2(a): the note advertised `{routed, population, cue,
+    reason, hint}` as THE report, while a ROUTED read carries `{routed, population,
+    shape, cue}` — so a customer writing `body["state_question"]["reason"]` against
+    the served text got a `KeyError` on the successful case, and `shape` \u2014 the
+    one field that says WHICH shape fired \u2014 was served nowhere. A union check would
+    have passed that text; the per-arm split is the contract, so it is what is read.
+    """
+    from tortoise.state_intent import (
+        ENDED,
+        ROUTING_NOTE,
+        StateQuestion,
+        missed_route_payload,
+        routed_payload,
+    )
+
+    routed = set(routed_payload(StateQuestion(ENDED, "wh_whole_question", "what ended")))
+    declined = set(missed_route_payload("ended", "shape"))
+    assert _note_key_groups(ROUTING_NOTE) == [
+        tuple(sorted(routed & declined)),
+        tuple(sorted(routed - declined)),
+        tuple(sorted(declined - routed)),
+    ], (
+        "the served note's key groups are not the payloads' own keys, arm by arm — "
+        f"routed={sorted(routed)}, declined={sorted(declined)}, "
+        f"note={_note_key_groups(ROUTING_NOTE)}. A caller codes against this text: "
+        "a key named here that no payload carries is a KeyError, and a key a "
+        "payload carries but the note omits is a field nobody can find")
+
+
+def test_the_served_note_describes_cue_as_the_word_SEEN_not_the_predicate():
+    """`cue` is the ending word that was seen \u2014 the note must not say otherwise.
+
+    #14780 review, finding 2(b): the note said "the cue is the question's own
+    PREDICATE, never an ending word that happens to sit near a wh-word", and the
+    SAME change ships `state_cue()`, whose whole job is to fire on exactly such an
+    ending word and whose result becomes the payload's `cue`. Pinned on the row the
+    note itself files under DOES NOT ROUTE, so the two readings cannot drift apart.
+    """
+    from tortoise.state_intent import (
+        ROUTING_NOTE,
+        detect_state_question,
+        missed_route_payload,
+        state_cue,
+    )
+
+    attributive = "which archived report has the Q3 numbers"
+    assert detect_state_question(attributive).population is None
+    cue = state_cue(attributive)
+    assert cue == "archived", (
+        "the attributive row is the note's own example: the ending word MODIFIES "
+        "`report` and is not the predicate (`has the Q3 numbers`)")
+    report = missed_route_payload(cue, "shape")
+    assert report["cue"] == "archived", (
+        "the payload's `cue` is the ending word that was seen, so the note's "
+        "description of the field has to be that \u2014 not the predicate")
+
+    served = " ".join(ROUTING_NOTE.split())
+    assert "`cue` is the ending word that was SEEN" in served, (
+        "the served note does not say what `cue` carries: it is the ending word "
+        "seen (attributive on a declined question), never proof the route fired")
+    assert "the cue is the question's own PREDICATE" not in served, (
+        "the note again claims `cue` is the PREDICATE, which the shipped payload "
+        "contradicts on `which archived report has the Q3 numbers` (cue=archived, "
+        "predicate=`has the Q3 numbers`) \u2014 routing needs the predicate; the "
+        "FIELD carries the word seen")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Acceptance 4 — A NON-FIRING STATE CUE IS DISTINGUISHABLE FROM AN EMPTY ANSWER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1513,7 +1594,9 @@ def test_the_report_is_a_closed_vocabulary():
     The construction-time refusal is what keeps it closed, rather than a docstring.
     """
     from tortoise.state_intent import (
+        COMMITMENTS,
         ENDED,
+        MISSED_ROUTE_COMMITMENTS_HINT,
         MISSED_ROUTE_FAMILY_HINT,
         MISSED_ROUTE_HINT,
         MISSED_ROUTE_REASONS,
@@ -1540,6 +1623,28 @@ def test_the_report_is_a_closed_vocabulary():
     assert family_addressed["hint"] != MISSED_ROUTE_HINT, (
         "the two reasons exist because the REMEDY differs: 'ask a recognised form' "
         "is a runaround for a caller whose recognised question the family refused")
+
+    # ⛔ THE SECOND FAMILY REFUSAL (#14780 review, finding 1). The commitment
+    # kinds are Object kinds, so a point/event/subject read declines a commitment
+    # shape it DID recognise. Defaulting that to ENDED would tell the caller the
+    # wrong population was refused, and reusing the ended hint would tell them to
+    # pick a family with a lifecycle — which is not the remedy here.
+    commitments_refused = missed_route_payload("our commitments", "family", COMMITMENTS)
+    assert commitments_refused["routed"] is False
+    assert commitments_refused["population"] == COMMITMENTS, (
+        "the commitments arm's decline must name the population IT refused")
+    assert commitments_refused["reason"] == "family"
+    assert commitments_refused["hint"] == MISSED_ROUTE_COMMITMENTS_HINT
+    assert commitments_refused["hint"] not in (MISSED_ROUTE_HINT,
+                                               MISSED_ROUTE_FAMILY_HINT), (
+        "each refusal carries its OWN remedy: this one is entity_type='object', "
+        "not 'ask a recognised form' and not 'pick a family with a lifecycle'")
+
+    # A 'shape' decline refused no population, so one passed beside it is refused
+    # rather than silently dropped (a field that can be ignored ships the caller a
+    # `population` the read never considered).
+    with pytest.raises(ValueError):
+        missed_route_payload("retired", "shape", COMMITMENTS)
 
     with pytest.raises(ValueError):
         missed_route_payload("retired", "adverb")

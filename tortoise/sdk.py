@@ -46739,6 +46739,17 @@ class TortoiseSDK:
                     _scope_from_question = query
                     if _state_question_out is not None:
                         _state_question_out["state_question"] = routed_payload(_state_q)
+                elif _state_question_out is not None:
+                    # #14033: the shape DID fire and this read's ``entity_type`` is
+                    # what declined the population \u2014 the commitment kinds are
+                    # Object kinds (ONTOLOGY \u00a75), so a point/event/subject read
+                    # has no arm for them. Reported for the same reason the family
+                    # refusal above is: silence here reads as "nothing is
+                    # committed", and this arm is reachable on the ONLY publishing
+                    # channel (`GET /v1/search` never passes ``entity_type``, so its
+                    # default `point` is what a customer's commitment question gets).
+                    _state_question_out["state_question"] = missed_route_payload(
+                        _state_q.cue or "", "family", COMMITMENTS)
             elif _state_question_out is not None:
                 # #14033: NO shape applied. The relevance read below answers, and
                 # that answer is silent about the fact that the caller's state cue
