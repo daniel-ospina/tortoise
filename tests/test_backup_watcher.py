@@ -2392,7 +2392,11 @@ def test_a_confirmed_no_manifest_org_that_HAS_state_is_not_called_never():
     # look like it lies.
     assert "IN FLIGHT" in body, body          # the benign cause leads
     assert "merely REAPPEARS without a manifest is still not a measurement" in body, body
-    assert "universe-shrink: the subject is gone" in body, body
+    # …and it says which arm is NOT one: the `per_team` census, which re-lists
+    # a state-only org regardless of census membership
+    # (`test_watcher_census_shrink_does_not_falsely_resolve_backup_set_missing`).
+    assert "NOT a closer" in body, body
+    assert "leaving the `per_team` CENSUS" in body, body
     assert "the class is then `never`" in body, body
     # `not_eligible` is a SHIPPED closer for this exact arm too — the branch at
     # `_drive_alerts`'s `not_eligible` leg resolves KIND_BACKUP_SET_MISSING, and

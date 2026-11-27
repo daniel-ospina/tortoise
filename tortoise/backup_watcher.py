@@ -1341,9 +1341,12 @@ class BackupWatcher:
                 "`never` and NEVER_BACKED_UP is filed — NOT arm (i) of this kind, "
                 "which requires state PRESENT), or the class becomes "
                 "`not_eligible` (the org left the DR surface: this closes and "
-                "NOTHING is opened), or the org leaves the census and its "
-                "archive listing entirely (universe-shrink: the subject is "
-                "gone)."),
+                "NOTHING is opened). ⛔ NOT a closer: the org leaving the "
+                "`per_team` CENSUS while its state lingers — "
+                "`compute_status` re-lists every state-only org from "
+                "`state_orgs` regardless of the census, and arm (ii) becomes "
+                "arm (i) once its prefix goes, so the subject stays in this "
+                "kind's set and the incident stays open."),
         }
 
     def _measured_fresh(self, org: str,
