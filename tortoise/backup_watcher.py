@@ -1100,14 +1100,15 @@ class BackupWatcher:
 
         * ``newest`` is the newest DEFAULT-graph archive the poll had — measured
           now, or (on a degraded poll) the last CONFIRMED measurement it kept.
-        * when ``newest`` is ``None`` the filing is an absence/unknown, never an
-          age, and the payload names WHICH absence. Since #9938 the CONFIRMED
-          "state present, no default archive" absence is its OWN class
+        * no ``newest is None`` filing is produced any more. Since #9938 the
+          CONFIRMED "state present, no default archive" absence is its OWN class
           (``backup_set_missing``) with its own payload
-          (``_backup_set_missing_evidence``), so the only ``newest is None``
-          filing left on this kind is the UNCONFIRMED one (the listing did not
-          answer — a cache miss off the census). The two absences send a triager
-          to different places, so they do not share a string.
+          (``_backup_set_missing_evidence``), and an UNCONFIRMED cache miss
+          opens nothing at all from ``_drive_alerts`` (#9937). The
+          ``newest is None`` branch below is therefore kept as keys only and is
+          unreachable: it publishes no ``measurement`` and no ``closes_when``.
+          The two absences still send a triager to different places, so they do
+          not share a string.
         * an ``ops/simulate`` DRILL forces the class without changing the
           archive, so the simulated timestamp is reported as ``simulated_age``
           and NEVER as ``newest_default_archive`` — publishing a key that does
@@ -1261,13 +1262,26 @@ class BackupWatcher:
                     "age, not a cache miss.")
                 evidence["closes_when"] = self._stale_closes_when(f"{fresh_arm}:")
         else:
-            # Unreachable from ``_drive_alerts``: a CONFIRMED absence with team
-            # state is its OWN class since #9938 (``backup_set_missing``, whose
-            # payload is ``_backup_set_missing_evidence``), so no STALE is filed
-            # for it — and with no state the class is ``never``, which opens a
-            # different kind. Kept as keys only: a payload that TELLS a reader
-            # the filing was not made is a claim that can only mislead if it is
-            # ever published.
+            # ``newest is None`` — unreachable from ``_drive_alerts`` TWO ways,
+            # and both are load-bearing:
+            #
+            # (a) ``r2_confirmed`` — a CONFIRMED absence with team state is its
+            #     OWN class since #9938 (``backup_set_missing``, whose payload
+            #     is ``_backup_set_missing_evidence``), and with no state the
+            #     class is ``never``. So the confirmed path never files a STALE.
+            # (b) ``not r2_confirmed`` — an UNMEASURED cache miss must not file
+            #     a STALE per org per R2 blip, and that is NOT argument (a)'s:
+            #     it holds solely because the ``stale`` arm's open gate blocks
+            #     ``newest is None`` (``tortoise/backup_watcher.py``, the
+            #     ``if r2_confirmed or (newest_ts_by_org or {}).get(org) is not
+            #     None:`` predicate — the shipped #9937 guard).
+            #
+            # ⛔ Do NOT delete that gate on the strength of (a): the confirmed
+            # class explains only the confirmed half, and removing the gate
+            # re-opens the per-org flood across every R2 blip (#9937).
+            #
+            # Kept as keys only: a payload that TELLS a reader the filing was
+            # not made is a claim that can only mislead if ever published.
             evidence["newest_default_archive"] = None
         return evidence
 
@@ -1329,9 +1343,11 @@ class BackupWatcher:
 
         Same newest-primary rule ``compute_status`` applies, so a non-expired
         ``ops/simulate`` drill object wins selection and can never be mistaken
-        for freshness. A cache miss, an unparsed timestamp and a DEGRADED poll
-        all return False — the caller gates on ``r2_confirmed`` as well, because
-        absence of a measurement is not freshness (#9937/#9940).
+        for freshness. A cache miss and an unparsed timestamp return ``False``.
+        This helper does NOT know whether the poll answered: a DEGRADED poll
+        hands it the last CONFIRMED measurement and can return ``True``, so
+        every caller MUST gate it on ``r2_confirmed`` — absence of a measurement
+        is not freshness (#9937/#9940).
         """
         newest = (newest_ts_by_org or {}).get(org)
         if newest is None or now is None:
