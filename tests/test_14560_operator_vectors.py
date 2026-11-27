@@ -322,7 +322,7 @@ def test_the_operator_denominator_counts_the_SLICE_not_the_whole_label(sdk, monk
         record_vector.reset_coverage_cache()
 
 
-# ── the consequence for a DESTRUCTIVE consumer (no database needed) ────────
+# ── the consequence for a DESTRUCTIVE consumer (⚠️ one arm needs a URI) ────
 
 def test_a_TRIVIAL_verdict_cannot_license_the_restore_drop(monkeypatch):
     """⛔ THE SIDE EFFECT THIS CHANGE HAD TO CLOSE, pinned without a database.
