@@ -60,8 +60,11 @@ version: 1
 # reader of the prose can see. On THIS tree — the LAST `origin/main` fold on this branch, which
 # ALREADY carries `tests/test_14691_structure_evidence.py` (`core`, at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) as #14723's row, not as this lane's (#14587 review cycle 11, P2: the
-# possessive spelling here credited the fold's own row to this branch, and the two manifests are
-# byte-identical, so the fold brought it in) — the verb packs seven shards at 828.0 s (a, f, g, h, i, j, k) and four at
+# possessive spelling here credited the fold's own row to this branch. ⛔ NOT because "the two
+# manifests are byte-identical" that is FALSE and was measured so: the fold's two parents differ
+# by 124/118 lines, and this head differs from `origin/main` by 24/78. What IS measured is ROW
+# MEMBERSHIP — the row is present in `origin/main`'s manifest and absent from the PRE-FOLD BASE's,
+# so the fold brought it in) — the verb packs seven shards at 828.0 s (a, f, g, h, i, j, k) and four at
 # 827.9 s (b, c, d, e), so `ceil(828.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is
 # the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
 # `watchdog_headroom: 2.03` (1680 / 828.0 = 2.0290) on every one of the eleven shards, so the two
@@ -330,8 +333,10 @@ version: 1
 # the sentence itself — a pair that disagreed cannot both have stated one partition — which is why
 # that spelling was DELETED rather than re-pointed. The figures that ARE true here are the PRE-FOLD BASE
 # `c1c8df1a3817`'s own emission — measured by loading `git show c1c8df1a3817:config/ci-surfaces.yml`
-# through `fast_pool()` and `push_legs()` — not either copy's, and not the fold's: a fold carries
-# this lane's row as well, so its pool is strictly larger by construction. Neither copy was picked;
+# through `fast_pool()` and `push_legs()` — not either copy's, and not the fold's. ⛔ AND NOT
+# BECAUSE A FOLD CARRIES THIS LANE'S ROW: this lane registers NO row at this head, and the fold's
+# pool is larger than the PRE-FOLD BASE's because `main` ADVANCED, not because this branch added a
+# member — a claim the same measurement refutes in one command. Neither copy was picked;
 # the re-derivation above is a third fresh one. ⛔ WHICH ONE IT COUNTS AS IS NOT STATED, and neither
 # copy's figures are quoted inline: that ordinal is a window the NEXT fold renumbers, and restating
 # a fold's numbers here is the carry the paragraph above refuses — the measurement lives on the
