@@ -1436,15 +1436,35 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
             # `position and not allocate and records`
             # (`record_projection.py:9105`) and `position=False` is a real mode
             # on this arm (`position=True if allocate else seq is not None`,
-            # `record_writer.py:4330-4335`, with `seq is None` a NAMED skip,
-            # `_note_unproven_position`). So the remedy pointer after it was a
+            # `record_writer.py:4346`, with `seq is None` a NAMED skip via
+            # `_note_unproven_position` at `:4288`). So the remedy pointer after it was a
             # dead end for that population. Pinned in the scoped form, so the
             # over-broad text cannot come back and the CORRECT text does not red.
-            assert "ENUMERATED replay that carries a position is refused" in text, (
+            assert ("ENUMERATED replay that carries a position is refused when "
+                    "this graph has a `record_cursor` row") in text, (
                 "the enumerated arm lost the cursor-row condition that makes "
                 "the allocating replay the remedy on a cut-over graph, or "
                 "lost its POSITION scope — `position=False` never reaches "
                 f"`_refuse_an_enumerated_replay`: {text[-400:]!r}")
+            # ⛔ AND THE MEMBER'S OWN REMEDY IS A MIGRATION (review pass at
+            # `0c98eb0ea6`, P3). The parenthetical grouped the cutover guard's
+            # read with the two `scope_connection` causes under "until the DSN or
+            # the role is fixed" — and that remedy matches NONE of the guard's
+            # reachable shapes: when the read FAILS the only real shape is a
+            # database the counter migration has not reached (`42P01`, whose
+            # remedy `record_projection.py:8382-8390` names itself: apply
+            # `20261116000001_record_cursor_allocator.sql`), and when it
+            # SUCCEEDS the remedy is the row's MODE, stated by the next clause.
+            # Both directions pinned, so the migration remedy cannot be dropped
+            # and cannot silently revert to a DSN/role claim.
+            assert "ordinal-allocator migration is applied to this database" in text, (
+                "the cutover guard's read must carry its OWN remedy — a `42P01` "
+                "is a MISSING MIGRATION, and neither a DSN nor a role fixes "
+                f"it: {text[-400:]!r}")
+            assert "a `42P01` is a MISSING MIGRATION, not a DSN or a role" in text, (
+                "the member's remedy is drifting back under the DSN/role claim "
+                "that matches none of its shapes: "
+                f"{text[-400:]!r}")
             assert "an ENUMERATED replay is refused" not in text, (
                 "the UNSCOPED form is back — the guard is gated on `position`, "
                 "and a `position=False` enumerated replay on a cut-over graph "

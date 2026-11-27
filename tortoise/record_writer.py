@@ -4854,19 +4854,39 @@ def write_live_record(record: Mapping[str, Any], *,
                 # on the record's own data (a replay RE-EXECUTES and re-fails
                 # until the data or the constraint is fixed), and the
                 # STORE/CONFIG refusals raised on the far side of the plan build
-                # (`_apply_tenant_scope`'s read-back and the role posture, the
-                # cutover guard's own SELECT — a replay re-raises until the
-                # DSN/role is fixed). Those are THREE causes; the cursor row is
+                # (`_apply_tenant_scope`'s read-back and the role posture — a
+                # replay re-raises until the DSN/role is fixed — and the cutover
+                # guard's own SELECT, which is a MISSING MIGRATION and healed by
+                # applying it, not by a DSN or a role; see the split below).
+                # Those are THREE causes; the cursor row is
                 # an INDEPENDENT axis across all of them, not a fourth. ⛔ EACH
                 # CAUSE IS NAMED IN THE SHIPPED SENTENCE, not only here — a
                 # comment does not reach the operator (round 28 P2).
                 "an OUTAGE is healed by a replay; a statement that EXECUTED and "
                 "failed re-fails until its own cause (its data or a constraint) "
                 "is fixed; a STORE/CONFIG refusal (the tenant scope, a role that "
-                "bypasses RLS, the cutover guard's own read) re-raises until "
-                "the DSN or the role is fixed; the tenant scope and the role "
-                "are asked on every replay, the cutover guard only on one that "
-                "carries a position; "
+                "bypasses RLS) re-raises until the DSN or the role is fixed; "
+                # ⛔ THE CUTOVER GUARD'S READ IS ITS OWN REMEDY AND IT IS NOT THE
+                # DSN OR THE ROLE (review pass at `0c98eb0ea6`, P3). This
+                # parenthetical used to include it alongside the two
+                # `scope_connection` causes, which made one remedy cover three
+                # members that need two different fixes. MEASURED at source: the
+                # only shape that reaches that read on a real deployment is a
+                # database the counter migration has not reached (`42P01`), and
+                # `record_projection.py:8382-8390` names the remedy itself —
+                # "Apply the ordinal-allocator migration
+                # (20261116000001_record_cursor_allocator.sql) to this database"
+                # — with the code's own comment at `:8375-8377` stating that the
+                # remedy is a MIGRATION, not a retry. A correct DSN and a correct
+                # role change neither of them. And when the read SUCCEEDS, the
+                # remedy is the row's MODE, which the next clause states. So the
+                # member is split out here rather than left under a remedy that
+                # matches none of its shapes.
+                "the cutover guard's own read re-raises until the ordinal-"
+                "allocator migration is applied to this database (a `42P01` is "
+                "a MISSING MIGRATION, not a DSN or a role); the tenant scope "
+                "and the role are asked on every replay, the cutover guard only "
+                "on one that carries a position; "
                 "and an ENUMERATED replay that carries a position is "
                 "refused when this graph "
                 "has a `record_cursor` row (cut over) — the remedy is then the "
