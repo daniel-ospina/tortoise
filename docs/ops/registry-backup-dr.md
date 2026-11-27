@@ -1067,10 +1067,10 @@ Two residuals are known and tracked, not silently absorbed:
   removed — no `ops/teams/{team}/state.json` — takes its incident off every walk,
   so a still-open one needs a manual close; same class as #3410. While the state
   file lingers it stays open **without churn** (the shrink poll deliberately does
-  not resolve it and then re-open it). Arm **(ii)** (#9938: state + a live prefix
-  + no manifest) is a `per_team` key, so it closes on its own once the prefix's
-  manifest is measured again — and it also closes when the STATE disappears, at
-  which point the class is `never` and arm (i) owns the subject.
+  not resolve it and then re-open it). Arm **(ii)** (#9938: state, plus a live
+  prefix, plus no manifest) is a `per_team` key, so it closes on its own once the
+  prefix's manifest is measured again — and it also closes when the STATE
+  disappears, at which point the class is `never` and arm (i) owns the subject.
 * The app requires the audit **comment** to land before closing (a failed comment
   raises and blocks the close, retried next run); the driver treats a failed
   comment as best-effort and closes anyway. Deliberate asymmetry: the app is the
