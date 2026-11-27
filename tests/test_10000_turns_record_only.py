@@ -27,6 +27,7 @@ security: unscoped reads return nothing, exactly as the production app role's do
 
 from __future__ import annotations
 
+import logging
 import re
 
 import pytest
@@ -186,7 +187,7 @@ def test_armed_record_writes_no_turn_nodes_but_keeps_the_session(sdk, monkeypatc
     assert rows[0][1] == 1, "turn_max_index is not the id-space high-water mark"
 
 
-def test_a_refused_record_write_falls_back_to_the_graph(sdk, monkeypatch):
+def test_a_refused_record_write_falls_back_to_the_graph(sdk, monkeypatch, caplog):
     """A record write that REFUSES the turn must put it in the graph instead.
 
     ⛔ THE DECISION COMES FROM WHAT THE WRITE DID, not from the preflight that
@@ -195,6 +196,14 @@ def test_a_refused_record_write_falls_back_to_the_graph(sdk, monkeypatch):
     on that, the fold refused the record — and the graph write was already
     skipped. A capability probe made before the write is not a decision; the
     outcome is.
+
+    ⛔ AND THE LINE IT WARNS WITH MUST NOT OVER-PROMISE (#14746 review, P2). The
+    rescue WARN used to say "A `write_failed` refusal heals on replay from the
+    journal; a `journal_collision` one does NOT" — an over-claim for the post-plan
+    half of `write_failed` (a STATEMENT that executed and failed, a store/CONFIG
+    refusal after the plan was built: both re-FAIL on replay) and silent about
+    `plan_refused`, which reaches this arm too. MEASURED pre-fix: the old sentence
+    was emitted verbatim on this capture.
     """
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
     monkeypatch.setattr("tortoise.record_writer.write_live_record",
@@ -203,12 +212,47 @@ def test_a_refused_record_write_falls_back_to_the_graph(sdk, monkeypatch):
     # a closed breaker) — only the write's own outcome refuses it.
     _bind_tenant(sdk)
     proj = sdk._get_proj()
-    _capture(sdk, "refused-session", [{"role": "user", "content": "a"},
-                                      {"role": "assistant", "content": "b"}])
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        _capture(sdk, "refused-session", [{"role": "user", "content": "a"},
+                                          {"role": "assistant", "content": "b"}])
     assert sorted(sdk_mod._capture_turn_ids(proj, "refused-session")) == [
         "refused-session_t0", "refused-session_t1"], (
         "the record refused the turns and the graph did not take them: the "
         "capture lost the transcript while reporting success")
+    line = "\n".join(r.getMessage() for r in caplog.records)
+    assert "writing them to the GRAPH" in line, (
+        f"the rescue WARN must still say what it did with the turns: {line}")
+    assert "Refusal(s):" in line, (
+        "the WARN must NAME which refusal population applied — the operator "
+        f"cannot pick a remedy otherwise: {line}")
+    assert "A replay heals an OUTAGE only" in line, (
+        f"the remedy must be scoped to the population a replay heals: {line}")
+    assert "heals on replay from the journal" not in line, (
+        "the blanket `write_failed` claim is back — a STATEMENT that executed "
+        f"and failed re-fails, and `plan_refused` is re-refused: {line}")
+
+
+def test_the_armed_write_failure_warning_never_promises_a_replay_that_cannot_heal_it(
+        sdk, caplog):
+    """#14746 review P3 — the grep line must not carry a remedy it cannot deliver.
+
+    `_record_write_failure` is the sdk seam's report for an ARMED write that did
+    not happen, and its only three call sites pass `seam_unimportable`,
+    `malformed_dsn` and `no_journal`. MEASURED pre-fix, ALL THREE were told "the
+    journal has the record and a replay heals the record": false for `no_journal`
+    (there is no journal — and the exception this same log record prints says
+    "no replay could heal it", so one record contradicted itself) and for a
+    `malformed_dsn` (a replay re-fails identically).
+    """
+    for reason in ("no_journal", "malformed_dsn", "seam_unimportable"):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+            sdk._record_write_failure(reason, RuntimeError(f"{reason} for the pin"))
+        line = "\n".join(r.getMessage() for r in caplog.records)
+        assert f"the record write did not happen ({reason})" in line, (
+            f"the phrase the runbook greps must survive: {line}")
+        assert "a replay heals the record" not in line, (
+            f"`{reason}` was promised a replay that cannot heal it: {line}")
 
 
 def test_the_graph_store_lane_keeps_the_turn_VECTOR(sdk, monkeypatch):

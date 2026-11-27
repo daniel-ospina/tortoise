@@ -408,8 +408,9 @@ def test_the_probe_epoch_is_a_float_and_not_the_identity_string():
     test still green. Measured: renaming only the module-level definition left
     this leg GREEN and the file's run moved by ZERO — stated as the per-mutant
     delta, not as a whole-file total, because a total re-stales the moment any
-    round adds a leg to this file (the `journal_collision` pin above did exactly
-    that to the `16 passed` this note used to carry). A member of
+    round adds a leg to this file (the `journal_collision` pin BELOW — the one at
+    `test_the_journal_collision_bullet_names_what_a_replay_heals_and_re_refuses`
+    — did exactly that to the `16 passed` this note used to carry). A member of
     `source.splitlines()` is a start-of-line match, so the indented assignment
     cannot stand in for it.
     """
