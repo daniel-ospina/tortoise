@@ -46695,8 +46695,13 @@ class TortoiseSDK:
         if (query is not None and not ended_scope and not include_terminal
                 and not [k for k in _retrieval_knobs() if k != "query"]):
             from .state_intent import (
-                COMMITMENTS, ENDED, detect_state_question, missed_route_payload,
-                routed_payload, state_cue)
+                COMMITMENTS,
+                ENDED,
+                detect_state_question,
+                missed_route_payload,
+                routed_payload,
+                state_cue,
+            )
 
             _state_q = detect_state_question(query)
             if _state_q.population == ENDED:
