@@ -4024,8 +4024,37 @@ def test_the_cost_table_is_the_receipt():
                 f"{len(edges)} written · **{len(dropped_here)} dropped** "
                 f"(`{names}`)"), (doc_id, cells[6], dropped_here)
         else:
-            assert cells[6].startswith(str(len(edges))), (doc_id, cells)
-            assert "dropped" not in cells[6], (doc_id, cells[6])
+            # ⛔ THE BREAKDOWN AFTER THE COUNT WAS FREE IN 4 OF THE 5 ROWS (15th
+            # fresh-context review, P2). `.startswith(len(edges))` graded the
+            # leading number only, so doc-01's `7 (5 `hasPart`, 2 `IMPL`)` could
+            # become `7 (5 `hasPart`, 4 `IMPL`)` — a cell whose own numbers then
+            # sum to 9 against a stated count of 7 — and the suite measured
+            # 103 passed. `test_no_FIGURE_in_the_two_documents_is_free` cannot see
+            # a SWAP to a figure some other row carries. The three spellings the
+            # table uses are derived here: `<n>` (doc-05, count only), `<n> (<k>
+            # `pred`, …)` (doc-01, doc-02) and `<n> (`pred`)` (doc-03, a single
+            # predicate, where the count is the row's own total).
+            cell = cells[6]
+            head = re.fullmatch(r"(\d+)(?: \((.*)\))?", cell)
+            assert head, (doc_id, cell)
+            assert int(head.group(1)) == len(edges), (doc_id, cell)
+            breakdown = head.group(2)
+            if breakdown is not None:
+                counts: dict[str, int] = {}
+                for edge in edges:
+                    counts[edge["predicate"]] = counts.get(edge["predicate"], 0) + 1
+                stated: dict[str, int] = {}
+                for item in breakdown.split(","):
+                    item = item.strip()
+                    counted = re.fullmatch(r"(\d+) `([A-Za-z]+)`", item)
+                    if counted:
+                        stated[counted.group(2)] = int(counted.group(1))
+                        continue
+                    bare = re.fullmatch(r"`([A-Za-z]+)`", item)
+                    assert bare, (doc_id, item, cell)
+                    stated[bare.group(1)] = int(head.group(1))
+                assert stated == counts, (doc_id, stated, counts, cell)
+            assert "dropped" not in cell, (doc_id, cell)
         total_ack += doc["ack_seconds"]
     totals = [c.strip() for c in _report_line(r"^\| \*\*total\*\* \|").strip().strip("|").split("|")]
     tk = _score()["extraction_tokens"]
