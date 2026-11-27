@@ -1,0 +1,68 @@
+{
+ "quotes_total": 50,
+ "verbatim": 11,
+ "paraphrase": 27,
+ "not_in_corpus": 12,
+ "audited": [
+  {
+   "quote": "**Lumen Core**, the energy-operations platform that control-room customers run",
+   "verbatim_in_corpus": false,
+   "overlap": 0.636,
+   "point": "Lumen Core is the energy-operations platform that control-room customers run."
+  },
+  {
+   "quote": "**Lumen Field**, the mobile product their field crews run",
+   "verbatim_in_corpus": false,
+   "overlap": 0.875,
+   "point": "Lumen Field is the mobile product that field crews run."
+  },
+  {
+   "quote": "Lumen Core carries three features \u2014 Grid Map (network topology view), Outage Alerts (notifies operators when a feeder trips), and Load Forecast (predicts demand",
+   "verbatim_in_corpus": false,
+   "overlap": 0.958,
+   "point": "Lumen Core carries three features: Grid Map, Outage Alerts, and Load Forecast."
+  },
+  {
+   "quote": "Grid Map (network topology view)",
+   "verbatim_in_corpus": false,
+   "overlap": 1.0,
+   "point": "Grid Map is the network topology view feature of Lumen Core."
+  },
+  {
+   "quote": "Outage Alerts (notifies operators when a feeder trips)",
+   "verbatim_in_corpus": false,
+   "overlap": 1.0,
+   "point": "Outage Alerts notifies operators when a feeder trips."
+  },
+  {
+   "quote": "Load Forecast (predicts demand per substation)",
+   "verbatim_in_corpus": false,
+   "overlap": 1.0,
+   "point": "Load Forecast predicts demand per substation."
+  },
+  {
+   "quote": "Lumen Field carries two \u2014 Crew Dispatch (assigns crews to open jobs) and Asset Register (records pole and transformer inventory).",
+   "verbatim_in_corpus": false,
+   "overlap": 0.941,
+   "point": "Lumen Field carries two features: Crew Dispatch and Asset Register."
+  },
+  {
+   "quote": "Crew Dispatch (assigns crews to open jobs)",
+   "verbatim_in_corpus": false,
+   "overlap": 1.0,
+   "point": "Crew Dispatch assigns crews to open jobs."
+  },
+  {
+   "quote": "Asset Register (records pole and transformer inventory)",
+   "verbatim_in_corpus": false,
+   "overlap": 1.0,
+   "point": "Asset Register records pole and transformer inventory."
+  },
+  {
+   "quote": "Dana Whitlock as Staff Engineer ... on Platform",
+   "verbatim_in_corpus": false,
+   "overlap": 1.0,
+   "point": "Dana Whitlock is the Staff Engineer on the Platform team"
+  }
+ ]
+}

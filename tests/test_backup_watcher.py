@@ -1002,6 +1002,41 @@ def test_watcher_census_shrink_does_not_falsely_resolve_backup_set_missing():
     assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_x"]
 
 
+def test_a_state_only_org_that_leaves_the_ELIGIBLE_set_closes_its_backup_set_missing():
+    """The census qualifier on BACKUP_SET_MISSING has ONE exception, and it is
+    measured here rather than assumed (#9938 review round 5).
+
+    `compute_status`'s state-only loop is eligibility-gated, so an arm-(i) org
+    that leaves the census **and** the eligible set drops out of
+    `backup_set_missing` entirely (no `per_team` key is computed for it at all),
+    and the cross-poll diff resolves the incident. That is the arm the runbook
+    and the payload must name as the one census-adjacent closer that fires —
+    while `test_watcher_census_shrink_does_not_falsely_resolve_backup_set_missing`
+    pins the mirror case (eligible, so it is re-listed and nothing closes).
+
+    The close is pinned on the cross-poll DIFF, not on the `not_eligible`
+    branch: an org outside the census has no `per_team` key, so that branch
+    never sees it.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_state(storage, "team_x")          # state, no prefix → arm (i)
+    _seed_archive(storage, "team_y", 0.5)   # a real org keeps the read credible
+    _seed_state(storage, "team_y")
+    w = _watcher(storage, ch, orgs=("team_x", "team_y"),
+                 eligible_provider=lambda: ["team_x", "team_y"])
+    w.poll()
+    assert any("BACKUP_SET_MISSING — team_x" in t for t in ch.issues.values()), ch.issues
+
+    # offboarded: out of the census AND out of the eligible set, state lingering
+    w._orgs = lambda: ["team_y"]
+    w._eligible = lambda: ["team_y"]
+    w.poll()
+    assert not any("BACKUP_SET_MISSING" in t for t in ch.issues.values()), ch.issues
+    assert any("resolved" in m.lower() and "BACKUP_SET_MISSING" in m
+               for m in ch.telegram), ch.telegram
+
+
 def test_watcher_blank_eligibility_ids_are_unconfirmed_too():
     """#3658 review (cycle 3). A guard that rejects only a ZERO-LENGTH result is
     bypassed one element away: `[""]` (or a whitespace-only id) is non-empty,
@@ -1518,6 +1553,97 @@ def test_watcher_backup_set_missing_closes_when_the_state_disappears():
     status = w.poll()
     assert status["backup_set_missing"] == []
     assert ch.issues == {}
+
+
+def test_arm_i_outside_census_set_is_STRANDED_across_a_watcher_restart():
+    """The `closes_when` payload names the cross-poll diff as the closer for an
+    arm-(i) org that has left the census — and that diff is an IN-PROCESS
+    register (`_last_backup_set_missing`), so it only closes a subject THIS
+    process saw on a previous CONFIRMED poll (#9938 round 9).
+
+    Modelled the way production runs it (`hosted_api._alert_store_from` →
+    `_backup_storage()`): ONE persistent storage behind the alert store, and a
+    FRESH `AlertStore` + `BackupWatcher` for the restarted process. The alert
+    store's storage is what a restart carries over; the backup surface is the
+    same scenario with the state file ABSENT, built as a fresh surface rather
+    than by removing the key in place (`tools/sdk_privatise.py` ratchets untyped
+    `.delete` receivers). Two details are load-bearing, and the first version of
+    this test got them wrong (round 9 measured it green under the mutation it
+    named):
+
+    * the DEDUP object lives in the alert store's STORAGE, not on the store
+      object — so a fresh `AlertStore` over the same storage still finds it and
+      would still close the incident. That is why the restart below builds a NEW
+      store over the same storage instead of reusing the first one: a reused
+      instance cannot tell the two apart. ⚠️ That construction is FIDELITY to the
+      production shape, NOT a guard — measured: reverting to ONE shared store
+      leaves this test green, and so does giving each process a store over a
+      fresh `MemoryStorage` (the carryover actually lost). No assertion here
+      consults the dedup object: after the restart the test asserts that NO
+      resolve is attempted, so nothing can distinguish a carried-over dedup from
+      a lost one. What strands the subject is a fresh ALERT-STORE storage, which
+      is what `_watcher()` builds (its own `MemoryStorage` per call), and that is
+      why the round-9 version was blind;
+    * the `_alert_leg` SPY is what makes an attempt visible at all: it records
+      `resolve_incident` whether or not a dedup object exists, so a carried
+      register reds `bsm_resolves == []` independently of the store's state.
+
+    Without a restart the incident closes
+    (`test_watcher_backup_set_missing_closes_when_the_state_disappears`); with
+    one, nothing references the subject at all (`to_resolve` sees it in neither
+    `per_team` — a state-only org outside the census has no key — nor the
+    register), so no resolve is even ATTEMPTED and it needs a manual close.
+    """
+    ch = _Channels()
+    storage: MemoryStorage = MemoryStorage()
+
+    def _store_over_shared_storage() -> AlertStore:
+        # A fresh store per process over the ONE persistent storage — the
+        # production restart shape (`_alert_store_from` is built per process).
+        return AlertStore(
+            storage, file_issue=ch.file_issue, close_issue=ch.close_issue,
+            search_open=ch.search_open, push_telegram=ch.push_telegram,
+            repo="daniel-ospina/tortoise", assignee="u", now=lambda: FIXED,
+        )
+
+    _seed_state(storage, "team_x")          # arm (i): state, no R2 prefix
+
+    def _proc() -> BackupWatcher:
+        return BackupWatcher(
+            storage, _store_over_shared_storage(),
+            org_provider=lambda: [], state_reader=lambda t: {},
+            driver_heartbeat_reader=lambda: {}, stale_threshold_min=90,
+            driver_down_threshold_min=240, grace_min=0, now=lambda: FIXED,
+        )
+
+    _proc().poll()
+    assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_x"], ch.issues
+
+    # RESTART, then the state disappears — the shape the residual describes.
+    w = _proc()
+    legs: list[tuple[str, str]] = []
+    real_leg = w._alert_leg
+
+    def _spy(op, kind, subject="", detail=None):
+        legs.append((op, kind))
+        return real_leg(op, kind, subject, detail)
+
+    w._alert_leg = _spy  # type: ignore[method-assign]
+    # The state disappears — modelled as a FRESH surface with no state file, not
+    # by removing the key in place (an untyped `.delete` receiver is ratcheted by
+    # `tools/sdk_privatise.py`). The watcher is the SECOND process here, so its
+    # carried register is empty and no resolve may be attempted for this subject.
+    emptied = MemoryStorage()
+    w._storage = emptied
+    for _ in range(3):
+        w.poll()
+    assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_x"], ch.issues
+    bsm_resolves = [1 for op, kind in legs
+                    if op == "resolve_incident" and kind == "BACKUP_SET_MISSING"]
+    assert bsm_resolves == [], (
+        "the cross-poll diff is an IN-PROCESS register: with nothing carried over, "
+        f"no resolve may be attempted ({legs})")
+    assert not any("resolved" in m.lower() for m in ch.telegram), ch.telegram
 
 
 def test_watcher_generator_eligibility_is_materialised_once():
@@ -2357,9 +2483,10 @@ def test_a_confirmed_no_manifest_org_that_HAS_state_is_not_called_never():
     """The three-way split on `newest is None` must not collapse case 3 into
     `never`: team state is written only after a SUCCESSFUL dump (#2374), so
     "never backed up" is false for an org that has state — what is missing is
-    the archive SET, which the separate `backup_set_missing` census owns. This
-    table has no class for it yet (#9938), so the pre-existing label stands
-    rather than gaining a new false one."""
+    the archive SET, and since #9938 this table NAMES it: the class is
+    `backup_set_missing` (the twin's, #2374) and BACKUP_SET_MISSING is the kind
+    that is filed for it — not `stale`, which was an age claim about an archive
+    nobody measured an age for."""
     ch = _Channels()
     storage = MemoryStorage()
     _seed_state(storage, "team_a")                 # a dump succeeded once
@@ -2373,23 +2500,308 @@ def test_a_confirmed_no_manifest_org_that_HAS_state_is_not_called_never():
         grace_min=0, now=lambda: FIXED,
     )
     status = w.poll()
-    assert status["per_team"]["team_a"] == "stale", status["per_team"]
+    assert status["per_team"]["team_a"] == "backup_set_missing", status["per_team"]
+    assert status["backup_set_missing"] == ["team_a"], status
     assert not any("NEVER_BACKED_UP" in t for t in ch.issues.values()), ch.issues
+    # EXACTLY ONE incident, of the kind that names the condition: `stale` is gone
+    # (it was a false age claim) and no second kind is open for the same org
+    # (#3294: exactly the incidents matching the classification are open).
+    assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_a"], ch.issues
     # …and the filed payload must not send the triager to R2 connectivity: this
     # poll's listing DID answer, so the absence is a missing archive SET, not a
     # cache miss. (Two different absences must not share one string.)
     (body,) = (ch.bodies[n] for n in ch.issues)
     assert "CONFIRMED listing" in body, body
     assert "cache miss" not in body, body
-    # …and it names EVERY arm that can close it. The branch used to assign its own
-    # `closes_when`, which silently dropped `not_eligible` and the universe-shrink
-    # leg — a list of some closers reads as exhaustive, so an issue that closed for
-    # an unlisted reason makes the watcher look like it lies.
+    # …and it publishes NO age for an ABSENCE: the issue TITLE is rendered from
+    # `age`/`age_minutes` (`alert_store._title`), so a stray age-like key here
+    # would change the adoption contract's title shape while the row still read
+    # as "no age". Asserted over EVERY age-prefixed key, not just the two the
+    # title reads: the mutation pass measured that `"age_min": 0` left this
+    # whole file GREEN under a check of `age`/`age_minutes` alone.
+    detail = json.loads(body.split("```")[1])
+    assert not [k for k in detail if k.startswith("age")], detail
+    # …and it names EVERY arm that can close it — a list of some closers reads as
+    # exhaustive, so an issue that closed for an unlisted reason makes the watcher
+    # look like it lies.
     assert "IN FLIGHT" in body, body          # the benign cause leads
-    assert "merely REAPPEARS does not close it" in body, body  # an OLD key is not freshness
-    assert "not_eligible" in body, body
-    assert "universe-shrink: the subject is gone" in body, body
-    assert "ALSO: the org's class changes to NEVER_BACKED_UP" in body, body
+    assert "merely REAPPEARS without a manifest is still not a measurement" in body, body
+    # …and it says which arm is NOT one: the `per_team` census, which re-lists
+    # a state-only org regardless of census membership
+    # (`test_watcher_census_shrink_does_not_falsely_resolve_backup_set_missing`).
+    assert "NOT a closer" in body, body
+    assert "leaving the `per_team` CENSUS" in body, body
+    assert "the class is then `never`" in body, body
+    # `not_eligible` is a SHIPPED closer for this exact arm too — the branch at
+    # `_drive_alerts`'s `not_eligible` leg resolves KIND_BACKUP_SET_MISSING, and
+    # on a DEGRADED poll it is the only closer (`test_watcher_not_eligible_
+    # closes_preexisting_backup_set_missing`). A closers list that omits it reads
+    # as exhaustive (#9940), so an incident closed by the org leaving the DR
+    # surface looks like the watcher invented a resolve.
+    assert "the class becomes `not_eligible`" in body, body
+    assert "(the org left the DR surface: this closes and NOTHING is opened)" in body, body
+    # …and it names the ONE sub-case of "the state disappears" where nothing is
+    # filed at all: an arm-(i) org that has ALREADY left the census has no
+    # `per_team` key, so the cross-poll diff is the only closer
+    # (`test_watcher_backup_set_missing_closes_when_the_state_disappears` pins
+    # that end to end). Unqualified, the sentence claimed `never` +
+    # NEVER_BACKED_UP for an org the code computes no class for (#9938 round 8).
+    assert "ALREADY outside the census" in body, body
+    assert "no `per_team` key at all" in body, body
+    # …and the diff it names as that closer is IN-PROCESS, so after a restart the
+    # subject is tracked nowhere and the incident strands
+    # (`test_arm_i_outside_census_set_is_STRANDED_across_a_watcher_restart`
+    # measures that stranding). An unqualified "simply resolves" promised a
+    # close the code cannot deliver for a restarted watcher (#9938 round 8).
+    assert "IN-PROCESS register" in body, body
+    assert "MANUAL close" in body, body
+    # The two-mechanism split at the end of that clause is drawn on the UNION
+    # surface, not on census membership alone: `compute_status` loops over
+    # `set(orgs + r2_orgs)`, so a departed org whose R2 prefix outlives it is
+    # still classified `not_eligible` and DOES carry a key. Pinned separately
+    # because "no `per_team` key at all" already appears in the TRUE arm-(i)
+    # sub-case above, so the old pin could not tell the two clauses apart.
+    assert "EITHER surface" in body, body
+    assert "absent from BOTH surfaces" in body, body
+
+
+def test_watcher_arm_ii_missing_set_closes_when_its_state_disappears():
+    """The `closes_when` payload enumerates three sub-cases of "the team state
+    disappears", so each is MEASURED here rather than asserted as prose (#9938
+    round 8).
+
+    Arm (ii) — state + a live prefix + no manifest — becomes `never` once the
+    state goes (a CONFIRMED listing still finds no manifest, so nothing ever
+    dumped), which is what the payload says. NEVER_BACKED_UP is then the only
+    kind open, and the set is closed by the cross-poll diff: the `never` arm
+    resolves STALE/METADATA_LOST only, so this kind gets exactly ONE resolve
+    ATTEMPT in the poll that closes it (#3146: the store counts one healthy
+    observation per call, so a second attempt in the same poll would close on
+    the first healthy poll and defeat the window). Asserted on the watcher's own
+    decision point, not on the store's reaction, for the same reason the
+    `stamp_missing` test spies its leg.
+    """
+    ch = _Channels()
+    storage: MemoryStorage = MemoryStorage()
+    _seed_state(storage, "team_a")
+    _seed_partial_archive(storage, "team_a")
+    w = _watcher(storage, ch)
+    first = w.poll()
+    assert first["per_team"]["team_a"] == "backup_set_missing", first["per_team"]
+    assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_a"], ch.issues
+
+    legs: list[tuple[str, str]] = []
+    real_leg = w._alert_leg
+
+    def _spy(op, kind, subject="", detail=None):
+        legs.append((op, kind))
+        return real_leg(op, kind, subject, detail)
+
+    w._alert_leg = _spy  # type: ignore[method-assign]
+    # The STATE disappears — modelled as a FRESH surface carrying exactly the new
+    # key set (the partial archive survives, the state file does not), not by
+    # removing a key in place: an untyped `.delete` receiver is ratcheted by
+    # `tools/sdk_privatise.py` on the required `surface-guard` check. The alert
+    # store keeps ITS storage, so the dedup sentinel and this process's carried
+    # register are untouched — which is what the resolve below depends on.
+    stateless = MemoryStorage()
+    _seed_partial_archive(stateless, "team_a")
+    w._storage = stateless
+    second = w.poll()
+    assert second["per_team"]["team_a"] == "never", second["per_team"]
+    assert second["backup_set_missing"] == [], second["backup_set_missing"]
+    assert list(ch.issues.values()) == ["[DR] NEVER_BACKED_UP — team_a"], ch.issues
+    bsm_resolves = [1 for op, kind in legs
+                    if op == "resolve_incident" and kind == "BACKUP_SET_MISSING"]
+    assert len(bsm_resolves) == 1, legs
+
+
+def test_status_confirmed_state_org_without_manifest_is_backup_set_missing():
+    """The compute_status arm of #9938, at the table level: state + prefix + no
+    manifest is the archive-set class, in BOTH the ``per_team`` table and the
+    kind's census — the census is what makes one block own the open AND the
+    resolve."""
+    s = _status(orgs=["team_a"], r2_orgs=["team_a"], state_orgs=["team_a"],
+                newest_ts_by_org={})
+    assert s["per_team"]["team_a"] == "backup_set_missing", s["per_team"]
+    assert s["backup_set_missing"] == ["team_a"], s["backup_set_missing"]
+
+    # …and the DEGRADED poll keeps the pre-existing `stale` cache-miss label: a
+    # cache miss is not a measurement, so it may not assert the set is missing.
+    degraded = _status(orgs=["team_a"], r2_orgs=["team_a"],
+                       state_orgs=["team_a"], newest_ts_by_org={}, r2_ok=False)
+    assert degraded["per_team"]["team_a"] == "stale", degraded["per_team"]
+    assert degraded["backup_set_missing"] == [], degraded["backup_set_missing"]
+
+    # …and arm (i) is ``never`` only while the org is STILL in ``orgs``: outside
+    # the census the kind's census still lists the subject, but ``per_team``
+    # carries NO key at all (the class table's row-5 qualifier — without it the
+    # row reads as ``never`` for a state-only org that left the census; the
+    # incident stays open there, pinned end-to-end by
+    # `test_watcher_census_shrink_does_not_falsely_resolve_backup_set_missing`).
+    outside = _status(orgs=[], r2_orgs=[], state_orgs=["team_a"],
+                      newest_ts_by_org={})
+    assert outside["per_team"] == {}, outside["per_team"]
+    assert outside["backup_set_missing"] == ["team_a"], outside["backup_set_missing"]
+
+
+def test_watcher_state_plus_prefix_gone_manifest_is_one_incident_not_two():
+    """#9938, the transition that used to report two conditions for one org.
+
+    A measured-stale org whose manifest disappears (bulk prune: `dump.enc`
+    survives, the manifest does not) is a missing archive SET, not an age. The
+    class change must close STALE and open BACKUP_SET_MISSING, leaving EXACTLY
+    one incident — the old code kept the STALE arm's label and never opened the
+    kind that names the condition."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)  # a real measured age: stale
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stale", status["per_team"]
+    assert list(ch.issues.values()) == ["[DR] STALE — team_a"], ch.issues
+
+    # The manifest is pruned and `dump.enc` survives, so the prefix stays
+    # listed: model that as a fresh surface rather than removing keys (an
+    # untyped `.delete` receiver is ratcheted by `tools/sdk_privatise.py`). The
+    # alert store keeps ITS storage, so the dedup sentinel — the thing that
+    # decides whether a re-file is possible — is carried across, the whole point.
+    pruned = MemoryStorage()
+    _seed_state(pruned, "team_a")
+    _seed_partial_archive(pruned, "team_a")
+    w._storage = pruned
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "backup_set_missing", status["per_team"]
+    assert list(ch.issues.values()) == [
+        "[DR] BACKUP_SET_MISSING — team_a"], ch.issues
+
+
+def test_watcher_state_plus_prefix_no_manifest_round_trip_does_not_refile():
+    """#9938 indicator 3 — the round trip, asserted at EVERY poll.
+
+    `state + prefix + no manifest` -> `state + prefix + fresh manifest`: the
+    open-incident set must match the state at each step, with NO resolve-then-
+    refile pair (resolving deletes the dedup sentinel, so a flip files a new
+    issue every window — the flood class #5047/#9937 removed for stateless
+    orgs)."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_state(storage, "team_a")
+    _seed_partial_archive(storage, "team_a")
+    w = _watcher(storage, ch)
+
+    s1 = w.poll()
+    assert s1["per_team"]["team_a"] == "backup_set_missing", s1["per_team"]
+    first = list(ch.issues)
+    assert [ch.issues[n] for n in first] == ["[DR] BACKUP_SET_MISSING — team_a"]
+
+    # A second poll of the SAME state is idempotent: no re-file, no resolve.
+    w.poll()
+    assert list(ch.issues) == first, ch.issues
+
+    # …and the manifest lands: the class is healthy, the incident closes, and
+    # NOTHING new is filed.
+    _seed_archive(storage, "team_a", 0.5)
+    s3 = w.poll()
+    assert s3["per_team"]["team_a"] == "ok", s3["per_team"]
+    assert s3["backup_set_missing"] == [], s3["backup_set_missing"]
+    assert ch.issues == {}, ch.issues
+    # exactly one resolve push for the one incident — not a resolve/refile pair
+    assert sum("resolved" in t.lower() for t in ch.telegram) == 1, ch.telegram
+
+
+def test_watcher_stamp_missing_does_not_resolve_a_stale_it_never_measured():
+    """#9938 indicator 2 — a class change is not a freshness reading.
+
+    `stamp_missing` is computed AFTER the age classification and OVERRIDES it, so
+    a stale-AND-stateless org arrives in that arm carrying its OLD archive. The
+    arm used to resolve STALE off the class change — closing a live age incident
+    having measured nothing (#9937/#9940's rule). It now closes only on a
+    MEASURED fresh archive."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)   # old archive …
+    _seed_state(storage, "team_a")          # … and state: stale
+    clock = [FIXED]
+    w = _watcher(storage, ch, now_fn=lambda: clock[0])
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stale", status["per_team"]
+    assert any("STALE — team_a" in t for t in ch.issues.values()), ch.issues
+
+    # Spy on the watcher's OWN decision point as well as its outcome: the
+    # invariant is that the STALE resolve is not even ATTEMPTED, so the
+    # assertion holds at the mechanism and not only at the store's reaction.
+    legs: list[tuple[str, str]] = []
+    real_leg = w._alert_leg
+
+    def _spy(op, kind, subject="", detail=None):
+        legs.append((op, kind))
+        return real_leg(op, kind, subject, detail)
+
+    w._alert_leg = _spy  # type: ignore[method-assign]
+
+    # The team mirror disappears. The class becomes `stamp_missing`, which
+    # OVERRIDES the age — but the archive above is STILL 200m old, so the STALE
+    # is still true and must survive. (A fresh surface, not an untyped
+    # `.delete` receiver, which `tools/sdk_privatise.py` ratchets.)
+    without_state = MemoryStorage()
+    _seed_archive(without_state, "team_a", 200)
+    w._storage = without_state
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stamp_missing", status["per_team"]
+    assert ("resolve_incident", "STALE") not in legs, (
+        f"a class change may not close a STALE nobody re-measured: {legs}")
+    assert any("STALE — team_a" in t for t in ch.issues.values()), (
+        "a class change may not close a STALE nobody re-measured", ch.issues)
+    assert any("METADATA_LOST — team_a" in t for t in ch.issues.values()), ch.issues
+
+    # A FRESH archive lands (still no state): now the age WAS measured, so the
+    # STALE closes — via the measurement, not via the class.
+    fresh = MemoryStorage()
+    _seed_archive(fresh, "team_a", 0.5)
+    w._storage = fresh
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stamp_missing", status["per_team"]
+    assert not any("STALE" in t for t in ch.issues.values()), ch.issues
+    assert any("METADATA_LOST — team_a" in t for t in ch.issues.values()), ch.issues
+
+
+def test_measured_fresh_lets_a_simulate_drill_win_the_newest_selection():
+    """`_measured_fresh` mirrors `compute_status`'s simulate rule, or a drill can
+    pass itself off as freshness.
+
+    `compute_status` lets a non-expired `ops/simulate` object WIN the newest
+    selection whenever it is older than the real archive
+    (`if simulate_age is not None and simulate_age < newest`), because a drill
+    forges the AGE, not the archive. The #9938 gate that closes STALE only on a
+    measurement must use the SAME rule — otherwise a watcher whose real archive
+    is fresh would let a simulated 200m drill close a real age incident. The
+    mutation pass measured that deleting the selection line left this whole file
+    GREEN, so the claim was unpinned.
+
+    RED mutation: drop `if simulate_age is not None and simulate_age < newest:
+    newest = simulate_age` from `_measured_fresh` → the drill case returns True
+    and the first assertion fails.
+    """
+    ch = _Channels()
+    w = _watcher(MemoryStorage(), ch)
+    fresh = FIXED - timedelta(minutes=10)
+    drill = FIXED - timedelta(minutes=200)
+    org = "team_a"
+
+    # The drill is OLDER than the real archive, so it wins selection: not fresh.
+    assert w._measured_fresh(org, {org: fresh}, FIXED, drill) is False, (
+        "a simulated old age must not be mistaken for a measured-fresh archive")
+    # No drill: the measured 10m archive is fresh.
+    assert w._measured_fresh(org, {org: fresh}, FIXED, None) is True
+    # The drill is NEWER than the archive, so `simulate_age < newest` is false and
+    # the real (old) measurement decides.
+    assert w._measured_fresh(
+        org, {org: FIXED - timedelta(minutes=200)}, FIXED,
+        FIXED - timedelta(minutes=10)) is False
+    # No measurement at all is never fresh, whatever the drill says.
+    assert w._measured_fresh(org, {}, FIXED, drill) is False
 
 
 def test_a_degraded_poll_files_no_new_stale_for_an_unmeasured_org():
@@ -2501,6 +2913,13 @@ def test_stale_filing_carries_the_measurement_that_justified_it():
     # successor incident exists for a downgraded org when none is filed.
     assert "a default-graph archive is MEASURED no older than" in body, body
     assert "opens the matching kind (#3294" in body, body
+    # …and the class list names BOTH kinds #9938 added to it, and states that the
+    # METADATA_LOST close is CONDITIONAL on a measurement — that class overrides
+    # the age, so a class change alone is not a freshness reading. Both
+    # sentences shipped unpinned: the mutation pass measured that deleting
+    # either one left this whole file GREEN.
+    assert "METADATA_LOST / BACKUP_SET_MISSING" in body, body
+    assert "closes this one only when the same poll MEASURED an archive fresh" in body, body
     assert "this closes and NOTHING is opened" in body, body
     assert "universe-shrink: the subject is gone" in body, body
     assert "consecutive confirming poll(s) before it is applied" in body, body

@@ -1,0 +1,3499 @@
+{
+  "graph_name": "xv14691_business_structure",
+  "db_uri": "127.0.0.1:16413/tortoise_test_matrix",
+  "corpus": "corpus/structure-corpus.json",
+  "corpus_chars": 4295,
+  "documents": [
+    {
+      "doc_id": "doc-01",
+      "date": "2026-04-07",
+      "title": "Product line review",
+      "turns": 6,
+      "ok": true,
+      "ack_seconds": 17.89,
+      "result": {
+        "protocol_version": "memory_write_v1",
+        "status": "ok",
+        "provenance": {
+          "source_session": "doc-01",
+          "source_harness": "unknown",
+          "ingested_at": "2026-11-26T05:38:02.954269+00:00"
+        },
+        "points": [
+          {
+            "id": "pt_a56eeb296e53c5130400aa3fc8303e71cc8e2fc6958d12f1d68cdcc2d38fa3",
+            "kind": "statement",
+            "text": "Lumen Core is the energy-operations platform that control-room customers run.",
+            "props": {
+              "quote": "**Lumen Core**, the energy-operations platform that control-room customers run",
+              "search_keys": [
+                "Lumen Core",
+                "energy-operations platform",
+                "control-room product"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_a56eeb296e53c5130400aa3fc8303e71cc8e2fc6958d12f1d68cdcc2d38fa3",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_069c95b23a134447ae0596416de451ae1a1356a3d9d0123b045fb784e98b65",
+            "kind": "statement",
+            "text": "Lumen Field is the mobile product that field crews run.",
+            "props": {
+              "quote": "**Lumen Field**, the mobile product their field crews run",
+              "search_keys": [
+                "Lumen Field",
+                "mobile product",
+                "field crews"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_069c95b23a134447ae0596416de451ae1a1356a3d9d0123b045fb784e98b65",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_05ec6c43664eb575fbd784211cd526042745402c9ef737623c3fb099012a77",
+            "kind": "statement",
+            "text": "Lumen Core carries three features: Grid Map, Outage Alerts, and Load Forecast.",
+            "props": {
+              "quote": "Lumen Core carries three features \u2014 Grid Map (network topology view), Outage Alerts (notifies operators when a feeder trips), and Load Forecast (predicts demand per substation).",
+              "search_keys": [
+                "Lumen Core features",
+                "three features",
+                "feature list"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_05ec6c43664eb575fbd784211cd526042745402c9ef737623c3fb099012a77",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_65b8d195970d46ed6dbdb20a03991e5fe708f9a005f860f6b1e72406bd7b80",
+            "kind": "statement",
+            "text": "Grid Map is the network topology view feature of Lumen Core.",
+            "props": {
+              "quote": "Grid Map (network topology view)",
+              "search_keys": [
+                "Grid Map",
+                "network topology view",
+                "topology"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_65b8d195970d46ed6dbdb20a03991e5fe708f9a005f860f6b1e72406bd7b80",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_b959e7cb0820343b4fe34b650b40bc1427438424aca515b82ccd679a21da28",
+            "kind": "statement",
+            "text": "Outage Alerts notifies operators when a feeder trips.",
+            "props": {
+              "quote": "Outage Alerts (notifies operators when a feeder trips)",
+              "search_keys": [
+                "Outage Alerts",
+                "feeder trip notification",
+                "operator alerts"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_b959e7cb0820343b4fe34b650b40bc1427438424aca515b82ccd679a21da28",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_9ab4e84bb9cbe82c0bb8e3fd6add3a58ed9bfbe5d8a7477b8efe23ee343681",
+            "kind": "statement",
+            "text": "Load Forecast predicts demand per substation.",
+            "props": {
+              "quote": "Load Forecast (predicts demand per substation)",
+              "search_keys": [
+                "Load Forecast",
+                "demand prediction",
+                "substation demand"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_9ab4e84bb9cbe82c0bb8e3fd6add3a58ed9bfbe5d8a7477b8efe23ee343681",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_e820633223152363961292ab14c30d0b63e8a92e2ce8f10b8a838b423d7371",
+            "kind": "statement",
+            "text": "Lumen Field carries two features: Crew Dispatch and Asset Register.",
+            "props": {
+              "quote": "Lumen Field carries two \u2014 Crew Dispatch (assigns crews to open jobs) and Asset Register (records pole and transformer inventory).",
+              "search_keys": [
+                "Lumen Field features",
+                "two features",
+                "feature list"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_e820633223152363961292ab14c30d0b63e8a92e2ce8f10b8a838b423d7371",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_e27c7cf6e5a2c9bb93ce7c16c0637df3c526c6c2e0ebfa2ae3d4fc187d8f29",
+            "kind": "statement",
+            "text": "Crew Dispatch assigns crews to open jobs.",
+            "props": {
+              "quote": "Crew Dispatch (assigns crews to open jobs)",
+              "search_keys": [
+                "Crew Dispatch",
+                "crew assignment",
+                "open jobs"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_e27c7cf6e5a2c9bb93ce7c16c0637df3c526c6c2e0ebfa2ae3d4fc187d8f29",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_8daef60a2b0a542d4b1a6d8740906bd0000b68c803c56619199f539f2cb9bf",
+            "kind": "statement",
+            "text": "Asset Register records pole and transformer inventory.",
+            "props": {
+              "quote": "Asset Register (records pole and transformer inventory)",
+              "search_keys": [
+                "Asset Register",
+                "pole inventory",
+                "transformer inventory"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_8daef60a2b0a542d4b1a6d8740906bd0000b68c803c56619199f539f2cb9bf",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_cda197275aad2284edba28429effcb4d7c58eaaa7afb95fedcdc962a0734d8",
+            "kind": "statement",
+            "text": "There is no shared feature surface between Lumen Core and Lumen Field: every feature belongs to exactly one product.",
+            "props": {
+              "quote": "The session confirmed there is no shared feature surface between the two: every feature belongs to exactly one product.",
+              "search_keys": [
+                "no shared features",
+                "feature boundary",
+                "exclusive feature ownership"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_cda197275aad2284edba28429effcb4d7c58eaaa7afb95fedcdc962a0734d8",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_75a45a60815d95d42523224420f36e4bfcc348c8d08d12e30d3743badf5947",
+            "kind": "statement",
+            "text": "Lumen Core and Lumen Field are distinct delivery surfaces serving distinct users (operators vs. field crews), not a single platform with a mobile skin.",
+            "props": {
+              "quote": "the two products are distinct delivery surfaces serving distinct users (operators vs.\n\nfield crews), not a single platform with a mobile skin.",
+              "search_keys": [
+                "distinct delivery surfaces",
+                "not a mobile skin",
+                "operators vs field crews"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_75a45a60815d95d42523224420f36e4bfcc348c8d08d12e30d3743badf5947",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_a68509b2c790b879bbd80d89a34ec21746ee8aec3f9673bdd01b5cdb5a0bb7",
+            "kind": "statement",
+            "text": "Any future proposal to share or duplicate a feature across the Lumen Core / Lumen Field boundary would be a change to this baseline, not a continuation of it.",
+            "props": {
+              "quote": "Any future proposal to share or duplicate a feature across the boundary would be a change to this baseline, not a continuation of it.",
+              "search_keys": [
+                "shared feature proposal",
+                "baseline change",
+                "cross-product feature"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_a68509b2c790b879bbd80d89a34ec21746ee8aec3f9673bdd01b5cdb5a0bb7",
+            "status": "live",
+            "ep_updated": true
+          }
+        ],
+        "error": null,
+        "session_id": "doc-01",
+        "turns": 6,
+        "extracted": 12,
+        "extraction_mode": "llm:deepseek-direct",
+        "ok": true,
+        "errors": [],
+        "warnings": [
+          "point 'Lumen Core is the energy-operations plat' has no resolvable source turn (no quote match)",
+          "point 'Lumen Field is the mobile product that f' has no resolvable source turn (no quote match)",
+          "point 'Lumen Core carries three features: Grid ' has no resolvable source turn (no quote match)",
+          "point 'Grid Map is the network topology view fe' has no resolvable source turn (no quote match)",
+          "point 'Load Forecast predicts demand per substa' has no resolvable source turn (no quote match)",
+          "point 'Lumen Field carries two features: Crew D' has no resolvable source turn (no quote match)",
+          "point 'Crew Dispatch assigns crews to open jobs' has no resolvable source turn (no quote match)",
+          "point 'Asset Register records pole and transfor' has no resolvable source turn (no quote match)",
+          "point 'There is no shared feature surface betwe' has no resolvable source turn (no quote match)",
+          "point 'Lumen Core and Lumen Field are distinct delivery surfaces se' has 2 sentences \u2014 E3 atomicity expects ONE claim per point",
+          "point 'Lumen Core and Lumen Field are distinct ' has no resolvable source turn (no quote match)",
+          "point 'Any future proposal to share or duplicat' has no resolvable source turn (no quote match)",
+          "S3 identity partial: the existing-item lookup did not run for 6 of 21 candidate(s)"
+        ],
+        "diagnostics": [],
+        "stats": {
+          "entities": 9,
+          "events": 0,
+          "points": 12,
+          "operators": 2,
+          "operator_endpoints_minted": 0,
+          "held": 0,
+          "held_entities": 0,
+          "held_entity_refs_stripped": 0,
+          "held_entity_operators_dropped": 0,
+          "held_reasons": {},
+          "held_drained": 0,
+          "held_drain_attempted": 0,
+          "tier_a_points": 0,
+          "noops": 0,
+          "merges": 0,
+          "deletions": 0,
+          "search_queries": 15,
+          "search_degraded": false,
+          "chain_notes": 0,
+          "supersessions": 0,
+          "relations": 7,
+          "relations_dropped": 0,
+          "mentions_recorded": 0,
+          "mentions_attached": 0,
+          "mentions_unresolved": 0,
+          "elapsed_s": 15.1,
+          "chunks": 1,
+          "failed_chunks": 0,
+          "edus": 6,
+          "s4_merge": {},
+          "renarrate": {
+            "fired": false
+          },
+          "s4_delta": true,
+          "s4_delta_empty": 1,
+          "llm": {
+            "calls": 3,
+            "retries": 0,
+            "truncated": 0,
+            "deadline_aborts": 0,
+            "prompt_tokens": 25328,
+            "completion_tokens": 3672,
+            "prompt_cache_hit_tokens": 16256,
+            "prompt_cache_miss_tokens": 9072,
+            "cost_usd": 0.0,
+            "calls_without_cost": 3,
+            "calls_without_usage": 0,
+            "by_stage": {
+              "s1": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 1829,
+                    "completion_tokens": 189,
+                    "prompt_cache_hit_tokens": 1408,
+                    "prompt_cache_miss_tokens": 421,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s2": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 9994,
+                    "completion_tokens": 3443,
+                    "prompt_cache_hit_tokens": 9216,
+                    "prompt_cache_miss_tokens": 778,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s4": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 13505,
+                    "completion_tokens": 40,
+                    "prompt_cache_hit_tokens": 5632,
+                    "prompt_cache_miss_tokens": 7873,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              }
+            },
+            "route_cost_overflows": 0,
+            "calls_without_tokens": 0
+          },
+          "recovery": {
+            "s2_out_tokens": 3443,
+            "s4_out_tokens": 40
+          },
+          "step_witness": {
+            "reader": {
+              "edus": 6,
+              "chunks": 1
+            },
+            "story": {
+              "by_stage_s1": true,
+              "story_arc_chars": 955
+            },
+            "map": {
+              "items": {
+                "entities": 9,
+                "events": 0,
+                "points": 12,
+                "operators": 2
+              }
+            },
+            "vet": {
+              "enabled": true,
+              "s2": {
+                "candidates": 21,
+                "by_outcome": {
+                  "KEEP": 21
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              },
+              "union": {
+                "candidates": 21,
+                "by_outcome": {
+                  "KEEP": 21
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              }
+            },
+            "classify_later": {
+              "enabled": false,
+              "s2": {},
+              "union": {}
+            },
+            "search": {
+              "mode": "real",
+              "degraded": false,
+              "reason": null,
+              "queries_run": 15,
+              "hits": {
+                "entities": 0,
+                "points": 0,
+                "events": 0
+              }
+            },
+            "merge": {
+              "merged_items": null,
+              "s2_items": null,
+              "s4_items": null
+            },
+            "commit": {
+              "payload_produced": true,
+              "entities": 9,
+              "events": 0,
+              "points": 12,
+              "operators": 2,
+              "committed": 12
+            }
+          }
+        },
+        "capture_redactions": 0,
+        "extraction_provider": "deepseek-direct",
+        "relation_write": {
+          "edges": [
+            {
+              "src_id": "1a2165c9fd5-bb074a074bd4",
+              "dst_id": "1a2165c9fe9-2aba993fa164",
+              "predicate": "hasPart",
+              "write_path": "structural",
+              "stated_predicate": "hasPart",
+              "declared_by": "product-strategy",
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165c9fd5-bb074a074bd4",
+              "dst_id": "1a2165c9ff2-cfe55f158517",
+              "predicate": "hasPart",
+              "write_path": "structural",
+              "stated_predicate": "hasPart",
+              "declared_by": "product-strategy",
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165c9fd5-bb074a074bd4",
+              "dst_id": "1a2165c9ffd-102e820a1d14",
+              "predicate": "hasPart",
+              "write_path": "structural",
+              "stated_predicate": "hasPart",
+              "declared_by": "product-strategy",
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165c9fe0-c49e1db3abb3",
+              "dst_id": "1a2165ca007-dc056b7c9587",
+              "predicate": "hasPart",
+              "write_path": "structural",
+              "stated_predicate": "hasPart",
+              "declared_by": "product-strategy",
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165c9fe0-c49e1db3abb3",
+              "dst_id": "1a2165ca011-b35a1e7af543",
+              "predicate": "hasPart",
+              "write_path": "structural",
+              "stated_predicate": "hasPart",
+              "declared_by": "product-strategy",
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165c9fd5-bb074a074bd4",
+              "dst_id": "1a2165ca01a-05d22d3877b0",
+              "predicate": "IMPL",
+              "write_path": "direct",
+              "stated_predicate": "supports",
+              "declared_by": null,
+              "mechanism": "IMPL",
+              "label": "supports",
+              "direction": "->",
+              "folded": []
+            },
+            {
+              "src_id": "1a2165c9fe0-c49e1db3abb3",
+              "dst_id": "1a2165ca023-d30af785f6ea",
+              "predicate": "IMPL",
+              "write_path": "direct",
+              "stated_predicate": "supports",
+              "declared_by": null,
+              "mechanism": "IMPL",
+              "label": "supports",
+              "direction": "->",
+              "folded": []
+            }
+          ],
+          "drops": [],
+          "collapsed": [],
+          "written": 7,
+          "dropped": 0,
+          "folded": 0,
+          "write_paths": {
+            "structural": 5,
+            "direct": 2
+          }
+        },
+        "surfaced": [
+          {
+            "point_id": "pt_a56eeb296e53c5130400aa3fc8303e71cc8e2fc6958d12f1d68cdcc2d38fa3",
+            "label": "Lumen Core is the energy-operations platform"
+          },
+          {
+            "point_id": "pt_069c95b23a134447ae0596416de451ae1a1356a3d9d0123b045fb784e98b65",
+            "label": "Lumen Field is the mobile product"
+          },
+          {
+            "point_id": "pt_05ec6c43664eb575fbd784211cd526042745402c9ef737623c3fb099012a77",
+            "label": "Lumen Core carries three features: Grid"
+          },
+          {
+            "point_id": "pt_65b8d195970d46ed6dbdb20a03991e5fe708f9a005f860f6b1e72406bd7b80",
+            "label": "Grid Map is the network topology"
+          },
+          {
+            "point_id": "pt_b959e7cb0820343b4fe34b650b40bc1427438424aca515b82ccd679a21da28",
+            "label": "Outage Alerts notifies operators when a"
+          },
+          {
+            "point_id": "pt_9ab4e84bb9cbe82c0bb8e3fd6add3a58ed9bfbe5d8a7477b8efe23ee343681",
+            "label": "Load Forecast predicts demand per substation"
+          },
+          {
+            "point_id": "pt_e820633223152363961292ab14c30d0b63e8a92e2ce8f10b8a838b423d7371",
+            "label": "Lumen Field carries two features: Crew"
+          },
+          {
+            "point_id": "pt_e27c7cf6e5a2c9bb93ce7c16c0637df3c526c6c2e0ebfa2ae3d4fc187d8f29",
+            "label": "Crew Dispatch assigns crews to open"
+          },
+          {
+            "point_id": "pt_8daef60a2b0a542d4b1a6d8740906bd0000b68c803c56619199f539f2cb9bf",
+            "label": "Asset Register records pole and transformer"
+          },
+          {
+            "point_id": "pt_cda197275aad2284edba28429effcb4d7c58eaaa7afb95fedcdc962a0734d8",
+            "label": "There is no shared feature surface"
+          },
+          {
+            "point_id": "pt_75a45a60815d95d42523224420f36e4bfcc348c8d08d12e30d3743badf5947",
+            "label": "Lumen Core and Lumen Field are"
+          },
+          {
+            "point_id": "pt_a68509b2c790b879bbd80d89a34ec21746ee8aec3f9673bdd01b5cdb5a0bb7",
+            "label": "Any future proposal to share or"
+          }
+        ],
+        "graph_ops": {
+          "total": 1177,
+          "read": 1051,
+          "write": 126,
+          "by_phase": {
+            "session_store": {
+              "read": 25,
+              "write": 18,
+              "total": 43
+            },
+            "extraction": {
+              "read": 695,
+              "write": 0,
+              "total": 695
+            },
+            "commit": {
+              "read": 0,
+              "write": 79,
+              "total": 79
+            },
+            "belief": {
+              "read": 331,
+              "write": 29,
+              "total": 360
+            }
+          }
+        }
+      }
+    },
+    {
+      "doc_id": "doc-02",
+      "date": "2026-04-14",
+      "title": "Team structure and ownership",
+      "turns": 6,
+      "ok": true,
+      "ack_seconds": 14.58,
+      "result": {
+        "protocol_version": "memory_write_v1",
+        "status": "ok",
+        "provenance": {
+          "source_session": "doc-02",
+          "source_harness": "unknown",
+          "ingested_at": "2026-11-26T05:38:20.797671+00:00"
+        },
+        "points": [
+          {
+            "id": "pt_a01d7456f9f61cbf2a773947fc2274fa4813e55a1bd72273e823824968529a",
+            "kind": "statement",
+            "text": "Three teams exist: Platform (engineering), Product (product management), and Customer (commercial)",
+            "props": {
+              "quote": "Three teams exist: Platform (engineering), Product (product management), and Customer (commercial).",
+              "search_keys": [
+                "team structure",
+                "org teams",
+                "engineering team",
+                "commercial team"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_a01d7456f9f61cbf2a773947fc2274fa4813e55a1bd72273e823824968529a",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_79a6d127fecd6b64120323749e682f93fcd74f3e8cd93387690e1ced1ab7fa",
+            "kind": "statement",
+            "text": "Dana Whitlock is the Staff Engineer on the Platform team",
+            "props": {
+              "quote": "Dana Whitlock as Staff Engineer ... on Platform",
+              "search_keys": [
+                "Dana Whitlock",
+                "Staff Engineer",
+                "Platform team member"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_79a6d127fecd6b64120323749e682f93fcd74f3e8cd93387690e1ced1ab7fa",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_b6a3ade2e242d94ad3605c657c62a78b9438ab75a2555a34053b1b7c1c90b2",
+            "kind": "statement",
+            "text": "Tomas Ferreira is the Site Reliability Engineer on the Platform team",
+            "props": {
+              "quote": "Tomas Ferreira as Site Reliability Engineer, both on Platform",
+              "search_keys": [
+                "Tomas Ferreira",
+                "SRE",
+                "Site Reliability Engineer",
+                "Platform team member"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_b6a3ade2e242d94ad3605c657c62a78b9438ab75a2555a34053b1b7c1c90b2",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_5e4f023599d034a4c022d355f3b165a9b0362ca880157696e040a2ab3cab04",
+            "kind": "statement",
+            "text": "Amara Osei is the Product Manager on the Product team",
+            "props": {
+              "quote": "Amara Osei as Product Manager on Product",
+              "search_keys": [
+                "Amara Osei",
+                "Product Manager",
+                "Product team member"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_5e4f023599d034a4c022d355f3b165a9b0362ca880157696e040a2ab3cab04",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_4e2c06326f2945285b56ec358caa53f56781a3f7b394fb1256b1a02098fa8e",
+            "kind": "statement",
+            "text": "Jonas Bauer is the Account Executive on the Customer team",
+            "props": {
+              "quote": "Jonas Bauer as Account Executive on Customer",
+              "search_keys": [
+                "Jonas Bauer",
+                "Account Executive",
+                "Customer team member"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_4e2c06326f2945285b56ec358caa53f56781a3f7b394fb1256b1a02098fa8e",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_8e8238217a369394e5a0ac19faee9615a8a78c1641a460b69d7909d68e4769",
+            "kind": "statement",
+            "text": "Ownership means accountable for the thing, not merely working on it",
+            "props": {
+              "quote": "Ownership was fixed with an explicit definition \u2014 accountable for the thing, not merely working on it.",
+              "search_keys": [
+                "ownership definition",
+                "accountability",
+                "who owns what",
+                "responsible vs working on"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_8e8238217a369394e5a0ac19faee9615a8a78c1641a460b69d7909d68e4769",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_663d77ce573c8b9c44810de787ec920fb1bbedfd1bc5d9bf2f102e7f83905e",
+            "kind": "statement",
+            "text": "Amara Osei owns Lumen Core, the product itself",
+            "props": {
+              "quote": "Amara Osei owns Lumen Core, the product itself",
+              "search_keys": [
+                "Lumen Core owner",
+                "product owner",
+                "Amara Osei ownership"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_663d77ce573c8b9c44810de787ec920fb1bbedfd1bc5d9bf2f102e7f83905e",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_a3c15812acc8c0e6029c1516fabe7b6405cb74f55fe3c572fd6a24a6d83080",
+            "kind": "statement",
+            "text": "Dana Whitlock owns the ingest-gateway component",
+            "props": {
+              "quote": "Dana Whitlock owns the ingest-gateway component",
+              "search_keys": [
+                "ingest-gateway owner",
+                "Dana Whitlock ownership",
+                "component owner"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_a3c15812acc8c0e6029c1516fabe7b6405cb74f55fe3c572fd6a24a6d83080",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_f4044d03cda247bdf84daf3347dd7a1180ca6cd745373a54928353d670a3cd",
+            "kind": "statement",
+            "text": "Tomas Ferreira owns the on-call rotation",
+            "props": {
+              "quote": "Tomas Ferreira owns the on-call rotation",
+              "search_keys": [
+                "on-call owner",
+                "Tomas Ferreira ownership",
+                "on-call rotation"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_f4044d03cda247bdf84daf3347dd7a1180ca6cd745373a54928353d670a3cd",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_859a9c36226ba5ca09733aff6acc7b8e9244c3613d66e97e0d627eb795db3d",
+            "kind": "statement",
+            "text": "Jonas Bauer owns enterprise renewals",
+            "props": {
+              "quote": "Jonas Bauer owns enterprise renewals",
+              "search_keys": [
+                "enterprise renewals owner",
+                "Jonas Bauer ownership",
+                "renewals"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_859a9c36226ba5ca09733aff6acc7b8e9244c3613d66e97e0d627eb795db3d",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_df041048678b797090b994f24a335dfff6f18f8d674ef7309a1a644621f945",
+            "kind": "statement",
+            "text": "Ownership is a responsibility claim, so questions of who decides or who is answerable route to the named owners rather than to whoever happens to be working on the item",
+            "props": {
+              "quote": "ownership is a responsibility claim, so future questions of \"who decides / who is answerable\" route to these named owners rather than to whoever happens to be working on the item.",
+              "search_keys": [
+                "who decides",
+                "who is answerable",
+                "ownership routing",
+                "decision authority"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_df041048678b797090b994f24a335dfff6f18f8d674ef7309a1a644621f945",
+            "status": "live",
+            "ep_updated": false
+          }
+        ],
+        "error": null,
+        "session_id": "doc-02",
+        "turns": 6,
+        "extracted": 11,
+        "extraction_mode": "llm:deepseek-direct",
+        "ok": true,
+        "errors": [],
+        "warnings": [
+          "point 'Three teams exist: Platform (engineering' has no resolvable source turn (no quote match)",
+          "point 'Ownership means accountable for the thin' has no resolvable source turn (no quote match)",
+          "point 'Ownership is a responsibility claim, so ' has no resolvable source turn (no quote match)",
+          "chain 'ruleLifecycle' emitted 'rule' but its next step 'rationale' is missing \u2014 the chain is incomplete",
+          "S3 identity partial: the existing-item lookup did not run for 13 of 28 candidate(s)"
+        ],
+        "diagnostics": [],
+        "stats": {
+          "entities": 16,
+          "events": 1,
+          "points": 11,
+          "operators": 0,
+          "operator_endpoints_minted": 0,
+          "held": 0,
+          "held_entities": 0,
+          "held_entity_refs_stripped": 0,
+          "held_entity_operators_dropped": 0,
+          "held_reasons": {},
+          "held_drained": 0,
+          "held_drain_attempted": 0,
+          "tier_a_points": 0,
+          "noops": 0,
+          "merges": 0,
+          "deletions": 0,
+          "search_queries": 15,
+          "search_degraded": false,
+          "chain_notes": 0,
+          "supersessions": 0,
+          "relations": 12,
+          "relations_dropped": 0,
+          "mentions_recorded": 0,
+          "mentions_attached": 0,
+          "mentions_unresolved": 0,
+          "elapsed_s": 13.6,
+          "chunks": 1,
+          "failed_chunks": 0,
+          "edus": 6,
+          "s4_merge": {},
+          "renarrate": {
+            "fired": false
+          },
+          "s4_delta": true,
+          "s4_delta_empty": 1,
+          "llm": {
+            "calls": 4,
+            "retries": 0,
+            "truncated": 0,
+            "deadline_aborts": 0,
+            "prompt_tokens": 26079,
+            "completion_tokens": 2992,
+            "prompt_cache_hit_tokens": 16384,
+            "prompt_cache_miss_tokens": 9695,
+            "cost_usd": 0.0,
+            "calls_without_cost": 4,
+            "calls_without_usage": 0,
+            "by_stage": {
+              "s1": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 1800,
+                    "completion_tokens": 188,
+                    "prompt_cache_hit_tokens": 1408,
+                    "prompt_cache_miss_tokens": 392,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s2": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 9960,
+                    "completion_tokens": 2679,
+                    "prompt_cache_hit_tokens": 9216,
+                    "prompt_cache_miss_tokens": 744,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s4": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 13390,
+                    "completion_tokens": 40,
+                    "prompt_cache_hit_tokens": 5632,
+                    "prompt_cache_miss_tokens": 7758,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "resolve": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 929,
+                    "completion_tokens": 85,
+                    "prompt_cache_hit_tokens": 128,
+                    "prompt_cache_miss_tokens": 801,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              }
+            },
+            "route_cost_overflows": 0,
+            "calls_without_tokens": 0
+          },
+          "recovery": {
+            "s2_out_tokens": 2679,
+            "s4_out_tokens": 40
+          },
+          "step_witness": {
+            "reader": {
+              "edus": 6,
+              "chunks": 1
+            },
+            "story": {
+              "by_stage_s1": true,
+              "story_arc_chars": 959
+            },
+            "map": {
+              "items": {
+                "entities": 16,
+                "events": 1,
+                "points": 11,
+                "operators": 0
+              }
+            },
+            "vet": {
+              "enabled": true,
+              "s2": {
+                "candidates": 28,
+                "by_outcome": {
+                  "KEEP": 28
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              },
+              "union": {
+                "candidates": 28,
+                "by_outcome": {
+                  "KEEP": 28
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              }
+            },
+            "classify_later": {
+              "enabled": false,
+              "s2": {},
+              "union": {}
+            },
+            "search": {
+              "mode": "real",
+              "degraded": false,
+              "reason": null,
+              "queries_run": 15,
+              "hits": {
+                "entities": 3,
+                "points": 0,
+                "events": 0
+              }
+            },
+            "merge": {
+              "merged_items": null,
+              "s2_items": null,
+              "s4_items": null
+            },
+            "commit": {
+              "payload_produced": true,
+              "entities": 16,
+              "events": 1,
+              "points": 11,
+              "operators": 0,
+              "committed": 11
+            }
+          }
+        },
+        "capture_redactions": 0,
+        "extraction_provider": "deepseek-direct",
+        "relation_write": {
+          "edges": [
+            {
+              "src_id": "1a2165cddb0-f1f7a9f097d1",
+              "dst_id": "1a2165cdd92-a48d8cae4dca",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cddb8-c7c3b9947112",
+              "dst_id": "1a2165cdd92-a48d8cae4dca",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cddc0-0f8b3f3ba2e1",
+              "dst_id": "1a2165cdd9d-4dc870c9aa66",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cddc7-67897f705466",
+              "dst_id": "1a2165cdda7-fe7c39ae46f6",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cddb0-f1f7a9f097d1",
+              "dst_id": "1a2165cddcf-f8964c6a0ee7",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cddb8-c7c3b9947112",
+              "dst_id": "1a2165cddd7-33d0f9833dd1",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cddc0-0f8b3f3ba2e1",
+              "dst_id": "1a2165cddde-a4923bfffee5",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cddc7-67897f705466",
+              "dst_id": "1a2165cdde6-a7ef2cf10436",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cddc0-0f8b3f3ba2e1",
+              "dst_id": "1a2165c9fd5-bb074a074bd4",
+              "predicate": "ownedBy",
+              "write_path": "structural",
+              "stated_predicate": "ownedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cddb0-f1f7a9f097d1",
+              "dst_id": "1a2165cddf7-d987f60b8c51",
+              "predicate": "ownedBy",
+              "write_path": "structural",
+              "stated_predicate": "ownedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cddb8-c7c3b9947112",
+              "dst_id": "1a2165cddff-07e1495ca680",
+              "predicate": "ownedBy",
+              "write_path": "structural",
+              "stated_predicate": "ownedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cddc7-67897f705466",
+              "dst_id": "1a2165cde06-0e72f68f3018",
+              "predicate": "ownedBy",
+              "write_path": "structural",
+              "stated_predicate": "ownedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            }
+          ],
+          "drops": [],
+          "collapsed": [],
+          "written": 12,
+          "dropped": 0,
+          "folded": 0,
+          "write_paths": {
+            "structural": 12
+          }
+        },
+        "surfaced": [
+          {
+            "point_id": "pt_a01d7456f9f61cbf2a773947fc2274fa4813e55a1bd72273e823824968529a",
+            "label": "Three teams exist: Platform (engineering), Produ"
+          },
+          {
+            "point_id": "pt_79a6d127fecd6b64120323749e682f93fcd74f3e8cd93387690e1ced1ab7fa",
+            "label": "Dana Whitlock is the Staff Engineer"
+          },
+          {
+            "point_id": "pt_b6a3ade2e242d94ad3605c657c62a78b9438ab75a2555a34053b1b7c1c90b2",
+            "label": "Tomas Ferreira is the Site Reliability"
+          },
+          {
+            "point_id": "pt_5e4f023599d034a4c022d355f3b165a9b0362ca880157696e040a2ab3cab04",
+            "label": "Amara Osei is the Product Manager"
+          },
+          {
+            "point_id": "pt_4e2c06326f2945285b56ec358caa53f56781a3f7b394fb1256b1a02098fa8e",
+            "label": "Jonas Bauer is the Account Executive"
+          },
+          {
+            "point_id": "pt_8e8238217a369394e5a0ac19faee9615a8a78c1641a460b69d7909d68e4769",
+            "label": "Ownership means accountable for the thing"
+          },
+          {
+            "point_id": "pt_663d77ce573c8b9c44810de787ec920fb1bbedfd1bc5d9bf2f102e7f83905e",
+            "label": "Amara Osei owns Lumen Core, the"
+          },
+          {
+            "point_id": "pt_a3c15812acc8c0e6029c1516fabe7b6405cb74f55fe3c572fd6a24a6d83080",
+            "label": "Dana Whitlock owns the ingest-gateway component"
+          },
+          {
+            "point_id": "pt_f4044d03cda247bdf84daf3347dd7a1180ca6cd745373a54928353d670a3cd",
+            "label": "Tomas Ferreira owns the on-call rotation"
+          },
+          {
+            "point_id": "pt_859a9c36226ba5ca09733aff6acc7b8e9244c3613d66e97e0d627eb795db3d",
+            "label": "Jonas Bauer owns enterprise renewals"
+          },
+          {
+            "point_id": "pt_df041048678b797090b994f24a335dfff6f18f8d674ef7309a1a644621f945",
+            "label": "Ownership is a responsibility claim, so"
+          }
+        ],
+        "graph_ops": {
+          "total": 684,
+          "read": 573,
+          "write": 111,
+          "by_phase": {
+            "session_store": {
+              "read": 22,
+              "write": 16,
+              "total": 38
+            },
+            "extraction": {
+              "read": 491,
+              "write": 0,
+              "total": 491
+            },
+            "commit": {
+              "read": 0,
+              "write": 72,
+              "total": 72
+            },
+            "belief": {
+              "read": 60,
+              "write": 23,
+              "total": 83
+            }
+          }
+        }
+      }
+    },
+    {
+      "doc_id": "doc-03",
+      "date": "2026-04-21",
+      "title": "Architecture overview",
+      "turns": 6,
+      "ok": true,
+      "ack_seconds": 16.07,
+      "result": {
+        "protocol_version": "memory_write_v1",
+        "status": "ok",
+        "provenance": {
+          "source_session": "doc-03",
+          "source_harness": "unknown",
+          "ingested_at": "2026-11-26T05:38:35.374356+00:00"
+        },
+        "points": [
+          {
+            "id": "pt_e01ae4c3b5a95c42b86643d3fdde9c3e45518767d2168c5e521e91f90cd18d",
+            "kind": "statement",
+            "text": "The system architecture is a seven-component dependency graph: ingest-gateway, event-bus, fact-store, signal-engine, web-dashboard, auth-service, and identity-db",
+            "props": {
+              "quote": "We recorded the system architecture as a seven-component dependency graph: ingest-gateway (meter telemetry intake), event-bus (internal events), fact-store (time-series facts), signal-engine (outage s",
+              "search_keys": [
+                "seven-component dependency graph",
+                "system architecture",
+                "components",
+                "seven components"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_e01ae4c3b5a95c42b86643d3fdde9c3e45518767d2168c5e521e91f90cd18d",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_8f1d5b83643cf7052a6f82d44bf1eea2d2982bdfc4744ebd49b730a94cac40",
+            "kind": "statement",
+            "text": "The ingest-gateway depends on the event-bus",
+            "props": {
+              "quote": "The dependency chain runs ingest-gateway \u2192 event-bus \u2192 fact-store",
+              "search_keys": [
+                "ingest-gateway depends on event-bus",
+                "ingest-gateway dependency",
+                "event-bus upstream"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_8f1d5b83643cf7052a6f82d44bf1eea2d2982bdfc4744ebd49b730a94cac40",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_a1ca39823aa4b4b3e8b66f864c9386db8e6dfbe7debbf5422b0e258003d20a",
+            "kind": "statement",
+            "text": "The event-bus depends on the fact-store",
+            "props": {
+              "quote": "The dependency chain runs ingest-gateway \u2192 event-bus \u2192 fact-store",
+              "search_keys": [
+                "event-bus depends on fact-store",
+                "event-bus dependency",
+                "fact-store upstream"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_a1ca39823aa4b4b3e8b66f864c9386db8e6dfbe7debbf5422b0e258003d20a",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_f576c63276b72ca3ae861488f657dd41061ffd6f9480306b35efe789a803a0",
+            "kind": "statement",
+            "text": "The signal-engine depends on both the event-bus and the fact-store",
+            "props": {
+              "quote": "signal-engine depending on both event-bus and fact-store",
+              "search_keys": [
+                "signal-engine depends on event-bus",
+                "signal-engine depends on fact-store",
+                "signal-engine dependencies"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_f576c63276b72ca3ae861488f657dd41061ffd6f9480306b35efe789a803a0",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_cbf16e1710a0588ead27bd90eda69ae390cc516c82cbac4eff6007db8c02e7",
+            "kind": "statement",
+            "text": "The web-dashboard depends on the signal-engine and the auth-service",
+            "props": {
+              "quote": "web-dashboard depending on signal-engine and auth-service",
+              "search_keys": [
+                "web-dashboard depends on signal-engine",
+                "web-dashboard depends on auth-service",
+                "dashboard dependencies"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_cbf16e1710a0588ead27bd90eda69ae390cc516c82cbac4eff6007db8c02e7",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_a87e958e3968b305d185b65c0819d4361bbcf2ed34f94de55a424677e54995",
+            "kind": "statement",
+            "text": "The auth-service depends on the identity-db",
+            "props": {
+              "quote": "auth-service depending on identity-db",
+              "search_keys": [
+                "auth-service depends on identity-db",
+                "auth-service dependency",
+                "identity-db upstream"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_a87e958e3968b305d185b65c0819d4361bbcf2ed34f94de55a424677e54995",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_0d1f68314d9f9ef113cd022ff532e05ab9c2b35c70c50920f07d14b7f904af",
+            "kind": "statement",
+            "text": "The fact-store is a single point of upward propagation: an outage there breaks the event-bus, and through it both the signal-engine and the ingest-gateway",
+            "props": {
+              "quote": "the fact-store is a single point of upward propagation \u2014 an outage there breaks the event-bus, and through it both the signal-engine and the ingest-gateway",
+              "search_keys": [
+                "fact-store blast radius",
+                "fact-store outage propagation",
+                "single point of upward propagation",
+                "blast-radius reasoning"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_0d1f68314d9f9ef113cd022ff532e05ab9c2b35c70c50920f07d14b7f904af",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_50a44630f73440aa6b2890682d30d78802f28a5e7f9a914f875e9acd161b63",
+            "kind": "statement",
+            "text": "Fact-store availability is not a local concern but a root dependency for telemetry ingestion and signal computation alike",
+            "props": {
+              "quote": "fact-store availability is not a local concern but a root dependency for telemetry ingestion and signal computation alike",
+              "search_keys": [
+                "fact-store availability",
+                "root dependency",
+                "fact-store resilience",
+                "telemetry ingestion dependency"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_50a44630f73440aa6b2890682d30d78802f28a5e7f9a914f875e9acd161b63",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_a693c6c89a17a6c367a426d013d6c60b6877106dc1d8f6554560beaf2685ba",
+            "kind": "statement",
+            "text": "Fact-store resilience should not be treated as a lower-priority item than the components visibly closer to operators",
+            "props": {
+              "quote": "which tempers any future decision to treat fact-store resilience as a lower-priority item than the components visibly closer to operators",
+              "search_keys": [
+                "fact-store resilience priority",
+                "lower-priority item",
+                "components closer to operators",
+                "resilience prioritization"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_a693c6c89a17a6c367a426d013d6c60b6877106dc1d8f6554560beaf2685ba",
+            "status": "live",
+            "ep_updated": true
+          }
+        ],
+        "error": null,
+        "session_id": "doc-03",
+        "turns": 6,
+        "extracted": 9,
+        "extraction_mode": "llm:deepseek-direct",
+        "ok": true,
+        "errors": [],
+        "warnings": [
+          "point 'The system architecture is a seven-compo' has no resolvable source turn (no quote match)",
+          "point 'The ingest-gateway depends on the event-' has no resolvable source turn (no quote match)",
+          "point 'The event-bus depends on the fact-store' has no resolvable source turn (no quote match)",
+          "point 'The auth-service depends on the identity' has no resolvable source turn (no quote match)",
+          "point 'The fact-store is a single point of upwa' has no resolvable source turn (no quote match)",
+          "point 'Fact-store availability is not a local c' has no resolvable source turn (no quote match)",
+          "point 'Fact-store resilience should not be trea' has no resolvable source turn (no quote match)",
+          "S3 identity partial: the existing-item lookup did not run for 4 of 18 candidate(s)"
+        ],
+        "diagnostics": [],
+        "stats": {
+          "entities": 8,
+          "events": 1,
+          "points": 9,
+          "operators": 2,
+          "operator_endpoints_minted": 0,
+          "held": 0,
+          "held_entities": 0,
+          "held_entity_refs_stripped": 0,
+          "held_entity_operators_dropped": 0,
+          "held_reasons": {},
+          "held_drained": 0,
+          "held_drain_attempted": 0,
+          "tier_a_points": 0,
+          "noops": 0,
+          "merges": 0,
+          "deletions": 0,
+          "search_queries": 15,
+          "search_degraded": false,
+          "chain_notes": 0,
+          "supersessions": 0,
+          "relations": 7,
+          "relations_dropped": 0,
+          "mentions_recorded": 0,
+          "mentions_attached": 0,
+          "mentions_unresolved": 0,
+          "elapsed_s": 15.0,
+          "chunks": 1,
+          "failed_chunks": 0,
+          "edus": 6,
+          "s4_merge": {},
+          "renarrate": {
+            "fired": false
+          },
+          "s4_delta": true,
+          "s4_delta_empty": 1,
+          "llm": {
+            "calls": 4,
+            "retries": 0,
+            "truncated": 0,
+            "deadline_aborts": 0,
+            "prompt_tokens": 26345,
+            "completion_tokens": 3512,
+            "prompt_cache_hit_tokens": 16384,
+            "prompt_cache_miss_tokens": 9961,
+            "cost_usd": 0.0,
+            "calls_without_cost": 4,
+            "calls_without_usage": 0,
+            "by_stage": {
+              "s1": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 1839,
+                    "completion_tokens": 220,
+                    "prompt_cache_hit_tokens": 1408,
+                    "prompt_cache_miss_tokens": 431,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s2": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 10037,
+                    "completion_tokens": 3176,
+                    "prompt_cache_hit_tokens": 9216,
+                    "prompt_cache_miss_tokens": 821,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s4": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 13598,
+                    "completion_tokens": 40,
+                    "prompt_cache_hit_tokens": 5632,
+                    "prompt_cache_miss_tokens": 7966,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "resolve": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 871,
+                    "completion_tokens": 76,
+                    "prompt_cache_hit_tokens": 128,
+                    "prompt_cache_miss_tokens": 743,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              }
+            },
+            "route_cost_overflows": 0,
+            "calls_without_tokens": 0
+          },
+          "recovery": {
+            "s2_out_tokens": 3176,
+            "s4_out_tokens": 40
+          },
+          "step_witness": {
+            "reader": {
+              "edus": 6,
+              "chunks": 1
+            },
+            "story": {
+              "by_stage_s1": true,
+              "story_arc_chars": 1112
+            },
+            "map": {
+              "items": {
+                "entities": 8,
+                "events": 1,
+                "points": 9,
+                "operators": 2
+              }
+            },
+            "vet": {
+              "enabled": true,
+              "s2": {
+                "candidates": 18,
+                "by_outcome": {
+                  "KEEP": 18
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              },
+              "union": {
+                "candidates": 18,
+                "by_outcome": {
+                  "KEEP": 18
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              }
+            },
+            "classify_later": {
+              "enabled": false,
+              "s2": {},
+              "union": {}
+            },
+            "search": {
+              "mode": "real",
+              "degraded": false,
+              "reason": null,
+              "queries_run": 15,
+              "hits": {
+                "entities": 1,
+                "points": 5,
+                "events": 1
+              }
+            },
+            "merge": {
+              "merged_items": null,
+              "s2_items": null,
+              "s4_items": null
+            },
+            "commit": {
+              "payload_produced": true,
+              "entities": 8,
+              "events": 1,
+              "points": 9,
+              "operators": 2,
+              "committed": 9
+            }
+          }
+        },
+        "capture_redactions": 0,
+        "extraction_provider": "deepseek-direct",
+        "relation_write": {
+          "edges": [
+            {
+              "src_id": "1a2165cddf7-d987f60b8c51",
+              "dst_id": "1a2165d1bf1-f6c7fdcb1f99",
+              "predicate": "dependsOn",
+              "write_path": "structural",
+              "stated_predicate": "dependsOn",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165d1bf1-f6c7fdcb1f99",
+              "dst_id": "1a2165d1bf8-9ddfb0fbbe82",
+              "predicate": "dependsOn",
+              "write_path": "structural",
+              "stated_predicate": "dependsOn",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165d1bff-290144cfdf57",
+              "dst_id": "1a2165d1bf1-f6c7fdcb1f99",
+              "predicate": "dependsOn",
+              "write_path": "structural",
+              "stated_predicate": "dependsOn",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165d1bff-290144cfdf57",
+              "dst_id": "1a2165d1bf8-9ddfb0fbbe82",
+              "predicate": "dependsOn",
+              "write_path": "structural",
+              "stated_predicate": "dependsOn",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165d1c06-0633b1cbe2a0",
+              "dst_id": "1a2165d1bff-290144cfdf57",
+              "predicate": "dependsOn",
+              "write_path": "structural",
+              "stated_predicate": "dependsOn",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165d1c06-0633b1cbe2a0",
+              "dst_id": "1a2165d1c0d-3f70b27d5212",
+              "predicate": "dependsOn",
+              "write_path": "structural",
+              "stated_predicate": "dependsOn",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165d1c0d-3f70b27d5212",
+              "dst_id": "1a2165d1c14-4f7cf1becc80",
+              "predicate": "dependsOn",
+              "write_path": "structural",
+              "stated_predicate": "dependsOn",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            }
+          ],
+          "drops": [],
+          "collapsed": [],
+          "written": 7,
+          "dropped": 0,
+          "folded": 0,
+          "write_paths": {
+            "structural": 7
+          }
+        },
+        "surfaced": [
+          {
+            "point_id": "pt_e01ae4c3b5a95c42b86643d3fdde9c3e45518767d2168c5e521e91f90cd18d",
+            "label": "The system architecture is a seven-component"
+          },
+          {
+            "point_id": "pt_8f1d5b83643cf7052a6f82d44bf1eea2d2982bdfc4744ebd49b730a94cac40",
+            "label": "The ingest-gateway depends on the event-bus"
+          },
+          {
+            "point_id": "pt_a1ca39823aa4b4b3e8b66f864c9386db8e6dfbe7debbf5422b0e258003d20a",
+            "label": "The event-bus depends on the fact-store"
+          },
+          {
+            "point_id": "pt_f576c63276b72ca3ae861488f657dd41061ffd6f9480306b35efe789a803a0",
+            "label": "The signal-engine depends on both the"
+          },
+          {
+            "point_id": "pt_cbf16e1710a0588ead27bd90eda69ae390cc516c82cbac4eff6007db8c02e7",
+            "label": "The web-dashboard depends on the signal-engine"
+          },
+          {
+            "point_id": "pt_a87e958e3968b305d185b65c0819d4361bbcf2ed34f94de55a424677e54995",
+            "label": "The auth-service depends on the identity-db"
+          },
+          {
+            "point_id": "pt_0d1f68314d9f9ef113cd022ff532e05ab9c2b35c70c50920f07d14b7f904af",
+            "label": "The fact-store is a single point"
+          },
+          {
+            "point_id": "pt_50a44630f73440aa6b2890682d30d78802f28a5e7f9a914f875e9acd161b63",
+            "label": "Fact-store availability is not a local"
+          },
+          {
+            "point_id": "pt_a693c6c89a17a6c367a426d013d6c60b6877106dc1d8f6554560beaf2685ba",
+            "label": "Fact-store resilience should not be treated"
+          }
+        ],
+        "graph_ops": {
+          "total": 880,
+          "read": 779,
+          "write": 101,
+          "by_phase": {
+            "session_store": {
+              "read": 24,
+              "write": 16,
+              "total": 40
+            },
+            "extraction": {
+              "read": 605,
+              "write": 0,
+              "total": 605
+            },
+            "commit": {
+              "read": 0,
+              "write": 62,
+              "total": 62
+            },
+            "belief": {
+              "read": 150,
+              "write": 23,
+              "total": 173
+            }
+          }
+        }
+      }
+    },
+    {
+      "doc_id": "doc-04",
+      "date": "2026-04-28",
+      "title": "Customers and the market we sell into",
+      "turns": 6,
+      "ok": true,
+      "ack_seconds": 13.09,
+      "result": {
+        "protocol_version": "memory_write_v1",
+        "status": "ok",
+        "provenance": {
+          "source_session": "doc-04",
+          "source_harness": "unknown",
+          "ingested_at": "2026-11-26T05:38:51.440809+00:00"
+        },
+        "points": [
+          {
+            "id": "pt_8a7bf81fd2b45ed87f5ff88beff1fe8e8c74c6a8667aedbcdfb74f7e89a154",
+            "kind": "statement",
+            "text": "We sell to mid-market utilities \u2014 regional electricity distributors with between fifty thousand and five hundred thousand metered customers.",
+            "props": {
+              "quote": "we sell to mid-market utilities \u2014 regional electricity distributors with between fifty thousand and five hundred thousand metered customers",
+              "search_keys": [
+                "mid-market utilities",
+                "target customer segment",
+                "regional electricity distributors",
+                "fifty thousand to five hundred thousand metered customers"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_8a7bf81fd2b45ed87f5ff88beff1fe8e8c74c6a8667aedbcdfb74f7e89a154",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_0a365304c97941ad46a74f9d03065763f1417f7f85e96f01ece40c4e104b51",
+            "kind": "statement",
+            "text": "The mid-market utilities segment is the unit we plan against.",
+            "props": {
+              "quote": "that segment is the unit we plan against",
+              "search_keys": [
+                "planning unit",
+                "segment is the planning unit",
+                "commercial frame"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_0a365304c97941ad46a74f9d03065763f1417f7f85e96f01ece40c4e104b51",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_445b6b63ee6784fa139d01797d7ece2d68a9e6674d8efc9e439cbdda143b85",
+            "kind": "statement",
+            "text": "Northwind Logistics is a customer and runs Lumen Core in its control room.",
+            "props": {
+              "quote": "Northwind Logistics, which runs Lumen Core in its control room",
+              "search_keys": [
+                "Northwind Logistics",
+                "Lumen Core",
+                "control room deployment",
+                "named customer"
+              ],
+              "source_turn_id": 1
+            },
+            "dedup": "new",
+            "point_id": "pt_445b6b63ee6784fa139d01797d7ece2d68a9e6674d8efc9e439cbdda143b85",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_065cde1c1d954b4b385f4da42e8f98f6159cd7a9f9404653b77b507af26a05",
+            "kind": "statement",
+            "text": "Helio Health is a customer and runs Lumen Field with its field crews.",
+            "props": {
+              "quote": "Helio Health, which runs Lumen Field with its field crews",
+              "search_keys": [
+                "Helio Health",
+                "Lumen Field",
+                "field crews",
+                "named customer"
+              ],
+              "source_turn_id": 1
+            },
+            "dedup": "new",
+            "point_id": "pt_065cde1c1d954b4b385f4da42e8f98f6159cd7a9f9404653b77b507af26a05",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_de0dd0fefefb137acd422cdde87193025dc78b7f0eee087dafb8dc6fff36eb",
+            "kind": "statement",
+            "text": "Both Northwind Logistics and Helio Health sit inside the mid-market utilities segment.",
+            "props": {
+              "quote": "Both Northwind Logistics and Helio Health sit in that segment.",
+              "search_keys": [
+                "segment membership",
+                "both customers in segment",
+                "mid-market utilities customers"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_de0dd0fefefb137acd422cdde87193025dc78b7f0eee087dafb8dc6fff36eb",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_80051bec60a16da2f676da18ebd80d6d5edb88b1cda86a3e1fb2bf51ae3ed1",
+            "kind": "statement",
+            "text": "Enterprise renewals are owned by Jonas Bauer, Account Executive.",
+            "props": {
+              "quote": "Enterprise renewals, owned by Jonas Bauer (Account Executive)",
+              "search_keys": [
+                "Jonas Bauer",
+                "Account Executive",
+                "renewal ownership",
+                "enterprise renewals"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_80051bec60a16da2f676da18ebd80d6d5edb88b1cda86a3e1fb2bf51ae3ed1",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_9f3b6a6aab16481769cb18e4094305bd43722c579d3e4d64430543d6464593",
+            "kind": "statement",
+            "text": "Enterprise renewals are negotiated per customer inside the segment rather than at segment level.",
+            "props": {
+              "quote": "Enterprise renewals, owned by Jonas Bauer (Account Executive), are negotiated per customer inside that segment rather than at segment level.",
+              "search_keys": [
+                "per-customer renewal negotiation",
+                "renewals not at segment level",
+                "enterprise renewal mechanics"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_9f3b6a6aab16481769cb18e4094305bd43722c579d3e4d64430543d6464593",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_54fe55abae74d3be384e965f3dd9287f260b4d769fd5c6b569cb3bc0c2ff68",
+            "kind": "statement",
+            "text": "The segment being the planning unit supports treating it as the durable commercial frame.",
+            "props": {
+              "quote": "the segment is the planning unit, which supports treating it as the durable commercial frame",
+              "search_keys": [
+                "durable commercial frame",
+                "segment as frame",
+                "planning unit reasoning"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_54fe55abae74d3be384e965f3dd9287f260b4d769fd5c6b569cb3bc0c2ff68",
+            "status": "live",
+            "ep_updated": true
+          },
+          {
+            "id": "pt_814e38a66eae187d65e7c3d823f6ea95d86470a10264c181d85f2696e7a6e9",
+            "kind": "statement",
+            "text": "Per-customer renewal negotiation tempers how much segment-level uniformity we can assume.",
+            "props": {
+              "quote": "per-customer renewal negotiation tempers how much segment-level uniformity we can assume",
+              "search_keys": [
+                "segment uniformity limitation",
+                "per-customer negotiation caveat",
+                "uniformity assumption"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_814e38a66eae187d65e7c3d823f6ea95d86470a10264c181d85f2696e7a6e9",
+            "status": "live",
+            "ep_updated": false
+          }
+        ],
+        "error": null,
+        "session_id": "doc-04",
+        "turns": 6,
+        "extracted": 9,
+        "extraction_mode": "llm:deepseek-direct",
+        "ok": true,
+        "errors": [],
+        "warnings": [
+          "value-bearing point 'We sell to mid-market utilities \u2014 regional electricity distr' resolved to turn 3 by the token-overlap band, not a verbatim anchor \u2014 it carries no source span (the value cannot be re-read verbatim)",
+          "point 'Enterprise renewals are owned by Jonas B' has no resolvable source turn (no quote match)",
+          "point 'Enterprise renewals are negotiated per c' has no resolvable source turn (no quote match)",
+          "point 'The segment being the planning unit supp' has no resolvable source turn (no quote match)",
+          "point 'Per-customer renewal negotiation tempers' has no resolvable source turn (no quote match)",
+          "S3 identity partial: the existing-item lookup did not run for 2 of 17 candidate(s)",
+          "narrative relation not written (#11237): transacts 'Northwind Logistics' \u2192 'Lumen Core' \u2014 `transacts` binds no declared write path (relation_write_paths() -> ()) \u2014 it is neither in the structural writer's predicate set nor bound to a mechanism, so nothing is written and nothing is inferred in its place",
+          "narrative relation not written (#11237): transacts 'Helio Health' \u2192 'Lumen Field' \u2014 `transacts` binds no declared write path (relation_write_paths() -> ()) \u2014 it is neither in the structural writer's predicate set nor bound to a mechanism, so nothing is written and nothing is inferred in its place"
+        ],
+        "diagnostics": [],
+        "stats": {
+          "entities": 8,
+          "events": 0,
+          "points": 9,
+          "operators": 2,
+          "operator_endpoints_minted": 0,
+          "held": 0,
+          "held_entities": 0,
+          "held_entity_refs_stripped": 0,
+          "held_entity_operators_dropped": 0,
+          "held_reasons": {},
+          "held_drained": 0,
+          "held_drain_attempted": 0,
+          "tier_a_points": 0,
+          "noops": 0,
+          "merges": 0,
+          "deletions": 0,
+          "search_queries": 15,
+          "search_degraded": false,
+          "chain_notes": 0,
+          "supersessions": 0,
+          "relations": 5,
+          "relations_dropped": 0,
+          "mentions_recorded": 0,
+          "mentions_attached": 0,
+          "mentions_unresolved": 0,
+          "elapsed_s": 12.0,
+          "chunks": 1,
+          "failed_chunks": 0,
+          "edus": 6,
+          "s4_merge": {},
+          "renarrate": {
+            "fired": false
+          },
+          "s4_delta": true,
+          "s4_delta_empty": 1,
+          "llm": {
+            "calls": 4,
+            "retries": 0,
+            "truncated": 0,
+            "deadline_aborts": 0,
+            "prompt_tokens": 25496,
+            "completion_tokens": 2366,
+            "prompt_cache_hit_tokens": 16384,
+            "prompt_cache_miss_tokens": 9112,
+            "cost_usd": 0.0,
+            "calls_without_cost": 4,
+            "calls_without_usage": 0,
+            "by_stage": {
+              "s1": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 1763,
+                    "completion_tokens": 151,
+                    "prompt_cache_hit_tokens": 1408,
+                    "prompt_cache_miss_tokens": 355,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s2": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 9886,
+                    "completion_tokens": 2109,
+                    "prompt_cache_hit_tokens": 9216,
+                    "prompt_cache_miss_tokens": 670,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s4": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 12947,
+                    "completion_tokens": 40,
+                    "prompt_cache_hit_tokens": 5632,
+                    "prompt_cache_miss_tokens": 7315,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "resolve": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 900,
+                    "completion_tokens": 66,
+                    "prompt_cache_hit_tokens": 128,
+                    "prompt_cache_miss_tokens": 772,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              }
+            },
+            "route_cost_overflows": 0,
+            "calls_without_tokens": 0
+          },
+          "recovery": {
+            "s2_out_tokens": 2109,
+            "s4_out_tokens": 40
+          },
+          "step_witness": {
+            "reader": {
+              "edus": 6,
+              "chunks": 1
+            },
+            "story": {
+              "by_stage_s1": true,
+              "story_arc_chars": 805
+            },
+            "map": {
+              "items": {
+                "entities": 8,
+                "events": 0,
+                "points": 9,
+                "operators": 2
+              }
+            },
+            "vet": {
+              "enabled": true,
+              "s2": {
+                "candidates": 17,
+                "by_outcome": {
+                  "KEEP": 17
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              },
+              "union": {
+                "candidates": 17,
+                "by_outcome": {
+                  "KEEP": 17
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              }
+            },
+            "classify_later": {
+              "enabled": false,
+              "s2": {},
+              "union": {}
+            },
+            "search": {
+              "mode": "real",
+              "degraded": false,
+              "reason": null,
+              "queries_run": 15,
+              "hits": {
+                "entities": 5,
+                "points": 12,
+                "events": 0
+              }
+            },
+            "merge": {
+              "merged_items": null,
+              "s2_items": null,
+              "s4_items": null
+            },
+            "commit": {
+              "payload_produced": true,
+              "entities": 8,
+              "events": 0,
+              "points": 9,
+              "operators": 2,
+              "committed": 9
+            }
+          }
+        },
+        "capture_redactions": 0,
+        "extraction_provider": "deepseek-direct",
+        "relation_write": {
+          "edges": [
+            {
+              "src_id": "1a2165d4e94-1b78526e3991",
+              "dst_id": "1a2165d4eaf-14bb00c07d66",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165d4ea4-b8484cc2b491",
+              "dst_id": "1a2165d4eaf-14bb00c07d66",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cddc7-67897f705466",
+              "dst_id": "1a2165cde06-0e72f68f3018",
+              "predicate": "ownedBy",
+              "write_path": "structural",
+              "stated_predicate": "ownedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            }
+          ],
+          "drops": [
+            {
+              "src": "Northwind Logistics",
+              "dst": "Lumen Core",
+              "predicate": "transacts",
+              "reason": "`transacts` binds no declared write path (relation_write_paths() -> ()) \u2014 it is neither in the structural writer's predicate set nor bound to a mechanism, so nothing is written and nothing is inferred in its place"
+            },
+            {
+              "src": "Helio Health",
+              "dst": "Lumen Field",
+              "predicate": "transacts",
+              "reason": "`transacts` binds no declared write path (relation_write_paths() -> ()) \u2014 it is neither in the structural writer's predicate set nor bound to a mechanism, so nothing is written and nothing is inferred in its place"
+            }
+          ],
+          "collapsed": [],
+          "written": 3,
+          "dropped": 2,
+          "folded": 0,
+          "write_paths": {
+            "structural": 3
+          }
+        },
+        "surfaced": [
+          {
+            "point_id": "pt_8a7bf81fd2b45ed87f5ff88beff1fe8e8c74c6a8667aedbcdfb74f7e89a154",
+            "label": "We sell to mid-market utilities \u2014"
+          },
+          {
+            "point_id": "pt_0a365304c97941ad46a74f9d03065763f1417f7f85e96f01ece40c4e104b51",
+            "label": "The mid-market utilities segment is the"
+          },
+          {
+            "point_id": "pt_445b6b63ee6784fa139d01797d7ece2d68a9e6674d8efc9e439cbdda143b85",
+            "label": "Northwind Logistics is a customer and"
+          },
+          {
+            "point_id": "pt_065cde1c1d954b4b385f4da42e8f98f6159cd7a9f9404653b77b507af26a05",
+            "label": "Helio Health is a customer and"
+          },
+          {
+            "point_id": "pt_de0dd0fefefb137acd422cdde87193025dc78b7f0eee087dafb8dc6fff36eb",
+            "label": "Both Northwind Logistics and Helio Health"
+          },
+          {
+            "point_id": "pt_80051bec60a16da2f676da18ebd80d6d5edb88b1cda86a3e1fb2bf51ae3ed1",
+            "label": "Enterprise renewals are owned by Jonas"
+          },
+          {
+            "point_id": "pt_9f3b6a6aab16481769cb18e4094305bd43722c579d3e4d64430543d6464593",
+            "label": "Enterprise renewals are negotiated per customer"
+          },
+          {
+            "point_id": "pt_54fe55abae74d3be384e965f3dd9287f260b4d769fd5c6b569cb3bc0c2ff68",
+            "label": "The segment being the planning unit"
+          },
+          {
+            "point_id": "pt_814e38a66eae187d65e7c3d823f6ea95d86470a10264c181d85f2696e7a6e9",
+            "label": "Per-customer renewal negotiation tempers how muc"
+          }
+        ],
+        "graph_ops": {
+          "total": 728,
+          "read": 627,
+          "write": 101,
+          "by_phase": {
+            "session_store": {
+              "read": 24,
+              "write": 16,
+              "total": 40
+            },
+            "extraction": {
+              "read": 449,
+              "write": 0,
+              "total": 449
+            },
+            "commit": {
+              "read": 0,
+              "write": 64,
+              "total": 64
+            },
+            "belief": {
+              "read": 154,
+              "write": 21,
+              "total": 175
+            }
+          }
+        }
+      }
+    },
+    {
+      "doc_id": "doc-05",
+      "date": "2026-05-05",
+      "title": "Cross-team delivery sync",
+      "turns": 6,
+      "ok": true,
+      "ack_seconds": 20.04,
+      "result": {
+        "protocol_version": "memory_write_v1",
+        "status": "ok",
+        "provenance": {
+          "source_session": "doc-05",
+          "source_harness": "unknown",
+          "ingested_at": "2026-11-26T05:39:04.530639+00:00"
+        },
+        "points": [
+          {
+            "id": "pt_2e112aaeaa74adb0a38e59f1b6032792c4cc7a69950444a014db0ae92f0c87",
+            "kind": "statement",
+            "text": "The Platform team builds the ingest-gateway, event-bus, fact-store, signal-engine, auth-service and identity-db",
+            "props": {
+              "quote": "the Platform team builds the ingest-gateway, event-bus, fact-store, signal-engine, auth-service and identity-db",
+              "search_keys": [
+                "who builds the ingest-gateway",
+                "Platform team ownership",
+                "component ownership map",
+                "event-bus fact-store signal-engine owner"
+              ],
+              "source_turn_id": 1
+            },
+            "dedup": "new",
+            "point_id": "pt_2e112aaeaa74adb0a38e59f1b6032792c4cc7a69950444a014db0ae92f0c87",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_01606ebbcc0eb19272b24e94cd18835d68a4eeefd91c519c2628a5f09483dc",
+            "kind": "statement",
+            "text": "The Product team builds the web-dashboard with the Platform team's support",
+            "props": {
+              "quote": "the Product team builds the web-dashboard with Platform's support",
+              "search_keys": [
+                "who builds the web-dashboard",
+                "Product team ownership",
+                "dashboard builder"
+              ],
+              "source_turn_id": 1
+            },
+            "dedup": "new",
+            "point_id": "pt_01606ebbcc0eb19272b24e94cd18835d68a4eeefd91c519c2628a5f09483dc",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_b747b6f4f1e20ddd04a0d885a80807e214f189bbec8eb3077bd1c5d03178c3",
+            "kind": "statement",
+            "text": "Amara Osei reviews dashboard changes because she owns Lumen Core",
+            "props": {
+              "quote": "Amara Osei reviews dashboard changes because she owns Lumen Core",
+              "search_keys": [
+                "who reviews dashboard changes",
+                "dashboard reviewer",
+                "Amara Osei review",
+                "Lumen Core owner"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_b747b6f4f1e20ddd04a0d885a80807e214f189bbec8eb3077bd1c5d03178c3",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_0e05cc728deae205502bb3ada8736b657c17a7d5996f1c0898f53f84ec960e",
+            "kind": "statement",
+            "text": "Lumen Core contains the Grid Map, Outage Alerts and Load Forecast screens that the dashboard renders",
+            "props": {
+              "quote": "Lumen Core contains Grid Map, Outage Alerts and Load Forecast, which are the screens the dashboard renders",
+              "search_keys": [
+                "what does Lumen Core contain",
+                "Grid Map Outage Alerts Load Forecast",
+                "dashboard screens"
+              ],
+              "source_turn_id": 3
+            },
+            "dedup": "new",
+            "point_id": "pt_0e05cc728deae205502bb3ada8736b657c17a7d5996f1c0898f53f84ec960e",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_270352923d733ddde1b9ee8708bcb6896e553bcfee34f2a783a222c87da34b",
+            "kind": "statement",
+            "text": "Northwind Logistics runs Lumen Core",
+            "props": {
+              "quote": "Northwind Logistics runs Lumen Core",
+              "search_keys": [
+                "who runs Lumen Core",
+                "Northwind Logistics product",
+                "Lumen Core customer"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_270352923d733ddde1b9ee8708bcb6896e553bcfee34f2a783a222c87da34b",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_abdf1107d56dc4585abf85e4c3e1651e4b865819fedd0327af2fee7f599f11",
+            "kind": "statement",
+            "text": "Helio Health runs Lumen Field",
+            "props": {
+              "quote": "Helio Health runs Lumen Field",
+              "search_keys": [
+                "who runs Lumen Field",
+                "Helio Health product",
+                "Lumen Field customer"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_abdf1107d56dc4585abf85e4c3e1651e4b865819fedd0327af2fee7f599f11",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_f160f7b536098091f4131913a580f4ac281f59d6d00b2afcc34d8ff3eb908c",
+            "kind": "statement",
+            "text": "Northwind Logistics and Helio Health are both in the mid-market utilities segment",
+            "props": {
+              "quote": "Both customers are in the mid-market utilities segment",
+              "search_keys": [
+                "mid-market utilities segment",
+                "customer segment",
+                "Northwind Helio segment"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_f160f7b536098091f4131913a580f4ac281f59d6d00b2afcc34d8ff3eb908c",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_0eb376e38933b96e9111a51961ece039bca33fddee63d55628732202c87adb",
+            "kind": "statement",
+            "text": "Jonas Bauer owns enterprise renewals for both Northwind Logistics and Helio Health",
+            "props": {
+              "quote": "Jonas Bauer owns enterprise renewals for both",
+              "search_keys": [
+                "who owns enterprise renewals",
+                "Jonas Bauer renewals",
+                "renewals owner"
+              ],
+              "source_turn_id": 5
+            },
+            "dedup": "new",
+            "point_id": "pt_0eb376e38933b96e9111a51961ece039bca33fddee63d55628732202c87adb",
+            "status": "live",
+            "ep_updated": false
+          },
+          {
+            "id": "pt_45ab4e4a897c052469e141be933fc286480d61ff449ec9f515f3f5c3755331",
+            "kind": "statement",
+            "text": "The component-to-team structure and customer delivery chain are recorded as durable structure rather than left implicit",
+            "props": {
+              "quote": "these are now recorded as the durable structure \u2014 who builds what, who reviews what, and how the products reach customers \u2014 rather than left implicit",
+              "search_keys": [
+                "durable structure recorded",
+                "ownership map settled",
+                "delivery chain recorded"
+              ]
+            },
+            "dedup": "new",
+            "point_id": "pt_45ab4e4a897c052469e141be933fc286480d61ff449ec9f515f3f5c3755331",
+            "status": "live",
+            "ep_updated": false
+          }
+        ],
+        "error": null,
+        "session_id": "doc-05",
+        "turns": 6,
+        "extracted": 9,
+        "extraction_mode": "llm:deepseek-direct",
+        "ok": true,
+        "errors": [],
+        "warnings": [
+          "point 'The component-to-team structure and cust' has no resolvable source turn (no quote match)",
+          "S3 identity partial: the existing-item lookup did not run for 17 of 31 candidate(s)"
+        ],
+        "diagnostics": [],
+        "stats": {
+          "entities": 19,
+          "events": 3,
+          "points": 9,
+          "operators": 0,
+          "operator_endpoints_minted": 0,
+          "held": 0,
+          "held_entities": 0,
+          "held_entity_refs_stripped": 0,
+          "held_entity_operators_dropped": 0,
+          "held_reasons": {},
+          "held_drained": 0,
+          "held_drain_attempted": 0,
+          "tier_a_points": 0,
+          "noops": 0,
+          "merges": 0,
+          "deletions": 0,
+          "search_queries": 15,
+          "search_degraded": false,
+          "chain_notes": 0,
+          "supersessions": 0,
+          "relations": 17,
+          "relations_dropped": 0,
+          "mentions_recorded": 0,
+          "mentions_attached": 0,
+          "mentions_unresolved": 0,
+          "elapsed_s": 18.7,
+          "chunks": 1,
+          "failed_chunks": 0,
+          "edus": 6,
+          "s4_merge": {},
+          "renarrate": {
+            "fired": false
+          },
+          "s4_delta": true,
+          "s4_delta_empty": 1,
+          "llm": {
+            "calls": 4,
+            "retries": 0,
+            "truncated": 0,
+            "deadline_aborts": 0,
+            "prompt_tokens": 27556,
+            "completion_tokens": 4595,
+            "prompt_cache_hit_tokens": 16384,
+            "prompt_cache_miss_tokens": 11172,
+            "cost_usd": 0.0,
+            "calls_without_cost": 4,
+            "calls_without_usage": 0,
+            "by_stage": {
+              "s1": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 1777,
+                    "completion_tokens": 190,
+                    "prompt_cache_hit_tokens": 1408,
+                    "prompt_cache_miss_tokens": 369,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s2": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 9939,
+                    "completion_tokens": 4128,
+                    "prompt_cache_hit_tokens": 9216,
+                    "prompt_cache_miss_tokens": 723,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "s4": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 14656,
+                    "completion_tokens": 40,
+                    "prompt_cache_hit_tokens": 5632,
+                    "prompt_cache_miss_tokens": 9024,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              },
+              "resolve": {
+                "deepseek-direct": {
+                  "deepseek-v4-flash": {
+                    "calls": 1,
+                    "prompt_tokens": 1184,
+                    "completion_tokens": 237,
+                    "prompt_cache_hit_tokens": 128,
+                    "prompt_cache_miss_tokens": 1056,
+                    "cost_usd": 0.0,
+                    "calls_without_cost": 1,
+                    "calls_without_usage": 0,
+                    "calls_without_tokens": 0,
+                    "usage_present": true
+                  }
+                }
+              }
+            },
+            "route_cost_overflows": 0,
+            "calls_without_tokens": 0
+          },
+          "recovery": {
+            "s2_out_tokens": 4128,
+            "s4_out_tokens": 40
+          },
+          "step_witness": {
+            "reader": {
+              "edus": 6,
+              "chunks": 1
+            },
+            "story": {
+              "by_stage_s1": true,
+              "story_arc_chars": 950
+            },
+            "map": {
+              "items": {
+                "entities": 19,
+                "events": 3,
+                "points": 9,
+                "operators": 0
+              }
+            },
+            "vet": {
+              "enabled": true,
+              "s2": {
+                "candidates": 31,
+                "by_outcome": {
+                  "KEEP": 31
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              },
+              "union": {
+                "candidates": 31,
+                "by_outcome": {
+                  "KEEP": 31
+                },
+                "discarded": 0,
+                "arbiter": "none",
+                "mechanical": {
+                  "enabled": true,
+                  "fired": 0,
+                  "overridden": 0,
+                  "by_rule": {
+                    "value.identifier_only.uuid": 0,
+                    "value.identifier_only.hash": 0,
+                    "value.identifier_only.reference": 0,
+                    "value.identifier_only.path": 0
+                  }
+                }
+              }
+            },
+            "classify_later": {
+              "enabled": false,
+              "s2": {},
+              "union": {}
+            },
+            "search": {
+              "mode": "real",
+              "degraded": false,
+              "reason": null,
+              "queries_run": 15,
+              "hits": {
+                "entities": 13,
+                "points": 0,
+                "events": 0
+              }
+            },
+            "merge": {
+              "merged_items": null,
+              "s2_items": null,
+              "s4_items": null
+            },
+            "commit": {
+              "payload_produced": true,
+              "entities": 19,
+              "events": 3,
+              "points": 9,
+              "operators": 0,
+              "committed": 9
+            }
+          }
+        },
+        "capture_redactions": 0,
+        "extraction_provider": "deepseek-direct",
+        "relation_write": {
+          "edges": [
+            {
+              "src_id": "1a2165cdd92-a48d8cae4dca",
+              "dst_id": "1a2165cddf7-d987f60b8c51",
+              "predicate": "produces",
+              "write_path": "structural",
+              "stated_predicate": "produces",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cdd92-a48d8cae4dca",
+              "dst_id": "1a2165d1bf1-f6c7fdcb1f99",
+              "predicate": "produces",
+              "write_path": "structural",
+              "stated_predicate": "produces",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cdd92-a48d8cae4dca",
+              "dst_id": "1a2165d1bf8-9ddfb0fbbe82",
+              "predicate": "produces",
+              "write_path": "structural",
+              "stated_predicate": "produces",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cdd92-a48d8cae4dca",
+              "dst_id": "1a2165d1bff-290144cfdf57",
+              "predicate": "produces",
+              "write_path": "structural",
+              "stated_predicate": "produces",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cdd92-a48d8cae4dca",
+              "dst_id": "1a2165d1c0d-3f70b27d5212",
+              "predicate": "produces",
+              "write_path": "structural",
+              "stated_predicate": "produces",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cdd92-a48d8cae4dca",
+              "dst_id": "1a2165d1c14-4f7cf1becc80",
+              "predicate": "produces",
+              "write_path": "structural",
+              "stated_predicate": "produces",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cdd9d-4dc870c9aa66",
+              "dst_id": "1a2165d1c06-0633b1cbe2a0",
+              "predicate": "produces",
+              "write_path": "structural",
+              "stated_predicate": "produces",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cddc0-0f8b3f3ba2e1",
+              "dst_id": "1a2165c9fd5-bb074a074bd4",
+              "predicate": "ownedBy",
+              "write_path": "structural",
+              "stated_predicate": "ownedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165c9fd5-bb074a074bd4",
+              "dst_id": "1a2165c9fe9-2aba993fa164",
+              "predicate": "hasPart",
+              "write_path": "structural",
+              "stated_predicate": "hasPart",
+              "declared_by": "product-strategy",
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165c9fd5-bb074a074bd4",
+              "dst_id": "1a2165c9ff2-cfe55f158517",
+              "predicate": "hasPart",
+              "write_path": "structural",
+              "stated_predicate": "hasPart",
+              "declared_by": "product-strategy",
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165c9fd5-bb074a074bd4",
+              "dst_id": "1a2165c9ffd-102e820a1d14",
+              "predicate": "hasPart",
+              "write_path": "structural",
+              "stated_predicate": "hasPart",
+              "declared_by": "product-strategy",
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165d4e94-1b78526e3991",
+              "dst_id": "1a2165c9fd5-bb074a074bd4",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165d4ea4-b8484cc2b491",
+              "dst_id": "1a2165c9fe0-c49e1db3abb3",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165d4e94-1b78526e3991",
+              "dst_id": "1a2165d9ce5-e31e6a510467",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165d4ea4-b8484cc2b491",
+              "dst_id": "1a2165d9ce5-e31e6a510467",
+              "predicate": "related",
+              "write_path": "structural",
+              "stated_predicate": "related",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cddc7-67897f705466",
+              "dst_id": "1a2165d4e94-1b78526e3991",
+              "predicate": "managedBy",
+              "write_path": "structural",
+              "stated_predicate": "managedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            },
+            {
+              "src_id": "1a2165cddc7-67897f705466",
+              "dst_id": "1a2165d4ea4-b8484cc2b491",
+              "predicate": "managedBy",
+              "write_path": "structural",
+              "stated_predicate": "managedBy",
+              "declared_by": null,
+              "mechanism": null,
+              "label": null,
+              "direction": null,
+              "folded": []
+            }
+          ],
+          "drops": [],
+          "collapsed": [],
+          "written": 17,
+          "dropped": 0,
+          "folded": 0,
+          "write_paths": {
+            "structural": 17
+          }
+        },
+        "surfaced": [
+          {
+            "point_id": "pt_2e112aaeaa74adb0a38e59f1b6032792c4cc7a69950444a014db0ae92f0c87",
+            "label": "The Platform team builds the ingest-gateway"
+          },
+          {
+            "point_id": "pt_01606ebbcc0eb19272b24e94cd18835d68a4eeefd91c519c2628a5f09483dc",
+            "label": "The Product team builds the web-dashboard"
+          },
+          {
+            "point_id": "pt_b747b6f4f1e20ddd04a0d885a80807e214f189bbec8eb3077bd1c5d03178c3",
+            "label": "Amara Osei reviews dashboard changes because"
+          },
+          {
+            "point_id": "pt_0e05cc728deae205502bb3ada8736b657c17a7d5996f1c0898f53f84ec960e",
+            "label": "Lumen Core contains the Grid Map"
+          },
+          {
+            "point_id": "pt_270352923d733ddde1b9ee8708bcb6896e553bcfee34f2a783a222c87da34b",
+            "label": "Northwind Logistics runs Lumen Core"
+          },
+          {
+            "point_id": "pt_abdf1107d56dc4585abf85e4c3e1651e4b865819fedd0327af2fee7f599f11",
+            "label": "Helio Health runs Lumen Field"
+          },
+          {
+            "point_id": "pt_f160f7b536098091f4131913a580f4ac281f59d6d00b2afcc34d8ff3eb908c",
+            "label": "Northwind Logistics and Helio Health are"
+          },
+          {
+            "point_id": "pt_0eb376e38933b96e9111a51961ece039bca33fddee63d55628732202c87adb",
+            "label": "Jonas Bauer owns enterprise renewals for"
+          },
+          {
+            "point_id": "pt_45ab4e4a897c052469e141be933fc286480d61ff449ec9f515f3f5c3755331",
+            "label": "The component-to-team structure and customer del"
+          }
+        ],
+        "graph_ops": {
+          "total": 853,
+          "read": 751,
+          "write": 102,
+          "by_phase": {
+            "session_store": {
+              "read": 22,
+              "write": 16,
+              "total": 38
+            },
+            "extraction": {
+              "read": 673,
+              "write": 0,
+              "total": 673
+            },
+            "commit": {
+              "read": 0,
+              "write": 67,
+              "total": 67
+            },
+            "belief": {
+              "read": 56,
+              "write": 19,
+              "total": 75
+            }
+          }
+        }
+      }
+    }
+  ],
+  "empty_before": {
+    "taxonomy": {
+      "Point": 0,
+      "Event": 0,
+      "Subject": 0,
+      "Object": 0,
+      "Source": 0
+    },
+    "structure": {
+      "gate0_jtbds": 0,
+      "gate1_use_cases": 0,
+      "gate2_user_journeys": 0,
+      "gate3_workflows": 0,
+      "gate4_requirements": 0,
+      "total": 0,
+      "operators": 0,
+      "gate_total": 0
+    },
+    "structure_check": [],
+    "pointkinds": [],
+    "tags": [],
+    "sources": [],
+    "namespaces": [
+      {
+        "namespace": "agent-ops",
+        "name": "Agent Operations",
+        "kind_count": 4
+      },
+      {
+        "namespace": "dev",
+        "name": "Development",
+        "kind_count": 32
+      },
+      {
+        "namespace": "portfolio",
+        "name": "Investment Portfolio Manager",
+        "kind_count": 6
+      },
+      {
+        "namespace": "marketing",
+        "name": "Marketing",
+        "kind_count": 11
+      },
+      {
+        "namespace": "product-strategy",
+        "name": "Product Strategy",
+        "kind_count": 21
+      },
+      {
+        "namespace": "pm",
+        "name": "Project Management",
+        "kind_count": 18
+      },
+      {
+        "namespace": "venture",
+        "name": "Venture",
+        "kind_count": 17
+      }
+    ],
+    "status": {
+      "connected": true,
+      "counts": {
+        "Point": 0,
+        "Event": 0,
+        "Subject": 0,
+        "Object": 0,
+        "Source": 0
+      },
+      "total_entities": 0
+    },
+    "stale": {
+      "stale": [],
+      "count": 0,
+      "cutoff": "30 days",
+      "limit": 50
+    },
+    "audit": {
+      "node_count": 0,
+      "edge_count": 0,
+      "checks": [],
+      "summary": {
+        "total_issues": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "clean": true
+      },
+      "exit_code": 0
+    },
+    "dream_health": {
+      "alarm_verdict": false,
+      "alarm_reason": "ok",
+      "stale_backlog": 0,
+      "last_pass_at": null,
+      "last_pass_output": 0,
+      "last_belief_write_count": null,
+      "no_op_reason": null,
+      "coverage_pct": 0.0,
+      "failure_rate": 0.0,
+      "operator_counts": 0,
+      "per_mode_counts": {},
+      "region_attempts": {},
+      "warm_skipped_updates": 0,
+      "propagation": {
+        "graph_live_claims": 0,
+        "ep_reachable_claims": 0,
+        "belief_present": 0,
+        "no_belief": 0,
+        "belief_coverage_pct": 0.0,
+        "stamped": 0,
+        "operator_less_claims": 0,
+        "unclassified_claims": 0,
+        "unavailable": null,
+        "last_pass": null,
+        "last_pass_reason": "no_pass_observed_by_this_sdk"
+      }
+    }
+  },
+  "installed_packs": [
+    {
+      "namespace": "agent-ops",
+      "name": "Agent Operations",
+      "kind_count": 4
+    },
+    {
+      "namespace": "dev",
+      "name": "Development",
+      "kind_count": 32
+    },
+    {
+      "namespace": "portfolio",
+      "name": "Investment Portfolio Manager",
+      "kind_count": 6
+    },
+    {
+      "namespace": "marketing",
+      "name": "Marketing",
+      "kind_count": 11
+    },
+    {
+      "namespace": "product-strategy",
+      "name": "Product Strategy",
+      "kind_count": 21
+    },
+    {
+      "namespace": "pm",
+      "name": "Project Management",
+      "kind_count": 18
+    },
+    {
+      "namespace": "venture",
+      "name": "Venture",
+      "kind_count": 17
+    }
+  ],
+  "graph_overview_after": {
+    "taxonomy": {
+      "Point": 86,
+      "Event": 10,
+      "Subject": 11,
+      "Object": 24,
+      "Source": 5
+    },
+    "structure": {
+      "gate0_jtbds": 0,
+      "gate1_use_cases": 0,
+      "gate2_user_journeys": 0,
+      "gate3_workflows": 0,
+      "gate4_requirements": 0,
+      "total": 81,
+      "operators": 5,
+      "gate_total": 0
+    },
+    "structure_check": [],
+    "pointkinds": [
+      {
+        "kind": "statement",
+        "count": 51,
+        "pack": ""
+      },
+      {
+        "kind": "event",
+        "count": 30,
+        "pack": ""
+      }
+    ],
+    "tags": [],
+    "sources": [
+      {
+        "url": "session:doc-01",
+        "sourceKind": "agentSession",
+        "points": 12
+      },
+      {
+        "url": "session:doc-02",
+        "sourceKind": "agentSession",
+        "points": 11
+      },
+      {
+        "url": "session:doc-03",
+        "sourceKind": "agentSession",
+        "points": 9
+      },
+      {
+        "url": "session:doc-05",
+        "sourceKind": "agentSession",
+        "points": 9
+      },
+      {
+        "url": "session:doc-04",
+        "sourceKind": "agentSession",
+        "points": 9
+      }
+    ],
+    "namespaces": [
+      {
+        "namespace": "agent-ops",
+        "name": "Agent Operations",
+        "kind_count": 4
+      },
+      {
+        "namespace": "dev",
+        "name": "Development",
+        "kind_count": 32
+      },
+      {
+        "namespace": "portfolio",
+        "name": "Investment Portfolio Manager",
+        "kind_count": 6
+      },
+      {
+        "namespace": "marketing",
+        "name": "Marketing",
+        "kind_count": 11
+      },
+      {
+        "namespace": "product-strategy",
+        "name": "Product Strategy",
+        "kind_count": 21
+      },
+      {
+        "namespace": "pm",
+        "name": "Project Management",
+        "kind_count": 18
+      },
+      {
+        "namespace": "venture",
+        "name": "Venture",
+        "kind_count": 17
+      }
+    ],
+    "status": {
+      "connected": true,
+      "counts": {
+        "Point": 86,
+        "Event": 10,
+        "Subject": 11,
+        "Object": 24,
+        "Source": 5
+      },
+      "total_entities": 136
+    },
+    "stale": {
+      "stale": [],
+      "count": 0,
+      "cutoff": "30 days",
+      "limit": 50
+    },
+    "audit": {
+      "node_count": 86,
+      "edge_count": 11,
+      "checks": [
+        {
+          "id": "missing_sourceKind_source",
+          "severity": "medium",
+          "count": 8,
+          "legacy": false,
+          "capped": false,
+          "samples": [
+            {
+              "node_id": "session:doc-01",
+              "detail": "Source 'session:doc-01' (backing evidence 'There is no shared feature surface between Lumen Core and Lumen Field: every feature belongs to exactly one product.') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-01', tier='T0'..'T4') or tortoise_register_source('session:doc-01', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-01",
+              "detail": "Source 'session:doc-01' (backing evidence 'Lumen Core and Lumen Field are distinct delivery surfaces serving distinct users (operators vs. field crews), not a single platform with a mobile skin.') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-01', tier='T0'..'T4') or tortoise_register_source('session:doc-01', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-01",
+              "detail": "Source 'session:doc-01' (backing evidence 'Any future proposal to share or duplicate a feature across the Lumen Core / Lumen Field boundary would be a change to this baseline, not a continuation of it.') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-01', tier='T0'..'T4') or tortoise_register_source('session:doc-01', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-03",
+              "detail": "Source 'session:doc-03' (backing evidence 'The fact-store is a single point of upward propagation: an outage there breaks the event-bus, and through it both the signal-engine and the ingest-gateway') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-03', tier='T0'..'T4') or tortoise_register_source('session:doc-03', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-03",
+              "detail": "Source 'session:doc-03' (backing evidence 'Fact-store availability is not a local concern but a root dependency for telemetry ingestion and signal computation alike') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-03', tier='T0'..'T4') or tortoise_register_source('session:doc-03', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-03",
+              "detail": "Source 'session:doc-03' (backing evidence 'Fact-store resilience should not be treated as a lower-priority item than the components visibly closer to operators') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-03', tier='T0'..'T4') or tortoise_register_source('session:doc-03', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-04",
+              "detail": "Source 'session:doc-04' (backing evidence 'The mid-market utilities segment is the unit we plan against.') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-04', tier='T0'..'T4') or tortoise_register_source('session:doc-04', kind, tier=...)"
+            },
+            {
+              "node_id": "session:doc-04",
+              "detail": "Source 'session:doc-04' (backing evidence 'The segment being the planning unit supports treating it as the durable commercial frame.') resolves to a NEUTRAL tier (no explicit credibilityTier / tier-form or registry-tiered sourceKind)",
+              "fix": "tier the source: tortoise_manage_source_trust('session:doc-04', tier='T0'..'T4') or tortoise_register_source('session:doc-04', kind, tier=...)"
+            }
+          ]
+        },
+        {
+          "id": "impl_instead_of_nand",
+          "severity": "low",
+          "count": 6,
+          "legacy": false,
+          "capped": true,
+          "samples": [
+            {
+              "node_id": "1a2165ca3e3-14824aaece72",
+              "detail": "IMPL edge 1a2165ca3e3-14824aaece72 \u2192 'Lumen Core and Lumen Field are distinct delivery surfaces serving distinct users' (keyword: 'not') \u2014 verify whether NAND applies",
+              "fix": "Verify semantic contradiction BEFORE converting \u2014 if confirmed: tortoise_link_entities('NAND', '1a2165ca3e3-14824aaece72', ['pt_75a45a60815d95d42523224420f36e4bfcc348c8d08d12e30d3743badf5947'])"
+            },
+            {
+              "node_id": "1a2165ca40c-c9d56d731ddf",
+              "detail": "IMPL edge 1a2165ca40c-c9d56d731ddf \u2192 'Lumen Core and Lumen Field are distinct delivery surfaces serving distinct users' (keyword: 'not') \u2014 verify whether NAND applies",
+              "fix": "Verify semantic contradiction BEFORE converting \u2014 if confirmed: tortoise_link_entities('NAND', '1a2165ca40c-c9d56d731ddf', ['pt_75a45a60815d95d42523224420f36e4bfcc348c8d08d12e30d3743badf5947'])"
+            },
+            {
+              "node_id": "1a2165ca40c-c9d56d731ddf",
+              "detail": "IMPL edge 1a2165ca40c-c9d56d731ddf \u2192 'Any future proposal to share or duplicate a feature across the Lumen Core / Lume' (keyword: 'not') \u2014 verify whether NAND applies",
+              "fix": "Verify semantic contradiction BEFORE converting \u2014 if confirmed: tortoise_link_entities('NAND', '1a2165ca40c-c9d56d731ddf', ['pt_a68509b2c790b879bbd80d89a34ec21746ee8aec3f9673bdd01b5cdb5a0bb7'])"
+            },
+            {
+              "node_id": "1a2165d1e18-972f694e84db",
+              "detail": "IMPL edge 1a2165d1e18-972f694e84db \u2192 'Fact-store availability is not a local concern but a root dependency for telemet' (keyword: 'not') \u2014 verify whether NAND applies",
+              "fix": "Verify semantic contradiction BEFORE converting \u2014 if confirmed: tortoise_link_entities('NAND', '1a2165d1e18-972f694e84db', ['pt_50a44630f73440aa6b2890682d30d78802f28a5e7f9a914f875e9acd161b63'])"
+            },
+            {
+              "node_id": "1a2165d1df8-07384f5691d6",
+              "detail": "IMPL edge 1a2165d1df8-07384f5691d6 \u2192 'Fact-store resilience should not be treated as a lower-priority item than the co' (keyword: 'not') \u2014 verify whether NAND applies",
+              "fix": "Verify semantic contradiction BEFORE converting \u2014 if confirmed: tortoise_link_entities('NAND', '1a2165d1df8-07384f5691d6', ['pt_a693c6c89a17a6c367a426d013d6c60b6877106dc1d8f6554560beaf2685ba'])"
+            },
+            {
+              "node_id": "1a2165d1e18-972f694e84db",
+              "detail": "IMPL edge 1a2165d1e18-972f694e84db \u2192 'Fact-store resilience should not be treated as a lower-priority item than the co' (keyword: 'not') \u2014 verify whether NAND applies",
+              "fix": "Verify semantic contradiction BEFORE converting \u2014 if confirmed: tortoise_link_entities('NAND', '1a2165d1e18-972f694e84db', ['pt_a693c6c89a17a6c367a426d013d6c60b6877106dc1d8f6554560beaf2685ba'])"
+            }
+          ]
+        }
+      ],
+      "summary": {
+        "total_issues": 14,
+        "high": 0,
+        "medium": 8,
+        "low": 6,
+        "clean": false
+      },
+      "exit_code": 1
+    },
+    "dream_health": {
+      "alarm_verdict": false,
+      "alarm_reason": "ok",
+      "stale_backlog": 0,
+      "last_pass_at": "2026-11-26T05:39:24.565034+00:00",
+      "last_pass_output": 9,
+      "last_belief_write_count": 0,
+      "no_op_reason": "no_ep_factors",
+      "coverage_pct": 0.9803921568627451,
+      "failure_rate": 0.0,
+      "operator_counts": 0,
+      "per_mode_counts": {
+        "local": 5
+      },
+      "region_attempts": {},
+      "warm_skipped_updates": 0,
+      "propagation": {
+        "graph_live_claims": 51,
+        "ep_reachable_claims": 9,
+        "belief_present": 9,
+        "no_belief": 0,
+        "belief_coverage_pct": 1.0,
+        "stamped": 50,
+        "operator_less_claims": 42,
+        "unclassified_claims": 0,
+        "unavailable": null,
+        "last_pass": {
+          "mode": "local",
+          "max_hops": 2,
+          "affected": 9,
+          "window_reachable": 9,
+          "graph_ep_reachable": 9
+        },
+        "last_pass_reason": null
+      }
+    }
+  }
+}
