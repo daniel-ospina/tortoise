@@ -78,7 +78,7 @@ version: 1
 # `git show --stat bf16c791a489 -- config/ci-surfaces.yml` printed nothing. The safe form is
 # `git diff <sha>^1 <sha> -- config/ci-surfaces.yml`, run PER FOLD — never as "empty since X",
 # which is the same census rot one level down. Each splice's figures live on the commit that
-# measured them — never carried into this derivation), carrying
+# measured them — never carried into this derivation, carrying
 # `#14597`'s expansion fusion over the residue RATCHET
 # (`tests/test_expansion_fusion_14344.py`, `core`, carrying a `durations` row),
 # `#14415`'s `tests/test_14219_batch_ingest.py` row and `tests/test_14219_batches_api.py` row,
