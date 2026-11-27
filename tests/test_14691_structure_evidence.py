@@ -2828,13 +2828,28 @@ def test_the_EXHIBITED_invented_quote_is_the_artifacts_quote():
     substantiation of that sentence, so an ungraded exhibit is an ungraded claim,
     and the bundle's only claim-layer FAIL rested on it.
 
-    Resolved residual, declared rather than hidden: a DELETION of trailing
-    exhibited rows leaves a shorter prefix, which this arm admits — it grades
-    every row it is SHOWN against the artifact, and the row
-    VERIFICATION-independent.md points at must be among them.
+    Resolved residual, declared rather than hidden: the fence may exhibit a
+    PREFIX of the field rather than all of it (today: 3 of 6 rows). Every row it
+    shows is graded, and a trailing deletion reds whenever it removes the row
+    VERIFICATION-independent.md points at — measured (15th review, `f2`), so the
+    admitted gap is narrower than "any truncation".
     """
     module = _load_score_module()
-    sanctioned = module.a4_invention()["quotes"]["invented_examples"]
+    # ⛔ THE COMMITTED FIELD, not the derivation (#14723 15th review, finding 2).
+    # `a4_invention()["quotes"]["invented_examples"]` is the DERIVED superset — 9
+    # rows — while the fence CITES `out/t6-score.json`'s `claim_layer.
+    # invented_examples`, which holds 6. Reading the derivation would let a fence
+    # exhibit rows 6-8 while citing a field that does not hold them: the very
+    # `a sentence that exists in NO field of the artifact` defect this commit
+    # fixed on the other side.
+    committed = json.loads((BUNDLE / "out" / "t6-score.json").read_text())
+    sanctioned = committed["claim_layer"]["invented_examples"]
+    assert sanctioned, "the committed claim layer carries no invented examples"
+    # ...and the derived superset must still AGREE on every row it shares, so the
+    # two populations cannot drift into two stories.
+    derived = module.a4_invention()["quotes"]["invented_examples"]
+    assert [r["quote"] for r in sanctioned] == [r["quote"] for r in derived][:len(sanctioned)], (
+        "the committed examples are not the head of the derived ones")
 
     def norm(s: str) -> str:
         return " ".join(s.split())
@@ -2842,28 +2857,40 @@ def test_the_EXHIBITED_invented_quote_is_the_artifacts_quote():
     body = norm(" ".join(_fence_after(r"^Examples of the invented")))
     assert body, "REPORT.md §3 has no invented-examples fence to grade"
 
-    # The exhibit must be the artifact's OWN quotes, in the artifact's order, and
-    # nothing else: an exact quote count is what makes a replaced or padded
-    # exhibit red instead of merely longer.
+    # The exhibit must RECONSTRUCT from the artifact's own quotes, in order, and
+    # nothing else — that is what makes a replaced, padded or re-ordered exhibit
+    # red instead of merely different.
+    # ⛔ NOT a `body.split('"')` tokenisation (#14723 15th review, finding 1):
+    # the artifact's 4th row (index 3) CONTAINS a literal `"` (`…questions of "who
+    # decides / who is answerable" route…`), so counting quote characters
+    # mis-splits a perfectly correct exhibit. Measured here on the pre-fix arm
+    # (`e366cb0a14`): today's 3-row fence (indices 0-2) happens to split clean →
+    # 104 passed, but exhibiting the artifact's OWN first four rows → **1 failed**,
+    # i.e. the correct exhibit was unrepresentable and the arm graded shape, not
+    # the claim. The reconstruction below accepts that exhibit and still reds a
+    # corruption, a substitution, a re-order and a padded fence.
     expected = [norm(r["quote"]) for r in sanctioned]
-    assert body.count('"') % 2 == 0, ("unbalanced exhibit fence", body)
-    shown = [q.strip() for q in body.split('"')[1::2]]
     # ⛔ (16th review, P3) the pairing check that stood here —
     # `assert len(shown) == body.count('"') // 2` — could never fail:
     # `split('"')[1::2]` has exactly `count // 2` elements by construction for an
-    # even count, and the odd case is refused on the line above. Deleted rather
-    # than left as a check no mutant can red.
-    assert shown, body
-    assert shown == expected[:len(shown)], (
-        "REPORT §3's exhibited invented-quotes are not the artifact's own quotes "
-        "in order — a restated exhibit, so the `None of those sentences is in the "
-        "corpus` claim beside it grades nothing",
-        list(zip(shown, expected[:len(shown)], strict=False)))
+    # even count, and the odd case was refused on the line above. The whole
+    # TOKENISER is gone here rather than just the check, so the inert assertion
+    # cannot come back with it.
+    for k in range(len(expected), 0, -1):
+        if body == '"' + '" "'.join(expected[:k]) + '"':
+            break
+    else:
+        raise AssertionError((
+            "REPORT §3's exhibited invented-quotes do not reconstruct from the "
+            "artifact's own `claim_layer.invented_examples` in order — a "
+            "restated exhibit, so the `None of those sentences is in the corpus` "
+            "claim beside it grades nothing",
+            body[:400], expected[:4]))
+    shown_rows = sanctioned[:k]
 
     # `None of those sentences is in the corpus` is the claim, so grade IT: no
     # exhibited sentence occurs in the corpus, and each sits below the 0.6 band.
     corpus = _corpus_text()
-    shown_rows = sanctioned[:len(shown)]
     for row in shown_rows:
         assert norm(row["quote"]).lower() not in corpus, (
             "§3 exhibits this sentence as absent from the corpus and the corpus "
@@ -2923,6 +2950,33 @@ def test_the_EXHIBITED_invented_quote_is_the_artifacts_quote():
     assert source[len(stored)].isalnum(), (
         "the prose says the capped field ends mid-word; the readback continues it "
         f"with {source[len(stored):len(stored) + 12]!r}, i.e. on a word boundary")
+
+
+def test_the_S5_transacts_sentence_is_the_DROPPED_relations():
+    r"""Reds if REPORT §5's dropped-relation sentence keeps a COUNT WORD.
+
+    ⛔ #14723 15th review, finding 3. `7379b02acb` corrected §5 to *"…after both
+    `transacts` rows were dropped"* and derived the two cells it named
+    (`REPORT.md:104`, `:179`) — this sentence kept the word. Measured on that
+    commit: reverting the line to the pre-commit singular (`after the `transacts`
+    row was dropped`) left **104 passed**, because
+    `test_no_FIGURE_in_the_two_documents_is_free` scans DIGITS and a count word is
+    invisible to it. Same class as the exhibit above: the copy, not the figure.
+    """
+    rows = _score()["A4_no_invention"]["relations_not_written"]
+    assert rows, "the artifact records no dropped relations to derive from"
+    preds = sorted({m.group(1) for m in (
+        re.search(r"not written \(#\d+\): (\S+) '", row["warning"])
+        for row in rows) if m})
+    assert preds, [row["warning"][:80] for row in rows]
+    named = "`, `".join(preds)
+    clause = (f"after both `{named}` rows were dropped" if len(rows) > 1
+              else f"after the `{named}` row was dropped")
+    paragraph = _report_paragraph(r"^\*\*Could not:\*\* the wiring of people")
+    assert paragraph, "REPORT.md has no §5 `Could not` paragraph"
+    assert clause in paragraph, (
+        "§5's dropped-relation sentence is not the artifact's own population "
+        f"({len(rows)} row(s) of {named}): {paragraph[-170:]!r})")
 
 
 def test_each_door_finding_ANSWER_is_the_artifacts_answer_in_SUBSTANCE():
