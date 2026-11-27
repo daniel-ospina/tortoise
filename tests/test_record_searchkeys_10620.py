@@ -2294,10 +2294,11 @@ def test_the_divergence_arm_prescribes_no_journal_repair_on_the_record_only_arm(
     )
 
     # ⛔ THE REFUSAL IS CONDITIONED ON DISAGREEMENT, not on the act of passing:
-    # the guard is `allocated_first != seq` (`record_writer.py:4430`), so a direct
-    # caller that supplies the allocator's own next number APPLIES. "passing one
-    # again refuses" was a universal this arm's own guard falsifies, so the advice
-    # has to name the disagreement instead.
+    # the guard is `if allocated_first != seq` in this arm, so a direct caller that
+    # supplies the allocator's own next number APPLIES. "passing one again refuses"
+    # was a universal this arm's own guard falsifies, so the advice has to name the
+    # disagreement instead. (Cited by CONDITION, not by line: a neighbour landmark
+    # lands above it every round and moves the number — the fix is not to type one.)
     assert "passing one again refuses" not in message, (
         "this arm fires only when the two numbers disagree, so do not claim "
         f"that any supplied position refuses: {message}"
