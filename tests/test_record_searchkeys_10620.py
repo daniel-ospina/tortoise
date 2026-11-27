@@ -1593,6 +1593,86 @@ def test_a_plan_refusal_on_the_record_only_arm_does_not_claim_a_journal_line(
     )
 
 
+def test_a_write_failure_on_the_record_only_arm_does_not_claim_a_journal_line(
+        monkeypatch, caplog):
+    """#11783 review F1, scope note — the SAME falsehood one arm down.
+
+    The review's F1 named the new `plan_refused` WARN and added, as its scope
+    note, that the pre-existing `write_failed` arm carries the same unqualified
+    claim ("the journal has the record") and that the cheap complete fix is to
+    condition THAT clause on the flag the door already holds. This is that fix's
+    pin.
+
+    `journal_skipped=True` is reachable at both arms: `live_write` sets it from
+    `record_owns_position` on a cut-over graph (#14002), where the chokepoint
+    deliberately does not append, so a `write_failed` there means the write
+    reached NEITHER store — and there is no line for a replay, enumerated or
+    allocating, to heal. It also IMPLIES `allocate`, so without this branch the
+    door would take an `allocate` sentence and prescribe a replay of a journal
+    that never received the record.
+
+    `_ScopeBlindConn` is the honest trigger: it makes the door execute the tenant
+    scope read-back and fail it, which is a STORE fact raised AFTER the plan was
+    built — the exact population of this arm.
+    """
+    from tortoise import record_writer
+
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://fake")
+    monkeypatch.setattr(record_writer, "_default_connect",
+                        lambda dsn: _ScopeBlindConn())
+    record_writer._close_live_breaker()
+
+    record = {"type": "PointAdded",
+              "point": {"eventId": "pt-11783-wf-skipped",
+                        "id": "pt-11783-wf-skipped",
+                        "content": "a claim", "point_kind": "statement"}}
+
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        write = record_writer.write_live_record(
+            record, seq=9, tenant=("org-t", "graph-t"), journal_skipped=True)
+
+    assert write is not None and write.refusal == "write_failed", (
+        "a store fact raised after the plan was built stays `write_failed` "
+        f"whatever the arm — got {None if write is None else write.refusal!r}"
+    )
+    message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reached NEITHER store" in message, (
+        "the record-only arm has NO journal line, so the write reached neither "
+        f"store and the WARN must say so — got: {message}"
+    )
+    assert "the journal has the record" not in message, (
+        "this arm's pre-existing copy of the false claim must be gone too: "
+        f"{message}"
+    )
+    assert "re-emit the record" in message, (
+        "with no line to replay, the remedy is a RE-EMIT (what "
+        f"`live_write.py` prescribes) — got: {message}"
+    )
+
+    # ⛔ DISCRIMINATING: the same door on the JOURNALED arm must still claim the
+    # line it really has, so this pin reds if the flag stops selecting the
+    # sentence (rather than merely passing on a message nobody varies).
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        journaled = record_writer.write_live_record(
+            record, seq=9, tenant=("org-t", "graph-t"))
+
+    assert journaled is not None and journaled.refusal == "write_failed"
+    journaled_message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "the journal has the record" in journaled_message, (
+        "on the JOURNALED arm the line exists and must still be named — "
+        f"got: {journaled_message}"
+    )
+    assert "reached NEITHER store" not in journaled_message, (
+        f"the same falsehood in the other direction: {journaled_message}"
+    )
+    assert "re-emit the record" not in journaled_message, (
+        "the journaled arm has a line to replay, so a re-emit is not the "
+        f"prescribed remedy there — got: {journaled_message}"
+    )
+
+
 def test_a_string_passes_through_unchanged():
     """The canonical form is NEVER re-flattened — a string is already the answer."""
     assert record_projection._record_column_value(
