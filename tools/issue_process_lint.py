@@ -1522,6 +1522,26 @@ def _row_range_span(text: str, rows: list[str]) -> set[str]:
     return spanned
 
 
+def _explicit_ids(text: str, rows: list[str]) -> set[str]:
+    """The declared ids `text` names OUTSIDE any range mention — the TOKEN half of `_ids_in`.
+
+    Split out for the clause-masked closing-line read (`_closing_line_range_claim`), which needs the
+    tokens and the range SPANS decided against different views of the same line: only CLAIMABLE
+    clauses may contribute ids, while the range's whole-claim test must still see a narrowing sibling
+    clause that carries no positive marker of its own.
+    """
+    mentions = _range_matches(text, rows)
+    scanned = text
+    if mentions:
+        chars = list(text)
+        for match in mentions:
+            for i in range(match.start(), match.end()):
+                chars[i] = " "
+        scanned = "".join(chars)
+    return {row for row in rows
+            if re.search(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", scanned)}
+
+
 def _ids_in(text: str, rows: list[str]) -> set[str]:
     """Which of `rows` this text CLAIMS — whole tokens (so `R1` is not found inside `R10`/`AR1`), plus
     every row a bare range claim spans.
@@ -1535,17 +1555,7 @@ def _ids_in(text: str, rows: list[str]) -> set[str]:
     `(row V2 of V1–V6)` claims V2 ALONE — not V1 and V6 as well, which is what counting the endpoints
     did, and not all six, which is what the bare span did.
     """
-    named = {row for row in rows
-             if re.search(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", text)}
-    mentions = _range_matches(text, rows)
-    if mentions:
-        chars = list(text)
-        for match in mentions:
-            for i in range(match.start(), match.end()):
-                chars[i] = " "
-        named = {row for row in rows
-                 if re.search(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", "".join(chars))}
-    return named | _row_range_span(text, rows)
+    return _explicit_ids(text, rows) | _row_range_span(text, rows)
 
 
 # A DISCLAIMER: prose naming rows the author says they are NOT claiming — `V1, V3–V6 remain
@@ -1575,7 +1585,10 @@ _DISCLAIMER_RE = re.compile(
 # Prose-based polarity cannot terminate, so a CLAUSE now contributes claims only on a POSITIVE
 # structural marker: it carries the closing keyword (with its attached qualifier), it carries a
 # COMPLETION verb (`_AFFIRM_RE`), or it is the documented `Satisfies #<issue>: <ids>` form. Everything
-# else is a mention, and mentions are not claims in either direction.
+# else is a mention, and mentions are not claims in either direction — with ONE exception, added in
+# review round 11: where a mention NARROWS a range on the same line, the rows it names are what the
+# sentence claims (`_narrowing_ids`). Reading only the marked clauses made `(rows V1–V6; V2 only)` a
+# complete claim on all six, i.e. `clean` on a one-row close — the false PASS this rule exists for.
 _AFFIRM_RE = re.compile(
     r"\b(?:prov(?:e|es|ed|en|ing)|measur\w+|done|complet\w+|deliver\w+|cover(?:s|ed)?|verif\w+"
     r"|satisf\w+|landed|shipped|closed|all\s+six|every\s+row)\b",
@@ -1612,6 +1625,63 @@ def _clause_spans(line: str, rows: list[str]) -> list[tuple[int, int]]:
 def _clauses(line: str, rows: list[str]) -> list[str]:
     """The clause TEXTS of one line — see `_clause_spans` for the boundaries."""
     return [line[a:b] for a, b in _clause_spans(line, rows)]
+
+
+def _narrowing_ids(line: str, match: re.Match, rows: list[str]) -> set[str]:
+    """The ids a NARROWING sibling clause names — `(rows V1–V6; V2 only)` claims **V2**.
+
+    ⛔ WHY THIS EXISTS, AND WHY IT IS NOT A CUE LIST (review round 11). Round 10 masked the claim read
+    to CLAIMABLE clauses so that `(row V2 only); V1, V3, V4, V5, V6 are separate PRs` could not count
+    its cue-free narrowing as claims. That is right for ids, and it took the *evidence* the range read
+    depends on with it: `claimable` now blanks a sibling clause that carries no completion verb, so
+    `(rows V1–V6; V2 only)` stopped looking narrowed — the bare range became "the whole claim" and a
+    ONE-ROW close of `#13036`'s six read **`clean`**, the false PASS this arm ranks worst. The
+    demoted range is therefore resolved by the sibling that demoted it: the rows IT names are the
+    narrower claim the sentence means. Nothing about the words is guessed — the sibling is identified
+    by *naming a declared row outside the range*, and it only counts when it names a STRICT SUBSET of
+    the span, so a sibling that names the whole span (`V1 … V6 are separate PRs`) is not a narrowing
+    and earns nothing (the line lands `ambiguous`, never `clean`).
+    """
+    spans = _clause_spans(line, rows)
+    own = next(((a, b) for a, b in spans if a <= match.start() and match.end() <= b), None)
+    ids: set[str] = set()
+    for a, b in spans:
+        if (a, b) == own:
+            continue
+        clause = line[a:b]
+        if _DISCLAIMER_RE.search(clause):
+            continue
+        ids |= _explicit_ids(clause, rows)
+    return ids
+
+
+def _closing_line_range_claim(line: str, claim_text: str, rows: list[str]) -> set[str]:
+    """The rows a RANGE earns on a closing line — read against THREE views of the same line.
+
+    `claim_text` is the line with every non-CLAIMABLE clause blanked, so a range only counts where the
+    author positively marked a claim. Offsets are identical to `line` (blanking preserves length),
+    which is what lets the range be FOUND in the masked view and JUDGED in the unmasked one:
+
+    * a range that is the WHOLE CLAIM of its line (`(rows V1–V6)`) spans every row between its
+      endpoints;
+    * a range demoted to a mention by a NARROWING sibling claims the rows that sibling names, and
+      only when they are a strict subset of the span (`(rows V1–V6; V2 only)` ⇒ V2);
+    * anything else (a range the sentence merely describes, a sentence that names the whole span as
+      *elsewhere*) earns nothing, so the verdict falls to AMBIGUOUS — never a `clean` and never an
+      accusation naming rows the author did not claim.
+    """
+    out: set[str] = set()
+    order = {row: i for i, row in enumerate(rows)}
+    for match in _range_matches(claim_text, rows):
+        lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
+        span = set(rows[lo:hi + 1])
+        if _range_is_the_whole_claim(line, match, rows):
+            out |= span
+            continue
+        narrowing = _narrowing_ids(line, match, rows)
+        if narrowing and narrowing < span:
+            out |= narrowing
+    return out
 
 
 def _closing_line_claim(pr_body: str, issue: int,
@@ -1658,11 +1728,11 @@ def _closing_line_claim(pr_body: str, issue: int,
             if _ids_in(line, rows) and _DISCLAIMER_RE.search(line):
                 disclaimed = True
             continue
-        # ⛔ THE LINE IS THE UNIT, the clause is the polarity boundary: `_ids_in` needs the whole line
-        # to see a SIBLING clause that narrows a bare range (`(rows V1–V6; V2 is what this PR proves)`
-        # is not a complete claim), so the disclaimed clauses are BLANKED in place of being skipped.
-        # Skipping them read each clause in isolation, where that bare range looked like a claim on
-        # all six and the line reported `clean` on a one-row PR.
+        # ⛔ THE LINE IS THE UNIT, the clause is the polarity boundary: the range read needs the whole
+        # line to see a SIBLING clause that narrows a bare range (`(rows V1–V6; V2 is what this PR
+        # proves)` is not a complete claim), so non-claimable clauses are BLANKED in place of being
+        # skipped. Skipping them read each clause in isolation, where that bare range looked like a
+        # claim on all six and the line reported `clean` on a one-row PR.
         spans = _clause_spans(line, rows)
         claimable: set[int] = set()
         for i, (a, b) in enumerate(spans):
@@ -1690,7 +1760,14 @@ def _closing_line_claim(pr_body: str, issue: int,
             if i not in claimable:
                 chars[a:b] = " " * (b - a)
         if claimable:
-            named |= _ids_in("".join(chars), rows)
+            # ⛔ TWO VIEWS OF ONE LINE (review round 11). The IDS come from the masked clause set —
+            # a mention is not a claim in either direction — while the RANGE is judged against the
+            # unmasked line, because a narrowing sibling that carries no completion verb is still
+            # proof the range is a mention. Judging the range on the masked view made
+            # `(rows V1–V6; V2 only)` a complete claim, i.e. `clean` on a one-row close.
+            claim_text = "".join(chars)
+            named |= _explicit_ids(claim_text, rows)
+            named |= _closing_line_range_claim(line, claim_text, rows)
     return named, disclaimed
 
 

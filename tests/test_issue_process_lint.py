@@ -4177,6 +4177,17 @@ def test_every_dash_and_word_spelling_of_a_full_range_is_a_complete_claim(spelli
     # never a `clean` and never an accusation naming rows the author already claimed.
     ("Closes #13036 (rows V1–V6, see the evidence doc)\n", "ambiguous"),
     ("Closes #13036 (rows V1–V6 of the capstone programme)\n", "ambiguous"),
+    # rows 18–21 — review round 11: round 10 masked the claim read to CLAIMABLE clauses and with it
+    # BLANKED the narrowing sibling, so the bare range below looked like the whole claim and a
+    # ONE-ROW close of six read `clean` — the same false PASS class, one round later. These shapes
+    # were `finding` before round 10 and `clean` after it; the sibling that demotes the range now
+    # decides the claim. The last row is the control: a sibling naming the WHOLE span is not a
+    # narrowing, so it earns nothing and the line abstains rather than passing.
+    ("Closes #13036 (rows V1–V6; V2 only)\n", "finding"),
+    ("Closes #13036 (rows V1–V6; V2 is this PR)\n", "finding"),
+    ("Closes #13036 (rows V1–V6; V2 in this PR)\n", "finding"),
+    ("Closes #13036 (rows V1–V6; V2 only, the rest are separate)\n", "finding"),
+    ("Closes #13036 (rows V1–V6; V1, V2, V3, V4, V5, V6 are separate PRs)\n", "ambiguous"),
 ])
 def test_a_range_that_names_the_row_set_is_not_a_claim_on_it(body, expected):
     """`_row_range_span` used to expand unconditionally, so `(row V2 of V1–V6)` claimed all six.
@@ -4199,6 +4210,39 @@ def test_a_range_that_names_the_row_set_is_not_a_claim_on_it(body, expected):
     else:
         assert stats[expected] == 1, body
         assert stats["clean"] == (1 if expected == "clean" else 0), body
+
+
+def test_a_range_narrowed_by_a_cue_free_sibling_claims_exactly_that_sibling():
+    """Review round 11 — round 10's clause mask blanked the EVIDENCE the range read needs.
+
+    `(row V2 only); V1, V3, V4, V5, V6 are separate PRs` must not read clean (round 10's finding),
+    and `(rows V1–V6; V2 only)` must not read clean either — but the second shape reaches its
+    narrower claim through the SIBLING clause, which carries no completion verb and is therefore
+    masked out of the id read. Judged only on the masked view, the bare range was "the whole claim"
+    and this sentence — a one-row close of a six-row issue — read `clean`. The claim is the rows the
+    demoting sibling names, and the CONTROLS below fix both ends: a sibling naming the whole span is
+    not a narrowing (never `clean`), and a sibling with no row ids leaves the honest span alone.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(
+        "Closes #13036 (rows V1–V6; V2 only)\n", 500, {13036: _scope(rows)})
+    assert stats["clean"] == 0, stats
+    assert stats["finding"] == 1, stats
+    assert findings[0].evidence["claimed"] == ["V2"]
+    assert findings[0].evidence["unclaimed"] == ["V1", "V3", "V4", "V5", "V6"]
+    assert L.claimed_row_ids("Closes #13036 (rows V1–V6; V2 only)\n", 13036, rows) == {"V2"}
+
+    # CONTROL A — the sibling names the WHOLE span, so it is not a narrowing: abstain, never pass.
+    wording = "Closes #13036 (rows V1–V6; V1, V2, V3, V4, V5, V6 are separate PRs)\n"
+    findings, stats = L.classify_partial_close(wording, 500, {13036: _scope(rows)})
+    assert stats["clean"] == 0, stats
+    assert stats["ambiguous"] == 1, stats
+
+    # CONTROL B — no sibling names a row, so the range IS the whole claim and the close is complete.
+    findings, stats = L.classify_partial_close(
+        "Closes #13036 (rows V1–V6; evidence in the evidence doc)\n", 500, {13036: _scope(rows)})
+    assert stats["clean"] == 1, stats
+    assert findings == []
 
 
 def test_the_satisfies_clause_still_spans_without_a_row_noun():
