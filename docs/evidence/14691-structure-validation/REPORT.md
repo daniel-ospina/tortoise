@@ -933,6 +933,48 @@ add a pin, not widen an allowlist.
   decides the sense (`return` → positive neighbour count, `reject` → zero,
   anything unmeasured → red).
 
+### 8.17 What the fifteenth round closed (the EVIDENCE column, the citation copies, and the duplicate figure) — and what it did NOT
+
+A fresh-context reviewer at `0368cbb7` measured **1 P1 + 4 P2**; this round closed the P1
+and three of the P2s, and states the residual rather than implying it away.
+
+- **P1 — a door finding's EVIDENCE cell was graded by nothing.** The ANSWER cell is exact
+  (an arm above), so the column a reader uses to decide whether the door is broken could
+  contradict its own measurement: `**0 rows** each` → `**1 rows** each` (D4), `19 real
+  neighbours` → `20`, `false on 5/5` → `false on 6/5` (D2) and `containment is absent
+  entirely (0 edges)` → `(1 edges)` (§3/A2 finding 5) each left `97 passed`.
+  `test_the_door_EVIDENCE_cells_state_the_artifacts_numbers` derives every one of those
+  figures from the artifact that produces it; all four mutants now red.
+- **P2 — the report's COPIES of the door citations were free.** `readback.json`'s copies are
+  pinned to code content, but the report repeats them: `navigation.py:172-179` → `166-173`
+  (the round-10 mutant, applied to the prose) and `sdk.py:62739-62758` → `61000-61019` both
+  left `97 passed`. `test_every_CODE_citation_in_the_documents_is_one_an_artifact_carries`
+  grades CONTAINMENT of the same site, so a wider honest span (`:533-559` against the
+  artifact's `:551-559`) passes and a moved range reds.
+- **P2 — the DUPLICATE figure.** A pin shaped `expected in line` grades ONE copy, so
+  `| … **5/5** | 5/5 (parent end…)` kept its second copy free: mutating EITHER `5/5` stayed
+  green and only mutating BOTH reddened. `test_the_A2_class_table_derives_BOTH_cells_from_the_artifact`
+  derives both columns from `A2_edges.totals`, and `§8.9`'s `809,812 bytes` is graded by
+  `test_EVERY_bytes_figure_in_the_documents_is_the_committed_file`, which reads every
+  occurrence (`809,813` reds).
+- **P2 — the §8 exclusion.** It stopped at §8.1 while claiming only that "the mutant tables
+  quote invented figures ON PURPOSE", silently excluding 16 headings under a reason that
+  covered one. It is now bounded at the SECTION and the reason is the true one: §8 is the
+  review-round log — pytest counts from the round that ran them — not a bundle measurement.
+  The §8 figures that ARE artifact claims are graded by their own arms, above.
+- ⛔ **THE RESIDUAL, stated rather than closed: a prose figure that is neither a table row
+  nor named by a dedicated arm is still supported by set membership alone.** The reviewer's
+  measured population was `154` of `373` single-token `+1` mutants staying green across
+  §1–§7. The figures it VERIFIED are all now pinned (§8.17's third bullet and
+  `test_the_CLAIM_layer_and_A2_figures_are_the_artifacts`: `(11 + 27 + 3 + 9 = 50)`,
+  `12 of the 50`, the invented `9`, and `6 ownedBy rows are only 4 pairs` — each reds on
+  `+1`, measured). **A global rule was tried and refused**: requiring every prose figure to
+  be carried by exactly one artifact value reds on honest small integers (`2 products`,
+  `5 features`, `3 teams` are non-distinctive by construction) and the only way to keep it
+  green was an allowlist of 24 figures — the hole wearing a gate's clothes. Closing the rest
+  honestly means pinning the sentence the next figure lives in, which is a per-sentence
+  obligation no global rule can discharge; the count is left to whoever re-measures it.
+
 ---
 
 ## 9. Mandate-preflight disclosure

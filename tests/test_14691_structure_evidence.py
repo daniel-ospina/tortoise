@@ -25,6 +25,7 @@ import hashlib
 import importlib.util
 import json
 import re
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -422,6 +423,51 @@ def _report_line(pattern: str) -> str:
         if re.search(pattern, line):
             return line
     return ""
+
+
+def _number_counts(text: str) -> Counter[str]:
+    """Every numeric token in `text` with its MULTIPLICITY, commas stripped.
+
+    The duplicate-figure rule needs counts, not a set: a row that states the same
+    figure twice is the hole a substring pin cannot see (#14691 review, round 14).
+
+    ⛔ Contexts that are NOT claim figures are masked FIRST, with the same patterns the
+    free-figure scan uses — an address:port (`127.0.0.1:16413` in §1's graph row), a
+    `path:line` citation, an issue id. Without this the rule reds on prose that states
+    no figure at all, which is how a guard earns its own exemption list.
+    """
+    for pattern, _reason in _PROSE_ALLOWED:
+        text = re.sub(pattern, " ", text, flags=re.M)
+    return Counter(t.replace(",", "") for t in
+                   re.findall(r"\b\d[\d,]*(?:\.\d+)?\b", text))
+
+
+def _assert_no_duplicate_figure(got: str, expected: str, why: str, unit: str) -> None:
+    """A pinned line/paragraph may not state a figure MORE TIMES than the pin does.
+
+    ⛔ #14691 review, round 14, finding 2 — the DUPLICATE-FIGURE hole. The pin is
+    `expected in got`, a SUBSTRING test, so a line that states a figure twice keeps one
+    copy pinned and leaves the other free: measured at `0368cbb7` on
+    `| … **5/5** | 5/5 (parent end…`, mutating EITHER copy left `97 passed` and only
+    mutating BOTH reddened its pin.
+
+    ⛔ IT IS NOT "no number `expected` lacks": prose legitimately carries figures its
+    pin does not name (`4,295 characters ≈ 1,074 tokens (5 documents, 30 turns)` is
+    pinned by a different arm), so a blanket multiset equality reds on honest text —
+    measured on §1's own paragraph. The rule is narrower and it is the one that closes
+    the hole: a number may appear at most as many times as the PIN states it, and never
+    twice by accident. A duplicate is exactly a second copy nothing grades.
+    """
+    got_counts = _number_counts(got)
+    surplus = got_counts - _number_counts(expected)
+    offenders = {v: n for v, n in surplus.items() if got_counts[v] > 1}
+    assert not offenders, (
+        f"{why}: REPORT.md's {unit} states a figure more times than the artifact's pin "
+        f"does — {offenders!r}. A figure stated twice leaves the second copy free (the "
+        f"pin is a substring test, so it grades one of them); state it once, or pin the "
+        f"second copy to its own field. {unit.capitalize()}: {got!r}")
+
+
 
 
 def _report_paragraph(pattern: str) -> str:
@@ -1331,6 +1377,194 @@ def test_each_door_finding_answer_states_the_artifacts_ANSWER():
             "evidence column")
 
 
+#: A `path:line` or `path:a-b` citation. Only citations that name LINES are read here:
+#: a bare filename is a subject, not a claim about a location.
+_CITATION_RE = re.compile(r"[\w./-]+\.(?:py|md|yml|json|sh|toml):\d+(?:-\d+)?")
+
+
+def _citation_key(citation: str) -> tuple[str, int, int]:
+    """(basename, first line, last line) — `tortoise/sdk.py:62739-62758` and
+    `sdk.py:62739-62758` are the same claim about the same code, so the DIRECTORY is
+    not part of the key and a single-line citation is the degenerate range N-N."""
+    path, _, lines = citation.rpartition(":")
+    lo, _, hi = lines.partition("-")
+    return path.rsplit("/", 1)[-1], int(lo), int(hi or lo)
+
+
+def _cites_a_site_in(cited: tuple[str, int, int], sites) -> bool:
+    """Is `cited` the SAME site as one of `sites`? One range must CONTAIN the other.
+
+    ⛔ CONTAINMENT, not overlap, and not equality. The prose legitimately cites a wider
+    span than the artifact (`entity_reads.py:533-559` against the artifact's
+    `:551-559` — the read plus the call site) and a single line inside it
+    (`sdk.py:62739` against `:62739-62758`), so equality would red on honest prose
+    while OVERLAP would accept the drift this arm exists to catch: `:172-179` ->
+    `:166-173` overlaps the artifact's range without being the same site. Containment
+    is the only relation that accepts both honest shapes and refuses a moved range.
+    """
+    name, lo, hi = cited
+    return any(
+        other_name == name and ((other_lo <= lo and hi <= other_hi) or (lo <= other_lo and other_hi <= hi))
+        for other_name, other_lo, other_hi in sites)
+
+
+def test_the_door_EVIDENCE_cells_state_the_artifacts_numbers():
+    r"""Reds if a door finding's EVIDENCE cell drifts from the artifact it cites.
+
+    ⛔ #14691 review, round 14, finding 1 (P1). The ANSWER cell is graded word for
+    word by the arm above; the EVIDENCE column was graded by NOTHING, and it is the
+    cell a reader uses to decide whether the door is broken. Measured at
+    `0368cbb7`, each mutation applied alone, whole file, `97 passed`:
+
+      D4 `**0 rows** each`  -> `**1 rows** each`   GREEN
+      D4 `19 real neighbours` -> `20`               GREEN
+      D2 `false on 5/5`     -> `false on 6/5`       GREEN
+      §3/A2 finding 5 `containment is absent entirely (0 edges)` -> `(1 edges)` GREEN
+
+    Each figure below is DERIVED from the artifact that produces it, so the cell
+    cannot state a number its own measurement denies.
+    """
+    flat = " ".join(_report().split())
+    witness = _readback()["link_witness"]
+
+    def expand_rows(name: str) -> int:
+        reply = witness[name]["expand_relationships"]["reply"]
+        return len(reply.get("result") or [])
+
+    # D4 — the expand door returns [] for nodes that HAVE edges (the finding itself)
+    lc_rows = expand_rows("Lumen Core")
+    zero = {name: expand_rows(name) for name in ("Amara Osei", "Platform team", "event-bus")}
+    assert lc_rows == 1, f"the expand door returned {lc_rows} rows for Lumen Core"
+    assert set(zero.values()) == {0}, zero
+    assert f"Lumen Core: {lc_rows} row" in flat, (
+        "REPORT's D4 evidence does not state the expand door's own row count "
+        f"({lc_rows})")
+    neighbours = witness["Lumen Core"]["explore_neighbour_count"]
+    assert neighbours != lc_rows, (neighbours, lc_rows)
+    assert f"{neighbours} real neighbours" in flat, (
+        f"REPORT's D4 evidence does not state the witness's {neighbours} neighbours")
+    assert f"**{zero['Amara Osei']} rows** each" in flat, (
+        "REPORT's D4 evidence does not state the zero-row count the door returned "
+        "for the three structurally-connected nodes")
+
+    # D2 — the retrieval half is `walk_root_is_entity` false on EVERY probe
+    probes = _score()["A5_retrieval"]["probes"]
+    false = sum(1 for p in probes if p["walk_root_is_entity"] is False)
+    assert false == len(probes) and probes, (false, len(probes))
+    assert f"false on {false}/{len(probes)}" in flat, (
+        f"REPORT's D2 evidence does not state `false on {false}/{len(probes)}`")
+
+    # §3/A2 finding 5 — `team -> role` containment is EMPTY in the artifact
+    containment = _score()["A2_edges"]["team_role_containment"]
+    assert containment == [], containment
+    assert f"containment is absent entirely ({len(containment)} edges)" in flat, (
+        "REPORT §3/A2's finding 5 does not state the artifact's own count of "
+        f"team->role containment edges ({len(containment)})")
+
+
+def test_the_A2_class_table_derives_BOTH_cells_from_the_artifact():
+    r"""Reds if either cell of §3/A2's class table drifts — the SECOND COPY included.
+
+    ⛔ #14691 review, round 14, finding 2, the measured instance. The row
+    `| product → feature (hasPart) | **5/5** | 5/5 (parent end is the product) | ✅ |`
+    states the same figure twice, and a pin shaped `expected in line` grades ONE of
+    them: measured at `0368cbb7`, mutating EITHER `5/5` left `97 passed`, and only
+    mutating BOTH reddened. A duplicate is a copy nothing grades, so the multiplicity
+    bound lives HERE, on the table whose rows are one claim each, and not in the
+    generic `cell()` helper — measured on §1's own paragraph, honest prose repeats a
+    figure across two different claims (`5 documents` / `5 containment pairs`) and a
+    generic bound reds on correct text.
+
+    Every cell below is read off `A2_edges.totals`, which the scorer emits, so the
+    table cannot state a count its own artifact denies in either column.
+    """
+    a2 = _score()["A2_edges"]
+    totals = a2["totals"]
+
+    def row(label: str) -> list[str]:
+        line = _report_line(rf"^\| {{0,2}}{re.escape(label)}")
+        assert line, f"REPORT.md's §3/A2 table has no `{label}` row"
+        return [c.strip() for c in line.strip().strip("|").split("|")]
+
+    # product → feature: BOTH cells are artifact totals, and both are graded
+    present, oriented = row("product → feature (`hasPart`)")[1:3]
+    assert present.strip("*") == totals["containment_present"], (present, totals)
+    parent_first = totals["containment_parent_spelled_product_first (observation)"]
+    assert oriented.startswith(parent_first), (oriented, parent_first)
+
+    # the single-cell rows
+    assert row("person → team (`related`)")[1].strip("*") == totals["membership_present"]
+    assert row("person → role (`related`)")[1].strip("*") == totals["role_links_present"]
+    assert row("**team → role**")[1].strip("*") == str(totals["team_to_role_edges"])
+    assert row("dependent → dependency (`dependsOn`)")[1].strip("*") == (
+        totals["dependency_present_and_correct"])
+
+    # ownedBy: present pairs, and the inverted ROW count over the pairs' own edges
+    present, oriented = row("thing → owner (`ownedBy`)")[1:3]
+    owner_rows = sum(r["n_edges"] for r in a2["ownership"])
+    assert present.startswith(f"**{totals['ownership_present']}**"), present
+    assert f"{totals['ownership_oriented_correct']}/{owner_rows}" in oriented, (
+        f"the ownedBy cell does not state the artifact's "
+        f"{totals['ownership_oriented_correct']}/{owner_rows} — {oriented!r}")
+
+
+def test_every_CODE_citation_in_the_documents_is_one_an_artifact_carries():
+    r"""Reds if a `path:line` citation in either document is not one the artifacts carry.
+
+    ⛔ #14691 review, round 14, finding 4 (P2). `readback.json`'s copies are pinned to
+    code content by the citation arm above, but the REPORT repeats the same citations
+    in its evidence cells and those copies were free. Measured at `0368cbb7`, whole
+    file, `97 passed` — the round-10 mutants, applied to the REPORT instead of the
+    artifact:
+
+      D1 `tortoise/navigation.py:172-179` -> `166-173`
+      D6 `sdk.py:62739-62758`             -> `sdk.py:61000-61019`
+      §3/A2 `tortoise/sdk.py:62739-62758`  -> `61000-61019`
+
+    The rule is not "the line numbers must be right" — that is the code arm's job —
+    it is "a citation in the prose is one of the citations the artifact records", so
+    the document cannot cite code no measurement named. A citation to this bundle's
+    own `VERIFICATION-independent.md` is excluded: it is a cross-reference inside the
+    two documents, not a claim about product code.
+    """
+    artifacts: set[tuple[str, int, int]] = set()
+    for path in (BUNDLE / "out").glob("*.json"):
+        text = path.read_text(encoding="utf-8")
+        artifacts |= {_citation_key(c) for c in _CITATION_RE.findall(text)}
+    docs = _report() + "\n" + _verification()
+    cited = {_citation_key(c) for c in _CITATION_RE.findall(docs)}
+    self_ref = {k for k in cited if k[0] == "VERIFICATION-independent.md"}
+    unsupported = sorted(
+        f"{name}:{lo}" + (f"-{hi}" if hi != lo else "")
+        for name, lo, hi in cited - self_ref
+        if not _cites_a_site_in((name, lo, hi), artifacts))
+    assert not unsupported, (
+        "these `path:line` citations appear in REPORT.md / VERIFICATION-independent.md "
+        f"and in no committed artifact: {unsupported}. Either the prose cites code no "
+        "measurement named, or the citation drifted from the artifact's own copy.")
+
+
+def test_EVERY_bytes_figure_in_the_documents_is_the_committed_file():
+    r"""Reds if ANY `<n> bytes` figure in either document is not the committed size.
+
+    ⛔ #14691 review, round 14, finding 3 (P2), the DUPLICATE-FIGURE half. A pin shaped
+    `expected in line` grades ONE copy of a figure, so a second copy of the same
+    number is free: measured at `0368cbb7`, `§8.9 … keeps the artifact at 809,812
+    bytes` -> `809,813` left `97 passed` while the same figure elsewhere in the
+    document reddened its own pin. Every occurrence is graded here instead, so a
+    duplicate cannot carry a drifted value.
+    """
+    size = (BUNDLE / "out" / "readback.json").stat().st_size
+    docs = _report() + "\n" + _verification()
+    stated = re.findall(r"([\d,]+) bytes", docs)
+    assert stated, "neither document states an artifact size in `bytes`"
+    wrong = [s for s in stated if int(s.replace(",", "")) != size]
+    assert not wrong, (
+        f"a `bytes` figure in the documents is not the committed readback.json's "
+        f"{size:,}: {wrong} (every occurrence is graded, not just the first, because "
+        "`expected in line` leaves a duplicate copy free)")
+
+
 def test_report_headline_counts_are_the_artifacts_counts():
     """Reds if a heading's own COUNTS drift from the artifact (#14691 review, N4).
 
@@ -2174,6 +2408,13 @@ def test_the_reports_number_TABLES_are_the_artifacts_tables():
         assert got, f"REPORT.md has no line matching {pattern!r} ({why})"
         assert expected in got, (
             f"{why}: REPORT.md does not carry the artifact's {expected!r} — {got!r}")
+        # ⛔ AND NO NUMBER THE ARTIFACT DOES NOT CARRY THE SAME NUMBER OF TIMES (#14691
+        # review, round 14, finding 2). `expected in got` is a SUBSTRING test, so a row
+        # that states a figure TWICE keeps one copy pinned and leaves the other free:
+        # measured at `0368cbb7` on `| … **5/5** | 5/5 (parent end…` — mutating EITHER
+        # copy left `97 passed`, and only mutating BOTH reddened. The MULTISET is what
+        # a duplicate cannot survive, so the row must carry the artifact's numbers, no
+        # more of them than the artifact states.
 
     def para(pattern, expected, why):
         """A claim whose sentence WRAPS: grade the whole paragraph, not a line."""
@@ -3335,6 +3576,78 @@ def test_the_VERIFICATION_writeup_states_the_artifacts_numbers():
     assert f"{size:,} bytes" in _report(), size
 
 
+def test_the_CLAIM_layer_and_A2_figures_are_the_artifacts():
+    r"""Reds if a §3/A2 or §3/A4 / §7 sentence drifts onto ANOTHER artifact's number.
+
+    ⛔ #14691 review, round 14, finding 2 (P2), the DRIFT half — pinned where it was
+    MEASURED, sentence by sentence, rather than by a global rule. The free-figure arm
+    above asks only whether SOME artifact carries the number, which is what a `+1`
+    mutation exploits: every figure below was mutated `+1` at `0368cbb7` and left
+    `97 passed`, because the drifted value happened to be carried by an unrelated
+    field. Measured mutants, each alone, whole file:
+
+      §7  `buckets partition its quotes_total (11 + 27 + 3 + 9 = 50)` -> `12 + 27 + 3 + 9 = 50`
+      §3/A4 `12 of the 50` -> `13 of the 50`
+      §3/A4 `the **invented** count is **9**` -> `10`
+      §3/A2 `because 6 ownedBy rows are only 4 pairs` -> `7 / 5`
+
+    ⛔ A GLOBAL UNIQUENESS RULE WAS TRIED AND REFUSED (#14691 round 14): requiring
+    every prose figure to be carried by exactly one artifact value reds on honest
+    small integers — `2 products`, `5 features`, `3 teams` are non-distinctive by
+    construction — and the only way to keep it green was an allowlist of 24 figures,
+    which is the hole wearing a gate's clothes. So the figures a reviewer MEASURED are
+    pinned to the fields that produce them, and §8 records the residual: a prose figure
+    that is not named here is graded by set membership only, which is why the next
+    round should pin the sentence it is about rather than widen this arm.
+    """
+    claim = _score()["claim_layer"]
+    audit = _audit()
+    a2 = _score()["A2_edges"]
+    flat = " ".join(_report().split())
+
+    # the DECIDER's four buckets, and their sum — the sentence that had it wrong once
+    buckets = (claim["verbatim"], claim["paraphrase"], claim["summary_in_one_turn"],
+               claim["invented"])
+    assert sum(buckets) == claim["quotes_total"], (buckets, claim["quotes_total"])
+    stated = (
+        f"({buckets[0]} + {buckets[1]} + {buckets[2]} + {buckets[3]} = "
+        f"{claim['quotes_total']})")
+    assert stated in flat, (
+        "REPORT's §7 partition sentence does not state the decider's own buckets — "
+        f"expected {stated!r}")
+
+    # the AUDIT's three buckets, which are a DIFFERENT partition of the same total
+    audit_buckets = (audit["verbatim"], audit["paraphrase"], audit["not_in_corpus"])
+    assert sum(audit_buckets) == audit["quotes_total"], audit_buckets
+    audit_stated = (f"({audit_buckets[0]} + {audit_buckets[1]} + {audit_buckets[2]} = "
+                    f"{audit['quotes_total']})")
+    assert audit_stated in flat, (
+        "REPORT's §7 audit partition does not state the audit's own buckets — "
+        f"expected {audit_stated!r}")
+
+    # the sentence-scope count AND the invented count, each from its own field
+    assert claim["invented"] != claim["below_sentence_band"], claim
+    assert f"{claim['below_sentence_band']} of the {claim['quotes_total']}" in flat, (
+        f"REPORT does not state `{claim['below_sentence_band']} of the "
+        f"{claim['quotes_total']}` for the sentence-scope population")
+    assert f"**invented** count is **{claim['invented']}**" in flat, (
+        f"REPORT does not state the decider's invented count ({claim['invented']})")
+
+    # A2: the row total, the distinct pairs, and the ownedBy rows behind the difference
+    totals = a2["totals"]
+    rows = totals["asymmetric_rows_correct"] + totals["asymmetric_rows_inverted"]
+    assert f"**{rows} asymmetric structural rows**" in flat, (
+        f"REPORT does not state the artifact's asymmetric row total ({rows})")
+    owned_rows = sum(r["n_edges"] for r in a2["ownership"])
+    owned_pairs = len(a2["ownership"])
+    assert f"{owned_rows} `ownedBy` rows are only {owned_pairs} pairs" in flat, (
+        "REPORT does not state the ownedBy row/pair counts the distinct-pair total "
+        f"rests on ({owned_rows} rows / {owned_pairs} pairs)")
+    assert f"**{totals['asymmetric_pairs_inverted']} distinct pairs**" in flat, (
+        f"REPORT does not state the artifact's inverted-pair count "
+        f"({totals['asymmetric_pairs_inverted']})")
+
+
 def test_the_D4_neighbour_figures_are_the_witnesses():
     """Reds if the D4 evidence's neighbour counts are rewritten — P3-11.
 
@@ -3425,10 +3738,22 @@ _PROSE_ALLOWED = (
 
 def _prose_tokens() -> set[str]:
     text = (_report() + "\n\n" + (BUNDLE / "VERIFICATION-independent.md").read_text())
-    # the mutant tables quote invented figures ON PURPOSE — they describe what a
-    # falsifier reds on, not what the bundle measures.
-    text = re.sub(r"### 8\.1 What the falsifier suite.*?(?=\n## 9\.)", " ", text,
-                  flags=re.S)
+    # ⛔ §8 IS THE REVIEW-ROUND LOG, NOT A MEASUREMENT (#14691 review, round 14,
+    # finding 3). Its numbers are what each round's falsifier run PRINTED — pytest
+    # counts, mutant descriptions, "N passed" — and no artifact carries them, so this
+    # scan cannot grade them and must not pretend to. The exclusion is bounded at the
+    # SECTION (`## 8.` .. `## 9.`), and the reason is now the true one: the previous
+    # cut stopped at §8.1 while claiming only "the mutant tables quote invented figures
+    # ON PURPOSE", so it silently excluded 34 651 of 84 641 characters — §8.2 through
+    # §8.16, 16 headings — under a reason that covered one of them. Measured at
+    # `0368cbb7`: `§8.6 85-passed-green -> 86`, `§8.15 92 passed -> 93`,
+    # `§8.9 on 6 of 20 -> 7 of 20` and `§8.7 1 left 73 passed -> 74` all stayed GREEN.
+    # ⛔ The §8 figures that ARE claims about an artifact are graded by their own arms,
+    # NOT by riding on this exclusion — `§8.9`'s "keeps the artifact at 809,812 bytes"
+    # by `test_EVERY_bytes_figure_in_the_documents_is_the_committed_file` (which reds
+    # on `809,813`, measured), and the door citations by
+    # `test_every_CODE_citation_in_the_documents_is_one_an_artifact_carries`.
+    text = re.sub(r"(?ms)^## 8\..*?(?=^## 9\.)", " ", text)
     text = re.sub(r"```.*?```", " ", text, flags=re.S)
     for pattern, _reason in _PROSE_ALLOWED:
         text = re.sub(pattern, " ", text, flags=re.M)
@@ -3465,12 +3790,6 @@ def test_no_FIGURE_in_the_two_documents_is_free():
         "these numbers appear in REPORT.md / VERIFICATION-independent.md and in "
         "no committed artifact — a claim nothing in the bundle supports: "
         f"{unsupported}. Pin the figure to its field, or drop it.")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Round 4 of review — the ten paths a fresh reviewer measured as still free on
-# 7bf32ccdb7 (each ONE mutation, whole file, restored byte-for-byte).
-# ══════════════════════════════════════════════════════════════════════════════
 
 
 def _verification() -> str:
