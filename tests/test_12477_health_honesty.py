@@ -621,6 +621,20 @@ def test_the_journal_collision_bullet_names_what_a_replay_heals_and_re_refuses()
     start = doc.find("* ``journal_collision``")
     end = doc.find("\n    * ``", start + 1)
     bullet = doc[start:end if end != -1 else len(doc)]
+    # ⛔ THE POINTER ITSELF, not only its referents (#14746, round 30). The order
+    # assertion above and the referent assertions below both LEAN ON this
+    # sentence promising "(the two bullets above)"; neither of them reads the
+    # promise. MEASURED before this assertion existed, each with the referents
+    # untouched: rewording it to `(the three bullets above)`, reversing it to
+    # `(the two bullets BELOW)` — a FALSE instruction in exactly the class this
+    # pin exists to prevent — and deleting it outright all left this leg GREEN.
+    # Whitespace is not normalised across the pointer's own line break:
+    # `(the two bullets above)` has never been re-wrapped, and a re-wrap here is
+    # a change to the sentence, which is what the pin is for.
+    assert "(the two bullets above)" in bullet, (
+        "the sentence must still NAME the two bullets it points at — the "
+        "order and referent assertions below are both justified by this "
+        f"promise — got: {bullet[-600:]!r}")
     assert "heals an OUTAGE" in bullet, (
         "the bullet must name the ONE `write_failed` population a replay heals "
         f"(an outage) — got: {bullet[-600:]!r}")
