@@ -1270,6 +1270,145 @@ else
 fi
 
 
+# ── (u) END TO END ON REAL GIT BYTES: a base advance that rewrites hunk context ──
+# ⛔ WHY THIS SECTION EXISTS. Every case above feeds the gate a HAND-WRITTEN diff, so
+# all of them pass if the fixtures encode the author's belief about what a base
+# advance does. This one uses a real git repository: it derives the reviewed bytes and
+# the live bytes from `git diff` itself, advanced the base for real, and then asks the
+# production gate step for a verdict on each. If the premise of #4255 is wrong — if a
+# base advance does NOT move the rendered diff, or if it moves the authored lines too —
+# this section says so instead of agreeing with the code under test.
+#
+# THE MODEL (and why it is the production shape, not a simplification):
+#   base1 ──► R (the reviewed commit)           `diff= ` is signed over `diff base1...R`
+#     └──► base2 (main advances: lines inserted ABOVE the edited region)
+#   feat merges base2 ──► H (the head the gate sees)
+# A merge (not a rebase) keeps R reachable, exactly as a "Update branch" click does, so
+# `compare/<current base>...<R>` still answers — which is the ANCHOR rule (c) needs.
+U_REPO="$T/u-repo"
+U_G() { git -C "$U_REPO" -c user.email=t@example.invalid -c user.name=t \
+                              -c commit.gpgsign=false -c init.defaultBranch=main "$@"; }
+mkdir -p "$U_REPO"
+git -c init.defaultBranch=main init -q "$U_REPO" || bad "(u) could not create the scratch repository"
+{
+  for n in $(seq 1 40); do printf 'context line %02d\n' "$n"; done
+} > "$U_REPO/doc.txt"
+U_G add doc.txt && U_G commit -qm "base1" && U_BASE1="$(U_G rev-parse HEAD)"
+U_G checkout -qb feat
+# The AUTHORED change: replace lines 20-22. Byte-for-byte what a reviewer approves.
+python3 - "$U_REPO/doc.txt" <<'PYEOF'
+import sys
+p = sys.argv[1]
+lines = open(p).read().split("\n")
+lines[19:22] = ["AUTHORED one", "AUTHORED two", "AUTHORED three"]
+open(p, "w").write("\n".join(lines))
+PYEOF
+U_G commit -qam "feat: the reviewed change" && U_R="$(U_G rev-parse HEAD)"
+U_REVIEWED_DIFF="$T/u-reviewed.diff"
+U_G diff "$U_BASE1...$U_R" > "$U_REVIEWED_DIFF"
+# `diff=` is the digest the PRODUCER signs at review time: sha256 over the NORMALIZED
+# reviewed diff (live_diff_hash_norm). Derived here from the extracted normalizer, so
+# the two sides cannot agree by both being wrong.
+U_MARKER_DIFF="$(normalize_review_diff < "$U_REVIEWED_DIFF" | openssl dgst -sha256 | awk '{print $NF}')"
+# main advances with work in the SAME FILE, INSIDE the authored hunk's context window.
+# ⛔ THIS PLACEMENT IS THE WHOLE FIXTURE. A change far from the edited region only moves
+# LINE NUMBERS, which the normalizer rewrites (`@@ -N,…` → `@@ -0,…`), so rule (b) still
+# matches and nothing is demonstrated — measured here first: three lines inserted at the
+# top of the file left the normalized digest BYTE-IDENTICAL and (u2) passed on the
+# pre-fix gate. Landing the upstream work adjacent to the authored lines changes the
+# hunk's CONTEXT LINES, which the normalizer keeps — that is the #4255 mechanism.
+U_G checkout -q main
+python3 - "$U_REPO/doc.txt" <<'PYEOF'
+import sys
+p = sys.argv[1]
+lines = open(p).read().split("\n")
+lines[18:18] = ["upstream A", "upstream B"]   # immediately above the authored region
+open(p, "w").write("\n".join(lines))
+PYEOF
+U_G commit -qam "main: unrelated work above the edited region"
+U_BASE2="$(U_G rev-parse HEAD)"
+U_G checkout -q feat
+U_G merge -q --no-edit main >/dev/null 2>&1 || bad "(u) the branch would not merge the advanced base"
+U_G commit -q --allow-empty -m "merge base" 2>/dev/null || true
+U_HEAD="$(U_G rev-parse HEAD)"
+U_LIVE_DIFF="$T/u-live.diff"
+U_G diff "$U_BASE2...$U_HEAD" > "$U_LIVE_DIFF"
+# The REVIEWED side as the gate reconstructs it (rule (c)): from the marker's @ sha
+# against the CURRENT base. Identical to the review-time bytes iff R is unreachable
+# from base2 — the property the whole rule rests on.
+U_REVIEWED_AT_BASE2="$T/u-reviewed-at-base2.diff"
+U_G diff "$U_BASE2...$U_R" > "$U_REVIEWED_AT_BASE2"
+
+# ── u1: the PREMISE. Prove the fixture does what #4255 claims, before trusting it. ──
+if [ -s "$U_LIVE_DIFF" ] && [ -s "$U_REVIEWED_DIFF" ] && cmp -s "$U_REVIEWED_DIFF" "$U_REVIEWED_AT_BASE2"; then
+    ok "(u1) the reviewed bytes are reproducible from the advanced base ($(wc -l < "$U_REVIEWED_DIFF" | tr -d ' ') lines) — the ANCHOR rule (c) depends on can be answered"
+else
+    bad "(u1) the reviewed diff is NOT reproducible from the advanced base, so the fixture does not model the production shape"
+fi
+U_LIVE_NORM="$(normalize_review_diff < "$U_LIVE_DIFF" | openssl dgst -sha256 | awk '{print $NF}')"
+U_LIVE_PATCH="$(patch_projection_review_diff < "$U_LIVE_DIFF" | openssl dgst -sha256 | awk '{print $NF}')"
+U_REV_PATCH="$(patch_projection_review_diff < "$U_REVIEWED_AT_BASE2" | openssl dgst -sha256 | awk '{print $NF}')"
+if [ "$U_LIVE_NORM" != "$U_MARKER_DIFF" ]; then
+    ok "(u1) the base advance MOVED the rendered digest (${U_MARKER_DIFF:0:12}… → ${U_LIVE_NORM:0:12}…), so rules (a)/(b) cannot carry this record — the measured harm"
+else
+    bad "(u1) the base advance did NOT move the rendered digest — this fixture cannot demonstrate anything, because rule (b) would already carry it"
+fi
+if [ "$U_REV_PATCH" = "$U_LIVE_PATCH" ]; then
+    ok "(u1) and the PATCH projection is unmoved ($(printf '%s' "$U_LIVE_PATCH" | cut -c1-12)…), so the authored change is the one that was reviewed"
+else
+    bad "(u1) the patch projection moved too — git says the authored change differs, so rule (c) must refuse"
+fi
+
+# ── u2: PRE-FIX BEHAVIOUR, on those same real bytes → RED ────────────────────────
+# `STUB_BASE_SHA` empty is exactly the pre-#4255 gate: rule (c) refuses (it never
+# existed), and the run is otherwise identical. This is the direction the issue reports.
+printf '%s\n' "$(diff_marker "$U_R" "$U_MARKER_DIFF")" > "$T/body-u"
+_saved_head="$HEAD"; HEAD="$U_HEAD"
+STUB_DIFF_FILE="$U_LIVE_DIFF" STUB_BASE_SHA="" run_gate "$T/body-u"
+assert_rc 1 "(u2) PRE-FIX: the gate is RED on a base advance that changed nothing the reviewer approved (the harm #4255 reports)"
+# ── u3: THE FIX, same bytes, rule (c) available → GREEN ──────────────────────────
+STUB_DIFF_FILE="$U_LIVE_DIFF" STUB_BASE_SHA="$U_BASE2" \
+    STUB_COMPARE_FILE="$U_REVIEWED_AT_BASE2" run_gate "$T/body-u"
+assert_rc 0 "(u3) FIXED: the SAME record carries at the advanced head, with no new review"
+assert_contains "(u3) names the patch path" "passed via PATCH match"
+
+# ── u4: ONE AUTHORED BYTE CHANGES → RED AGAIN, rule (c) and all ──────────────────
+# The counter-direction, on the same repository: edit one character of an AUTHORED
+# line and commit it. If the fix carries that, the gate is worthless.
+python3 - "$U_REPO/doc.txt" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+open(p, "w").write(s.replace("AUTHORED two", "AUTHORED two!", 1))
+PYEOF
+U_G commit -qam "feat: an authored byte changed after the review"
+U_HEAD2="$(U_G rev-parse HEAD)"
+U_LIVE2_DIFF="$T/u-live2.diff"
+U_G diff "$U_BASE2...$U_HEAD2" > "$U_LIVE2_DIFF"
+HEAD="$U_HEAD2"
+STUB_DIFF_FILE="$U_LIVE2_DIFF" STUB_BASE_SHA="$U_BASE2" \
+    STUB_COMPARE_FILE="$U_REVIEWED_AT_BASE2" run_gate "$T/body-u"
+assert_rc 1 "(u4) ONE authored byte changed → RED (rule (c) does not carry a changed change)"
+# ── u5: WHITESPACE ONLY → RED TOO (anti-`patch-id`, on real git bytes) ───────────
+# `git patch-id --stable` ignores whitespace and would MATCH here; the projection must
+# not, because the reviewer approved the bytes, not their meaning.
+U_G checkout -q feat
+U_G reset -q --hard "$U_HEAD"
+python3 - "$U_REPO/doc.txt" <<'PYEOF'
+import sys
+p = sys.argv[1]
+open(p, "w").write(open(p).read().replace("AUTHORED three", "AUTHORED  three", 1))
+PYEOF
+U_G commit -qam "feat: whitespace only"
+U_HEAD3="$(U_G rev-parse HEAD)"
+U_LIVE3_DIFF="$T/u-live3.diff"
+U_G diff "$U_BASE2...$U_HEAD3" > "$U_LIVE3_DIFF"
+HEAD="$U_HEAD3"
+STUB_DIFF_FILE="$U_LIVE3_DIFF" STUB_BASE_SHA="$U_BASE2" \
+    STUB_COMPARE_FILE="$U_REVIEWED_AT_BASE2" run_gate "$T/body-u"
+assert_rc 1 "(u5) a WHITESPACE-only edit → RED (the projection is byte-exact; \`patch-id\` would have carried it)"
+HEAD="$_saved_head"
+
 echo "  PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { echo "  ❌ FAILURES — fix and re-run"; exit 1; }
 echo "  ✅ all checks passed"
