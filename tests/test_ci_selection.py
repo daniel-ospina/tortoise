@@ -10150,7 +10150,8 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
         f"cannot read ({unread}), so that figure is graded by NOTHING while its "
         "neighbours are graded by this test — re-spell it as `N shards at S.S s "
         "(names)`, or delete it. A rebase that splices two re-derivations is how it "
-        "gets there.")    # ⛔ THE STATED HEADROOM RATIO, driven in BOTH directions and across SPELLINGS.
+        "gets there.")
+    # ⛔ THE STATED HEADROOM RATIO, driven in BOTH directions and across SPELLINGS.
     # The first cut of `_EMISSION_RATIO_RE` admitted only `/` and `=`, so a PRESENT, FALSE ratio
     # re-spelled `(1680 ÷ 827.6 = 2.0400)` — ONE character — passed every arm (measured, 52 passed;
     # #14623 review round 30, P2). These fixtures are what stop a re-narrowing going silent again:
@@ -13008,6 +13009,22 @@ def test_the_fast_shards_header_block_does_not_claim_its_row_list_is_complete():
         "the completeness-frame pattern no longer reads the sentence it was cut for, so assertion "
         "1 passes over any spelling of it — re-point `_COMPLETENESS_CLAIM_RE` at the block's own "
         "retired wording")
+    # ⛔ …AND EACH ALTERNATIVE IS PINNED SEPARATELY. The fixture above carries ALL THREE phrases at
+    # once, so `findall` stays truthy while any ONE of them survives — measured at `f45d7655aa`:
+    # narrowing the pattern to a single alternative, or dropping either of the two later ones, left
+    # this arm GREEN (it read a fixture that matched on what remained). Phrase 3 is worth its own
+    # assertion because it is the only one that catches a TAIL-ONLY splice — the half-deleted-
+    # sentence class this very branch shipped at `fd1726210be8` — so losing it silently is exactly
+    # the false PASS the pattern exists to prevent. Each phrase is TRUE prose of the retired frame,
+    # so no assertion here can false-block the live block (which matches none of the three).
+    for _phrase, _which in (
+            ("that enumeration is complete", "the `enumeration is complete` alternative"),
+            ("it is a completeness claim", "the `is a completeness claim` alternative"),
+            ("those are the named files", "the `those are the named files` alternative")):
+        assert _COMPLETENESS_CLAIM_RE.search(_phrase) is not None, (
+            f"the completeness-frame pattern no longer reads {_which}. The fixture above carries "
+            f"all three phrases at once, so `findall` cannot see one going missing — a re-narrowed "
+            f"pattern would ship GREEN over the splice class it exists to catch")
     # ⛔ …AND THE DECLARED RESIDUAL IS PINNED BY NEGATIVE FIXTURES. This arm grades three
     # phrases, so the frames below are GREEN — that is the DECLARED gap beside the pattern, not a
     # claim of coverage. The assertions here keep the assertion one-way: a future widening that
