@@ -3969,3 +3969,33 @@ def test_arm_3_is_mounted_warn_only_on_the_workflow_that_runs():
     assert doc["permissions"]["issues"] == "read"
     # and the UNMEASURED arm, so a traceback cannot go green
     assert "UNMEASURED" in json.dumps(mount)
+
+
+def test_the_measured_instance_is_flagged_from_the_REAL_issue_artifacts(monkeypatch):
+    """⛔ THE PIN FOR A CORRECTION (review P2). The module docstring used to say arm 3 "would NOT have
+    flagged #13886" because `#13036` carries no `## Satisfies`. That was true of the TICK-STATE source
+    and false of the arm, and the fixer rewrote the paragraph. A prose claim about the code is only as
+    good as the test that holds it, so this drives the REAL artifacts through `read_scope`: the tick
+    state abstains, and the finding still lands, naming the five rows."""
+    monkeypatch.setattr(L, "fetch_issue", lambda n, r: (CAPSTONE_BODY, []))
+    scopes = L.read_scope([13036], None)
+    assert scopes[13036]["satisfies"]["measured"] is False      # the tick-state source abstains
+    assert scopes[13036]["rows"] == ["V1", "V2", "V3", "V4", "V5", "V6"]
+
+    findings, stats = L.classify_partial_close(
+        "Closes #13036 (row V2 only).\n", 500, scopes, "daniel-ospina/tortoise")
+    assert len(findings) == 1 and stats["finding"] == 1
+    assert findings[0].evidence["source"] == "rows"
+    assert findings[0].evidence["unclaimed"] == ["V1", "V3", "V4", "V5", "V6"]
+
+
+@pytest.mark.parametrize("spelling", ["V1–V6", "V1—V6", "V1-V6", "V1..V6", "V1 through V6", "V1 to V6"])
+def test_every_dash_and_word_spelling_of_a_full_range_is_a_complete_claim(spelling):
+    """The en dash is the STANDARD range mark and is what an author actually types; an em dash and the
+    two words are the same sentence. A complete close must read as complete in all six, because
+    flagging it is a false positive on the behaviour this arm exists to encourage."""
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(
+        f"Closes #13036 (rows {spelling})\n", 500, {13036: _scope(rows)})
+    assert findings == [], spelling
+    assert stats["clean"] == 1, spelling
