@@ -1148,6 +1148,25 @@ a literal re-added to the `#:` block RED · a start INSIDE the range admitted RE
 `test_the_citation_shape_table_is_the_predicate_the_docstring_states`. Nothing else changed: no
 artifact, pin, row or predicate moved.
 
+### 8.23 Round 25 — the END of a wider span was graded by nothing below the site's whole span
+
+Shape 3 requires a wider citation to end EXACTLY on the artifact's end, and the predicate's
+docstring says so. Nothing graded it below the site's own span: the table's only end-padded row
+pads by the FULL span, so a tolerance narrower than that was free. Measured at `c6c3439cb5e8`, each
+mutant applied alone and the file restored byte-for-byte (`sha256sum` compared): widening
+`hi - other_hi == 0` to `<= 5` — and to `<= 1` — left **103 passed**, while the sentence "requires
+it to end at EXACTLY the artifact's end" became false at the tree it describes.
+
+The start side had already been swept one offset at a time (round 22, after a restated figure went
+wrong the same way); the end side had one row. It is now swept the same way: every end offset
+`1..span` past a site, at the site's own start, must be refused.
+
+Mutants, each applied alone: end tolerance `<= 5` RED · `<= 1` RED · the equivalent rewrite `<= 0`
+GREEN (so the sweep is not red on a change that keeps the rule) · bound `20` → `19` RED · slack
+`18` → `17` RED · a literal re-added to the `#:` block RED · control **103 passed**. Every red is
+exactly `test_the_citation_shape_table_is_the_predicate_the_docstring_states`. No artifact, pin,
+row or predicate changed.
+
 ---
 
 ## 9. Mandate-preflight disclosure

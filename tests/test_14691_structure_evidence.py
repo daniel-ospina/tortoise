@@ -1465,6 +1465,13 @@ def _cites_a_site_in(cited: tuple[str, int, int], sites) -> bool:
     fails. ⛔ THE ONE OFFSET THAT IS NOT REFUSED IS `span` ITSELF — the artifact's LAST LINE, where
     `lo == hi == other_hi` collapses the range to the degenerate single line that shape 2 exists
     to admit, so it returns **True**. That is a shape-2 admission, not an inside start.
+    ⛔ AND THE END IS SWEPT ON THE SAME PRINCIPLE (#14723, round 25): "end exact" is a claim
+    ABOUT THE CODE, so every end offset `1..span` past the artifact's end, at the artifact's own
+    start, must be REFUSED. Measured at the previous head, widening `hi - other_hi == 0` to
+    `<= 5` — and to `<= 1` — left all `103 passed`: the table's only end-padded row pads by the
+    site's WHOLE span, so any tolerance narrower than that was graded by nothing while this
+    paragraph's "EXACTLY" became false at the tree it describes. The start side was swept one
+    offset at a time in round 22 for exactly this reason; the end side is swept the same way.
     ⛔ STATE THIS RULE AS AN OFFSET FROM THE SPAN, NEVER AS LITERAL POSITIONS — and cite no
     artifact by line range here. A rebase can move a site by lines AND change its span: the
     `#14624` creation hook moved this site +23 lines and widened it 19 → 20, which made the
@@ -1724,6 +1731,14 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
     for k in range(1, span + 4):
         table[f"start offset {k} inside a span-{span} site, end exact"] = (
             (name, lo + k, hi), k == span)
+    # ⛔ …and the END side is swept too (#14723, round 25). The paragraph above says shape 3
+    # requires the citation to end at EXACTLY the artifact's end, and the table's only end-padded
+    # row pads by the site's WHOLE span — so every tolerance narrower than that was graded by
+    # nothing. Measured at the previous head, widening `hi - other_hi == 0` to `<= 5` and to
+    # `<= 1` left all **103 passed** while the sentence became false at the tree it describes.
+    for k in range(1, span + 1):
+        table[f"end offset {k} past a span-{span} site, start at its start"] = (
+            (name, lo, hi + k), False)
     # ⛔ …and NEITHER home of the rule may name an artifact by LINE RANGE. A literal site
     # expired twice here (round 21, and the +23-line hook that also widened the span), so a
     # literal — qualified or bare — is the defect the offset rule exists to remove. Grade it in
