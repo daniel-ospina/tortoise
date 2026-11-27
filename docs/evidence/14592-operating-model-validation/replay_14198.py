@@ -165,6 +165,23 @@ def main(argv: list[str]) -> int:
     arm = "this-worktree"
     if "--arm" in argv:
         arm = argv[argv.index("--arm") + 1]
+    # ⛔ `--tree` selects WHICH CHECKOUT is imported, and it is ALWAYS explicit:
+    # the default is the worktree this script lives in, never the ambient
+    # import path. This box's venv has the MAIN checkout installed, so a bare
+    # `python replay_14198.py` resolves `/home/cmux/tortoise` and measures a
+    # tree nobody named — `_arm_is_fixed` then REFUSES `--arm before`, which is
+    # safe but leaves the before-arm unreproducible. With `--tree` the
+    # pre-fix half is a one-liner:
+    #   git worktree add /tmp/before-14198 <BASE_SHA> --detach
+    #   python replay_14198.py --arm before --tree /tmp/before-14198
+    tree = str(HERE.parents[2])
+    if "--tree" in argv:
+        tree = argv[argv.index("--tree") + 1]
+    if not (Path(tree) / "tortoise" / "extractor_v2.py").is_file():
+        raise SystemExit(
+            f"tree {tree!r} carries no tortoise/extractor_v2.py — refusing to "
+            "label a run with a tree it did not import")
+    sys.path.insert(0, str(Path(tree).resolve()))  # FIRST, before the import
     from tortoise.extractor_v2 import execute_embed  # the arm under test
 
     if arm in ("before", "after"):
@@ -195,6 +212,7 @@ def main(argv: list[str]) -> int:
              or (NAND_DST_REF[:40] in w and "dropped" in w)]
 
     print(f"# replay arm: {arm}")
+    print(f"# tree: {tree}")
     print(f"# lookup state: {coverage}")
     print(f"# extractor_v2 from: {__import__('tortoise').extractor_v2.__file__}")
     print(f"# new claim (this capture) : {new_id}")

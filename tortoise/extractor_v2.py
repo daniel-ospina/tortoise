@@ -9151,9 +9151,19 @@ def supersede_allowed(a: str, b: str) -> bool:
     A differing NUMBER or DATE is a new value for one attribute, which is what
     UPDATE is for — the boundary does not block it.  A differing NEGATION,
     CONDITION, marker SCOPE, LANGUAGE or substituted content means the two are
-    RIVAL claims: a rival may be neither folded nor superseded, so both
-    survive.  This asks the full identity set, so a value difference elsewhere
-    in the claim cannot mask it.
+    RIVAL claims: a rival may be neither folded nor superseded **by this
+    boundary's verdict**, so a caller that consults it keeps both.  This asks
+    the full identity set, so a value difference elsewhere in the claim cannot
+    mask it.
+
+    ⛔ SCOPE — the sentence above governs THIS predicate, NOT the automatic
+    pipeline (#14198). A rival can still be CLOSED by an explicitly DECLARED
+    contradiction: `execute_embed`'s cross-capture NAND arm records a
+    supersession for a claim an earlier capture emitted, and that arm never
+    consults `_boundary` / `fold_allowed` / this predicate — the model declared
+    the contradiction and code does the interval arithmetic, which is the split
+    #14198 requires. So "both claims survive" is the LEXICAL classifier's
+    verdict, not a promise about what the pipeline may do with a declaration.
     """
     return not _boundary(a, b)[1]
 
@@ -12387,6 +12397,31 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     _capture_point_when: dict[str, str] = {
         str(p.get("id") or ""): str(p.get("when") or "")
         for p in payload_points if p.get("id")}
+    #: The points this capture will actually WRITE as superseders: real `points`
+    #: entries MINUS the `#2552` mint-before-wire materializations.
+    #:
+    #: ⛔ THE MINT IS LOAD-BEARING AND WAS A LIVE P1 (review of #14794). When
+    #: the newer side is named only inside the edge, the mint pre-pass
+    #: materializes it — and the prune below deletes every minted endpoint that
+    #: no surviving payload operator references. This arm SUPPRESSES the
+    #: operator, so in that shape the minted successor is pruned, the record
+    #: then names a point that was never written, `apply_supersessions` skips
+    #: it ("No point …"), and the document's OWN claim — the only thing it
+    #: asserted — is gone from the payload while the extractor's warning claims
+    #: the interval was closed. Silent destruction reported as success. So the
+    #: precondition is "will the successor EXIST in the write", never "did this
+    #: capture mention the id", and the arm DECLINES otherwise (today's
+    #: behaviour: the mint, the edge, no closure).
+    _minted_point_ids: frozenset[str] = frozenset(minted_endpoints)
+    _written_point_ids: set[str] = {
+        str(p.get("id") or "") for p in payload_points
+        if str(p.get("id") or "") not in _minted_point_ids}
+    _written_point_ids.discard("")
+    #: One closure per older claim. A second refuter is still EVIDENCE:
+    #: `apply_supersessions` treats a terminal target as an idempotent no-op and
+    #: skips it SILENTLY, so suppressing its operator too would erase that
+    #: attack from the graph with nothing said (review of #14794).
+    _closed_prior_ids: set[str] = set()
 
     def _prior_start(prior_id: str, prior_row: dict | None) -> str:
         """The prior claim's world-time window start, '' when unknown.
@@ -12447,6 +12482,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             return False
         if not new_id.startswith("pt_"):
             return False
+        # …and it must be a point this capture will WRITE (see _written_point_ids
+        # above): an event has no point lifecycle, a minted endpoint can be
+        # pruned, and a folded prior id is not a claim the successor can be.
+        if new_id not in _written_point_ids:
+            return False
+        if older_id in _closed_prior_ids:
+            return False
+        _closed_prior_ids.add(older_id)
         new_when = str(_capture_point_when.get(new_id) or "")
         older_when = _prior_start(older_id, older_row)
         if (_valid_iso_date(new_when) and _valid_iso_date(older_when)

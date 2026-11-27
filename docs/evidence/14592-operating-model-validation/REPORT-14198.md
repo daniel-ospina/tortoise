@@ -34,7 +34,7 @@ Three facts, in the order they bite:
 |---|---|---|
 | 1 | `tortoise/extractor_v2.py:12360` (pre-fix) | the operator pass resolves both endpoints through `_resolve`, which reads **only this capture's** `point_ids`/`event_ids`. An older side that lives in a **prior** capture is unresolvable there *by construction* — so a cross-document contradiction is dropped by the resolver's scope, not by any guard rejecting it. |
 | 2 | `tortoise/extractor_v2.py:3614` | the `#10997` hold that step 1's failure creates is not persisted — `hold_store` is `None` on the path that ships (no caller in `sdk.py`/`mcp_server.py`/`tool_registry.py` passes one), so a later run cannot drain it. `stats.held: 3`, `supersessions: 0`. |
-| 3 | `tortoise/extractor_v2.py:11687` + `:9854` | the channel that **does** cross captures — a point-level `supersedes` ref, resolved against the S3 prior set by `_resolve_point_supersede` — was never used, because the model declared a `NAND` between two *points* instead. |
+| 3 | `tortoise/extractor_v2.py:11700` (collect) + `:11763` (resolve) + `:9854` | the channel that **does** cross captures — a point-level `supersedes` ref, resolved against the S3 prior set by `_resolve_point_supersede` — was never used, because the model declared a `NAND` between two *points* instead. |
 
 So the answer to "which of the three" is: **the write path dropped a declared
 relation**, and **nothing closed an interval** because the one channel that
@@ -122,8 +122,13 @@ belief, and there is no un-supersede API to repair it.
 ## 3. Before / after — the artifact, not a claim
 
 ```text
-$ python docs/evidence/14592-operating-model-validation/replay_14198.py --arm before
-# extractor_v2 from: <tree at HEAD~1>
+$ git worktree add /tmp/before-14198 3f134560b6c --detach
+$ python docs/evidence/14592-operating-model-validation/replay_14198.py \
+      --arm before --tree /tmp/before-14198
+# replay arm: before
+# tree: /tmp/before-14198
+# lookup state: partial
+# extractor_v2 from: /tmp/before-14198/tortoise/extractor_v2.py
 # new claim (this capture) : pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5
 # older claim (prior)      : pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078
 
@@ -138,7 +143,10 @@ VERDICT: the cross-document contradiction is NOT RECORDED
 
 ```text
 $ python docs/evidence/14592-operating-model-validation/replay_14198.py --arm after
-# extractor_v2 from: <this change>
+# replay arm: after
+# tree: /home/cmux/tortoise/.worktrees/14198-contra
+# lookup state: partial
+# extractor_v2 from: .../14198-contra/tortoise/extractor_v2.py
 # new claim (this capture) : pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5
 # older claim (prior)      : pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078
 
@@ -157,9 +165,10 @@ VERDICT: the cross-document contradiction is RECORDED
 
 The `before` warning is **byte-identical** to the one the recorded run wrote —
 that is the check that the replay is a replay, not a different run. ⛔ `--arm`
-is now CHECKED against the imported module and refuses when the label and the
-tree disagree; it is no longer a printed label over whatever tree `import`
-resolved.
+is CHECKED against the imported module and refuses when the label and the tree
+disagree, and `--tree` selects the checkout that is imported (never the ambient
+import path — this box's venv has the MAIN checkout installed, so a bare run
+measured `/home/cmux/tortoise` and printed a verdict for code it never loaded).
 
 ⚠️ **What this artifact proves, exactly.** The prior set here is a
 **RECONSTRUCTION**: the receipt does not record doc-05's S3 prior set (its
@@ -182,7 +191,7 @@ reader can ask finally differ:
 | question | before | after |
 |---|---|---|
 | "what is true now" (default scope) | both claims, both `live` | only *"The cold-chain audit failed ColdPath Logistics last week"*; the certificate claim is terminal and **excluded** |
-| "what did we believe on 2026-02-20" (`get_historical_knowledge`) | the certificate claim, by luck of ranking | the certificate claim **via the `CORRECTS` chain**, `valid_to=2026-03-05`, `valid_from=2026-02-03` |
+| "what did we believe on 2026-02-20" (`get_historical_knowledge`) | **`found: false`** — the instant precedes the audit claim's own `valid_from` (2026-03-05) and no `CORRECTS` edge exists to reach back, so the chain is `[AUDIT]` only | the certificate claim **via the `CORRECTS` chain**, `valid_to=2026-03-05`, `valid_from=2026-02-03` |
 | "has anything we relied on ended?" (`ended` / `include_terminal`) | — | the closed claim, with its ending time |
 
 The `#14721`/`#14737` boundary, stated exactly: **the closed interval is now
@@ -201,13 +210,18 @@ the *surviving* claims to rank first) is neither implemented nor needed here.
 | **positive (read)** | a current-scope query for the old claim's own wording no longer answers with it; the terminal scope still does | ❌ | ✅ |
 | **negative (support)** | the *same* two documents with the model declaring `IMPL` (support) close **nothing**; the older claim keeps its open interval and stays current | ✅ | ✅ |
 | **negative (event side)** | a NAND whose emitted side is an Event closes nothing AND does not claim it did (no `recorded as a supersession` warning) | ❌ | ✅ |
+| **negative (minted successor)** | a `NAND` whose newer side is named only INSIDE the edge closes nothing and claims nothing — the `#2552` mint would be pruned once the operator is suppressed, so the closure would name a point that was never written and the document's own claim would vanish (measured in review as the arm's worst shape: `supersessions_written: 0`, "the contradiction is recorded …" still warned) | ✅ | ✅ |
+| **negative (second refuter)** | 2 refuters of one claim → 1 closure, and the SECOND refuter KEEPS its `NAND` (the consumer would skip it silently as an idempotent no-op, so suppressing both would erase that evidence) — REDS pre-fix as `1 operator, 0 closures` | ❌ | ✅ |
 | **negative (undeclared)** | a corpus that reverses itself in **wording** but declares no edge gains no contradiction. ⛔ A PIN, not coverage: no mutation of the arm can red it (the `none` shape emits no operator at all) | ✅ | ✅ |
 
 Suite: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_14198_contradiction_closure.py -q`
-→ **8 passed**. The three added cases (other emission order, backfill, event
-side) were each measured RED under the mutation that reverts their gate — the
-`src`-only guard, the arrival-order direction, and the missing point-only
-guard — so each row above is falsifiable by an edit to this change.
+→ **10 passed**, 6 of them RED on the base commit (the four positives plus the
+second-refuter negative). The emission-order, backfill and event-side cases were
+each measured RED under the mutation that reverts their gate — the `src`-only
+guard, the arrival-order direction, and the missing point-only guard — and the
+minted-successor and second-refuter shapes were produced by review, measured
+against the arm, and pinned as pure-function tests (`execute_embed` needs no
+graph).
 
 Regression surface run alongside, all green: `test_extractor_v2`,
 `test_consolidation_4way`, `test_never_across_fold_5080`, `test_10997_i3_partial_run`,

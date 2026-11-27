@@ -489,3 +489,92 @@ def test_the_closure_does_not_depend_on_which_lookup_arm_ran(make_graph):
     hist = sdk.get_historical_knowledge(_pid(AUDIT), "2026-02-20")
     assert hist["found"] is True
     assert hist["valid_point"]["id"] == _pid(CERT)
+
+
+# ── guards found in review, pinned as pure-function shapes ───────────────────
+# `execute_embed` is pure, so each guard is a short assertion instead of a graph
+# run. Both shapes below were LIVE defects in an earlier cut of this arm.
+PRIOR_ID = _pid(CERT)
+_PARTIAL = {"derived": {"points": 25}, "ran": {"points": 14},
+            "failed": {"points": 0}}
+_RESOLVED = {"derived": {"points": 25}, "ran": {"points": 25},
+             "failed": {"points": 0}}
+
+
+def _shape_run(embed_list, coverage):
+    from tortoise.extractor_v2 import execute_embed
+
+    search = {"points": [{"id": PRIOR_ID, "content": CERT,
+                          "kind": "statement", "when": "2026-02-03"}],
+              "query_coverage": coverage}
+    out = execute_embed(embed_list, search, session_id="shape",
+                        session_date="2026-03-05")
+    return out, (out.get("payload") or {})
+
+
+def _statement(content, when="2026-03-05"):
+    return {"content": content, "pointKind": "statement",
+            "about_entities": ["ColdPath Logistics"], "when": when,
+            "quote": content, "search_keys": ["cold-chain audit"]}
+
+
+def test_a_minted_successor_is_never_named_as_a_superseder():
+    """The successor must be a point this capture will WRITE.
+
+    ⛔ THE P1 THIS PINS (review of #14794, measured): when the newer side is
+    named only inside the edge, the `#2552` mint pre-pass materialises it — and
+    the prune deletes every minted endpoint no surviving payload operator
+    references. This arm SUPPRESSES the operator, so with a minted successor the
+    document's own claim was deleted from the payload, the record named a point
+    that was never written (`point supersede … failed: No point …`,
+    `supersessions_written: 0`), and the extractor still warned that the
+    interval was closed. The arm must DECLINE instead — today's behaviour (the
+    mint, the edge, no closure) is strictly better than losing both sides.
+    """
+    for coverage, label in ((_RESOLVED, "resolved"), (_PARTIAL, "partial")):
+        out, payload = _shape_run({
+            "entities": [], "events": [], "points": [],
+            "operators": [{"op_type": "NAND", "src": AUDIT, "dst": CERT}],
+        }, coverage)
+        assert out.get("supersessions") == [], (
+            f"[{label}] a minted successor must not be named as a superseder — "
+            "the prune would delete it and the closure would be refused")
+        assert not any("is recorded as a supersession" in w
+                       for w in out.get("warnings") or []), (
+            f"[{label}] the run must not claim a closure it did not record")
+        if label == "resolved":
+            # the minted claim must still reach the payload: the prune only
+            # removes what no surviving operator references, and here the
+            # operator is NOT suppressed.
+            assert {str(p.get("id")) for p in payload.get("points") or []}, (
+                "[resolved] the model's own claim must still be written")
+        # ⛔ On the PARTIAL arm the claim is not written at all — that is the
+        # PRE-EXISTING #10997 hold (`hold_store` is None on the shipping path),
+        # not this arm's doing, and it is a further reason to decline.
+
+
+def test_a_second_refuter_keeps_its_edge():
+    """One closure per older claim; a second refuter is still EVIDENCE.
+
+    `apply_supersessions` treats a terminal target as an idempotent no-op and
+    skips it SILENTLY, so suppressing BOTH operators erased the second attack
+    from the graph with nothing said (measured pre-fix: `supersessions: 2`,
+    `supersessions_written: 1`, `operators: 0`, one NAND edge nowhere).
+    """
+    second = "ColdPath does not hold a validated certificate for our routes"
+    out, payload = _shape_run({
+        "entities": [], "events": [],
+        "points": [_statement(AUDIT), _statement(second)],
+        "operators": [
+            {"op_type": "NAND", "src": AUDIT, "dst": CERT},
+            {"op_type": "NAND", "src": second, "dst": CERT},
+        ],
+    }, _RESOLVED)
+    records = out.get("supersessions") or []
+    assert len(records) == 1, "one closure per prior claim"
+    assert records[0]["superseded"] == PRIOR_ID
+    ops = payload.get("operators") or []
+    assert len(ops) == 1, (
+        "the second refuter must keep its NAND — the payload cannot skip it "
+        "silently the way the consumer would")
+    assert str(ops[0]["src"]) == _pid(second)
