@@ -133,9 +133,9 @@ version: 1
 # registrations this derivation STATES are GRADED rather than trusted:
 # `test_the_derivation_surface_claims_are_graded_against_the_manifest` reads every file whose
 # surface is named above and REDs if any of them moves. ⛔ NO NUMERAL, deliberately (#14623
-# review): a count here was "four" while five files carry a named surface, so the fifth —
-# `test_expansion_fusion_14344.py` on `core` — was asserted-closed and ungraded. The arm's stated
-# set is the count. ⛔ AND THAT SET IS GRADED WHOLE rather than one membership at a time: a file
+# review): an earlier count here was stale — `test_expansion_fusion_14344.py` on `core` carries a
+# named surface above and was asserted-closed while ungraded. The arm's stated set is the count.
+# ⛔ AND THAT SET IS GRADED WHOLE rather than one membership at a time: a file
 # that GAINS a surface this paragraph does not name re-stales the sentence exactly as a loss does.
 # ⛔ THE SCOPE IS THE ARM FAMILY, not every arm in the suite: registration membership IS asserted
 # by name elsewhere (`manifest["surfaces"]["core"]` and siblings), so the unqualified "no arm

@@ -10335,11 +10335,10 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
 def test_the_derivation_surface_claims_are_graded_against_the_manifest():
     """#14623 review: the derivation STATES these files' surfaces, and nothing read them.
 
-    ⛔ NO NUMERAL HERE, deliberately (#14623 review): this docstring said "four files" while the
-    derivation names FIVE, and the fifth — `test_expansion_fusion_14344.py` on `core`, named at
-    `config/ci-surfaces.yml:86` — was the one missing from the assertions below. That is an
-    over-claim of coverage written into the arm that exists to prevent over-claims. The stated
-    set is the count.
+    ⛔ NO NUMERAL HERE, deliberately (#14623 review): an earlier count of these files was stale —
+    `test_expansion_fusion_14344.py` on `core`, named in the derivation above, was missing from the
+    assertions below while the sentence claimed their set was graded. That is an over-claim of
+    coverage written into the arm that exists to prevent over-claims. The stated set is the count.
 
     The block named each file's surface while asserting, a few lines above, that "registration
     status is a THIS-HEAD fact no arm in this block's family reads", and justified that gap with
