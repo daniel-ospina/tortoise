@@ -4929,9 +4929,21 @@ def write_live_record(record: Mapping[str, Any], *,
                 "of the same record SUCCEEDS — nothing to fix; a statement "
                 "that EXECUTED and failed on its own data or a constraint "
                 "re-fails on that replay until that cause is fixed; a "
+                # ⛔ THE EXAMPLES MUST BE REACHABLE ON *THIS* ARM (round-33 P3).
+                # The enumerated arm's copy of this parenthetical names "the
+                # cutover guard's own read", and that SELECT cannot run here:
+                # `record_projection.py:9105` gates `_refuse_an_enumerated_replay`
+                # on `position and not allocate and records`, and this arm exists
+                # precisely because `allocate=True` was passed. Naming it as a
+                # cause on the arm that makes it unreachable is the SAME class of
+                # defect this PR exists to fix — a sentence whose claim does not
+                # match its arm's population — reappearing in the CAUSE half
+                # instead of the remedy half. The two examples kept here ARE
+                # reachable: `scope_connection` (the tenant GUC + role gate) runs
+                # unconditionally, before the guards, on both arms.
                 "STORE/CONFIG refusal (the tenant scope, a role that bypasses "
-                "RLS, the cutover guard's own read) re-raises until the DSN or "
-                "the role is fixed, on any replay"
+                "RLS) re-raises until the DSN or the role is fixed, on any "
+                "replay"
             )
         _logger.warning(
             "the record write did not happen (write_failed) — %s; %s: "

@@ -1290,6 +1290,24 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
                 "population: a tenant-scope/role refusal raised after the plan "
                 "build lands here on the allocated arm too, and its remedy is a "
                 f"DSN/role fix, not any replay: {text[-400:]!r}")
+            # ⛔ EVERY EXAMPLE THE SENTENCE NAMES MUST BE REACHABLE ON THE ARM
+            # THAT NAMES IT (round-33 P3). The enumerated arm's copy of this
+            # parenthetical includes "the cutover guard's own read"; THIS arm is
+            # the `allocate=True` one, and `record_projection.py:9105` gates
+            # `_refuse_an_enumerated_replay` on `position and not allocate and
+            # records` — so that SELECT never runs here. A cause the arm cannot
+            # produce is the same claim/arm mismatch this PR exists to fix, so
+            # this leg reddens on the pre-fix text and stays green on the fix.
+            assert "the cutover guard's own read" not in text, (
+                "the ARMED arm names a cause it cannot produce — the cutover "
+                "guard is gated on `not allocate`, and this arm exists because "
+                f"`allocate=True` was passed: {text[-400:]!r}")
+            for reachable in ("the tenant scope", "a role that bypasses RLS"):
+                assert reachable in text, (
+                    "dropping the unreachable example must not take the "
+                    "`scope_connection` causes with it — the tenant GUC and the "
+                    "role gate run unconditionally on both arms: "
+                    f"{reachable!r} absent from {text[-400:]!r}")
         else:
             # ⛔ EVERY CLAUSE OF THE SPLIT IS PINNED, because this sentence is
             # read on THREE populations (an outage, a statement that executed
@@ -1319,6 +1337,13 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
                 "the enumerated arm lost the cursor-row condition that makes "
                 "the allocating replay the remedy on a cut-over graph: "
                 f"{text[-400:]!r}")
+            # …and the guard that condition gates IS reachable here, so its
+            # example stays: removing it from BOTH arms would over-correct
+            # (round-33 P3 fixed the ARMED arm only).
+            assert "the cutover guard's own read" in text, (
+                "the enumerated arm (`allocate=False`) is where "
+                "`_refuse_an_enumerated_replay` actually runs, so its example "
+                f"belongs in this sentence: {text[-400:]!r}")
     monkeypatch.delenv(rw.RECORD_ALLOCATE_ENV, raising=False)
 
 
