@@ -49,6 +49,8 @@ tests/eval/write_path/
   baselines/m2.json               # committed CI-lane baseline (posture m2, deterministic)
   receipts/                       # validated run receipts (llm + m2 lanes)
   receipts/7947-arms-2026-10-18/  # #7947: 7 sessions x 2 arms, per-session receipts
+  receipts/10360-e2-arms-2026-11-27/  # #10360: E2 strict-verbatim arms, OUT of E4's
+                                      #   pool (receipts/*.json is E4's candidate set)
   salience_labels.jsonl           # #4917: OWNER-confirmed not-an-entity name labels
   test_write_path_corpus.py       # contract tests (S4/S15)
   test_score_qualifiers.py        # #7947: the rule, the guards, and the artifact pin
