@@ -8256,8 +8256,11 @@ def test_the_e2_off_arm_definition_uses_the_REAL_kill_switch(monkeypatch):
 #:
 #: Kept here ON PURPOSE, as the mutant rather than a mirror of production: the edit
 #: that reverts the fix is `[A-Z0-9_]+` -> `[A-Z_]+`, and a mutant is only pinned if
-#: something actually runs it. It lives in this file's test body — never in the
-#: parser above — so the two cannot drift together.
+#: something actually runs it — so the replay below COMPOSES ITS PATTERN FROM THIS
+#: CONSTANT (mutating it to `[A-Z0-9_]+` reds the `endswith` assertion: the pre-fix
+#: class then reads the digit-bearing switch, which is the demonstration the row
+#: claims). It lives in this file's test body — never in the parser above — so the
+#: two cannot drift together.
 _E2_PREFIX_TEST_PRE_FIX_CLASS = "[A-Z_]+"
 
 
@@ -8333,8 +8336,17 @@ def test_the_arm_prefix_parser_cannot_SILENTLY_truncate_a_digit_bearing_switch()
     #     half: without it the class fix alone would let the failure return silently
     #     through the next switch name nobody anticipated.
     flat = re.sub(r"\\\s*\n\s*", " ", doc)
+    # ⛔ THE PRE-FIX CLASS IS READ FROM ITS CONSTANT, NOT RE-TYPED HERE (`#14774`
+    # review cycle 10, MEASURED). The constant above says it is "the mutant rather
+    # than a mirror … a mutant is only pinned if something actually runs it", and
+    # NOTHING referenced it: the replay hard-typed `[A-Z_]+` inline, so mutating
+    # the constant to `[A-Z0-9_]+` left the row GREEN and told a reader the pre-fix
+    # class was unexercised. A pin that polices hand-written copies cannot itself
+    # keep one (the same defect `_arm_prefix_keys()` was fixed for). Read from the
+    # constant, that mutant now reds the `endswith` assertion below.
+    _pre = _E2_PREFIX_TEST_PRE_FIX_CLASS        # a character class, e.g. "[A-Z_]+"
     narrow = re.search(
-        r"(?P<prefix>(?:^|\s)(?:env\s+)?(?:[A-Z_]+=\S+\s+|-u\s+[A-Z_]+\s+)+)"
+        r"(?P<prefix>(?:^|\s)(?:env\s+)?(?:" + _pre + r"=\S+\s+|-u\s+" + _pre + r"\s+)+)"
         r"\S*python\s+-m\s+tests\.eval\.write_path\.runner\s+run\s+--out\s+\S*e2-off-",
         flat)
     assert narrow is not None, (
