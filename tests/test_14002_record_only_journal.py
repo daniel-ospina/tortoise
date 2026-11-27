@@ -826,8 +826,13 @@ def test_the_record_only_divergence_names_nothing_to_compare_or_restore(
     so, because "compare the two readings", `seed --journal` and "RESTORE THE
     JOURNAL" all presuppose a line this write never had.
 
-    Without this leg the branch is unobservable: every phrase it adds can be
-    reverted and the whole suite stays green (measured).
+    What this leg adds over
+    `test_record_searchkeys_10620.py::test_the_divergence_arm_prescribes_no_journal_repair_on_the_record_only_arm`
+    (which already reds if the branch is reverted) is the two phrases that
+    sibling does not pin: that the ordinal is stated NOT to be a journal position,
+    and that the journaled arm's "the journal holds the record at position" is
+    absent. It is a second, independent reader of the same behaviour, not the
+    only one.
     """
     monkeypatch.setattr(rw, "_live_write_verdict",
                         lambda **_kw: (None, ("org", "graph"), None))

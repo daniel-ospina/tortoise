@@ -4414,7 +4414,10 @@ def write_live_record(record: Mapping[str, Any], *,
         # ⛔ THE CUTOVER INVARIANT (#12894): while BOTH allocators exist they must
         # AGREE, and a disagreement is a REFUSAL — never a silent renumbering.
         #
-        # ⛔ UNREACHABLE FROM `live_write`, WHICH IS NOT THE SAME AS UNREACHABLE.
+        # ⛔ UNREACHABLE FROM `live_write` WHEN THE APPEND WAS SKIPPED, WHICH IS
+        # NOT THE SAME AS UNREACHABLE — an ARMED deployment reaches this arm
+        # from `live_write` on a real `seq` (the paragraph below names those
+        # states).
         # The chokepoint passes `seq=None` whenever it sets `journal_skipped`
         # (`live_write.py:650`), so there is no second reading in existence on
         # that path. ⛔ BUT THE DOOR ITSELF DOES NOT ENFORCE THAT PAIRING: a
