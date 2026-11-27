@@ -4414,9 +4414,14 @@ def write_live_record(record: Mapping[str, Any], *,
         # ⛔ THE CUTOVER INVARIANT (#12894): while BOTH allocators exist they must
         # AGREE, and a disagreement is a REFUSAL — never a silent renumbering.
         #
-        # ⛔ THIS ARM IS UNREACHABLE WHEN THE APPEND WAS SKIPPED (#14002) — not
-        # because the check was relaxed, but because `seq` is then `None` and
-        # there is no second reading in existence. The guard below stays exactly
+        # ⛔ UNREACHABLE FROM `live_write`, WHICH IS NOT THE SAME AS UNREACHABLE.
+        # The chokepoint passes `seq=None` whenever it sets `journal_skipped`
+        # (`live_write.py:650`), so there is no second reading in existence on
+        # that path. ⛔ BUT THE DOOR ITSELF DOES NOT ENFORCE THAT PAIRING: a
+        # DIRECT caller can pass `seq` AND the flag (the suite does), and then
+        # this arm really is reached with no journal line — which is why the
+        # WARN below selects its whole message on the flag rather than assuming
+        # a line. The guard stays exactly
         # as it is for every ordinal a caller DOES hold (a direct caller, a
         # pre-cutover graph, a `backfill_copy_turns` batch): removing the second
         # allocator is the fix, weakening the comparison is not.

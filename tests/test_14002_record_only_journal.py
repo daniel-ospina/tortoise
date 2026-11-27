@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import logging
 import os
 import threading
 import uuid
@@ -813,6 +814,54 @@ def test_the_divergence_guard_still_REFUSES_a_caller_held_ordinal(
         "the allocation was not rolled back — the position would be BURNED")
     assert conn.committed == 0, "a refused divergent write was committed"
     assert after.get("write_failed", 0) == before.get("write_failed", 0) + 1
+
+
+def test_the_record_only_divergence_names_nothing_to_compare_or_restore(
+        monkeypatch, caplog):
+    """#11783 review — the SKIP branch of the divergence WARN is pinned.
+
+    `journal_skipped` does NOT imply `seq is None` at the door: only `live_write`
+    enforces that (`live_write.py:650`). So a DIRECT caller can pass both and land
+    on this arm with no journal line in existence — and the WARN must then say
+    so, because "compare the two readings", `seed --journal` and "RESTORE THE
+    JOURNAL" all presuppose a line this write never had.
+
+    Without this leg the branch is unobservable: every phrase it adds can be
+    reverted and the whole suite stays green (measured).
+    """
+    monkeypatch.setattr(rw, "_live_write_verdict",
+                        lambda **_kw: (None, ("org", "graph"), None))
+    conn = _GuardConn()
+    monkeypatch.setattr(rw, "_default_connect", lambda _dsn: conn)
+
+    def _write_records(records, **kwargs):
+        # The counter issues 10 while the caller holds 9.
+        return SimpleNamespace(applied=True, first_seq=10, last_seq=10,
+                               connection=conn, statements=1, events=1,
+                               written_bytes=1, written_rows=1)
+    monkeypatch.setattr(rw, "write_records", _write_records)
+
+    with caplog.at_level(logging.WARNING, logger=rw.__name__):
+        result = rw.write_live_record(RECORD, durable=True, seq=9,
+                                      tenant=("org", "graph"),
+                                      journal_skipped=True)
+
+    assert result is not None and result.refusal == "write_failed", (
+        "a caller-held ordinal that disagrees with the counter still refuses on "
+        f"the skip arm — got {None if result is None else result.refusal!r}"
+    )
+    message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "is not a journal position" in message, (
+        "on the record-only arm the passed ordinal is NOT a journal position "
+        f"and the WARN must say so — got: {message}"
+    )
+    assert "the journal holds the record at position" not in message, (
+        f"there is no line for it to hold: {message}"
+    )
+    assert "RESTORE THE JOURNAL" not in message, (
+        "RESTORE THE JOURNAL presupposes a journal this write never had — the "
+        f"repair path must be flag-conditioned too: {message}"
+    )
 
 
 def test_the_guard_still_COMPARES_on_the_source():
