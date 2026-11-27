@@ -8597,6 +8597,21 @@ def test_the_arming_scan_reads_a_switch_reached_through_a_module_ATTRIBUTE():
         ({"env": {"TORTOISE_VALUE_GATE": None}, "readable": True,
           "vet_toggle": False, "s2_seam": False, "value_gate": False,
           "vet_enabled": False}, "contradicts itself"),
+        # ⛔ THE SEAM TERM IS PINNED HERE (`#14774` review cycle 9, MEASURED).
+        # `#5087` records that arming `TORTOISE_S2_DECISION_SEAM` arms VET even
+        # against an explicit `TORTOISE_VET=0`, and the recompute composes that
+        # with `or expected_seam`. Deleting that half left the whole guard set
+        # GREEN (measured at this head: 25 passed over `arm or receipt or
+        # DERIVED`) — so a hand-edited receipt could claim `vet_enabled: false`
+        # while its own env ARMS the seam, and §25's
+        # `readback["vet_enabled"] is (arm == "on")` passes too (`False is
+        # False`): a full end-to-end false PASS for the one interaction this PR's
+        # own comments cite. This case is the row that reds when the term goes.
+        ({"env": {"TORTOISE_VET": "0", "TORTOISE_VALUE_GATE": "0",
+          "TORTOISE_S2_DECISION_SEAM": "1",
+          "TORTOISE_STATE_VALUE_VERBATIM": None},
+          "readable": True, "vet_toggle": False, "s2_seam": True,
+          "value_gate": False, "vet_enabled": False}, "contradicts itself"),
         # a switch the runner's own surface does not know: recorded nowhere
         ({"env": {"TORTOISE_UNKNOWN": "1"}, "readable": True, "vet_enabled": True},
          "unknown switches"),
