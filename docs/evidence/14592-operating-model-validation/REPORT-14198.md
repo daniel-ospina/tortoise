@@ -63,6 +63,16 @@ claim inherits the closed claim's provenance — correct in the one direction th
 arm emits (the newer document supersedes the older one) and the reason the
 backfill direction is DECLINED rather than folded backwards (§6.5).
 
+**One closure per claim, across PRODUCERS, not just within this arm.** The
+payload's `supersessions` may already name this prior when the operator pass
+runs — a point carrying a `supersedes` ref, or the UPDATE fold, both append
+earlier — and `apply_supersessions` skips a terminal target with a bare
+`continue` (no warning, not even a `skipped` entry). So the arm checks the
+records already present and, if one of them closed this prior, DECLINES: the
+declared `NAND` stays as the evidence of this refutation and the receipt names
+the successor that closed it. Appending a second record there would have looked
+like a closure in the payload and been a silent no-op in the graph.
+
 **Both lookup arms, one representation.** The #14592 receipt was recorded on a
 `partial` identity lookup, and the two arms take different internal routes to
 the same declaration — measured on the receipt's own shape:
