@@ -10955,7 +10955,10 @@ _H_14544_COPULA = (
 #: The row, and the names this family uses for the SAME row. ``the `durations` ENTRY`` is an
 #: accepted TRUE rewording elsewhere in this block (`_H_14544_ROW_PROVENANCE_RE`), so a ban that
 #: read only `row` left the false claim reachable by renaming its subject (measured round 29).
-_H_14544_ROW_NOUN = (r"(?:(?:the|that|this|its|a|no|durations)\s+(?:\w+\s+){0,2})?"
+#: ⛔ THE DETERMINER RUN ADMITS BACKTICKS (`[`\w]+`): this block writes ``No `durations` row``, and a
+#: bare `\w+` cannot span the code span, so the match started at `row` and the `No` fell OUTSIDE the
+#: negation window — refusing TRUE prose (measured).
+_H_14544_ROW_NOUN = (r"(?:(?:the|that|this|its|a|no|durations)\s+(?:[`\w]+\s+){0,2})?"
                      r"(?:row\b(?:['\u2019]s)?(?:\s+weight\b)?"
                      r"|`durations`\s+entry)")
 #: ⛔ THE SAME NOUN PHRASE IN THE REVERSE ORDER — `the weight of the row`, `the weight carried by
@@ -11020,8 +11023,13 @@ _H_14544_ROW_EXEMPT_SUBJECT_RE = re.compile(
 #: `so`/`as` + a light verb, which is a closed paradigm, so it is enumerated — and it must include
 #: `do`/`does`/`did`, because `The REGISTRATION is exempt, and so does the row.` is the same claim and
 #: was certified CLEAN at round 29.
-_H_14544_AUX = (r"(?:is|are|was|were|do|does|did|has|have|had|will|would|can|could"
-                r"|stays|remains|stayed|remained|becomes|became|seems|appears|turns|gets|goes)")
+#: ⛔ DERIVED FROM `_H_14544_COPULA`, never hand-written beside it — a second hand-written copula list
+#: is exactly how two arms drift apart, and it had: COPULA carries `seemed` / `appeared` and AUX did
+#: not, so `The REGISTRATION is exempt, and so seemed the row.` was certified CLEAN (measured).
+#: The extras are the LIGHT VERBS that take the same marker.
+_H_14544_AUX = (_H_14544_COPULA[:-1]
+                + r"|do|does|did|has|have|had|will|would|can|could|becomes|became|seems|appears"
+                r"|turns|gets|goes)")
 #: ⛔ RULE 4 — WHICH BRANCH MAY READ THE PREVIOUS SENTENCE IS A PROPERTY OF THE BRANCH, and it is
 #: expressed as NAMED GROUPS rather than as a test on the matched text. The anaphoric markers elide
 #: the predicate their antecedent stated, so they may read one sentence back:
@@ -11037,7 +11045,8 @@ _H_14544_AUX = (r"(?:is|are|was|were|do|does|did|has|have|had|will|would|can|cou
 #: `included`) must not read back. The three groups added at round 34 spell the elision WITHOUT a
 #: copula and stood beside the coordinated markers, so they were classified as coordination and
 #: could never fire in a sentence of their own.
-_H_14544_ANAPHORIC_GROUPS = ("anaph", "anaph_too", "anaph_likewise", "anaph_same", "ellip")
+_H_14544_ANAPHORIC_GROUPS = ("anaph", "anaph_too", "anaph_likewise", "anaph_same",
+                             "anaph_as_well", "anaph_too_weight", "ellip")
 #: A COORDINATION carries its OWN subject and may NOT: `along with the row's weight` is this block's
 #: own TRUE statement of fact about `durations_floors`, and carrying an `exempt` from the sentence
 #: before REFUSED it end-to-end (measured round 30). ⛔ A first attempt tested the match's first
@@ -11060,6 +11069,9 @@ _H_14544_ROW_ADDITIVE_RE = re.compile(
     # read, because its antecedent is in the SAME sentence, which is what hid this: only the
     # same-sentence form was ever measured.
     + r"|(?P<anaph_too>so\s+too\s+(?:" + _H_14544_AUX + r"\s+)?" + _H_14544_ROW_NOUN_ANY + r")"
+    # …and the same pro-form with the WEIGHT as its complement (`so too its weight`), which the
+    # row-only form above cannot reach — measured CLEAN at round 33's head (#14623).
+    + r"|(?P<anaph_too_weight>so\s+too\s+(?:its|the|that|this)\s+weight\b)"
     # coordination that names the row without restating the predicate it modifies. ⛔ `likewise` is
     # NOT one of these, although it stood here until round 34: unlike `as well as` / `along with`,
     # which attach to a predicate the same sentence states, `likewise` REPLACES that predicate, so in
@@ -11068,8 +11080,13 @@ _H_14544_ROW_ADDITIVE_RE = re.compile(
     # the comma spelling matched no alternative here at all.
     + r"|(?:as\s+well\s+as|along\s+with)\s+" + _H_14544_ROW_NOUN_ANY
     + r"|(?P<anaph_likewise>likewise\s*,?\s+" + _H_14544_ROW_NOUN_ANY + r")"
-    + r"|" + _H_14544_ROW_NOUN_ANY + r"\s+as\s+well\b"
-    + r"|" + _H_14544_ROW_NOUN_ANY + r"\s+included\b"
+    # ⛔ AND THESE TWO ELIDE THEIR PREDICATE AS WELL (#14623, measured): `The row as well.` and
+    # `The row included.` name no exemption of their own — they are pro-forms for the previous
+    # sentence's predicate — so untagged they could not fire in the only shape they exist for, one
+    # sentence after the exemption, and both shipped GREEN there. They are tagged for the same reason
+    # `so too the row` and `the same goes for the row` are.
+    + r"|(?P<anaph_as_well>" + _H_14544_ROW_NOUN_ANY + r"\s+as\s+well\b"
+    + r"|" + _H_14544_ROW_NOUN_ANY + r"\s+included\b)"
     # ⛔ A PRO-FORM TOO — `the same` names no exemption either — so it is tagged for the same reason
     # as `so too the row`. Measured GREEN in its own sentence at round 33's head.
     + r"|(?P<anaph_same>the\s+same\s+goes\s+for\s+" + _H_14544_ROW_NOUN_ANY + r")"
@@ -11080,8 +11097,12 @@ _H_14544_ROW_ADDITIVE_RE = re.compile(
     + r"\s*(?:" + _H_14544_COPULA + r")?\s*,?\s*too\s*(?:[.!?]|$))"
     + r")", re.IGNORECASE)
 #: Rule 2. `n't` is listed because a contraction negates as surely as `not` does.
+#: ⛔ `cannot` IS ITS OWN WORD, and this block uses it ("dropping that REGISTRATION cannot move a
+#: bin"). `not` and `n't` cover the spaced and contracted forms and NEITHER matches `cannot`, so the
+#: paragraph's own thesis restated negatively was REFUSED as false prose (measured: `The row cannot
+#: be exempt.` RED, `The row can not be exempt.` GREEN).
 _H_14544_NEGATION_RE = re.compile(
-    r"\b(?:no|not|never|none|nothing|neither|nor)\b|n['\u2019]t\b", re.IGNORECASE)
+    r"\b(?:no|not|never|none|nothing|neither|nor|cannot)\b|n['\u2019]t\b", re.IGNORECASE)
 
 
 #: ⛔ RULE 2 — NEGATION IS LOCAL, NEVER SENTENCE-WIDE (#14623 round 30, P1). Round 29 tolerated a
@@ -11090,7 +11111,11 @@ _H_14544_NEGATION_RE = re.compile(
 #: measured consequence: appending the false claim as a CLAUSE to a live sentence was certified GREEN,
 #: while the same claim as its own sentence was RED. The ban was OFF for exactly the rewrite a fold
 #: produces. A negation must therefore sit in a WINDOW around the exemption it negates.
-_H_14544_NEGATION_WINDOW_BEFORE = 30
+#: ⛔ 12, not 30 (#14623, measured): at 30 the window reached a negation belonging to a DIFFERENT
+#: noun phrase — `is not a gate,` licensed a `the row` 18 characters later — so ordinary block prose
+#: with a folded clause was certified CLEAN. The negation that matters sits AT the match start
+#: (`No `durations` row`) or inside the run (`the row is not exempt`).
+_H_14544_NEGATION_WINDOW_BEFORE = 12
 _H_14544_NEGATION_WINDOW_AFTER = 25
 #: Rule 2b: the boundaries a negation does NOT reach across — a sentence end, an em-dash, and a
 #: CONTRASTIVE conjunction. `and` is excluded on purpose (see `_h_14544_negated`).
@@ -11125,6 +11150,12 @@ def _h_14544_negated(sentence: str, match: re.Match[str]) -> bool:
     return _H_14544_NEGATION_RE.search(before + " " + after) is not None
 
 
+#: ⛔ A NEGATED PREDICATE NOMINATIVE — `A REGISTRATION IS NOT A ROW` — is not an exemption claim
+#: about a row, so it is masked before the scan.
+_H_14544_NOT_A_ROW_RE = re.compile(
+    r"\b(?:not|n['\u2019]?t|never)\s+(?:a|the|any|either|one)?\s+row\b", re.IGNORECASE)
+
+
 def _h_14544_first_unnegated(pattern: re.Pattern[str],
                             sentence: str) -> re.Match[str] | None:
     """The FIRST match of `pattern` that no negation in its window covers, or None.
@@ -11142,8 +11173,20 @@ def _h_14544_first_unnegated(pattern: re.Pattern[str],
     the sentence. This grades the PROPERTY — "no un-negated row claim in this sentence" — instead of
     "the first one happens to be true".
     """
-    for m in pattern.finditer(sentence):
-        if not _h_14544_negated(sentence, m):
+    # ⛔ AND THE NEGATED PREDICATE NOMINATIVE IS MASKED, not merely skipped (#14623, measured). These
+    # patterns span the whole clause to reach `exempt`, so a tolerated match SWALLOWS every candidate
+    # inside its own span and a sentence certified CLEAN while its trailing clause stated the claim:
+    #     ⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted, and the
+    #     row is exempt too.                                             GREEN
+    # `A REGISTRATION IS NOT A ROW` is this block's thesis: the `row` in it is the OBJECT of a negated
+    # predicate nominative, so neither it nor its `not` may be read as an exemption claim. Masking it
+    # out (same length, so every offset is preserved) removes only what must not count.
+    # ⛔ The obvious resume rule does NOT work and was measured failing: resuming one character past a
+    # match start re-matches `No `durations` row is exempt` at `row`, dropping its `No` and turning
+    # TRUE prose RED.
+    masked = _H_14544_NOT_A_ROW_RE.sub(lambda hit: "\x00" * len(hit.group(0)), sentence)
+    for m in pattern.finditer(masked):
+        if not _h_14544_negated(masked, m):
             return m
     return None
 
@@ -11160,10 +11203,11 @@ def _h_14544_row_exempted(sentence: str, previous: str = "") -> str | None:
     ⛔ EACH BRANCH IS SCANNED FOR THE FIRST UN-NEGATED MATCH (round 33), not merely the first match:
     a negated subject claim no longer hides a later additive one, nor the reverse.
     """
-    m = _h_14544_first_unnegated(_H_14544_ROW_EXEMPT_SUBJECT_RE, sentence)
+    masked = _H_14544_NOT_A_ROW_RE.sub(lambda hit: "\x00" * len(hit.group(0)), sentence)
+    m = _h_14544_first_unnegated(_H_14544_ROW_EXEMPT_SUBJECT_RE, masked)
     if m is not None:
-        return m.group(0)
-    m = _h_14544_first_unnegated(_H_14544_ROW_ADDITIVE_RE, sentence)
+        return sentence[m.start():m.end()]
+    m = _h_14544_first_unnegated(_H_14544_ROW_ADDITIVE_RE, masked)
     if m is None:
         return None
     # Rule 4: only the anaphoric branches may read the sentence before it. ⛔ EVERY anaphoric group
@@ -11172,10 +11216,20 @@ def _h_14544_row_exempted(sentence: str, previous: str = "") -> str | None:
     # was added for (how `so too the row` and `the same goes for the row` behaved at round 33's
     # head), so the two lists are asserted against each other beside the arm.
     anaphoric = any(m.groupdict().get(name) for name in _H_14544_ANAPHORIC_GROUPS)
+    # ⛔ AN ANAPHORIC MARKER INHERITS ITS ANTECEDENT'S POLARITY (#14623, measured). `The row is not
+    # exempt, and so is the weight of the row.` states that the WEIGHT is not exempt either — `so is`
+    # carries the negation FORWARD, it does not undo it. The window around the marker cannot see a
+    # negation belonging to the clause before, so the antecedent is checked explicitly. ⛔ Anaphoric
+    # branches ONLY: a coordination carries its own subject AND its own polarity.
+    if anaphoric and not _h_14544_negated(masked, m):
+        antecedent = (previous + " " + masked[:m.start()]) if previous else masked[:m.start()]
+        if _H_14544_NEGATION_RE.search(antecedent):
+            return None
     context = previous + " " + sentence if previous and anaphoric else sentence
     if not re.search(r"exempt", context, re.IGNORECASE):
         return None
-    return m.group(0)
+    # the offsets index the MASKED copy (same length), so the phrase is sliced from the real one
+    return sentence[m.start():m.end()]
 
 
 def _h_14544_banned_claim(block: str) -> str | None:
