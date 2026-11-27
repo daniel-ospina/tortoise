@@ -350,7 +350,6 @@ is not lost. Nothing here is paraphrased.
   *"The accepted-and-half-honoured state it has today — the write is accepted, belief honours it, and
   every retrieval leg ignores it — is tracked at **#11825**."* The behaviour stays; the tracker does not.
 
-
 ### Batch 5 — §5 (40 references)
 
 One row per source line that carried a reference. **Five of these lines are inside declared
@@ -398,7 +397,6 @@ unchanged.
   what does not belong here. **The model statement it contrasted with stays in full**: *"`retracted`,
   `outdated` and `archived` are read-side legacy, not statuses: in this model no verb produces them,
   while every reader still treats them as ended over stored rows."*
-
 
 ### Batch 6 — §6–§12 (37 references)
 
@@ -448,7 +446,6 @@ unchanged.
   ⚠️ **This is a paragraph about shipping order and gating, named a "merge-blocker" by its own
   heading.** Its single rule — *rebuild-side fold decay is supersede-scoped* — is extracted into the
   model and stays. The rest is a work item and lives here.
-
 
 <!-- PASTE-END -->
 

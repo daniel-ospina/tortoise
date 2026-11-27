@@ -24,7 +24,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, ONTOLOGY-CHANGELOG.md
 > "Ontology.md is unfortunately polluted with issue numbers and changelog when it shouldnt.
 > Ontology.md should be simply the canonical ontology (the vision of what should be), and we
 > have separate documents for changelog and implementation plans."
-
+>
 > "we need to fix that. making ontology canonical on the direction"
 
 ## 2. The authority being enforced (the document contradicts itself)
@@ -101,8 +101,8 @@ carries three artefacts, and a section is not proposed unless all three are comp
 
 ### The mechanical metric (D1) — and why it cannot stand alone
 
-**D1** = (occurrences of `must|shall|required|always|never`, case-insensitive, word-boundary)
-+ (count of fenced ```` ```text ```` declared-vocabulary blocks). It is deliberately crude and
+**D1** = (occurrences of `must|shall|required|always|never`, case-insensitive, word-boundary) +
+(count of fenced ```` ```text ```` declared-vocabulary blocks). It is deliberately crude and
 deliberately reproducible:
 
 ```bash
@@ -121,7 +121,7 @@ deletion. Every D1 delta is therefore named, never merely reported.
 
 ⚠️ **Extracting a PROPOSED block when it contains its own fences.** §3.9 declares the predicate
 vocabulary in a ```` ```text ```` block, so the §3 proposal is wrapped in **four** backticks
-(````markdown … ````) rather than three. A reader re-running the extraction with a three-backtick
+(````markdown …````) rather than three. A reader re-running the extraction with a three-backtick
 regex will silently get a **truncated** §3 ending at the vocabulary heading — which would make
 the D1 figure look like 22 instead of 30. Use the four-backtick form for §3 (and for any later
 batch whose section contains a fenced block).
@@ -149,9 +149,9 @@ the owner's approval of the exact text is recorded.
 
 ---
 
-# Batch 1 — the header, §1, §2
+## Batch 1 — the header, §1, §2
 
-## 1.1 Per-section table
+### 1.1 Per-section table
 
 | Section | `ONTOLOGY.md` lines | Refs before | Refs removed | Classes | D1 before → after | Rules moved | Unclassifiable |
 |---|---|---|---|---|---|---|---|
@@ -172,7 +172,7 @@ explicit decision, not a default** — see §1.8. The source says a *location* r
 > That is a **policy change on the one category the current header protects**, and it is
 > proposed, not assumed.
 
-## 1.2 Sentence-level dispositions — §2 (9 occurrences)
+### 1.2 Sentence-level dispositions — §2 (9 occurrences)
 
 Exhaustive: these **nine** rows are every `#NNNN` in lines 61–108 (re-measured per line, see
 §1.7 for the command).
@@ -189,7 +189,7 @@ Exhaustive: these **nine** rows are every `#NNNN` in lines 61–108 (re-measured
 | 8 | 103 | "both propagate EP under **#7813** (all four epistemic labels; the Point→Event direction is no longer write-only — §8 OVERRIDES)" | **B** | "under #7813" dropped; "no longer write-only" → **"is not write-only"** (the same rule in the model's tense; "no longer" is history). §8 `OVERRIDES` pointer kept — that is structure, not history. |
 | 9 | 105 | "The `:Subject`/`:Object` operator endpoints are live (**#7902**); the write path admits all four." | **C** | Same as row 1: status removed, rule kept verbatim. |
 
-## 1.3 Normative-statement inventory — §2
+### 1.3 Normative-statement inventory — §2
 
 Every rule in §2, with its fate. **Moved rules: 0.**
 
@@ -235,7 +235,7 @@ gains *"Anything that records when something was decided… belongs in
 `ONTOLOGY-CHANGELOG.md`"*, which uses no D1 token but is normative. D1 is a cross-check, not a
 guarantee (§5) — this sentence is the reason that caveat exists.
 
-## 1.4 Proposed text — header + frontmatter (replaces `ONTOLOGY.md` lines 1–43)
+### 1.4 Proposed text — header + frontmatter (replaces `ONTOLOGY.md` lines 1–43)
 
 Changes, exhaustively — the reviewer of batch 1 found four undisclosed edits in the first cut of
 this section, and each is now either restored or named here:
@@ -310,14 +310,14 @@ CRITICAL RULE: no modification to this file is allowed without explicit approval
 
 > **Approve:** ☐ text as written · ☐ with changes (list them) · ☐ reject (header keeps its wording)
 
-## 1.5 Proposed text — §1 Entity Types (lines 45–60): **UNCHANGED**
+### 1.5 Proposed text — §1 Entity Types (lines 45–60): **UNCHANGED**
 
 **Proposed: no change.** §1 carries zero `#NNNN` references and zero build status. It already
 reads as the model. Approving this row is approving that §1 is left exactly as it is.
 
 > **Approve:** ☐ §1 unchanged · ☐ §1 has changes I want (list them below)
 
-## 1.6 Proposed text — §2 Four-Ontology Model (replaces lines 61–108)
+### 1.6 Proposed text — §2 Four-Ontology Model (replaces lines 61–108)
 
 <!-- PROPOSED:§2 -->
 ```markdown
@@ -373,7 +373,7 @@ Each layer answers a different question. All four are live mechanisms.
 
 > **Approve:** ☐ text as written · ☐ with changes (list them) · ☐ reject (§2 keeps its numbers)
 
-## 1.7 Anything not classifiable
+### 1.7 Anything not classifiable
 
 **Nothing in Batch 1 is unclassifiable.** The exhaustive per-line measurement is reproducible:
 
@@ -401,7 +401,7 @@ Two judgement calls are stated rather than buried:
    longer" is a statement about the past (class B history); "is not" is the same rule in the
    model's tense. **Flagged so it can be rejected on its own.**
 
-## 1.8 Policy changes this draft asks for — decisions, not defaults
+### 1.8 Policy changes this draft asks for — decisions, not defaults
 
 These are **not** covered by the four defaults in §3. Each one changes the model's rules rather
 than removing a citation from them, and each is separately rejectable.
@@ -417,9 +417,9 @@ reduces to: nine citations removed from §2, the header untouched, and §1 untou
 
 ---
 
-# Batch 2 — §3.1–§3.9 (Edge Topology)
+## Batch 2 — §3.1–§3.9 (Edge Topology)
 
-## 2.1 Per-section table
+### 2.1 Per-section table
 
 | Section | lines | Refs before | Refs removed | Classes | D1 before → after | Rules moved | Unclassifiable |
 |---|---|---|---|---|---|---|---|
@@ -446,7 +446,7 @@ and stays. **No normative rule leaves the model.** It is row `2-M1` below.
 
 **§3.7 carries no references and is proposed unchanged**, like §1 in batch 1.
 
-## 2.2 Dispositions — §3.1 (16)
+### 2.2 Dispositions — §3.1 (16)
 
 | # | Ref(s) | Line | Class | What happened to the semantic content |
 |---|---|---|---|---|
@@ -463,7 +463,7 @@ and stays. **No normative rule leaves the model.** It is row `2-M1` below.
 | 3.1-k | `#909` | 143 | **B** | *"(epic #909 §4.3 #5 / research addendum §1 — pipeline spec)"* → *"(pipeline spec)"*. The three canonical NAND-direction rules below the heading are untouched. |
 | 2-M1 | `#2501` | 124 | **C + D** | ⚠️ **Sentence moved whole** — *"Full `about*` parity additionally depends on #2501 (create_point never live-wires `aboutEntities` — the only lane where 2b sees live `about*` edges is rebuild→supersede→rebuild)."* It states a build gap and names its tracker; it carries no model rule (the two-family rule it refers to is stated in the preceding clause). **This is the batch's only removed `never`.** Changelog `B-1`. |
 
-## 2.3 Dispositions — §3.2 (20)
+### 2.3 Dispositions — §3.2 (20)
 
 | # | Ref(s) | Line | Class | What happened to the semantic content |
 |---|---|---|---|---|
@@ -481,7 +481,7 @@ and stays. **No normative rule leaves the model.** It is row `2-M1` below.
 | 3.2-l | `#1417` | 168 | **A** | *"**`aboutEvent` is content-only (#1417):**"* → *"**`aboutEvent` is content-only:**"*. The rule itself. |
 | 3.2-m | `#4282`, `#1417` | 168 | **B** | *"(its public name retired by #4282)"* → *"(the public name is retired)"*; *"Pre-#1417 `aboutEvent`-as-provenance edges"* → *"Pre-existing `aboutEvent`-as-provenance edges"*. Both rules kept; "pre-existing" is the same fact without the version stamp. |
 
-## 2.4 Dispositions — §3.3–§3.8 (14)
+### 2.4 Dispositions — §3.3–§3.8 (14)
 
 | # | Ref(s) | Line | Class | What happened |
 |---|---|---|---|---|
@@ -496,7 +496,7 @@ and stays. **No normative rule leaves the model.** It is row `2-M1` below.
 | 3.8-b | `#7813` | 225 | **B** | *"Point→Event propagates EP under #7813 (an Event target is epistemic — §8 OVERRIDES)"* → *"Point→Event propagates EP (an Event target is epistemic — §8 OVERRIDES)"*. |
 | 3.8-c | `#7902` | 225 | **C** | *"`:Subject`/`:Object` endpoints are live (`#7902`); the write path admits all four"* → *"The write path admits all four"*. Status dropped, rule kept. |
 
-## 2.5 Dispositions — §3.9 (13)
+### 2.5 Dispositions — §3.9 (13)
 
 | # | Ref(s) | Line | Class | What happened |
 |---|---|---|---|---|
@@ -512,7 +512,7 @@ and stays. **No normative rule leaves the model.** It is row `2-M1` below.
 | 3.9-j | `#2315` ×2 | 364, 374 | **B** | *"**Hard rule (#2315, pinned 2026-09-07):**"* → *"**Hard rule:**"*; *"**Strength semantics (#2315, product decision 2026-09-07 — mitigation is a GRADED DAMPENER, not a refutation):**"* → *"**Strength semantics (mitigation is a GRADED DAMPENER, not a refutation):**"*. Both rules, the `[0.10, 0.50]` band and `w_eff = w × (1 − strength)` are untouched. |
 | 3.9-k | `#2199` | 384 | **B** | *"The strength is NOT fused into the mitigation point's own Beta prior (#2199 decision 3)."* → same sentence without the parenthetical. |
 
-## 2.6 Wording changes (not citation deletions) — so they can be rejected individually
+### 2.6 Wording changes (not citation deletions) — so they can be rejected individually
 
 | # | Where | Before → after | Why |
 |---|---|---|---|
@@ -525,7 +525,7 @@ and stays. **No normative rule leaves the model.** It is row `2-M1` below.
 **No other wording changes.** Everything not named in 2.2–2.6 is the source text with a citation
 removed.
 
-## 2.7 Proposed text — §3.1–§3.9 (replaces `ONTOLOGY.md` lines 109–389)
+### 2.7 Proposed text — §3.1–§3.9 (replaces `ONTOLOGY.md` lines 109–389)
 
 <!-- PROPOSED:§3 -->
 ````markdown
@@ -812,10 +812,10 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 ````
 
 > **Approve:** ☐ text as written · ☐ with changes (list them) · ☐ reject (§3 keeps its numbers)
-
+>
 > **Approve the wording changes separately:** ☐ W-1 ☐ W-2 ☐ W-3 ☐ W-4 ☐ W-5 · ☐ reject all
 
-## 2.8 Anything not classifiable
+### 2.8 Anything not classifiable
 
 **Nothing in §3.1–§3.9 is unclassifiable.** Ref coverage is exhaustive and checkable:
 
@@ -833,9 +833,9 @@ verbatim in the changelog extract, so nothing is lost and each can be restored i
 
 ---
 
-# Batch 3 — §4.1–§4.4 (Point, Subject, Object, Document)
+## Batch 3 — §4.1–§4.4 (Point, Subject, Object, Document)
 
-## 3.1 Per-section table
+### 3.1 Per-section table
 
 | Section | lines | Refs before | Refs removed | Classes | D1 before → after | Rules moved | Unclassifiable |
 |---|---|---|---|---|---|---|---|
@@ -857,7 +857,7 @@ six in §4.1 (`C-1` holds 2, `C-2` holds 2, `C-3` holds 1, and `#947` holds 1 �
 and each is quoted verbatim in the changelog extract. Every other removal in this batch is a
 citation deletion.
 
-## 3.2 Dispositions — §4.1 Point (21)
+### 3.2 Dispositions — §4.1 Point (21)
 
 | # | Ref(s) | Line | Class | What happened to the semantic content |
 |---|---|---|---|---|
@@ -878,7 +878,7 @@ citation deletion.
 | 4.1-o | `epic 903` *(no `#`)* | 413 | **C** | ⚠️ **A bare tracker identity, not a `#NNNN`.** *"timestamp of the last EP write-back that **converged** on this claim (epic 903)"* → *"…on this claim."* The freshness-stamp rule, the NULL-ranks-stalest rule and the atomic-write rule are untouched. Recorded at changelog `B-59`. |
 | **P-4** | `#11915` | 421 | **C** | ⚠️ **An owner-approved sentence is rewritten.** The source sentence lists *"Percent, ratio, duration and quantity"* as shapes with no storing implementation, then a **status note** corrects it. Proposal: the sentence names **percent** as a storing shape (with `basisPoints`/`verbatim`/validation) and lists only **ratio, duration and quantity** as unbuilt; the status note is deleted. The note itself says *"rewriting an owner-approved clause is a new decision"* — **that is exactly what this is, and it is proposed as P-4, not assumed.** Rejecting P-4 restores the approved sentence *and* the status note (and that one `#11915` reference stays). Changelog `C-3`. |
 
-## 3.3 Dispositions — §4.2 Subject (19)
+### 3.3 Dispositions — §4.2 Subject (19)
 
 | # | Ref(s) | Line | Class | What happened |
 |---|---|---|---|---|
@@ -888,7 +888,7 @@ citation deletion.
 | 4.2-d | `#2295` | 434 | **B** | *"adopted ON MATCH only when absent — #2295"* → no number. |
 | 4.2-e | `#2295` ×3, `#2296`, `#1918`, `#2061`, `#2194` | 437 | **B** | The registration-durability blockquote, de-numbered: heading; *"pre-#2295 journals (no backfill)"* → *"journals written before this contract existed (no backfill)"*; *"(#2296 scope hook: …)"* → *"(…)"*; *"(random-ulid, #1918)"* → *"(random-ulid)"*; *"Event-precedent parity, #2061/#2194"* → *"Event-precedent parity"*; *"(pinned by the #2295 suite test 1)"* → *"(pinned by the durability suite's first test)"*. **All durability rules survive**: the journal-when-wired rule, the probe-gate, the byte-identity scope, the residual non-durable classes, and the reserved-name narrowing. |
 
-## 3.4 Dispositions — §4.3 Object (20)
+### 3.4 Dispositions — §4.3 Object (20)
 
 | # | Ref(s) | Line | Class | What happened |
 |---|---|---|---|---|
@@ -900,7 +900,7 @@ citation deletion.
 | 4.3-f | `#7856`, `#11824` | 457 | **B** | Same treatment as §4.1 row `4.1-n`: the closed `goalState` vocabulary, the `guideline` exclusion and the ending-agreement refusal all stay. |
 | 4.3-g | `#2194` ×2, `#2295` ×2, `#2296`, `#2061`, `#2309` | 461 | **B** | The Object registration-durability blockquote, de-numbered exactly as §4.2's: heading, *"pre-#2194 journals (no backfill)"* → *"journals written before this contract existed"*, *"since #2295"* → no number, *"(#2296 scope hook: …)"* → *"(…)"*, *"Event-precedent parity, #2061"* → no number, *"(the is-None gate — #2309 review hardening, mirrored for Subjects in #2295)"* → *"(the is-None gate, mirrored for Subjects)"*. **All durability rules survive.** |
 
-## 3.5 Dispositions — §4.4 Document (10)
+### 3.5 Dispositions — §4.4 Document (10)
 
 | # | Ref(s) | Line | Class | What happened |
 |---|---|---|---|---|
@@ -911,7 +911,7 @@ citation deletion.
 | 4.4-e | `#5140` | 500 | **B** | *"that inversion is exactly the defect #5140 fixed"* → *"that inversion is exactly the defect to avoid"* (W-14). The read-order rule (`captured`/`extracted` outrank `needs_extraction`; ABSENT ≠ done) is untouched. |
 | 4.4-f | `#2726` ×2, `#398` | 506–515 | **B** / **C** | ⚠️ **A "TARGET STATE" blockquote becomes canonical** (W-11). Source opened *"**(#2726) Meeting capture … (TARGET STATE, writer not yet wired):** once the capture/index writer emits the new kinds, a captured meeting **will land** as a Document…"* and closed with *"TODAY the index/classifier path still emits `meeting_summary` … so `meeting_summary` remains the kind actually written."* Proposal states the model directly: *"a captured meeting **lands** as a Document …; the tier question is left open (§5)"*. **The model claim is unchanged; the two status sentences move to `C-4`, `C-5`.** |
 
-## 3.6 Wording changes (not citation deletions) — rejectable individually
+### 3.6 Wording changes (not citation deletions) — rejectable individually
 
 | # | Where | Change | Why |
 |---|---|---|---|
@@ -930,7 +930,7 @@ citation deletion.
 | **W-19** | §4.1 `c_cal`, `when` | *"(registered #909 §4.3 #11; written by … slice 5+)"* → *"(written by …)"*; *"(registered #1533 E1; written by …)"* → *"(written by …)"* | Drops both the registration marker and the delivery slice. |
 | **W-20** | §4.3 `passes_frequency_gate` | *"(registered #909 §4.3 #12; planned for the capture path, slice 5+)"* → *"(planned for the capture path)"* | Same as W-19. |
 
-### 3.6bis Two tracker references batch 2 missed (corrected here)
+#### 3.6bis Two tracker references batch 2 missed (corrected here)
 
 Batch 2's review checked `#NNNN` and found none left; it did **not** check bare epic numbers, and they
 survived in **four** places: `epic 903` in §3.1's EP message-state heading, `903-C4` twice in §3.1's
@@ -947,13 +947,13 @@ grep -nE '#[0-9]' docs/ONTOLOGY.md  # must print nothing — ANY digit run, not 
 grep -nE '(epic|issue|PR) [0-9]{2,5}|[0-9]{3,5}-C[0-9]' docs/ONTOLOGY.md   # must print nothing
 ```
 
-## 3.7 Policy item introduced by this batch
+### 3.7 Policy item introduced by this batch
 
 | # | The change | Why it needs a decision | Rejecting it means |
 |---|-----------|------------------------|--------------------|
 | **P-4** | **§4.1's *"Percent, ratio, duration and quantity …"* sentence is rewritten**, and its status note deleted. | The source's own note says *"rewriting an owner-approved clause is a new decision"*. This draft makes that decision explicitly rather than burying it in a batch. | Restore the approved sentence **and** its status note verbatim — the section then keeps one `#11915` reference, and the proposal's strict-zero target excludes §4.1's Values paragraph. Every other row in this batch is unaffected. |
 
-## 3.8 Proposed text — §4.1–§4.4 (replaces `ONTOLOGY.md` lines 390–517)
+### 3.8 Proposed text — §4.1–§4.4 (replaces `ONTOLOGY.md` lines 390–517)
 
 <!-- PROPOSED:§4a -->
 ```markdown
@@ -1081,12 +1081,12 @@ node TOPOLOGY (two addresses for one document), not merely the edge.
 ```
 
 > **Approve:** ☐ text as written · ☐ with changes (list them) · ☐ reject (§4.1–§4.4 keep their numbers)
-
+>
 > **Approve the wording changes separately:** ☐ W-7 ☐ W-8 ☐ W-9 ☐ W-10 ☐ W-11 ☐ W-12 ☐ W-13 ☐ W-14 ☐ W-15 ☐ W-16 ☐ W-17 ☐ W-18 ☐ W-19 ☐ W-20 · ☐ reject all
-
+>
 > **P-4 (rewriting an owner-approved sentence):** ☐ approve ☐ reject (restore the sentence + its `#11915` status note)
 
-## 3.9 Anything not classifiable
+### 3.9 Anything not classifiable
 
 **Nothing in §4.1–§4.4 is unclassifiable.** All 70 references are covered above; the only text that
 leaves the model is at rows `4.1-j`, `4.1-l`, `4.1-m`, `P-4`, and `4.4-f`'s two `TODAY` sentences —
@@ -1100,9 +1100,9 @@ stays at zero.
 
 ---
 
-# Batch 4 — §4.5–§4.8 (Event, Source, Temporal Model, Session)
+## Batch 4 — §4.5–§4.8 (Event, Source, Temporal Model, Session)
 
-## 4.1 Per-section table
+### 4.1 Per-section table
 
 | Section | lines | Refs before | Refs removed | Classes | D1 before → after | Rules moved | Unclassifiable |
 |---|---|---|---|---|---|---|---|
@@ -1122,7 +1122,7 @@ names where a half-open/closed boundary decision is being tracked, the other whe
 accepted-but-half-honoured state is tracked. Both sentences survive with the pointer removed; both
 are quoted in the changelog.
 
-## 4.2 Dispositions — §4.5 Event (15)
+### 4.2 Dispositions — §4.5 Event (15)
 
 | # | Ref(s) | Line | Class | What happened to the semantic content |
 |---|---|---|---|---|
@@ -1139,7 +1139,7 @@ are quoted in the changelog.
 | 4.5-k | `#2725` | 561 | **B** | *"the Event-carries-state question was answered **no** in #2725."* → *"… answered **no**."* The answer (no) is the rule; the tracker goes. |
 | 4.5-l | `#11825` | 561 | **D** | *"The accepted-and-half-honoured state it has today — the write is accepted, belief honours it, and every retrieval leg ignores it — is tracked at **#11825**."* → *"The accepted-and-half-honoured state it has today — the write is accepted, belief honours it, and every retrieval leg ignores it."* ⚠️ **The behavioural description stays** (it is the contract); only "tracked at" goes. |
 
-## 4.3 Dispositions — §4.6 Source (46)
+### 4.3 Dispositions — §4.6 Source (46)
 
 | # | Ref(s) | Line | Class | What happened |
 |---|---|---|---|---|
@@ -1161,7 +1161,7 @@ are quoted in the changelog.
 | 4.6-p | `#3644` ×2, `#5097` | 630 | **B** | *"**… in the same act (`#3644`).**"* → *"**… in the same act.**"*; *"since **#5097** its METADATA block does replay"* → *"its METADATA block does replay"*; *"… tracked on **#3644**; the gap is pinned (never silenced) by"* → *"… and the gap is pinned (never silenced) by"*. The half-open `[validFrom, validTo)` contract and the pinned gap both stay. |
 | 4.6-q | `#5024`, `#3644` ×2, `#3590`, `#3980`, `#4021`, `#5358`, `#5360` | 636 | **B** | *"(the anchor half is `#5024`, the window half `#3644`)"* → deleted; *"The *window* half (#3644):"* → *"The *window* half:"*; *"**#3590** S2's decision"* → *"undecided"*; *"needs the inversion guards the Point window needed (#3980, #4021, #5358, #5360)"* → *"… needed"*. **Every "what remains open" clause stays** — the node's `validTo`/`expiredAt` and the caller-asserted start. |
 
-## 4.4 Dispositions — §4.7 Temporal Model (36)
+### 4.4 Dispositions — §4.7 Temporal Model (36)
 
 | # | Ref(s) | Line | Class | What happened |
 |---|---|---|---|---|
@@ -1184,7 +1184,7 @@ are quoted in the changelog.
 | 4.7-q | `#5127`, `#5142` | 837 | **C** | *"moved into `_SOURCE_HANDLED` by D10 (the model version is v3.15, §4.4; the code half that moved it is PR #5127 — `#5142`)"* → *"(the model version is v3.15, §4.4; moved with it)"*. |
 | 4.7-r | `#11827` | 843 | **B** | *"`asOf` was retired for exactly this (#11827)."* → no number. The "a value carries no temporal slot" rule stays. |
 
-## 4.5 Dispositions — §4.8 `:Session` (8)
+### 4.5 Dispositions — §4.8 `:Session` (8)
 
 | # | Ref(s) | Line | Class | What happened |
 |---|---|---|---|---|
@@ -1195,7 +1195,7 @@ are quoted in the changelog.
 | 4.8-e | `#2335` | 930 | **B** | *"arm the #2335 TRUE-retry gate"* → *"arm the TRUE-retry gate"*. The gate is **named**, not weakened. |
 | 4.8-f | `#10000`, `#10011` | 953 | **C** | ⚠️ **A heading loses its tracker and a "after X" history clause** (W-25): *"**`turn_count` with no turn member at all — the store, not a shortfall (#10000)** — after `#10011` the capture writer stores …"* → *"**… the store, not a shortfall** — the capture writer stores …"*. The whole verdict — `retro_quantifiable: False`, the `turns_record_held` bucket, the placement rule — stays. |
 
-## 4.6 Wording changes (not citation deletions) — rejectable individually
+### 4.6 Wording changes (not citation deletions) — rejectable individually
 
 | # | Where | Change | Why |
 |---|---|---|---|
@@ -1206,7 +1206,7 @@ are quoted in the changelog.
 | **W-25** | §4.8 `turn_count` heading | tracker removed from the heading; *"after #10011"* → no clause | The verdict is the heading; the delivery order is history. |
 | **W-26** | §4.7 END state | *"**state is settled** (#9202, owner ruling 2026-10-25, option B)"* → *"(owner ruling, option B)"* | Keeps the authority (an owner ruling, option B), drops the date and number. |
 
-## 4.7 Proposed text — §4.5–§4.8 (replaces `ONTOLOGY.md` lines 518–973)
+### 4.7 Proposed text — §4.5–§4.8 (replaces `ONTOLOGY.md` lines 518–973)
 
 <!-- PROPOSED:§4b -->
 ```markdown
@@ -1669,10 +1669,10 @@ section and at the retrofit amendment in
 ```
 
 > **Approve:** ☐ text as written · ☐ with changes (list them) · ☐ reject (§4.5–§4.8 keep their numbers)
-
+>
 > **Approve the wording changes separately:** ☐ W-21 ☐ W-22 ☐ W-23 ☐ W-24 ☐ W-25 ☐ W-26 · ☐ reject all
 
-## 4.8 Anything not classifiable
+### 4.8 Anything not classifiable
 
 **Nothing in §4.5–§4.8 is unclassifiable.** Ref coverage is exhaustive:
 
@@ -1701,9 +1701,9 @@ changelog's Batch 4 rows.
 
 ---
 
-# Batch 5 — §5 Core Kind Vocabulary
+## Batch 5 — §5 Core Kind Vocabulary
 
-## 5.1 Per-section table
+### 5.1 Per-section table
 
 | Section | lines | Refs before | Refs removed | Classes | D1 before → after | Rules moved | Unclassifiable |
 |---|---|---|---|---|---|---|---|
@@ -1720,7 +1720,7 @@ at 23, which counts those eight blocks.
 inside a ```` ```text ```` block is a change to a *vocabulary*, not to prose: each removes only a
 trailing `# #NNNN` comment and leaves every declared term exactly as it was.
 
-## 5.2 Dispositions (40)
+### 5.2 Dispositions (40)
 
 | # | Ref(s) | Line | Class | What happened to the semantic content |
 |---|---|---|---|---|
@@ -1749,7 +1749,7 @@ trailing `# #NNNN` comment and leaves every declared term exactly as it was.
 | 5-w | `#12855`, `#11824`, `#2498` | 1176 | **B** / **C** | *"ended over stored rows (#12855)"* → no number. ⚠️ **The `C`-class clause is moved whole**: *"⚠️ The code is not yet aligned: `retract_point` **still writes `retracted` today** — a stated residual of #11824, not a description of the model."* — the source says itself that it is *"not a description of the model"*, so it goes to changelog `C-10`. *"a second, flag-based dead marker (#2498) that readers … must continue to honour"* → no number, **and the "must continue to honour" rule stays**. |
 | 5-x | `#690`, `#1088` ×2, `#432` | 1190 | **B** | *"**Parity decision (#690, amended #1088):**"* → *"**Parity decision:**"*; *"deliberately NOT SDK parity since #1088;"* → *"deliberately NOT SDK parity;"*; *"RESERVED for the #432 change-log stream"* → *"RESERVED for the change-log stream"*. **Every parity rule stays** — no-status→live, explicit draft honoured and never auto-promoted, EventAPI's own posture, CLI backfill, and the `:GraphEvent` reservation. |
 
-## 5.3 Wording changes (not citation deletions) — rejectable individually
+### 5.3 Wording changes (not citation deletions) — rejectable individually
 
 | # | Where | Change | Why |
 |---|---|---|---|
@@ -1759,7 +1759,7 @@ trailing `# #NNNN` comment and leaves every declared term exactly as it was.
 | **W-30** | §5 point↔object overlap | *"the pre-#7813 'write-only' rule"* → *"the earlier 'write-only' rule"* | Same rule, without the version stamp. |
 | **W-31** | §5 response-contract heading | *"(W4 why-layer, #2101 / epic #2080 DM-12)"* → *"(W4 why-layer, DM-12)"* | Two trackers removed; the work-stream label that names the spec stays. |
 
-## 5.4 Proposed text — §5 (replaces `ONTOLOGY.md` lines 974–1193)
+### 5.4 Proposed text — §5 (replaces `ONTOLOGY.md` lines 974–1193)
 
 <!-- PROPOSED:§5 -->
 ````markdown
@@ -1986,12 +1986,12 @@ degraded_reason    timeout | assembly_error | breaker_open      # degradations o
 ````
 
 > **Approve:** ☐ text as written · ☐ with changes (list them) · ☐ reject (§5 keeps its numbers)
-
+>
 > **Approve the wording changes separately:** ☐ W-27 ☐ W-28 ☐ W-29 ☐ W-30 ☐ W-31 · ☐ reject all
-
+>
 > **Approve the five in-vocabulary edits separately:** ☐ 5-n (`#531`) ☐ 5-o (`#2767`) ☐ 5-p (`#1013`) ☐ 5-s line 1154 (`#11702`) ☐ 5-s line 1158 (`#11702`) · ☐ reject all
 
-## 5.5 Anything not classifiable
+### 5.5 Anything not classifiable
 
 **Nothing in §5 is unclassifiable.** Ref coverage is exhaustive:
 
@@ -2018,9 +2018,9 @@ the Event-kind block, two in the Response-Contract block).
 
 ---
 
-# Batch 6 — §6–§12 (the tail: subclass model, equivalence, edge semantics, packs, recency, cascading invalidation, reputation, standards)
+## Batch 6 — §6–§12 (the tail: subclass model, equivalence, edge semantics, packs, recency, cascading invalidation, reputation, standards)
 
-## 6.1 Per-section table
+### 6.1 Per-section table
 
 | Section | lines | Refs before | Refs removed | Classes | D1 before → after | Rules moved | Unclassifiable |
 |---|---|---|---|---|---|---|---|
@@ -2043,7 +2043,7 @@ document with nothing to remove.
 the frozen posterior"*. Its one rule — *rebuild-side fold decay is supersede-scoped* — is extracted
 and kept; the shipping order, the gate and the blocker go to changelog `C-11`.
 
-## 6.2 Dispositions — §8 (21)
+### 6.2 Dispositions — §8 (21)
 
 | # | Ref(s) | Line | Class | What happened to the semantic content |
 |---|---|---|---|---|
@@ -2059,7 +2059,7 @@ and kept; the shipping order, the gate and the blocker go to changelog `C-11`.
 | 6-j | `#11083` ×3, `#7848` ×2 | 1384, 1390 | **B** | *"Restored as a Layer-2 meaning by #11083 (owner 2026-11-05, cites `#7848`'s `OVERRIDES:`); the pre-#11083 mapping onto `causes` changed the meaning **and** inverted the direction."* → *"Restored as a Layer-2 meaning by owner ruling; mapping it onto `causes` changes the meaning **and** inverts the direction."* (W-35). **The `produces` ≠ `causes` distinction and the direction rationale stay**; the pointer to an `OVERRIDES:` **on #7848** is dropped rather than re-pointed at a §8 marker that says something else. At 1390, *"(#7848's correction of 2026-11-08 withdrew the earlier promotion)"* → *"(an earlier promotion was withdrawn)"*. |
 | 6-k | `#2766` | 1390 | **B** | *"**A word that fails the layer test is a LABEL, not a meaning** — #2766's rule, which #11083 applies."* → *"**A word that fails the layer test is a LABEL, not a meaning.**"* (W-36). The rule and the `funds` worked example stay. |
 
-## 6.3 Dispositions — §9, §10, §10.5, §11, §12 (16)
+### 6.3 Dispositions — §9, §10, §10.5, §11, §12 (16)
 
 | # | Ref(s) | Line | Class | What happened |
 |---|---|---|---|---|
@@ -2076,7 +2076,7 @@ and kept; the shipping order, the gate and the blocker go to changelog `C-11`.
 | 6-u | `#398` | 1473 | — | (counted at `6-o`) |
 | 6-v | `#5358` | 1567 | **B** | *"`retract_point` is the window-agnostic route (#5358) (§4.7)"* → *"… route (§4.7)"*. The bi-temporal row's whole rule set stays. |
 
-## 6.4 Wording changes (not citation deletions) — rejectable individually
+### 6.4 Wording changes (not citation deletions) — rejectable individually
 
 | # | Where | Change | Why |
 |---|---|---|---|
@@ -2087,7 +2087,7 @@ and kept; the shipping order, the gate and the blocker go to changelog `C-11`.
 | **W-36** | §8 layer test | *"— #2766's rule, which #11083 applies."* → deleted | The sentence is the rule; the two attributions are not. |
 | **W-37** | §10.5 | the `#2488` merge-blocker paragraph → one rule sentence | It is a status paragraph by its own name ("merge-blocker"); its one rule is extracted. |
 
-## 6.5 Proposed text — §6–§12 (replaces `ONTOLOGY.md` lines 1194–1568)
+### 6.5 Proposed text — §6–§12 (replaces `ONTOLOGY.md` lines 1194–1568)
 
 <!-- PROPOSED:§6 -->
 ````markdown
@@ -2466,10 +2466,10 @@ subject -[:performs]-> events → outcome operators (Event→Point IMPL/NAND)
 ````
 
 > **Approve:** ☐ text as written · ☐ with changes (list them) · ☐ reject (§6–§12 keep their numbers)
-
+>
 > **Approve the wording changes separately:** ☐ W-32 ☐ W-33 ☐ W-34 ☐ W-35 ☐ W-36 ☐ W-37 · ☐ reject all
 
-## 6.6 Anything not classifiable
+### 6.6 Anything not classifiable
 
 **Nothing in §6–§12 is unclassifiable.** Ref coverage:
 
@@ -2492,9 +2492,9 @@ assertion that they need no change.
 
 ---
 
-# Final state — the whole document
+## Final state — the whole document
 
-## F.1 What approval produces
+### F.1 What approval produces
 
 If every batch is approved as written, **applying the seven `<!-- PROPOSED:… -->` blocks in order**
 yields a `docs/ONTOLOGY.md` that:
@@ -2518,7 +2518,7 @@ grep -nE '(epic|issue|PR) [0-9]{2,5}|[0-9]{3,5}-C[0-9]' docs/ONTOLOGY.md # no ou
 The first grep deliberately matches **any** digit run: the `#86` above was invisible to a
 `#[0-9]\{3,5\}` pattern, which is how it survived nine review cycles.
 
-### F.1b Where the −11 lines come from (per batch)
+#### F.1b Where the −11 lines come from (per batch)
 
 | Batch | lines in | lines out | Δ | what removed the lines |
 |---|---|---|---|---|
@@ -2534,7 +2534,7 @@ The first grep deliberately matches **any** digit run: the `#86` above was invis
 gives the document totals: **1,568 → 1,557** (`wc -l`), measured by splicing the blocks into the
 source rather than by adding up the parts.*
 
-## F.2 What is NOT in this proposal (stated so it is not assumed to be)
+### F.2 What is NOT in this proposal (stated so it is not assumed to be)
 
 | Excluded | Why | Consequence |
 |---|---|---|
@@ -2543,7 +2543,7 @@ source rather than by adding up the parts.*
 | **Digits inside real paths** (`tests/test_subject_supersession_1423.py`, the PGlite `9972-cycle` case name) | Renaming a test to satisfy a grep is a code change with its own risk. | These are **not** `#NNNN` and the greps in F.1 stay at 0. |
 | **The four class-A refs inside `ONTOLOGY-CHANGELOG.md`** | That file is the changelog; numbers belong there. | n/a — this proposal only removes numbers from the *model*. |
 
-## F.3 Open policy items collected (each rejectable on its own)
+### F.3 Open policy items collected (each rejectable on its own)
 
 | # | Item | Batch | If rejected |
 |---|---|---|---|
@@ -2561,7 +2561,7 @@ build-gap sentence). If the owner wants a minimal-risk landing, approving **all 
 still removes **306 of 324** references. The 18 that stay are the 17 `#NNNN §x.y` **location
 pointers** that P-1's carve-out protects, plus §4.1's one `#11915`. **No rule moves** in that shape.
 
-## F.4 How the per-section assertions were produced
+### F.4 How the per-section assertions were produced
 
 Every count in this proposal is reproducible, and each was recomputed after every edit — several were
 wrong on the first pass and were corrected (a truncated §3 extraction, an under-counted `#2194`, a
