@@ -12928,7 +12928,7 @@ _COMPLETENESS_CLAIM_RE = re.compile(
 #:   1. reading the bare word (`complete*`, `exhaust*`, `every … row*`) FALSE-BLOCKED THE LIVE BLOCK:
 #:      assertion 1 reads the WHOLE header, and `NO NUMERAL AND NO EXHAUSTIVE ENUMERATION` (the
 #:      block's own rule) matched, as did the TRUE "Every row item above is therefore spelled with
-#:      its path beside it".
+#:      its path beside the word".
 #:   2. reading the adjective (`\bcomplete\s+(?:list|enumeration|set)\b`) FALSE-BLOCKED TRUE PROHIBITION
 #:      PROSE — "⛔ NO COMPLETE LIST OF ROWS IS CLAIMED HERE.", "Never call this a complete list: a
 #:      sweep adds a row." — and the arm's own message then told the maintainer the block FRAMES its
@@ -13017,10 +13017,17 @@ def test_the_fast_shards_header_block_does_not_claim_its_row_list_is_complete():
     # inverse was MEASURED as a real false block, not added for symmetry. All four below are TRUE
     # statements, so a RED here is a false block on correct prose.
     for prohibition in (
+        # Two of these are the fixtures that CATCH attempts 1 and 2; the last two CATCH attempt 3
+        # (its copula form red `DO NOT CLAIM THIS IS A COMPLETE LIST`, its `of every` form red the
+        # `EVERY`-inserted prohibition below). Measured: attempt 3's pattern passes the first four
+        # GREEN and reds the last two, which is why the sentence above can say all THREE attempts
+        # are caught — without those two it certified a reach it did not have (#14623 review P1).
         "A ROW is an entry in `durations` — ⛔ NO COMPLETE LIST OF ROWS IS CLAIMED HERE.",
         "A ROW is an entry in `durations` — never call this a complete list: a sweep adds a row.",
         "A ROW is an entry in `durations` — ⛔ NO NUMERAL AND NO EXHAUSTIVE ENUMERATION here either.",
-        "A ROW is an entry in `durations` — every row item above is spelled with its path beside it.",
+        "A ROW is an entry in `durations` — every row item above is spelled with its path beside the word.",
+        "A ROW is an entry in `durations` — DO NOT CLAIM THIS IS A COMPLETE LIST.",
+        "A ROW is an entry in `durations` — ⛔ NO COMPLETE LIST OF EVERY ROW IS CLAIMED HERE.",
     ):
         assert _COMPLETENESS_CLAIM_RE.search(_unquoted_block(prohibition)) is None, (
             "the completeness-frame pattern FALSE-BLOCKS true prohibition prose "
