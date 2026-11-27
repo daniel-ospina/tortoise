@@ -127,11 +127,18 @@ version: 1
 # the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
 # `watchdog_headroom: 2.03` (1680 / 827.8 = 2.0295), so the two agree by construction rather than
 # by a hand re-read.
+# reader of the prose can see. On THIS tree — the `#14645` fold (`a0be10ac456b`) and the `#14694`
+# fold (`8fd022fdd1c5`) merged in, plus THIS lane's own row (`tests/test_14691_structure_evidence.py`,
+# `core`, at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) — the verb packs nine shards at 827.8 s (a, b, e,
+# f, g, h, i, j, k) and two at 827.7 s (c, d), so `ceil(827.8/60 x 2)` = 28 m governs (a shard's
+# job-level wall clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28`
+# with `watchdog_headroom: 2.03` (1680 / 827.8 = 2.0295), so the two agree by construction rather
+# than by a hand re-read.
 # ⛔ THE PARTITION is stated here, not only the minute, because at this base the move is INVISIBLE
-# to arithmetic: that folded `origin/main` (`a0be10ac456b`) re-derived to all ELEVEN shards at one
-# figure, and this tree splits them NINE and TWO, while the minute is 28 m and the headroom 2.03
-# on BOTH sides — so
-# a check that read only `28 m` would call the move cosmetic and let a figure nobody emits stand.
+# to arithmetic: each folded `origin/main` (`a0be10ac456b`, then `8fd022fdd1c5`) re-derived to all
+# ELEVEN shards at one figure, and this tree splits them NINE and TWO, while the minute is 28 m
+# and the headroom 2.03 on BOTH sides — so a check that read only `28 m` would call the move
+# cosmetic and let a figure nobody emits stand.
 # ⛔ The parent's split is described here by COUNT and by direction on purpose: restating either
 # side as a shard-figure sentence would put a SECOND partition in a block whose guard reads ONE (the
 # `_EMISSION_UNREAD_SENTENCE_RE` arm reds a figure spelled where the clause parser cannot read it),
@@ -140,15 +147,16 @@ version: 1
 # ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
 # own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
 # figures stay on the commit that measured them. The delta is measurable and small: `fast_pool()`
-# holds 1342 files at this head against 1341 on the `origin/main` it folded in (`a0be10ac456b`), read
-# by running the verb on one manifest per side (`origin/main`'s blob and this tree's), and the ONE addition THIS
-# lane brings is `tests/test_14691_structure_evidence.py`, the row registered by the commit that
-# added the T6 bundle's falsifiers. With nothing `main` carries missing from this tree, that one
-# row is the whole delta: measured, `set(fast_pool(head)) - set(fast_pool(main))` returns exactly
-# that file and the reverse difference is empty. ⛔ An earlier revision of this paragraph named a
-# row that was NOT this lane's — `tests/test_13450_ep_position_axis_participation.py` — and at THIS
-# base that file is `main`'s (it landed with its own fold, and `fast_pool(main)` contains it), so
-# reading it as this lane's delta attributes a partition move to a row that had already merged.
+# holds 1342 files at this head against 1341 on the newest `origin/main` it folded in
+# (`8fd022fdd1c5`), read by running the verb on one manifest per side (`origin/main`'s blob and this
+# tree's), and the ONE addition THIS lane brings is `tests/test_14691_structure_evidence.py`, the row
+# registered by the commit that added the T6 bundle's falsifiers. With nothing `main` carries
+# missing from this tree, that one row is the whole delta: measured, `set(fast_pool(head)) -
+# set(fast_pool(main))` returns exactly that file and the reverse difference is empty. ⛔ An earlier
+# revision of this paragraph named a row that was NOT this lane's —
+# `tests/test_13450_ep_position_axis_participation.py` — and at THIS base that file is `main`'s (it
+# landed with its own fold, and `fast_pool(main)` contains it), so reading it as this lane's delta
+# attributes a partition move to a row that had already merged.
 # ⛔ Every OTHER row this tree carries is `main`'s at this head, NOT this lane's (`#14597`'s
 # expansion-fusion row, `#14548`'s residue RATCHET — `tests/test_sdk_privatise_sweep.py` — `#14607`'s
 # `tests/test_mcp_selfcheck.py`, `#14700`'s capture-refusal suite, and the rest): each landed before
