@@ -57,27 +57,6 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `#14721`'s own suite added (`tests/
-# test_14721_superseded_never_outranks.py`, `ep`, at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) — the
-# verb packs nine shards at 827.8 s (a, b, e, f, g, h, i, j, k) and two at 827.7 s (c, d), so
-# `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
-# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
-# (1680 / 827.8 = 2.0295), so the two agree by construction rather than by a hand re-read. The
-# SLOWEST shard moved by 0.2 s (827.6 → 827.8; the two lightest by 0.1 s) and the watchdog did NOT:
-# that is the measured case this guard exists for — a minute-only re-read would have called the
-# carried sentence correct, and the 0.2 s is the figure the watchdog's `ceil` actually reads.
-# ⛔ THAT PAIR IS THIS TREE'S ALONE, and the move is measurable: `fast_pool()` holds 1342 entries
-# here, read by loading this tree's OWN manifest through the verb; `origin/main`'s manifest, loaded
-# the same way at this head, differs by exactly TWO entries and both are named here rather than
-# inferred — `tests/test_14721_superseded_never_outranks.py` (this change's suite, present only
-# here) and `tests/test_14582_creation_hook.py` (a later `main` landing this branch has not folded).
-# ⛔ Every other row this tree carries is `main`'s at this head, NOT this change's
-# (`#14700`'s `tests/test_14700_capture_in_flight_typed_refusal.py`, `#14621`'s
-# `tests/test_14592_read_parity.py`, `#14548`'s residue RATCHET `tests/test_sdk_privatise_sweep.py`
-# — the one `core` row here whose weight is NOT the flat 2.0 s — `#14607`'s
-# `tests/test_mcp_selfcheck.py` and `tests/test_recall_neighborhood.py`): each landed before this
-# fold, and reading one as this change's delta would attribute a partition move to a row that did
-# not cause it. The name lists above are what the guard COMPARES against the live emission
 # reader of the prose can see. On THIS tree — `origin/main` `e2a9c695adfb` folded in, over
 # `a0cea310786d`, the fold THIS BRANCH de-spliced (the de-splice is a commit of this branch's own,
 # not an act that fold performed — the possessive spelling credited it with an edit it never made)
@@ -118,11 +97,22 @@ version: 1
 # (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), `#14671`'s
 # `tests/test_13450_ep_position_axis_participation.py` row in `durations` — `core`-registered — and
 # `#14726`'s dual registration, `tests/test_own_site_fragment_targets.py` row in
-# `durations`, on `core` AND `onboarding` — the verb packs the pool into two bins: nine shards at
-# 827.8 s (a, b, e, f, g, h, i, j, k) and two at 827.7 s (c, d), so
-# `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
-# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
-# (1680 / 827.8 = 2.0295), so the two agree by construction rather than by a hand re-read.
+# `durations`, on `core` AND `onboarding` AND `#14721`'s own suite (`tests/
+# test_14721_superseded_never_outranks.py`, `ep`, at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) — the
+# verb packs the pool into two bins: seven shards at 828.0 s (a, f, g, h, i, j, k) and four at
+# 827.9 s (b, c, d, e), so `ceil(828.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is
+# the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
+# `watchdog_headroom: 2.03` (1680 / 828.0 = 2.0290), so the two agree by construction rather than by
+# a hand re-read. The partition moved by 0.2 s when `#14772`'s pool-split fold landed on this head
+# and the watchdog did NOT move: that is the measured case this guard exists for — a minute-only
+# re-read would have called the carried sentence correct. `fast_pool()` holds 1343 entries here,
+# read by loading this tree's OWN manifest through the verb, and `origin/main`'s manifest loaded the
+# same way differs by exactly ONE entry: this change's suite, present only here.
+# (`tests/test_14582_creation_hook.py` was the second entry in an earlier spelling of this
+# sentence; `main` has folded it since, so the difference is one row. Every other row this tree
+# carries — `#14700`'s, `#14621`'s, `#14548`'s residue RATCHET (the one `core` row whose weight is
+# not the flat 2.0 s) and `#14607`'s — is `main`'s at this head, so reading one as this change's
+# delta would attribute a partition move to a row that did not cause it.)
 # ⛔ THAT `origin/main` FOLD LABEL IS HAND-CHECKED, and it is stated here rather than left
 # implied: it has been wrong REPEATEDLY inside this issue (`90c125a736a0c`, `d6a2104518762`,
 # `cc7b1f3f2c6a3`, `e182b8b8b0cb3`, and `dc479c6f` — ⛔ NOT the correction this head carries: that
@@ -239,19 +229,6 @@ version: 1
 # The name lists are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), and
 # `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
-# derivation, so they are a graded claim about THIS head — re-derived with the verb on every fold,
-# never carried.
-# ⛔ THIS BLOCK ARRIVES SPLICED, REPEATEDLY, and that is mechanical rather than mysterious:
-# `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
-# derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. Measured on
-# this rebase: two copies arrived, one naming `origin/main` `c1c8df1a3817` with `#14700`'s row, one
-# naming the same base with this change's row, and NEITHER described the merged tree (both said
-# 827.4/827.5 and a `fast_pool()` of 1340 against the 827.6 and 1341 that fold's verb emitted).
-# Neither side is picked: both are DELETED and the paragraph above is a fresh re-derivation with
-# `--emit-push-matrix` on this merged tree. Each earlier fold's figures live on the commit that
-# measured them (`git log`), which is where a spliced copy belongs — `#14721` re-derived this block
-# again for the same reason and the figures above are THAT measurement (827.8/827.7, 1342), not this
-# one's.
 # derivation, so they are a graded claim about THIS head — a fold re-derives them with the verb, it
 # never carries them.
 # ⛔ THIS BLOCK ARRIVES SPLICED ON A FOLD THAT RE-DERIVES IT ON BOTH SIDES, and that is mechanical
