@@ -4879,36 +4879,38 @@ def write_live_record(record: Mapping[str, Any], *,
             # corrected by the round-32 review). `allocate` says which WRITE ARM
             # ran, not which CAUSE failed. The four populations that reach here:
             #  1. an OUTAGE — replay heals it, but WHICH FORM depends on the
-            #     cursor ROW: no row replays unchanged (`record_projection.py`,
-            #     `_refuse_an_enumerated_replay`'s sibling note), mode='active'
-            #     needs the allocating form (a cut-over graph REFUSES a plain
-            #     one), and `seeded`/`halted` needs re-seed (+`reopen`) and
-            #     `arm` FIRST or the allocation itself refuses — `UNCUT_GRAPHS_SQL`
-            #     is `no row OR mode <> active`, so `journal_skipped=False` does
-            #     NOT imply an active row.
+            #     cursor ROW: with NO row it replays unchanged; with a row the
+            #     plain (enumerated) replay is REFUSED by
+            #     `_refuse_an_enumerated_replay`, so it takes the ALLOCATING
+            #     form; and a `seeded`/`halted` row takes re-seed (`halted` after
+            #     `reopen`) and then `arm` FIRST, or the allocation itself
+            #     refuses — `UNCUT_GRAPHS_SQL` is `no row OR mode <> active`, so
+            #     `journal_skipped=False` does NOT imply an active row.
             #  2. a `40001`/`40P01`/`57014` on the allocation —
             #     `RetryableAllocationFailure` is raised UNDER `allocate` and is
             #     not in the allocator map, so it lands HERE; its contract is the
             #     OPPOSITE of "re-fails": the server aborted the transaction and
             #     the counter rolled back WITH it, so a replay of the same record
             #     SUCCEEDS. Naming a replay as the fix would be wrong; there is
-            #     nothing to fix. ⛔ `IsolationRefused` is NOT in this group and
-            #     the earlier revision of this block wrongly put it here: it is
-            #     raised by `require_read_committed` BEFORE any statement runs, so
-            #     nothing was aborted and no counter increment exists to roll
-            #     back — every replay RE-RAISES until the transaction isolation is
-            #     fixed, i.e. until the DSN stops asking for a serializable one.
-            #     A reader who edited the shipped text from that sentence would
-            #     have told an operator on such a deployment to do nothing while
-            #     every armed write is refused indefinitely. It is population 4.
+            #     nothing to fix.
             #  3. a statement that EXECUTED and failed on its own data or a
             #     constraint — re-executes and re-fails until that cause is
             #     fixed (#13207's `chk_point_baseline_complete`).
             #  4. a STORE/CONFIG refusal — re-raises on any replay until the DSN
-            #     or the role is fixed; this is where the ISOLATION guard
-            #     (`IsolationRefused`, raised before any statement) belongs, and
-            #     the shipped sentence covers it in the "until the DSN ... is
-            #     fixed" clause.
+            #     or the role is fixed. ⛔ THE ISOLATION GUARD BELONGS HERE, not
+            #     in 2: `IsolationRefused` is raised by `require_read_committed`,
+            #     which runs only when `allocate` is set and BEFORE any statement
+            #     — nothing was aborted and nothing rolled back, so every replay
+            #     that must ALLOCATE (and every armed live write) RE-RAISES until
+            #     the transaction isolation is fixed; the guard requires exactly
+            #     READ COMMITTED, so REPEATABLE READ is refused identically. A
+            #     NON-allocating replay is never asked the isolation question
+            #     (`if allocate: ra.require_read_committed(...)`), so population
+            #     1's no-row clause still applies to it. An earlier revision put
+            #     this class in 2 ("nothing to fix"), which would have told an
+            #     operator on a REPEATABLE READ/SERIALIZABLE deployment to do
+            #     nothing while every armed write is refused indefinitely.
+            #     Population 4's "until the DSN ... is fixed" clause covers it.
             # The earlier revision of this block named only three, asserted a
             # cut-over graph unconditionally, and therefore told population 2 a
             # replay re-fails (false) and population 1's no-row/seeded/halted
