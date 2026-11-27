@@ -12277,7 +12277,7 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The REGISTRATION stays exempt, and the row remains exempt.",
             # ⛔ ONE FIXTURE PER ADMITTED SPELLING, because the run is only as graded as the fixtures
             # that reach it (#14623 review round 25, P3). These spellings are now graded by
-            # `_H_14544_ROW_EXEMPTED_RE` inside `_h_14544_banned_claim` (round 27 replaced the
+            # `_h_14544_row_exempted` inside `_h_14544_banned_claim` (round 27 replaced the
             # enumerated subject-form alternation with that property), and each fixture below is a
             # sentence that really does grant the row the exemption, so removing a copula or an
             # adverb from the property REDs instead of letting the reading `#14612` deletes ship.
@@ -12297,7 +12297,7 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The REGISTRATION remains exempt, and the row remains exempt.",
             "On the record's own numbers this paragraph DOES exclude it."):
         # ⛔ THE ARM'S GUARD SET, not one constant (#14623 round 27): the row-continuation class is
-        # graded by `_H_14544_ROW_EXEMPTED_RE` inside `_h_14544_banned_claim`, the other inverse
+        # graded by `_h_14544_row_exempted` inside `_h_14544_banned_claim`, the other inverse
         # classes by `_H_14544_INVERTED_RE`, and the arm asserts BOTH. A fixture bound to either one
         # reds the moment a class moves between them — grading the IMPLEMENTATION rather than the
         # claim — so this loop drives the pair the arm actually relies on.
@@ -12913,9 +12913,9 @@ _COMPLETENESS_CLAIM_RE = re.compile(
 #: ⛔ DECLARED RESIDUAL — what this pattern does NOT grade, and why three widenings were REFUSED on
 #: measurement rather than attempted a fourth time (#14623 review). It reads three phrases, all of
 #: them this block's own RETRACTION wording, so a completeness frame spelled ANY OTHER WAY ships
-#: GREEN. That is declared here, in the block's own convention (the `#14560` role split and the
-#: `#14544` pronoun-object paraphrase are declared the same way), because every wider form was
-#: falsified:
+#: GREEN. That is declared here, in the block's own convention (the `#14544` pronoun-object
+#: paraphrase is declared the same way at the `_h_14544_banned_claim` arms), because every wider
+#: form was falsified:
 #:
 #: MEASURED GREEN over this pattern — four live frames (injected into the block header, whole arm
 #: run, 0/8 arms in the family RED for each):
