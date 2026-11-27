@@ -4738,7 +4738,7 @@ def write_live_record(record: Mapping[str, Any], *,
             # keys on (`record_projection.py:9122`); `position_unverifiable` is
             # exempt by its OWN guard (`and not journal_skipped`, :4281) rather
             # than by reachability; and `position_divergence` is unreachable FROM
-            # `live_write`, which passes `seq=None` whenever it sets this flag
+            # `live_write` only WHEN IT SETS THIS FLAG, which passes `seq=None`
             # (`live_write.py:650`) — but NOT from a direct caller that passes
             # both, which the suite itself does and now pins, so its WHOLE
             # message is selected by the flag rather than being exempt — on that
