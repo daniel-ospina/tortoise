@@ -1562,10 +1562,19 @@ def test_arm_i_outside_census_set_is_STRANDED_across_a_watcher_restart():
     process saw on a previous CONFIRMED poll (#9938 round 9).
 
     Modelled the way production runs it (`hosted_api._alert_store_from` →
-    `_backup_storage()`): ONE persistent alert store over ONE storage, two
-    watcher PROCESSES. That sharing is load-bearing — with a fresh store per
-    process a carried register would still close nothing, and the test would be
-    green under the exact mutation it guards (found by review round 9).
+    `_backup_storage()`): ONE persistent storage behind the alert store, two
+    watcher PROCESSES. Two details are load-bearing, and the first version of
+    this test got them wrong (round 9 measured it green under the mutation it
+    named):
+
+    * the DEDUP object lives in the alert store's STORAGE, not on the store
+      object — so a fresh `AlertStore` over the same storage still finds it and
+      would still close the incident. What strands the subject is a fresh
+      STORAGE, which is what `_watcher()` builds (its own `MemoryStorage` per
+      call), and that is why the round-9 version was blind;
+    * the `_alert_leg` SPY is what makes an attempt visible at all: it records
+      `resolve_incident` whether or not a dedup object exists, so a carried
+      register reds `bsm_resolves == []` independently of the store's state.
 
     Without a restart the incident closes
     (`test_watcher_backup_set_missing_closes_when_the_state_disappears`); with
