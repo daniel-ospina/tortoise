@@ -1306,6 +1306,40 @@ def test_a_mapping_valued_property_CLEARS_on_the_EntityMutated_patch_too():
     assert "content = %s" in sql, f"the rest of the patch must land: {sql}"
 
 
+def test_only_the_verbatim_patch_feeds_can_carry_a_mapping_flatten_key():
+    """#11783 round 28 P3 — the SCOPE of `patch=True`, made mechanical.
+
+    `_split_properties(patch=True)` is passed by the whole `NodePatch` feed, so
+    the docstring names EIGHT record types; the load-bearing claim is narrower —
+    a Mapping-valued ``_POINT_FLATTEN_COLUMNS`` key can only ARRIVE on the two
+    feeds that copy arbitrary caller props verbatim (`from_payload is None`:
+    `PointRevised`, `OperatorAnnotated`) or on the `EntityMutated` arm, whose
+    `state` map is written as it stands. The other five NodePatch records
+    declare their keys, and if one ever declared a flatten column this leg — not
+    the prose — is what should redden.
+    """
+    verbatim = []
+    for name, mutation in record_projection.RECORD_MUTATIONS.items():
+        effect = mutation.effect
+        if type(effect).__name__ != "NodePatch":
+            continue
+        if getattr(effect, "from_payload", None) is None:
+            verbatim.append(name)
+            continue
+        declared = set(effect.from_payload) | {k for k, _ in effect.renames}
+        assert not (declared & record_projection._POINT_FLATTEN_COLUMNS), (
+            f"{name} declares a flatten column as a typed patch key, so a "
+            "Mapping can reach the split from a DECLARED feed — the docstring's "
+            "'only the verbatim feeds' scope is now false for it; either widen "
+            "the rule or drop the key")
+    assert set(verbatim) == {"PointRevised", "OperatorAnnotated"}, (
+        "the verbatim (`from_payload is None`) NodePatch feeds moved: "
+        f"{sorted(verbatim)} — the `patch=True` docstring in "
+        "`record_projection._split_properties` names this set, and "
+        "`OperatorAnnotated` is the member whose fold writes annotator dims "
+        "only (so there the record CLEARS what the node keeps)")
+
+
 class _FakeConn:
     """Enough of a connection for the door to open, fail and dispose of one."""
 
@@ -1377,6 +1411,9 @@ class _ScopeBlindCursor:
     27 P2): `journal_skipped=True` IMPLIES `allocate`, and the allocator's
     isolation gate (`record_allocator._assert_read_committed`) opens its own
     cursor and `close()`s it in a `finally` BEFORE `_apply_tenant_scope` runs.
+    (The gate is `record_allocator.require_read_committed`, called from
+    `record_projection.py:9082`; a first version of this note cited
+    `_assert_read_committed`, a symbol that does not exist — #11783 round 28 P3.)
     A fake with no `close()` therefore died in that `finally` with
     `AttributeError: '_ScopeBlindCursor' object has no attribute 'close'` — so
     the arm this leg claims to grade (a scope refusal, a STORE/CONFIG fact

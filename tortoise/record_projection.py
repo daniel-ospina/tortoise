@@ -3796,7 +3796,17 @@ def _split_properties(
     col = %s`), not a create-or-update upsert. It reaches exactly one rule — a
     Mapping-valued ``_POINT_FLATTEN_COLUMNS`` key, whose two graph doors differ
     and whose record half must match the door it shares a record type with
-    (#11783, measured: see `_record_column_value`). ⛔ TWO FEEDS ONLY — `PointRevised`, `EntityMutated`; `OperatorAnnotated` rides the same `from_payload is None` branch but folds annotator dims only, so there this CLEARS what the node keeps.
+    (#11783, measured: see `_record_column_value`). ⛔ WHICH RECORDS IT CAN
+    REACH: `patch=True` is passed by the whole `NodePatch` feed and by the
+    `EntityMutated` patch arm, so EIGHT record types reach it — `PointRevised`,
+    `EntityMutated`, `OperatorAnnotated`, `BatchIdStamped`, `PointRetracted`,
+    `PointSuperseded`, `PointInvalidated`, `ObjectSuperseded`. Only two can
+    carry a MAPPING-valued flatten key: `PointRevised` (verbatim caller props,
+    `from_payload=None`) and `EntityMutated` (the whole applied `state` map).
+    `OperatorAnnotated` rides the same `from_payload is None` branch but its
+    fold writes annotator dims by direct `SET`, so there this CLEARS what the
+    node keeps; the other five declare their keys (`from_payload` / `renames` /
+    `literals`) and none of them is a flatten column.
     """
     cols = columns[table]
     refused_here = refused.get(table, frozenset())

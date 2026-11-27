@@ -4842,12 +4842,19 @@ def write_live_record(record: Mapping[str, Any], *,
                 # OUTAGE (replay heals it), a STATEMENT that executed and failed
                 # on the record's own data (a replay RE-EXECUTES and re-fails
                 # until the data or the constraint is fixed), and the
-                # store/CONFIG refusals the note above enumerates (a replay
-                # re-raises until the DSN/role is fixed). The cursor row is a
-                # THIRD axis, not the only one.
+                # STORE/CONFIG refusals raised on the far side of the plan build
+                # (`_apply_tenant_scope`'s read-back and the role posture, the
+                # cutover guard's own SELECT — a replay re-raises until the
+                # DSN/role is fixed). Those are THREE causes; the cursor row is
+                # an INDEPENDENT axis across all of them, not a fourth. ⛔ EACH
+                # CAUSE IS NAMED IN THE SHIPPED SENTENCE, not only here — a
+                # comment does not reach the operator (round 28 P2).
                 "an OUTAGE is healed by a replay; a statement that EXECUTED and "
                 "failed re-fails until its own cause (its data or a constraint) "
-                "is fixed; and an ENUMERATED replay is refused when this graph "
+                "is fixed; a STORE/CONFIG refusal (the tenant scope, a role that "
+                "bypasses RLS, the cutover guard's own read) re-raises until "
+                "the DSN or the role is fixed, on any replay; "
+                "and an ENUMERATED replay is refused when this graph "
                 "has a `record_cursor` row (cut over) — the remedy is then the "
                 "one that refusal names for the row's MODE, not a chain that "
                 "assumes `active`: `replay(allocate=True)` needs mode='active' "

@@ -3216,18 +3216,28 @@ def test_the_write_path_vocabulary_does_not_call_a_statement_failure_an_outage()
     failure read as a transport outage), one layer down in the module that
     calls itself the vocabulary's ONE home.
 
-    Mutation (MEASURED): restore the pre-fix bullet — *"``write_failed`` is the
-    record being UNREACHABLE, or a connection/statement failing — ``degraded``
-    literally;"* — and the FIRST assertion reddens, on the case: that text spells
-    the half ``unreachable`` while the needle is ``UNREACHABLE``. ⛔ THAT IS A
-    CASE PIN, NOT THIS FINDING'S DISCRIMINATOR (#11783 round 27 P3): the base
-    bullet already carried both ``not an outage`` and a ``statement`` mention, so
-    restoring it cannot grade the new claim. The needle that does is ``FOR THAT
-    HALF`` — the ``degraded``-literal scope added here; deleting it from the
-    current bullet reddens the fourth assertion (MEASURED, in-process, without
-    touching the tree: ``sv.__doc__.replace("FOR THAT HALF", "FOR THAT")`` →
-    red), while dropping the word ``statement`` alone does NOT red (MEASURED:
-    it survives), so do not read that needle as the proof.
+    ⛔ FOUR ASSERTIONS, FOUR DIFFERENT READINGS — measured in-process against
+    this module's own ``__doc__`` (no tree edit; re-measured 2026-11-27, #11783
+    round 28):
+
+    * the branch's PREDECESSOR bullet (``* ``write_failed`` is the record being
+      UNREACHABLE, or a connection/statement failing — ``degraded``
+      literally;``, `427e410f91`) reddens the THIRD assertion first — it has no
+      ``not an outage`` clause; the first assertion is GREEN on it, because it
+      spells the half ``UNREACHABLE`` upper-cased, not lower-cased;
+    * ``origin/main``'s two-cause bullet reddens the FIRST (it says
+      ``unreachable`` lower-cased), the SECOND (no ``statement`` at all) and the
+      fourth;
+    * dropping the word ``statement`` from the CURRENT bullet reddens the SECOND
+      alone — that needle IS load-bearing;
+    * ``FOR THAT HALF`` → ``FOR THAT`` reddens the FOURTH alone, the scope of
+      the ``degraded``-literal claim.
+
+    ⚠️ An earlier revision of this note claimed the predecessor bullet reddened
+    the FIRST assertion, then claimed ``statement`` could be dropped without
+    going red and that the predecessor already carried ``not an outage``. Each
+    of those is false at source and each was a review finding applied without
+    re-measuring the mutation it names — do not re-instate them.
     """
     from tortoise import status_vocabulary
 
@@ -3253,6 +3263,61 @@ def test_the_write_path_vocabulary_does_not_call_a_statement_failure_an_outage()
         "says `circuit_open` is, and the size sentence derives its count as "
         "the members that are NOT a measured outage); if the wording moved, "
         "update this needle rather than dropping the scope")
+
+    # ⛔ THE MUTATION TABLE ABOVE IS ENFORCED HERE, not merely written down:
+    # two revisions of this docstring stated mutations that were never
+    # re-measured (round 27 P3, round 28 P2). `_write_failed_bullet_reds` is the
+    # shared definition of the four needles, and each historical bullet below is
+    # the RECORDED text it claims to be, so a needle edit that invalidates the
+    # table reddens this leg instead of leaving a false claim for the next
+    # reviewer to trust.
+    assert _write_failed_bullet_reds(bullet) == [], (
+        "the four assertions above and `_write_failed_bullet_reds` disagree — "
+        "they are two copies of ONE definition; update both")
+    assert _write_failed_bullet_reds(PREDECESSOR_WRITE_FAILED_BULLET) == [3, 4], (
+        "the predecessor bullet no longer reddens the THIRD and FOURTH "
+        "assertions — re-measure the table in this docstring rather than "
+        "re-stating it (it has been wrong twice)")
+    assert _write_failed_bullet_reds(ORIGIN_MAIN_WRITE_FAILED_BULLET) == [1, 2, 4]
+    assert _write_failed_bullet_reds(
+        bullet.replace("STATEMENT", "THING").replace("statement", "thing")
+    ) == [2], (
+        "dropping the word `statement` must red the SECOND assertion alone — "
+        "an earlier note claimed it survived; it does not")
+    assert _write_failed_bullet_reds(
+        bullet.replace("FOR THAT HALF", "FOR THAT")
+    ) == [4], (
+        "`FOR THAT HALF` must be the FOURTH assertion's discriminator")
+
+
+# The three bullets the docstring above grades. Recorded VERBATIM so the table
+# is a measurement over text that cannot drift with the branch.
+PREDECESSOR_WRITE_FAILED_BULLET = (
+    "* ``write_failed`` is the record being UNREACHABLE, or a "
+    "connection/statement failing — ``degraded`` literally;")
+ORIGIN_MAIN_WRITE_FAILED_BULLET = (
+    "* ``write_failed`` covers two causes: the record was unreachable\n"
+    "  (``degraded`` literally), OR the record was reached and refused the\n"
+    "  projection — an impairment, not an outage;")
+
+
+def _write_failed_bullet_reds(bullet: str) -> list[int]:
+    """Which of the four assertions above red on ``bullet``, 1-based.
+
+    The shared definition of the needles, so the mutation table in
+    ``test_the_write_path_vocabulary_does_not_call_a_statement_failure_an_outage``
+    is measured rather than asserted in prose.
+    """
+    reds = []
+    if "UNREACHABLE" not in bullet:
+        reds.append(1)
+    if "statement" not in bullet.lower():
+        reds.append(2)
+    if "not an outage" not in bullet:
+        reds.append(3)
+    if "FOR THAT HALF" not in bullet:
+        reds.append(4)
+    return reds
 
 
 # ── the demo seeders are writers too (the population, not the capture path) ──

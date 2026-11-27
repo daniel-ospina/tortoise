@@ -1249,17 +1249,25 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
                 f"{text[-400:]!r}")
         else:
             # ⛔ EVERY CLAUSE OF THE SPLIT IS PINNED, because this sentence is
-            # read on ALL THREE populations (an outage, a statement that
-            # executed and failed, a store/CONFIG refusal) and the exception
-            # driven here is the middle one. The old text pinned nothing and
-            # claimed the first for all three.
+            # read on THREE populations (an outage, a statement that executed
+            # and failed, a store/CONFIG refusal) and the exception driven here
+            # is the middle one. The old text pinned nothing and claimed the
+            # first for all three. ⚠️ The store/CONFIG clause is pinned too —
+            # before round 28 this leg asserted two of the three and the third
+            # lived only in a code comment, so a regression that dropped it from
+            # the SHIPPED sentence was invisible.
             assert "an OUTAGE is healed by a replay" in text, (
                 "the ENUMERATED arm stopped naming the outage half — a replay "
                 f"IS the remedy there: {text[-400:]!r}")
             assert "statement that EXECUTED and failed re-fails" in text, (
-                "the ENUMERATED arm still promises a heal to the ONE class "
-                "that lands on it without one — a `RecordStatementError` "
-                f"re-fails on a replay: {text[-400:]!r}")
+                "the ENUMERATED arm still promises a heal to a statement that "
+                "executed and failed — a `RecordStatementError` re-fails on a "
+                f"replay: {text[-400:]!r}")
+            assert "STORE/CONFIG refusal" in text, (
+                "the ENUMERATED arm does not name the store/CONFIG half of its "
+                "own population: a tenant-scope/role refusal raised after the "
+                "plan build also lands on `write_failed`, and its remedy is a "
+                f"DSN/role fix, not any replay: {text[-400:]!r}")
             assert "a replay heals the record" not in text, (
                 "the blanket 'a replay heals the record' claim is back on a "
                 "population that includes a statement that executed and "
