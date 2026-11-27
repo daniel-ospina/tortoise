@@ -57,9 +57,11 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — the LAST `origin/main` fold on this branch, plus THIS
-# lane's own row (`tests/test_14691_structure_evidence.py`, `core`, at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) — the verb packs seven shards at 828.0 s (a, f, g, h, i, j, k) and four at
+# reader of the prose can see. On THIS tree — the LAST `origin/main` fold on this branch, which
+# ALREADY carries `tests/test_14691_structure_evidence.py` (`core`, at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`) as #14723's row, not as this lane's (#14587 review cycle 11, P2: the
+# possessive spelling here credited the fold's own row to this branch, and the two manifests are
+# byte-identical, so the fold brought it in) — the verb packs seven shards at 828.0 s (a, f, g, h, i, j, k) and four at
 # 827.9 s (b, c, d, e), so `ceil(828.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is
 # the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
 # `watchdog_headroom: 2.03` (1680 / 828.0 = 2.0290) on every one of the eleven shards, so the two
@@ -126,7 +128,8 @@ version: 1
 # `tests/test_13450_ep_position_axis_participation.py` row in `durations` — `core`-registered — and
 # `#14726`'s dual registration, `tests/test_own_site_fragment_targets.py` row in
 # `durations`, on `core` AND `onboarding`. ⛔ NO emission is restated HERE: the merged tree's
-# partition is the re-derivation above (this lane's own row is in the pool), and this list is the
+# partition is the re-derivation above (#14723's `tests/test_14691_structure_evidence.py` is in the
+# pool — the fold's row, not this lane's), and this list is the
 # rows it carries — a second spelling of the bins is the splice this block refuses.
 # ⛔ THAT `origin/main` FOLD LABEL IS HAND-CHECKED, and it is stated here rather than left
 # implied: it has been wrong REPEATEDLY, each time caught by a reader rather than by a gate. ⛔ THE
