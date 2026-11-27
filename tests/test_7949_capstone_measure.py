@@ -12465,21 +12465,37 @@ _MEMBERSHIP_CMD_RE = re.compile(
     # number three other claims quote.
     r"(?:numstat|name-only|name-status) origin/main\.\.\.HEAD -- "
     r"docs/epics/2026-11-04-7949-extractor-v4-capstone/(?P<path>[0-9A-Za-z._-]+\.md)`"
-    # ⛔ 120, not 60 (#14587 review P2): at 60 the tail was cut off mid-verdict — measured on
-    # `05-verify.md`, the D5 row's own sentence reached the window's edge at
-    # `" -> `1 1` at this head, and the EMPTY reading this clause us"`, so a verdict written
-    # past the 60th character was unread by construction rather than absent.
-    r"(?P<tail>[^;]{0,120})"
+    # ⛔ A SENTENCE-SCALE WINDOW, AND PINNED (#14587 review cycle 2, P2/P3 — MEASURED). The
+    # window was 60 and then 120; neither is a bound anything graded, and at both widths a
+    # verdict stated further from its command was invisible. Measured with a shape-based
+    # detector: the D5 row's own sentence put `prints NOTHING` ~230 characters after the
+    # closing backtick, and BOTH 60 and 120 read it as `([], [])` while 400 reads it. It is 400
+    # because that is past the longest in-scope tail at this head, and because the arm below
+    # now carries a fixture whose verdict starts beyond 200 — so a silent revert re-opens a red
+    # rather than a hole.
+    # ⛔ WHAT IT CANNOT SEE, declared rather than implied: the tail stops at a `;`, so a verdict
+    # after one is unread; and it stops at 400 characters, so a verdict a paragraph away from
+    # its command is unread. A future head that needs a wider window must re-pin the fixture
+    # with it, not widen the number alone.
+    r"(?P<tail>[^;]{0,400})"
 )
 
-#: The two spellings the documents used for "this file is in no part of this diff".
-_NEGATIVE_MEMBERSHIP_VERDICTS = ("prints NOTHING", "is EMPTY")
+#: The spellings the documents used for "this file is in no part of this diff".
+#: ⛔ A SHAPE, NOT A STRING, and CASE-FOLDED (#14587 review cycle 2, P2 — MEASURED): as a tuple
+#: of literals this read `prints NOTHING` / `is EMPTY` exactly, so `prints nothing` in lower case
+#: parsed as `([], [])` and the arm was green over it. A guard whose refusals are spelled as
+#: literals refuses only the heads that happen to reuse the same capitals.
+_NEGATIVE_MEMBERSHIP_VERDICTS = re.compile(r"prints\s+nothing|is\s+empty", re.IGNORECASE)
 
-#: The spellings a document uses for a MEASURED pair. ⛔ BOTH, and the second one is the
-#: bug (#14587 review P2): the documents write `-> `1 1``, the detector read `prints `1 1``
-#: only, so the one live claim on this head was classified by NOTHING while the fixture below
-#: — cut from the retired assertion's spelling — kept the arm's own mutation test green.
-_POSITIVE_MEMBERSHIP_VERDICTS = ("prints `1 1`", "-> `1 1`")
+#: The spellings a document uses for a MEASURED pair.
+#: ⛔ A SHAPE, NOT THE NUMBER (#14587 review cycle 2, P2 — MEASURED): this read the literal
+#: digits `1 1`, while the assertion it feeds claims to refuse ANY typed pair — and the numbers
+#: are EXACTLY what rots, so the only pair a future head can produce is one this arm could not
+#: read. Measured: `-> `150 43``, `-> `47 40`` and `-> `23 0`` each parsed as `([], [])`, and the
+#: graded document already carried every one of those figures (`grep -o` -> 1 each). `-> ` and
+#: `prints ` are the two verbs the bundle uses; the digits are `\d+` so a re-typed pair cannot
+#: slip through by changing its numbers, which is the one thing a re-typed pair always changes.
+_POSITIVE_MEMBERSHIP_VERDICTS = re.compile(r"(?:prints|->)\s*`\d+\s+\d+`")
 
 
 def _membership_claims(doc_text: str) -> tuple[list[str], list[str]]:
@@ -12493,9 +12509,9 @@ def _membership_claims(doc_text: str) -> tuple[list[str], list[str]]:
     positive: list[str] = []
     for match in _MEMBERSHIP_CMD_RE.finditer(doc_text):
         tail = match.group("tail")
-        if any(verdict in tail for verdict in _NEGATIVE_MEMBERSHIP_VERDICTS):
+        if _NEGATIVE_MEMBERSHIP_VERDICTS.search(tail):
             negative.append(f"{match.group('path')} -> {tail.strip()[:70]!r}")
-        elif any(verdict in tail for verdict in _POSITIVE_MEMBERSHIP_VERDICTS):
+        elif _POSITIVE_MEMBERSHIP_VERDICTS.search(tail):
             positive.append(f"{match.group('path')} -> {tail.strip()[:70]!r}")
     return negative, positive
 
@@ -12538,12 +12554,18 @@ def test_no_bundle_document_states_a_negative_membership_claim_it_cannot_keep():
         for claim in positive:
             failures.append(f"{name}: TYPED PAIR {claim}")
     assert not failures, (
-        "a bundle document states a membership verdict about a file in this diff — negative "
-        "(`prints NOTHING` / `is EMPTY`) or a TYPED PAIR. Membership changes with every commit "
-        "that touches that file, and `2bedbc41` / the D5 row each made their own sentence FALSE "
-        "two lines away from the repair it was describing, in one polarity and then the other. "
-        "Neither figure survives a fold: ROUTE the question to the command that answers it and "
-        "let a reader re-run it. Measured: "
+        "a bundle document states a membership verdict about one of THIS bundle's own "
+        "documents — negative (any `prints nothing` / `is empty`, any case) or a TYPED PAIR "
+        "(`-> `N M`` / `prints `N M``, which is graded as a SHAPE, not as this head's digits). "
+        "⛔ THE SCOPE IS THESE TWO DOCUMENTS, and the message says so rather than claiming "
+        "\"a file in this diff\": the path group above is pinned to this bundle's directory, so a "
+        "`prints NOTHING` about `tortoise/sdk.py` elsewhere in the file is NOT read here and is "
+        "not what this arm asserts (#14587 review cycle 2, P3 — the earlier wording over-claimed "
+        "that scope). Membership changes with every commit that touches the named file, and "
+        "`2bedbc41` / the D5 row each made their own sentence FALSE two lines away from the "
+        "repair it was describing, in one polarity and then the other. Neither figure survives a "
+        "fold: ROUTE the question to the command that answers it and let a reader re-run it. "
+        "Measured: "
         f"{failures}")
 
 
@@ -12616,6 +12638,50 @@ def test_the_membership_detectors_fire_on_the_sentences_that_actually_shipped():
     assert positive3 and not negative3, (
         "the detector does not parse the spelling the DOCUMENTS use (`-> `1 1``), so the live "
         f"affirmative claim is graded by nothing — negative={negative3} positive={positive3}")
+    # ⛔ THE SHAPES, NOT THIS HEAD'S NUMBERS (#14587 review cycle 2, P2 — MEASURED). A pair
+    # detector pinned to `1 1` refuses exactly one pair, and the numbers are the ONE thing a
+    # re-typed pair always changes — so the fixture below is a DIFFERENT pair, and it is one the
+    # graded document already carried (`grep -o '150 43'` -> 1 at `c8a0ad91`).
+    other_pair = (
+        "`git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` -> `150 43` "
+        "at that head")
+    negative4, positive4 = _membership_claims(other_pair)
+    assert positive4 and not negative4, (
+        "the pair detector is pinned to the literal digits `1 1`, so a re-typed pair — the only "
+        "form a future head can produce, since the numbers are what rot — is graded by NOTHING. "
+        f"negative={negative4} positive={positive4}")
+    # ⛔ AND CASE-FOLDED: `prints nothing` in lower case parsed as `([], [])` while the fixture
+    # above used capitals, which is a guard that refuses only the spellings that reuse a dead
+    # head's capitals.
+    lower_negative = (
+        "`git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints nothing here")
+    negative5, _ = _membership_claims(lower_negative)
+    assert negative5, (
+        "the negative detector is case-SENSITIVE, so a lower-case `prints nothing` claim is "
+        f"graded by nothing — negative={negative5}")
+    # ⛔ AND THE WINDOW IS PINNED, because a window nothing grades is a window that silently
+    # reverts (#14587 review cycle 2, P3): this fixture puts the verdict past character 200 —
+    # the distance the D5 row's own sentence actually used — so shrinking the window back to
+    # 60 or 120 REDS here instead of quietly re-opening the hole.
+    far_verdict = (
+        "`git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` is the command, and "
+        "writing its answer into this sentence is what produced two refuted polarities inside "
+        "one clause in the very same row that states the verdict is deleted in both polarities "
+        "and that no replacement pair is typed here, so at this head the command prints NOTHING "
+        "and the remedy is the command itself")
+    gap = far_verdict.index("prints NOTHING") - far_verdict.index("`", 1)
+    assert gap > 200, (
+        "fixture rot: this fixture exists to put the verdict past character 200 — the distance "
+        f"the D5 row's own sentence used — and the verdict sits only {gap} characters after the "
+        "command, so it would no longer grade the window it was written for")
+    negative6, _ = _membership_claims(far_verdict)
+    assert negative6, (
+        "the tail window has been narrowed below the distance a real sentence puts its verdict "
+        f"from its command (measured {gap} characters here), so the claim is unread and the arm "
+        f"is green over it — negative={negative6}")
     # ⛔ AND THE SUBJECT IS ASSERTED, not assumed: an arm over a document that contains no
     # membership command reads NOTHING and passes — measured before this line existed, the arm
     # yielded `negative=0 positive=0` over a `05-verify.md` that carried four commands and one
