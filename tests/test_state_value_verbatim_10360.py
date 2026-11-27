@@ -31,6 +31,7 @@ What this file pins, and why each pin is here rather than in a comment:
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
 import json
 import pathlib
@@ -7727,6 +7728,33 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
         "committed draws — the row's 'no direction is supported' clause must be "
         "re-derived rather than left standing")
 
+    # 7b. ⛔ AND THE FIVE MAGNITUDES THAT SENTENCE RESTS ON ARE PINNED TOO
+    #     (`#14774` review cycle 5, MEASURED). The checks above recompute their
+    #     own extremes and never read the row's prose, so every one of these
+    #     five could be perturbed to a value the receipts contradict and the
+    #     suite stayed GREEN (measured on the pre-fix head: `40–50` -> `30–55`,
+    #     `37–50` -> `31–56`, `5.75-unit` -> `9.75-unit`, `13-unit` ->
+    #     `4-unit`, `90 graded units` -> `84 graded units`, all green). They are
+    #     the row's evidence that the bar is not resolvable at this sample size —
+    #     i.e. the numbers that license "no direction is supported" — so they are
+    #     derived figures like any other and get the same exactly-once pin.
+    _stated_once(
+        f"{min(r['survived'] for r in on)}\u2013{max(r['survived'] for r in on)}",
+        "the flags-on draws' span, which is why the bar sits INSIDE it")
+    _stated_once(
+        f"{min(r['survived'] for r in on + off)}\u2013"
+        f"{max(r['survived'] for r in on + off)}",
+        "the six draws' between-run span")
+    _stated_once(
+        f"{_count(abs(on_mean - off_mean))}-unit",
+        "the separation between the two arm means")
+    _stated_once(
+        f"{spread}-unit",
+        "the between-run range the mean separation is compared against")
+    _stated_once(
+        f"{base_total} graded units",
+        "the corpus size the power statement names")
+
     # 8. the reading this replaces must be gone, not merely supplemented: the
     #    old clause asserted BOTH that the figure was not re-measured and that
     #    it was unmeasurable, and a row carrying both stories is how a future
@@ -7807,17 +7835,20 @@ def test_the_e2_off_arm_definition_uses_the_REAL_kill_switch(monkeypatch):
         " — an unset default-ON switch is the ON arm")
 
 
-def _arming_switches_read_by(fn) -> set[str]:
-    """The `TORTOISE_*` env names a production arming function reads — from CODE.
+_SWITCH_NAME = re.compile(r"TORTOISE_[A-Z0-9_]+")
 
-    ⛔ Docstrings are excluded on purpose: they NAME sibling switches in prose
+
+def _docstring_node_ids(tree: ast.AST) -> set[int]:
+    """The `id()`s of the constant nodes that ARE docstrings in `tree`.
+
+    These are excluded from every literal scan below, and that exclusion is
+    load-bearing rather than tidy: docstrings NAME sibling switches in prose
     (`_s2_seam_armed`'s mentions `TORTOISE_CLASSIFY_LATER`, which arms S2.3 and
-    does not arm the pass), so a source scan that counted string constants
-    everywhere would red on prose that is correct. Only constants in executable
-    position count, which is exactly what a new arming read is.
+    does not arm the pass), so a scan that counted string constants everywhere
+    would red on prose that is correct. A constant in executable position is
+    exactly what a new arming read looks like.
     """
-    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
-    docstring_nodes = set()
+    ids = set()
     for node in ast.walk(tree):
         # statement-list bodies only: `ast.Lambda.body` is an EXPRESSION, so a
         # bare `getattr(node, "body")` walks into a Constant and subscripts it.
@@ -7825,18 +7856,125 @@ def _arming_switches_read_by(fn) -> set[str]:
                                  ast.AsyncFunctionDef, ast.ClassDef)):
             continue
         body = node.body
-        if not body:
-            continue
-        first = body[0]
-        if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
-                and isinstance(first.value.value, str)):
-            docstring_nodes.add(id(first.value))
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            ids.add(id(body[0].value))
+    return ids
+
+
+def _switch_literals(node: ast.AST, *, skip: set[int] | None = None) -> set[str]:
+    """The `TORTOISE_*` names written as string literals inside `node`."""
+    skip = skip or set()
     return {
-        node.value for node in ast.walk(tree)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
-        and id(node) not in docstring_nodes
-        and re.fullmatch(r"TORTOISE_[A-Z0-9_]+", node.value)
+        n.value for n in ast.walk(node)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        and id(n) not in skip and _SWITCH_NAME.fullmatch(n.value)
     }
+
+
+def _resolve_expr(expr: ast.AST, namespaces: list[dict]):
+    """Resolve `name` / `mod.name` / `mod.name.attr` against the given namespaces."""
+    if isinstance(expr, ast.Name):
+        for namespace in namespaces:
+            if expr.id in namespace:
+                return namespace[expr.id]
+        return None
+    if isinstance(expr, ast.Attribute):
+        base = _resolve_expr(expr.value, namespaces)
+        return getattr(base, expr.attr, None) if base is not None else None
+    return None
+
+
+def _local_import_aliases(tree: ast.AST) -> dict:
+    """`s2_decision_seam` -> the module, for `from tortoise import s2_decision_seam`.
+
+    ⛔ Needed because one arming term imports its module INSIDE the function
+    (`_s2_seam_armed` does), so the name is not in that function's globals and a
+    globals-only resolver would silently stop the walk there — the switch would
+    be missed and the pin would pass over exactly the shape it exists for.
+    """
+    aliases: dict = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        package = "." * node.level + (node.module or "")
+        try:
+            base = importlib.import_module(package)
+        except Exception:
+            continue
+        for alias in node.names:
+            # `from <pkg> import <name>` binds EITHER a submodule or an
+            # attribute, and a lazily-imported submodule is not an attribute of
+            # its package until something imports it — so try the SUBMODULE
+            # first. Without this the walk stops at `s2_decision_seam` and the
+            # seam switch is missed (measured: it is the case this pin exists
+            # for, and the sanity assertion below caught it).
+            try:
+                bound = importlib.import_module(f"{package}.{alias.name}")
+            except Exception:
+                bound = getattr(base, alias.name, base)
+            aliases[alias.asname or alias.name] = bound
+    return aliases
+
+
+def _arming_switches_in(node: ast.AST, *namespaces: dict,
+                        depth: int = 0, seen: set | None = None) -> set[str]:
+    """Every `TORTOISE_*` switch the arming expression `node` reads, transitively.
+
+    ⛔ **Scans the COMPOSITION, not a hand-written list of resolvers** (`#14774`
+    review cycle 5, MEASURED). The first version of this pin named five
+    functions — so a new term added to the OR that actually decides
+    `vet_enabled` (`extractor_v2.extract_session_v2:14797`, the very line
+    `ARM_SWITCHES`'s own docstring says the tuple mirrors) went undetected, and
+    so did a switch read through a module-level constant (the house style of two
+    of the three existing terms). Both are covered here: literals in the
+    expression, then each callee it names resolved in its own module and
+    followed, with `Name` references resolved through the module globals and
+    through function-local imports.
+    """
+    seen = set() if seen is None else seen
+    reads = _switch_literals(node, skip=_docstring_node_ids(node))
+    callees: list = []
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name):
+            for namespace in namespaces:
+                value = namespace.get(sub.id)
+                if isinstance(value, str) and _SWITCH_NAME.fullmatch(value):
+                    reads.add(value)
+        elif isinstance(sub, ast.Call) and depth < 6:
+            target = _resolve_expr(sub.func, list(namespaces))
+            # ⛔ `isfunction`, deliberately NOT `ismethod`: `os.environ.get` is a
+            # BOUND METHOD inherited from `Mapping` (a Python function), so
+            # accepting methods walks into the stdlib and dies on
+            # `inspect.getsource`. An arming read is a module-level `def`.
+            if (target is not None and id(target) not in seen
+                    and inspect.isfunction(target)):
+                seen.add(id(target))
+                callees.append(target)
+    for target in callees:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(target)))
+        globals_ = getattr(target, "__globals__", {})
+        reads |= _arming_switches_in(
+            tree, globals_, _local_import_aliases(tree),
+            depth=depth + 1, seen=seen)
+    return reads
+
+
+def _arm_composition_expression(fn) -> ast.AST:
+    """The RHS of the `vet_enabled = ...` assignment inside the S2.2 arming site."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    found = [
+        node.value for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(getattr(target, "id", None) == "vet_enabled"
+                for target in node.targets)
+    ]
+    assert len(found) == 1, (
+        f"{fn.__qualname__} must contain exactly ONE `vet_enabled = ...` "
+        f"assignment; found {len(found)} — the arming composition moved, so this "
+        "pin is reading the wrong expression and would pass over a new switch")
+    return found[0]
 
 
 def test_the_arm_switch_surface_names_every_production_arming_read():
@@ -7865,22 +8003,25 @@ def test_the_arm_switch_surface_names_every_production_arming_read():
     import tortoise.extractor_v2 as ev2
     import tortoise.value_gate as vg
     from tests.eval.write_path import runner as wp_runner
-    from tortoise import s2_decision_seam
 
-    reads: set[str] = set()
-    for fn in (ev2._vet_enabled, ev2._s2_seam_armed, vg.value_gate_enabled,
-               vg.resolve_enabled, s2_decision_seam.seam_enabled):
-        reads |= _arming_switches_read_by(fn)
-    # Two of the three terms read their env through a module-level CONSTANT, so
-    # the name is not a literal inside any function body.
-    reads.add(vg.ENV_FLAG)
-    reads.add(s2_decision_seam.ENV_FLAG)
-    # sanity: the scan must have found the three terms the readback composes,
-    # or it is reading nothing and the assertion below is vacuous.
+    # ⛔ THE BOUND IS THE COMPOSITION SITE (`#14774` review cycle 5, MEASURED):
+    # `ARM_SWITCHES`'s docstring says the tuple mirrors the OR that production
+    # reads, so the pin parses THAT expression. Scanning a list of five
+    # resolvers by hand was one refactor away from silent: a sixth term added to
+    # `vet_enabled = (vet_arbiter is not None or _vet_enabled() or
+    # _value_gate_enabled())` — the exact line a lane would edit — was invisible,
+    # as was a switch read through a module-level constant.
+    reads = _arming_switches_in(
+        _arm_composition_expression(ev2.extract_session_v2),
+        ev2.extract_session_v2.__globals__)
+    # sanity: the scan must have walked through the callees to the three terms
+    # the readback composes (two of which read their env through a CONSTANT, and
+    # one through a function-local import), or it is reading nothing and the
+    # assertion below is vacuous.
     assert {"TORTOISE_VET", "TORTOISE_S2_DECISION_SEAM",
             vg.ENV_FLAG} <= reads, (
         f"the arming-source scan found only {sorted(reads)} — the pin is "
-        "reading the wrong functions and would pass on a new switch")
+        "reading the wrong expression and would pass on a new switch")
     missing = sorted(reads - set(wp_runner.ARM_SWITCHES))
     assert not missing, (
         f"production arming reads {missing}, which `ARM_SWITCHES` does not "
@@ -7907,6 +8048,10 @@ def test_the_arm_switch_surface_names_every_production_arming_read():
         ({"env": {}, "readable": "yes"}, "expected a bool"),
         # a readable arm that does not say WHICH arm it resolved
         ({"env": {}, "readable": True}, "vet_enabled"),
+        # the block itself is not an object (a hand-edited receipt: "arm": "on")
+        ("on", "expected an object"),
+        # `env` is not an object, so no switch it names can be attributed
+        ({"env": [], "readable": True, "vet_enabled": True}, "expected an object"),
     ],
 )
 def test_the_arm_readback_validator_refuses_each_malformed_shape(arm, expected):
