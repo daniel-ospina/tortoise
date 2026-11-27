@@ -1351,8 +1351,10 @@ def _boundary_is_unaskable(boundary: Path) -> bool:
     `_resolves_to_own_gitdir` would have permitted — and reported "that directory's `.git`
     entry does not resolve to a repository git will use", every clause of which is false
     for that shape. The gitdir question therefore decides EVERY pointer-form answer, and
-    the fast path is gone rather than narrowed: it bought one subprocess on a branch a
-    healthy walk never takes, at the price of a false diagnosis on a healthy repository.
+    the fast path is gone rather than narrowed: it bought one subprocess on the
+    strict-ancestor answer, which a HEALTHY retargeted repository takes too (that is exactly
+    the shape the shortcut was refusing), at the price of a false diagnosis on a healthy
+    repository.
 
     ⛔ AND THE FAIL-CLOSED DIRECTION IS UNTOUCHED BY THAT REMOVAL, structurally rather than
     by enumeration: every damage shape this function refuses answers with the repository
@@ -1378,10 +1380,16 @@ def _boundary_is_unaskable(boundary: Path) -> bool:
     """
     has_pointer = os.path.lexists(boundary / ".git")
     boundary_real = os.path.realpath(boundary)
-    # ⛔ THE QUESTION IS WHICH REPOSITORY GIT RESOLVED, AND THE ANSWER'S SHAPE IS THE
-    # VERDICT (#14741 review, P2/P3, measured). The pointer form asks for its WORK TREE
-    # root, because that is the repository whose index the probe reads; the
-    # metadata-in-place form asks for the gitdir, because a bare gitdir has no work tree.
+    # ⛔ THE QUESTION IS WHICH REPOSITORY GIT RESOLVED, AND FOR A POINTER FORM ITS ANSWER
+    # SHAPE IS **NEVER** CONSULTED (#14757 review, P3, measured). The pointer form asks for
+    # its WORK TREE root only to establish that git resolves a working tree here at all —
+    # a `core.bare=true` boundary makes this question ERROR, which is refused above — and
+    # WHICH repository it resolved is decided by `_resolves_to_own_gitdir` alone. The
+    # pointer path below returns before the answer is ever compared, so no shape can decide
+    # anything on it; the metadata-in-place form is the one whose verdict IS the gitdir
+    # comparison, because a bare gitdir has no work tree to ask about. (The answer text is
+    # still read for the returncode/empty gauges above, which is why the question is asked
+    # rather than skipped.)
     question = "--show-toplevel" if has_pointer else "--absolute-git-dir"
     try:
         resolved = subprocess.run(
@@ -1397,7 +1405,6 @@ def _boundary_is_unaskable(boundary: Path) -> bool:
     answer = resolved.stdout.strip()
     if not answer:
         return True
-    answer_real = os.path.realpath(answer)
     if has_pointer:
         # ⛔ THE GITDIR IDENTITY DECIDES **EVERY** ANSWER A POINTER FORM CAN GIVE — equal,
         # strict-ancestor, or elsewhere — and no answer shape is askable on work-tree
@@ -1430,13 +1437,17 @@ def _boundary_is_unaskable(boundary: Path) -> bool:
         # walked-up without a subprocess; but a HEALTHY repository whose own `core.worktree`
         # names a PARENT of the boundary answers a strict ancestor too, and it was refused
         # with a diagnosis that is false about it (its gitdir IS its own, and it DOES track
-        # the destination). Removing the shortcut costs one `rev-parse` on a branch a
-        # healthy walk never takes and buys a true verdict on both shapes.
+        # the destination). Removing the shortcut costs one `rev-parse` on the
+        # strict-ancestor answer — which a HEALTHY retargeted repository produces too, so
+        # this is not a cost only damaged trees pay — and buys a true verdict on both
+        # shapes. (The answer text is deliberately NOT realpath'd above this return: on a
+        # pointer-form boundary it decides nothing, and computing it here is what let an
+        # earlier revision believe a shape was the verdict.)
         return not _resolves_to_own_gitdir(boundary)
     # No `.git` pointer: the metadata-in-place form has no work tree, so its `question` IS
     # the gitdir, and naming this directory is the whole test for it. A gitdir answer that
     # names something else means git resolved this boundary to the repository ABOVE it.
-    return answer_real != boundary_real
+    return os.path.realpath(answer) != boundary_real
 
 
 def _destination_probes(
