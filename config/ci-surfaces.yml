@@ -57,7 +57,7 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `0204a219aa90` folded in, over
+# reader of the prose can see. On THIS tree — `origin/main` `e2a9c695adfb` folded in, over
 # `a0cea310786d`, the fold THIS BRANCH de-spliced (the de-splice is a commit of this branch's own,
 # not an act that fold performed — the possessive spelling credited it with an edit it never made);
 # the rows below landed across the folds and the
@@ -97,11 +97,11 @@ version: 1
 # (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), `#14671`'s
 # `tests/test_13450_ep_position_axis_participation.py` row in `durations` — `core`-registered — and
 # `#14726`'s dual registration, `tests/test_own_site_fragment_targets.py` row in
-# `durations`, on `core` AND `onboarding` — the verb packs the pool into ONE
-# est_seconds reading: eleven shards at 827.6 s (a, b, c, d, e, f, g, h, i, j, k), so
-# `ceil(827.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
+# `durations`, on `core` AND `onboarding` — the verb packs the pool into two bins: nine shards at
+# 827.8 s (a, b, e, f, g, h, i, j, k) and two at 827.7 s (c, d), so
+# `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
 # the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
-# (1680 / 827.6 = 2.0300), so the two agree by construction rather than by a hand re-read.
+# (1680 / 827.8 = 2.0295), so the two agree by construction rather than by a hand re-read.
 # ⛔ THAT `origin/main` FOLD LABEL IS HAND-CHECKED, and it is stated here rather than left
 # implied: it has been wrong REPEATEDLY inside this issue (`90c125a736a0c`, `d6a2104518762`,
 # `cc7b1f3f2c6a3`, `e182b8b8b0cb3`, and `dc479c6f` — ⛔ NOT the correction this head carries: that
@@ -198,21 +198,6 @@ version: 1
 # `rglob("test_*.py")` on purpose — a file added to a non-gating subtree must not silently re-enter
 # the gate), so re-measure the delta on the tree you are merging INTO rather than carrying this
 # sentence's zero.
-# The name lists above are what the guard COMPARES against the live emission
-# reader of the prose can see. On THIS tree — `origin/main` `ff10fb328891` folded in — the verb packs
-# the pool into two bins: nine shards at 827.8 s (a, b, e, f, g, h, i, j, k) and two at 827.7 s
-# (c, d), so `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST
-# shard's) — and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
-# (1680 / 827.8 = 2.0295) on every one of the eleven shards, so the two agree by construction
-# rather than by a hand re-read.
-# ⛔ THE POOL DELTA IS RE-COUNTED ON THE RESOLVED TREE, not carried: `fast_pool()` holds **1342**
-# files at this head against **1341** on `origin/main` `ff10fb328891`, both counted by loading each
-# tree's OWN manifest (`git show origin/main:config/ci-surfaces.yml`) through `fast_pool()` — and
-# the set difference is exactly ONE entry: `tests/test_14582_creation_hook.py` (`core`, flat 2.0 s),
-# this PR's own (#14582) suite. `main` carries nothing this tree lacks, and every other row the
-# emission names — `#14726`'s `tests/test_own_site_fragment_targets.py` included — landed on
-# `main` BEFORE this fold, so counting one of them as this PR's would contradict the 1342 − 1341 = 1
-# the two readings give.
 # The name lists are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), and
 # `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
@@ -249,15 +234,6 @@ version: 1
 # 827.2/827.3 partition and a `fast_pool()` of 1339, against the 827.4/827.5 and 1340 the verb
 # emitted at that rebase. Neither copy was picked either; the paragraph above is a third fresh
 # re-derivation.
-# ⛔ THIS BLOCK ARRIVES SPLICED, REPEATEDLY, and that is mechanical rather than mysterious:
-# `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
-# derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. Measured on
-# this rebase: two copies arrived, one naming `origin/main` `c1c8df1a3817` with `#14700`'s row, one
-# naming the same base with this change's row, and NEITHER described the merged tree (both said
-# 827.4/827.5 and a `fast_pool()` of 1340 against the 827.6 and 1341 the verb emits here). Neither
-# side is picked: both are DELETED and the paragraph above is a fresh re-derivation with
-# `--emit-push-matrix` on this merged tree. Each earlier fold's figures live on the commit that
-# measured them (`git log`), which is where a spliced copy belongs.
 # ⛔ NO WINDOW IS STATED HERE, and the reason is a measurement: "the folds after `a0cea310786d`
 # touched nothing" was FALSE in this very paragraph, because `bf16c791a489` landed after it and
 # moved seventeen lines of this block. The derivation reads ONCE because each fold was checked on
