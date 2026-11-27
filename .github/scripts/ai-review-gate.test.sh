@@ -1111,6 +1111,12 @@ echo "── (t) acceptance rule (c): the PATCH projection survives a base advan
 #   live     binding 4d4d1118…   patch f7f1d204…   ← binding MOVED, patch IDENTICAL
 #   one byte edited  patch d747ddd2…               ← a fresh review IS owed
 #   whitespace added patch 13c304e8…               ← a fresh review IS owed (anti-patch-id)
+#   RENAMED file     patch 52810b48…               ← a fresh review IS owed (path is identity)
+#   DELETED line     patch d6e0cf6a…               ← a fresh review IS owed
+# The rename/delete pairs exist because the workflow header used to claim BOTH
+# were "pinned by the harness" while no fixture carried either — a coverage
+# claim the harness did not back. They are also checked to move AWAY from the
+# reviewed digest, so neither pin can pass vacuously.
 REVIEWED_DIFF_FILE="$T/rev-base-moved.diff"
 cat > "$REVIEWED_DIFF_FILE" <<'DIFFEOF'
 diff --git a/f.md b/f.md
@@ -1144,11 +1150,50 @@ EDITED_DIFF_FILE="$T/edited.diff"
 sed 's/PR-LINE/PR-LINe/' "$LIVE_DIFF_FILE" > "$EDITED_DIFF_FILE"
 WS_DIFF_FILE="$T/ws.diff"
 sed 's/PR-LINE/PR-LINE /' "$LIVE_DIFF_FILE" > "$WS_DIFF_FILE"
+# ── The other two claims the workflow header makes, as FIXTURES ───────────
+# The header used to assert that "a renamed file and a deleted line" move the
+# patch projection, "pinned by the harness" — while no fixture in this file
+# contained either. These two close that gap: the rename exercises the
+# `similarity index`/`rename from`/`rename to` lines (which the projection keeps
+# VERBATIM, so the PATH is part of the identity), and the delete adds a `-` line.
+RENAMED_DIFF_FILE="$T/renamed.diff"
+cat > "$RENAMED_DIFF_FILE" <<'DIFFEOF'
+diff --git a/old-name.md b/new-name.md
+similarity index 87%
+rename from old-name.md
+rename to new-name.md
+index 819129e..2355478 100644
+--- a/old-name.md
++++ b/new-name.md
+@@ -8,6 +8,7 @@ l7
+ l8
+ l9
+ l10
++PR-LINE
+ l11
+ l12
+DIFFEOF
+DELETED_DIFF_FILE="$T/deleted.diff"
+cat > "$DELETED_DIFF_FILE" <<'DIFFEOF'
+diff --git a/f.md b/f.md
+index 819129e..2355478 100644
+--- a/f.md
++++ b/f.md
+@@ -8,6 +8,5 @@ l7
+ l8
+ l9
+ l10
++PR-LINE
+-l11
+ l12
+DIFFEOF
 PB_REVIEWED="dfebaa86f270853c99b5f809b31f6f5621009e8e5a0f03d3a42597470a62420c"
 PB_LIVE="4d4d1118333448a5c97de826680e7fdcc929e133b179001565c03b2c80583eca"
 PP_REVIEWED="f7f1d204dfd1bcd120e2088c8e6ac3b8cf768e6bb29fac3f947417c6840c5388"
 PP_EDITED="d747ddd2a35a20377203a59ed6137b6e692634d020507840dc9c5319d0aaad60"
 PP_WS="13c304e8ebf5fe32a50f855cb2fc7385fc01703fa7a47e8f3a38758507d80d7a"
+PP_RENAME="52810b4893cde4493c51aa292454a7dab213c4c10cb80b4c8dc7ae7b3d3f3224"
+PP_DELETED="d6e0cf6a8dc8f2cba10969a5726d92092f923f10911a6c94fe8bc6d220f1464c"
 BASE_SHA="$(printf 'c%.0s' $(seq 1 40))"
 
 # ── Direct vector tests of the extracted PATCH projector ──────────────────
@@ -1171,6 +1216,20 @@ check_patch "the reviewed diff" "$REVIEWED_DIFF_FILE" "$PP_REVIEWED"
 check_patch "the base-moved live diff (SAME authored change)" "$LIVE_DIFF_FILE" "$PP_REVIEWED"
 check_patch "one byte edited" "$EDITED_DIFF_FILE" "$PP_EDITED"
 check_patch "whitespace added" "$WS_DIFF_FILE" "$PP_WS"
+check_patch "a RENAMED file" "$RENAMED_DIFF_FILE" "$PP_RENAME"
+check_patch "a DELETED line" "$DELETED_DIFF_FILE" "$PP_DELETED"
+# …and each of the four "the authored change moved" vectors must ALSO differ
+# from the reviewed digest. A pin that agrees with PP_REVIEWED would make the
+# claim above vacuous, which is the failure mode the header sentence is about.
+for _case in "a byte edit:$PP_EDITED" "whitespace:$PP_WS" \
+             "a rename:$PP_RENAME" "a deleted line:$PP_DELETED"; do
+    if [ "${_case##*:}" = "$PP_REVIEWED" ]; then
+        bad "(t) the ${_case%%:*} vector projects to the REVIEWED digest — the anti-vacuity claim is false"
+    else
+        ok "(t) ${_case%%:*} moves the patch projection away from the reviewed digest"
+    fi
+done
+unset _case
 # The whole point, stated as a vector: the BINDING moves and the PATCH does not.
 _bn="$(normalize_review_diff < "$REVIEWED_DIFF_FILE" | openssl dgst -sha256 | awk '{print $NF}')"
 _bn2="$(normalize_review_diff < "$LIVE_DIFF_FILE" | openssl dgst -sha256 | awk '{print $NF}')"
@@ -1233,6 +1292,19 @@ diff_marker "$STALE" "$PB_REVIEWED" > "$T/body-t5"
 STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
     STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" STUB_COMPARE_FAIL=1 run_gate "$T/body-t5"
 assert_rc 1 "(t5) a FAILED compare fetch fails closed (never a pass from a failed read)"
+# A compare answer that is NON-EMPTY but carries no `diff --git` entry: there is
+# no reviewed artifact to anchor on, so rule (c) must refuse. NOTE ON
+# ATTRIBUTABILITY: deleting the compare-fetch guard (`gate.yml` `[ ! -s ]` /
+# `grep -qE '^diff --git '`) does NOT redden this row, because the ANCHOR refuses
+# on such a file anyway. The guard is therefore REASONED-redundant with the
+# anchor, not unattributed-by-oversight — an attacker would have to hold the
+# signing key to mint a `diff=` digest over a non-diff, and then they can mint a
+# valid review marker. The row pins the BEHAVIOUR (fail closed), not the guard.
+printf 'Not a diff at all\n' > "$T/ntbd.diff"
+STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$T/ntbd.diff" run_gate "$T/body-t5"
+assert_rc 1 "(t5) a compare answer with NO diff --git entry fails closed (no patch match)"
+assert_not_contains "(t5) …and no patch match is claimed" "passed via PATCH match"
 STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" STUB_BASE_FAIL=1 \
     STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t5"
 assert_rc 1 "(t5) an UNREADABLE base sha fails closed"
@@ -1244,7 +1316,12 @@ assert_rc 1 "(t5) an unreadable LIVE diff fails closed (no patch digest to compa
 # Rule (c) is consulted only when (a) and (b) found nothing, so an ordinary PR makes
 # no compare call and no base-sha read — otherwise every gate run would pay two extra
 # API calls, and the queue's entry check is on the critical path of every merge.
-legacy_marker "$HEAD" > "$T/body-t6"
+# ⛔ THE FIXTURE IS DELIBERATELY A `diff=`-BEARING HEAD-BOUND MARKER **PLUS** a SIGNED
+# STALE SIBLING whose patch WOULD match. With `legacy_marker "$HEAD"` alone (no
+# `diff=`) the old fixture could not attribute the cost guard `[ -z "$candidates" ]`:
+# the stale sibling is what the guard is keeping OFF the probe path, so if that guard
+# is deleted the sibling gets probed and this row's "no API call" assertion reddens.
+{ diff_marker "$HEAD" "$PP_REVIEWED"; diff_marker "$STALE" "$PB_REVIEWED"; } > "$T/body-t6"
 STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
     STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t6"
 assert_rc 0 "(t6) a HEAD-BOUND marker still passes on rule (a)"
@@ -1265,8 +1342,116 @@ else
     STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
         STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t1"
     RUN_BLOCK="$_saved_block"
-    [ "$GATE_RC" = "1" ]; ck_rc=$?
-    if [ "$ck_rc" = "0" ]; then ok "(t7) the MUTANT FAILS the unchanged-artifact case — so (t1) is rule (c)'s doing"; else bad "(t7) the MUTANT passed (rc=$GATE_RC) — (t1) does not depend on the patch comparison"; fi
+    # ⛔ NOT `[ … ]; ck_rc=$?`. The harness runs under `set -euo pipefail`, so a bare
+    # failing `[ ]` TERMINATES the shell: this control's own `bad` diagnostic would be
+    # dead in exactly the case it exists for (the mutant PASSING), and the suite would
+    # die mid-run with no ❌ row and no PASS=/FAIL= summary — the anti-pattern this file
+    # already documents ~20 lines above. `if` puts the test in a condition context.
+    if [ "$GATE_RC" = "1" ]; then
+        ok "(t7) the MUTANT FAILS the unchanged-artifact case — so (t1) is rule (c)'s doing"
+    else
+        bad "(t7) the MUTANT passed (rc=$GATE_RC) — (t1) does not depend on the patch comparison"
+    fi
+fi
+
+# ── (t8) MUTATION: the COST GATE is load-bearing, and it is the fixture's doing ──
+# Deleting `[ -z "$candidates" ] &&` makes rule (c) probe the SIGNED STALE SIBLING of
+# (t6). If that mutant does NOT produce a rule-(c) API call, then (t6) is decorative
+# and a later refactor that drops the guard would ship with the suite green.
+MUT_COST="$T/mutant-no-cost-gate.sh"
+# NOTE the indentation: the harness STRIPS the YAML's 10-space `run: |` prefix, so a
+# top-level statement in the extracted block starts at column 0 and a `patch_arm_ok`
+# body line at column 2 (which is why (t7)'s mutant pattern above uses 2).
+sed 's/^if \[ -z "$candidates" \] && \[ -n "$all_markers" \]; then$/if [ -n "$all_markers" ]; then/' \
+    "$RUN_BLOCK" > "$MUT_COST"
+if cmp -s "$RUN_BLOCK" "$MUT_COST"; then
+    bad "(t8) the cost-gate mutation did not apply — the guard line changed shape, so this control proves NOTHING"
+else
+    _saved_block="$RUN_BLOCK"; RUN_BLOCK="$MUT_COST"
+    STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+        STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t6"
+    RUN_BLOCK="$_saved_block"
+    if grep -qE -- "/compare/|--jq \.base\.sha" "$T/gh.log"; then
+        ok "(t8) with the cost gate REMOVED the stale sibling IS probed — so (t6) attributes that guard"
+    else
+        bad "(t8) the mutant produced NO rule-(c) API call — (t6) does not attribute the cost gate (guard still in place? fixture not signed?)"
+    fi
+    # …and the HEAD-BOUND skip inside patch_arm_ok is a second, DEFENCE-IN-DEPTH belt:
+    # while the cost gate holds it is unreachable, so removing it ALONE is invisible to
+    # every row. Removing BOTH must still be caught — that is what this second mutant
+    # buys, and it is stated here rather than left as an implied attribution.
+    MUT_BOTH="$T/mutant-no-cost-gate-no-head-skip.sh"
+    sed -e 's/^if \[ -z "$candidates" \] && \[ -n "$all_markers" \]; then$/if [ -n "$all_markers" ]; then/' \
+        -e 's#^  \[ "$p_sha" != "$expected" \] || return 1$#  :#' \
+        "$RUN_BLOCK" > "$MUT_BOTH"
+    if cmp -s "$RUN_BLOCK" "$MUT_BOTH"; then
+        bad "(t8) the double mutation did not apply — so the head-bound-skip claim below is unchecked"
+    else
+        _saved_block="$RUN_BLOCK"; RUN_BLOCK="$MUT_BOTH"
+        { diff_marker "$HEAD" "$PP_REVIEWED"; } > "$T/body-t8b"
+        STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+            STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t8b"
+        RUN_BLOCK="$_saved_block"
+        if grep -qE -- "/compare/" "$T/gh.log"; then
+            ok "(t8) with BOTH the cost gate and the head-bound skip removed the head-bound marker IS probed — the belt is caught in combination"
+        else
+            bad "(t8) the double mutant produced no compare call — the head-bound skip has NO attributable catch"
+        fi
+    fi
+fi
+
+# ── (t9) THE PROBE FAN-OUT IS BOUNDED BY EVIDENCE, NOT BY BODY BYTES ─────
+# `all_markers` is attacker-supplied text: the PR BODY is not restricted to
+# OWNER|MEMBER|COLLABORATOR and this workflow is `pull_request_target`, so a fork PR's
+# body reaches rule (c). Before the bound, every well-formed line cost TWO repo-scoped
+# `gh api` calls against the 1,000/hour PER-REPOSITORY token budget that every workflow
+# shares — and this check is the merge queue's ENTRY condition, so exhausting it reds
+# the merge path for EVERY PR. Measured pre-fix on a 25-line forged body: 53 calls.
+FORGED="$T/body-t9-forged"
+: > "$FORGED"
+for _i in $(seq 1 25); do
+    # Well-formed marker shape, distinct sha+diff, but a signature the gate cannot
+    # verify — i.e. exactly what a fork PR author can write for free.
+    printf 'review recorded: reviews/%s.json verdict=clean @ %s diff=%s (%s) sig=%s\n' \
+        "$PR_NUMBER" "$(printf '%040d' "$_i")" "$(printf '%064d' "$_i")" \
+        "$REPO_NAME" "$(printf 'f%.0s' $(seq 1 64))" >> "$FORGED"
+done
+diff_marker "$STALE" "$PB_REVIEWED" >> "$FORGED"
+STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$FORGED"
+assert_rc 0 "(t9) 25 forged marker lines beside ONE signed record: the signed record still carries"
+_t9_compares="$(grep -c -- "/compare/" "$T/gh.log" || true)"
+if [ "$_t9_compares" -le 1 ]; then
+    ok "(t9) the forged lines bought NO probe (${_t9_compares} compare call(s) — signature verified FIRST)"
+else
+    bad "(t9) the body's forged lines bought $_t9_compares compare calls — the probe fan-out is a function of PR TEXT"
+fi
+if grep -qE -- "/compare/[0-9a-f]+\.\.\.0{20}" "$T/gh.log"; then
+    bad "(t9) a forged marker's sha reached a compare probe (log: $(cat "$T/gh.log"))"
+else
+    ok "(t9) no forged sha reached the compare endpoint"
+fi
+# And the CAP is real: many DISTINCT SIGNED records cannot buy unbounded probes.
+CAP_PIN="$(sed -nE 's/^ *PATCH_PROBE_CAP=([0-9]+).*/\1/p' "$RUN_BLOCK" | head -1)"
+if [[ "$CAP_PIN" =~ ^[0-9]+$ ]]; then
+    CAPBODY="$T/body-t9-cap"
+    : > "$CAPBODY"
+    for _i in $(seq 1 $((CAP_PIN + 3))); do
+        _m="review recorded: reviews/${PR_NUMBER}.json verdict=clean @ $(printf '%040d' "$_i") diff=$(printf '%064d' "$_i") (${REPO_NAME})"
+        printf '%s sig=%s\n' "$_m" "$(sign "$_m")" >> "$CAPBODY"
+    done
+    STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+        STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$CAPBODY"
+    assert_rc 1 "(t9) signed stale records that match nothing still FAIL closed"
+    _t9_cap_compares="$(grep -c -- "/compare/" "$T/gh.log" || true)"
+    if [ "$_t9_cap_compares" -eq "$CAP_PIN" ]; then
+        ok "(t9) the probe cap holds (${_t9_cap_compares} compares for $((CAP_PIN + 3)) signed records, cap $CAP_PIN)"
+    else
+        bad "(t9) $_t9_cap_compares compare calls for $((CAP_PIN + 3)) signed records (cap is $CAP_PIN) — the bound is not enforced"
+    fi
+    assert_contains "(t9) …and the cap is reported, not silent" "stopped after ${CAP_PIN} distinct SIGNED patch probes"
+else
+    bad "(t9) could not read PATCH_PROBE_CAP from the run block — the bound is unassertable"
 fi
 
 

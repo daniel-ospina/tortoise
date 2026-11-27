@@ -167,15 +167,31 @@ name: ai-review-gate
 # WHAT (c) DOES NOT DO. It cannot tell WHICH revision a reviewer saw — no
 # acceptance rule here can; that binding is the producer's stale-sha guard's job
 # (see the delegation note below). It is not a whitespace-blind match: the patch
-# projection keeps whitespace BYTE-EXACT and keeps PATHS, so an edited line, an
-# added space, a renamed file and a deleted line all move it (pinned by the
-# harness, both directions). The fields it drops are exactly the ones a rebase
+# projection keeps whitespace BYTE-EXACT and keeps the `diff --git`/`---`/`+++`
+# path lines and every mode/rename line, so an edited line, an added space, a
+# RENAMED FILE (its `similarity index`/`rename from`/`rename to` lines) and a
+# DELETED LINE (a `-` line) all move it. ⛔ Every one of those four is a PINNED
+# digest vector in `.github/scripts/ai-review-gate.test.sh` §(t) —
+# `PP_EDITED`/`PP_WS`/`PP_RENAME`/`PP_DELETED` — and each is ALSO asserted to
+# differ from the reviewed digest, so no pin can pass vacuously and this sentence
+# cannot drift away from the harness that backs it. (Before that was true, this
+# paragraph claimed "pinned by the harness" for a rename and a deleted line that
+# no fixture exercised — a coverage claim the harness did not support.)
+# The fields it drops are exactly the ones a rebase
 # rewrites — which is the same arm agent-infra's `merge-one.sh` has ALREADY been
 # merging on since #1377 (`patch_dimension_carry`), so (c) widens no acceptance
 # set relative to what the fleet already lands; it removes the requirement that
 # a human re-record before the SERVER-side gate will agree with the local one.
 # (b) carries a verdict across a merge-only update: the head moved, the
 # reviewed diff did not.
+#
+# WHAT (c) COSTS, AND WHY THAT IS BOUNDED. It is consulted ONLY when (a) and (b)
+# found nothing, and within that it probes only markers whose HMAC VERIFIES,
+# de-duplicated on (sha,diff) and capped at PATCH_PROBE_CAP. Both bounds exist
+# because each probe makes two repo-scoped API calls while the marker list comes
+# from PR TEXT on a `pull_request_target` workflow — see the full rationale at
+# the loop itself. Removing either bound re-opens the availability defect they
+# close; §(t6)/(t8)/(t9) of the harness redden if you do.
 #
 # The signature is HMAC-SHA256 over the marker text, keyed by the
 # AI_REVIEW_GATE_KEY repo secret (the agent machine holds the same key at
@@ -807,6 +823,37 @@ jobs:
           # head is the marker's own claim; the anchor proves the bytes; nothing
           # here mints or extends evidence, and rule (a) still governs every
           # head-bound marker.
+          marker_sig_ok() { # <marker line> -> 0 iff its trailing HMAC verifies
+            # ONE verifier, shared by the rule-(c) probe and the acceptance loop
+            # below: the two must never disagree about what "signed" means, or a
+            # marker could be probed as signed and then rejected as unsigned (or
+            # the reverse). Pure local work — no API call, no secret printed.
+            local line="$1" sig computed
+            [[ "$line" == *" sig="* ]] || return 1
+            sig="${line##* sig=}"
+            computed="$(printf '%s' "${line% sig=*}" | openssl dgst -sha256 -hmac "$GATE_SECRET" | awk '{print $NF}')"
+            [ "$computed" = "$sig" ]
+          }
+
+          # ⛔ THE PROBE COUNT IS BOUNDED BY EVIDENCE, NOT BY BODY BYTES (#4255
+          # review). `all_markers` is ATTACKER-SUPPLIED TEXT: the comment channel
+          # is narrowed to OWNER|MEMBER|COLLABORATOR, but the PR BODY is not
+          # narrowed at all, and this workflow is `pull_request_target` BY DESIGN,
+          # so a fork PR's body reaches the loop below. A marker LINE is ~257 bytes,
+          # so a 64 KiB body holds ~254 of them, and probing each one costs TWO
+          # repo-scoped `gh api` calls (base sha + compare) against the
+          # 1,000-request/hour-PER-REPOSITORY `GITHUB_TOKEN` budget that every
+          # workflow in this repo shares. `ai-review-gate` is the Mergify queue's
+          # ENTRY condition (#5433), so exhausting that budget would red the merge
+          # path for EVERY PR until the window resets — an availability defect on
+          # the one path whose cheapness the harness pins. Two independent bounds,
+          # both cheap: the signature is verified FIRST (only a key holder can mint
+          # a marker that reaches a probe, so the fan-out is proportional to GENUINE
+          # evidence), and the probes are capped + de-duplicated on (sha,diff) as a
+          # backstop. Neither can ever ACCEPT anything: a probe that does not run
+          # only leaves rule (c) refusing, i.e. the pre-#4255 verdict.
+          PATCH_PROBE_CAP=8
+
           patch_arm_ok() { # <marker line> -> 0 iff its reviewed PATCH == this PR's live PATCH
             local line="$1" p_sha="" p_diff="" p_base="" p_rt="" p_anchor="" p_patch=""
             p_sha="$(printf '%s' "$line" | sed -nE 's/^.* @ ([0-9a-f]{40}).*$/\1/p')"
@@ -833,15 +880,46 @@ jobs:
             [ "$p_patch" = "$live_patch_hash" ] || return 1
             return 0
           }
+          patch_sig_rejected=0
+          patch_probe_capped=0
           if [ -z "$candidates" ] && [ -n "$all_markers" ]; then
+            patch_probes=0
+            patch_probe_keys="|"
+            # NEWEST FIRST. `all_markers` is body-then-comment order, so its LAST
+            # entry is the most recently recorded re-review. Iterating in reverse
+            # means the CAP can only drop the OLDEST records — a cap that skipped
+            # the newest would refuse exactly the marker a fresh re-review just
+            # wrote, which is the opposite of what a carry is for.
             while IFS= read -r line; do
               [ -z "$line" ] && continue
+              # ⛔ SIGNATURE BEFORE THE PROBE (the fan-out bound above). A marker
+              # that cannot verify is not evidence and must cost ZERO API calls.
+              if ! marker_sig_ok "$line"; then
+                patch_sig_rejected=$((patch_sig_rejected + 1))
+                continue
+              fi
+              # De-duplicate on the (sha,diff) pair: the same record repeated in
+              # both channels (and any decoy echo of it) is probed once.
+              p_key="$(printf '%s' "$line" | sed -nE 's/^.*@ ([0-9a-f]{40}) diff=([0-9a-f]{64}) \(.*$/\1 \2/p')"
+              [ -n "$p_key" ] || continue
+              case "$patch_probe_keys" in
+                *"|${p_key}|"*) continue ;;
+              esac
+              if [ "$patch_probes" -ge "$PATCH_PROBE_CAP" ]; then
+                patch_probe_capped=1
+                continue
+              fi
+              patch_probe_keys="${patch_probe_keys}${p_key}|"
+              patch_probes=$((patch_probes + 1))
               if patch_arm_ok "$line"; then
                 candidates="${candidates}${line}"$'\n'
                 candidates_via_patch=1
               fi
-            done <<< "$all_markers"
+            done <<< "$(printf '%s\n' "$all_markers" | awk 'NF{a[NR]=$0} END{for(i=NR;i>0;i--) print a[i]}')"
             candidates="$(printf '%s' "$candidates" | sed '/^$/d')"
+            if [ "$patch_probe_capped" -eq 1 ]; then
+              echo "::warning::AI review rule (c): stopped after ${PATCH_PROBE_CAP} distinct SIGNED patch probes (newest first); older recorded review records were not compared. This can only REFUSE evidence, never accept it — re-record on the current head if the carry matters."
+            fi
           fi
 
           # ── Verify the HMAC over the marker text, which INCLUDES diff= ────
@@ -902,6 +980,13 @@ jobs:
             # No acceptable marker. Classify WHY — the operator must not have
             # to guess between "re-record", "fix the repo field", and "fix the
             # key". Priority: unsigned → wrong repo → malformed → stale.
+            if [ "${patch_sig_rejected:-0}" -gt 0 ]; then
+              # Rule (c) probes SIGNED markers only (the fan-out bound above), so
+              # a stale-sha diff= marker with a BAD signature reaches this branch
+              # instead of the HMAC-mismatch diagnostic. Name it, or the stale
+              # verdict below blames the DIFF for what is a KEY problem.
+              echo "::error::${patch_sig_rejected} stale-sha evidence marker(s) carried a diff= but their signature did NOT verify against AI_REVIEW_GATE_KEY, so rule (c) did not probe them. If the authored change is unchanged since the review, the recording KEY is the problem — not the diff."
+            fi
             # Union both channels here too (#1224): the classification below
             # (unsigned / wrong-repo / malformed / stale) must work when the
             # markers came from EITHER channel, or a comment-carried failure
