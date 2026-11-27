@@ -352,6 +352,78 @@ def test_a_pre_accounting_receipt_must_say_its_fold_count_is_absent():
     assert not any("relation_write" in i for i in issues), issues
 
 
+# ── The arm validator's WIRING into `validate_receipt` (#14774 review P3) ─────
+#
+# ⛔ THE REFUSAL ARMS ARE PINNED ELSEWHERE, AND THAT PIN CANNOT SEE THE WIRING.
+# `test_state_value_verbatim_10360.py::test_the_arm_readback_validator_refuses_each_
+# malformed_shape` calls `_validate_arm_block(arm)` DIRECTLY, so it stays green under
+# the mutant that un-wires the call from `validate_receipt` — i.e. under a receipt
+# path that accepts every malformed arm the validator would have refused.
+# MEASURED at this head: with `issues.extend(_validate_arm_block(arm))` replaced by
+# `pass`, `pytest -k "arm or receipt"` over BOTH files was GREEN (8 passed) — the
+# arms fired where they were called, and nothing proved the receipt path called
+# them. Every other test in this file builds a WELL-FORMED arm block (or none) and
+# asserts `validate_receipt(...) == []`, which an un-wired validator also satisfies,
+# so the wiring had no row at all.
+#
+# This is the only row that reaches the validator through the PUBLIC entry point,
+# with each malformed shape, so a validator that is correct but disconnected reds
+# here and nowhere else.
+
+
+def test_the_arm_refusals_are_reachable_THROUGH_the_receipt_path():
+    """Each `_validate_arm_block` refusal surfaces from `validate_receipt`.
+
+    FAILS IF the block is un-wired from `validate_receipt` (the mutant
+    `if arm is not None: pass`) while `_validate_arm_block` itself is untouched:
+    every assertion below then sees `[]`. The shapes are the three arms the
+    validator declares — an unknown switch, a non-bool `readable`, and a readable
+    block that does not say which arm it resolved — and each is asserted by the
+    named substring, so deleting an arm reds its case too.
+
+    The positive control at the end is what makes the three attributable: it pushes
+    the runner's OWN readback through the same path and requires a clean verdict, so
+    a red above cannot be excused by "no receipt could ever pass this".
+    """
+    report = _completed_report()
+
+    def issues_for(arm: dict) -> list[str]:
+        report["arm"] = arm
+        return runner.validate_receipt(runner.build_receipt(report))
+
+    # 1. a switch the runner's own surface does not know — recorded nowhere.
+    issues = issues_for(
+        {"env": {key: None for key in runner.ARM_SWITCHES}
+         | {"TORTOISE_UNKNOWN": "1"},
+         "readable": True, "vet_enabled": True})
+    assert any("unknown switches" in i and "TORTOISE_UNKNOWN" in i for i in issues), (
+        "an arm block naming a switch outside ARM_SWITCHES must be refused by "
+        f"`validate_receipt`, and the issue must name it; got {issues}")
+
+    # 2. `readable` is the honesty flag itself, so it must be a real bool.
+    issues = issues_for(
+        {"env": {key: None for key in runner.ARM_SWITCHES},
+         "readable": "yes", "vet_enabled": True})
+    assert any("arm.readable" in i for i in issues), (
+        f"a non-bool `arm.readable` must be refused by `validate_receipt`; got {issues}")
+
+    # 3. a READABLE block with no `vet_enabled`: the one boolean that decides
+    #    whether the pass ran is missing, so the arm cannot be attributed.
+    issues = issues_for(
+        {"env": {key: None for key in runner.ARM_SWITCHES}, "readable": True})
+    assert any("arm.vet_enabled" in i for i in issues), (
+        "a readable arm without `vet_enabled` must be refused by "
+        f"`validate_receipt`; got {issues}")
+
+    # …positive control: the readback a real run produces validates clean here, so
+    # the three refusals above are attributable to the shapes, not to a path that
+    # refuses every arm block.
+    issues = issues_for(runner.extractor_arm_readback())
+    assert not any("arm" in i for i in issues), (
+        "the runner's own arm readback must validate clean through "
+        f"`validate_receipt`; got {issues}")
+
+
 class _CensusResult:
     def __init__(self, rows):
         self.result_set = rows

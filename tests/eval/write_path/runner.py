@@ -1981,11 +1981,203 @@ def run_benchmark(
            if relation_runs else {}),
         "graph_census": graph_census_report,
         "extractor_identity": extractor_identity(),
+        # #10360 / #14774 review P1: the ARM this run actually produced, read
+        # back through the production resolvers. Without it a receipt's arm is
+        # only its FILENAME, and a mislabelled arm is undetectable from every
+        # artifact the run commits.
+        "arm": extractor_arm_readback(),
         "semantic_judge": semantic_block,
         "session_results": session_results,
         "notes": notes,
         "log": log,
     }
+
+
+#: The switches a write-path arm can be varied by, recorded on every receipt so
+#: an arm can be attributed instead of trusted.
+#:
+#: ⛔ **Three of these decide whether the S2.2 VET pass runs; the fourth does not.**
+#: ``TORTOISE_VET`` and ``TORTOISE_S2_DECISION_SEAM`` are the two terms
+#: ``extractor_v2._vet_enabled`` ORs, and ``TORTOISE_VALUE_GATE`` is the sibling
+#: term ``extract_session_v2`` ORs alongside it. ``TORTOISE_STATE_VALUE_VERBATIM``
+#: is the `#10360` CARVE-OUT's own off-switch — it moves the write-path refusal,
+#: never the S2.2 arming — and it is in this tuple because a lane flips it and the
+#: receipt must record that it did. This tuple is therefore the arm's SWITCH
+#: SURFACE, not "the S2.2 arming terms in production order": the production OR at
+#: ``extract_session_v2`` reads ``vet_arbiter is not None or _vet_enabled() or
+#: _value_gate_enabled()``, whose order (and whose first term) no env switch can
+#: express. ``test_the_arm_switch_surface_names_every_production_arming_read``
+#: pins the MEMBERSHIP against the resolvers' own code; nothing pins an order,
+#: because no order is a fact about this tuple.
+#:
+#: ⛔ **AN ABSENT ``TORTOISE_VALUE_GATE`` IS THE *ON* SPELLING** (`#10996`), which
+#: is why this tuple exists rather than being inferred from a filename: the
+#: ``#14774`` review measured that the documented "flags-OFF" arm —
+#: ``env -u TORTOISE_VET -u TORTOISE_VALUE_GATE`` — resolved ``vet_enabled``
+#: **True**, i.e. the control arm was a second realization of the treatment and
+#: the A/B was a comparison of a run against itself. The same defect is recorded
+#: and guarded in ``docs/evidence/7949-capstone/probes/e1_paired_arm.py``
+#: (``DEFAULT_ON_KEYS`` / ``off_arm_readback``); this is the write-path runner's
+#: copy of that readback, so a receipt can never again claim an arm it did not
+#: produce.
+ARM_SWITCHES = (
+    "TORTOISE_VET",
+    "TORTOISE_VALUE_GATE",
+    "TORTOISE_S2_DECISION_SEAM",
+    "TORTOISE_STATE_VALUE_VERBATIM",
+)
+
+
+def extractor_arm_readback() -> dict:
+    """The arm this run ACTUALLY produced — read back, never asserted.
+
+    The receipt's other arm-side fields cannot answer this: ``resolved_config`` is
+    ``dict(corpus.BASELINE_CONFIG)`` (posture/lanes/mode/seed — never env), and
+    ``extractor_posture == "llm"`` holds under BOTH arms. So before this block the
+    only thing tying a receipt to an arm was its **filename**, and a run whose
+    "off" spelling silently resolved ON committed a receipt indistinguishable
+    from the treatment arm (`#14774` review P1).
+
+    ``vet_enabled`` is composed through the PRODUCTION terms rather than a mirror
+    of them, because the whole failure class is a resolver whose unset value is
+    ON: a copy of the rule here would drift from the rule that decides
+    (``tortoise.value_gate.resolve_enabled``, `#10996`; `extractor_v2._vet_enabled`
+    ORs in `TORTOISE_S2_DECISION_SEAM`, `#5087`).
+
+    ⚠️ An unreadable arming path records ``readable: False`` + the error instead
+    of raising: a receipt that says the arm could not be read is honest and is
+    REFUSED by the consumer, whereas one that omits the question is a label.
+    """
+    raw = {key: os.environ.get(key) for key in ARM_SWITCHES}
+    try:
+        import tortoise.extractor_v2 as ev2
+        import tortoise.value_gate as vg
+
+        vet_toggle = bool(ev2._vet_enabled())          # TORTOISE_VET | seam
+        seam = bool(ev2._s2_seam_armed())
+        value_gate = bool(vg.value_gate_enabled())     # ON unless told otherwise
+    except Exception as exc:  # recorded, never swallowed silently
+        return {
+            "env": raw,
+            "readable": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "env": raw,
+        "readable": True,
+        # the three terms `extract_session_v2` ORs, so a reader can attribute the
+        # boolean instead of trusting it
+        "vet_toggle": vet_toggle,
+        "s2_seam": seam,
+        "value_gate": value_gate,
+        # …and the boolean that decides whether the pass runs **for an env-only
+        # run**. ⛔ NOT the whole production condition: ``extract_session_v2``
+        # ORs an injected ``vet_arbiter is not None`` ahead of these terms
+        # (``extractor_v2.py``, the arming-OR at the call site), and no receipt
+        # can observe an injected arbiter — this runner has ONE extraction entry,
+        # ``sdk._capture_session`` (``runner.py``), which passes no
+        # ``vet_arbiter``, and no call into ``extract_session_v2`` anywhere in
+        # ``tortoise/sdk.py`` passes one either (``_commit_session_v2`` and
+        # ``_extract_session_v2`` both omit the argument — ``grep -n
+        # 'vet_arbiter=' tortoise/sdk.py`` is empty) — so the two agree on every
+        # receipt this runner can write.
+        # ⛔ The check is NAMED, not offered as a grep on this FILE: the first
+        # version of this comment said ``rg 'arbiter' tests/eval/write_path/
+        # runner.py`` is empty, and that can never be true while this caveat
+        # exists, because the caveat must name the term it excludes — it matched
+        # this paragraph AND the ``_ARM_SWITCHES`` block above. An instruction
+        # that invalidates itself, on the load-bearing caveat of the one boolean
+        # the arm-attribution story rests on (#14774 reviews 7 and 8).
+        # ⚠️ No count is quoted here on purpose: a bare hit total drifts with
+        # every edit to this comment, which is the class this PR removes.
+        # The arbiter is recorded here rather than silently dropped, because it is
+        # the one term a future caller could add without moving this field.
+        "vet_enabled": bool(vet_toggle or value_gate),
+    }
+
+
+def _validate_arm_block(arm: dict) -> list[str]:
+    """Shape-validate the additive ``arm`` block (present-only).
+
+    Shape **plus env-vs-booleans consistency**: a readable block must record every
+    switch in ``ARM_SWITCHES``, and its booleans must be what that recorded env
+    resolves to through the production resolvers (see the recompute below).
+    WHICH arm a receipt belongs to is the consumer's verdict
+    (``test_state_value_verbatim_10360.py`` §25), not this function's.
+    """
+    issues: list[str] = []
+    if not isinstance(arm, dict):
+        return ["receipt.arm: expected an object"]
+    env = arm.get("env")
+    if not isinstance(env, dict):
+        issues.append("receipt.arm.env: expected an object")
+    else:
+        unknown = sorted(set(env) - set(ARM_SWITCHES))
+        if unknown:
+            issues.append(
+                "receipt.arm.env: unknown switches "
+                f"{unknown} — ARM_SWITCHES is the arming surface; a new switch "
+                "must be added there or it is recorded nowhere"
+            )
+        # ⛔ …AND A READABLE BLOCK MUST RECORD EVERY ONE OF THEM (#14774 review,
+        # P3). Refusing only the UNKNOWN keys let a receipt drop the known ones:
+        # MEASURED, an `arm.env` of `{"TORTOISE_VALUE_GATE": "0"}` alone validated
+        # `[]`, i.e. a receipt that no longer says what its survival number was
+        # measured on. `extractor_arm_readback` always writes all four, so the
+        # producer already satisfies this; the check exists to stop a hand-edited
+        # or future-narrowed block from passing as `readable`.
+        missing = sorted(set(ARM_SWITCHES) - set(env))
+        if missing:
+            issues.append(
+                "receipt.arm.env: missing switches "
+                f"{missing} — a readable arm block must record every switch in "
+                "ARM_SWITCHES, or the receipt no longer says what its survival "
+                "number was measured on"
+            )
+    if not isinstance(arm.get("readable"), bool):
+        issues.append(
+            "receipt.arm.readable: expected a bool, got "
+            f"{arm.get('readable')!r}"
+        )
+    elif arm["readable"] and not isinstance(arm.get("vet_enabled"), bool):
+        issues.append(
+            "receipt.arm.vet_enabled: a readable arm requires a bool, got "
+            f"{arm.get('vet_enabled')!r}"
+        )
+    # ⛔ AND THE BOOLEANS MUST BE WHAT THE **RECORDED ENV** RESOLVES TO (#14774
+    # review P2). Shape alone let a receipt claim an arm it did not produce through
+    # the block that exists to stop exactly that: a block whose
+    # `env.TORTOISE_VALUE_GATE` is ABSENT (``#10996``: absent ⇒ the value gate is
+    # ON) while its `value_gate`/`vet_enabled` say False validated as `[]`, and
+    # §25 — which compares `vet_enabled` to the FILENAME's arm — certified it too.
+    # So the recorded booleans are RECOMPUTED from the recorded env through the
+    # PRODUCTION resolvers, over a raw value, so the check cannot drift from the
+    # rule that decides: `value_gate.resolve_enabled` (the one default site,
+    # `#10996`), `env_truthy.is_truthy` for the two `_vet_enabled` terms, and the
+    # same OR `extract_session_v2` composes.
+    if (isinstance(env, dict) and isinstance(arm.get("readable"), bool)
+            and arm["readable"]):
+        from tortoise.env_truthy import is_truthy
+        from tortoise.value_gate import resolve_enabled
+
+        expected_seam = bool(is_truthy(env.get("TORTOISE_S2_DECISION_SEAM")))
+        expected_vet = bool(is_truthy(env.get("TORTOISE_VET")) or expected_seam)
+        expected_gate = bool(resolve_enabled(env.get("TORTOISE_VALUE_GATE")))
+        for field, expected in (
+            ("s2_seam", expected_seam),
+            ("vet_toggle", expected_vet),
+            ("value_gate", expected_gate),
+            ("vet_enabled", bool(expected_vet or expected_gate)),
+        ):
+            if field in arm and arm[field] is not expected:
+                issues.append(
+                    f"receipt.arm.{field}: the recorded env resolves {expected!r}, "
+                    f"but the receipt records {arm[field]!r} — the arm block "
+                    "contradicts itself, so the receipt's arm claim cannot be "
+                    "attributed (an ABSENT TORTOISE_VALUE_GATE is the ON spelling, "
+                    "#10996)"
+                )
+    return issues
 
 
 def extractor_identity() -> dict:
@@ -2641,6 +2833,12 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
     # the identity is what lets the receipt check reject a wire-only number.
     if report.get("extractor_identity") is not None:
         receipt["extractor"] = report["extractor_identity"]
+    # #10360 additive ARM readback (a completed-run dimension only): the S2.2
+    # arming switches and what the PRODUCTION resolvers made of them. Added only
+    # when the report carries it, so every pre-#10360 receipt stays byte-identical
+    # and shape-valid — a receipt WITHOUT this block is an arm nobody verified.
+    if report.get("arm") is not None:
+        receipt["arm"] = report["arm"]
     # #11237 additive relation-write block: the S5 Job 1 channel's WRITE half,
     # added ONLY when the run stated one, so a receipt from a run whose
     # extraction produced no relations is byte-identical to the pre-#11237 one.
@@ -2723,6 +2921,16 @@ def validate_receipt(receipt: dict) -> list[str]:
                 "receipt.extractor.real: expected a bool, got "
                 f"{extractor.get('real')!r}"
             )
+    # #10360 additive ARM readback — validated only when present, for the same
+    # back-compat reason (pre-#10360 receipts carry no arm block at all). Shape
+    # PLUS env-vs-booleans consistency: the recorded booleans are recomputed from
+    # the recorded env through the production resolvers, so a block that claims an
+    # arm it did not produce is refused here. Whether the arm is the one the
+    # FILENAME claims is the consumer's verdict (`test_state_value_verbatim_10360.py`
+    # §25), not this check.
+    arm = receipt.get("arm")
+    if arm is not None:
+        issues.extend(_validate_arm_block(arm))
     # #11237 additive relation-write block — SHAPE only, and only when present.
     # Whether the number is GOOD belongs to the write-path lane
     # (``test_write_path_relation_lane``) and to the census, not to a receipt
