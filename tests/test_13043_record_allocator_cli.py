@@ -7,16 +7,20 @@ enumerated arm while the graph is cut over, so `_refuse_an_enumerated_replay`
 refuses every record while the journal keeps advancing; `write_live_record` is
 fail-soft by contract, so this is a WARN per record and never an exception). It
 also found that the flag is GLOBAL while the cutover is PER GRAPH, and that
-nothing in this tree creates the counter row for a NEW graph
-(`provision_graph_record` has zero hits), so every graph created after the
-cutover is born uncut.
+nothing in this tree created the counter row for a NEW graph — so every graph
+created after the cutover was born uncut. ⛔ THAT PREMISE IS HISTORICAL: the hook
+that gives a NEW graph its row is `record_writer.provision_graph_record`
+(`#14582`), best-effort, and a graph it misses is reported as
+`record.armed_but_uncut`. The agreement between this prose and the tree is pinned
+by `test_the_tree_no_longer_matches_the_absent_hook_premise` below, which measures
+the tree rather than trusting the sentence.
 
 The fixes asserted here:
 
 * `arm` REFUSES without `--acknowledge-cutover`, and the refusal is the
   documentation: it names the env flag, its HOME (the writer, not this shell),
-  the order of operations, the per-graph scope, the absent creation hook, and
-  the backfill lane.
+  the order of operations, the per-graph scope, the creation hook and its
+  best-effort/backfill split, and the backfill lane.
 * `sweep` finds born-uncut graphs the record has seen (read-only), so the hazard
   is discoverable rather than a sentence.
 * `status` reports the RECORD's state and the flag SEPARATELY (P2-4), and the
@@ -51,7 +55,7 @@ def test_arm_refuses_without_the_acknowledgement(capsys) -> None:
     for required in ("TORTOISE_RECORD_ALLOCATE",   # the flag, by name
                      "WRITER",                     # …and whose environment it lives in
                      "halt", "seed", "reopen",     # the way back, in order
-                     "provision_graph_record",     # the hook that is absent
+                     "provision_graph_record",     # the hook that gives a new graph its row
                      "sweep",                      # how the hazard is found
                      "backfill_copy_turns"):       # the fourth position-row writer
         assert required in err, (
@@ -574,3 +578,37 @@ def test_the_wiring_gate_reds_when_the_flag_plumbing_is_deleted(
     assert problems, (
         f"{name}: the wiring gate passed a tree whose allocate flag is not read "
         "on the door's path — this is the P2-12 defect restored")
+
+
+# ── #14587 review [2]: the premise this file was written on went historical ──
+
+def test_the_tree_no_longer_matches_the_absent_hook_premise() -> None:
+    """Pin the PROSE to the TREE — never the tree to the prose.
+
+    This file's module docstring said `provision_graph_record` had "zero hits" in
+    the tree, which is what made "every graph created after the cutover is born
+    uncut" true when it was written. `#14582` added the hook, so that sentence
+    became FALSE about the tree it ships in — and it is the sentence an operator
+    reads immediately before deciding to seed a graph by hand.
+
+    The assertion is a two-way agreement, so it reds whichever side drifts: the
+    hook must be defined under `tortoise/`, and the docstring must not go back to
+    describing it as absent. The prose measured is `cli.__doc__` — the module
+    docstring itself, not this file's source — so the needle cannot match the
+    assertion that looks for it.
+    """
+    root = Path(__file__).resolve().parent.parent
+    hits = sorted(
+        path.relative_to(root).as_posix()
+        for path in (root / "tortoise").rglob("*.py")
+        if "def provision_graph_record" in path.read_text(encoding="utf-8",
+                                                          errors="replace"))
+    assert hits, (
+        "`provision_graph_record` is not defined anywhere under tortoise/ — the "
+        "docstring's premise has become true again and the prose must say so")
+    prose = cli.__doc__ or ""
+    for stale in ("has zero hits", "the absent creation hook"):
+        assert stale not in prose, (
+            f"this file still claims {stale!r}, but the hook it calls absent is "
+            f"defined at {hits} — the sentence an operator reads is false "
+            f"(#14587 review [2])")
