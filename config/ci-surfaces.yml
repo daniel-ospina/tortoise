@@ -57,12 +57,17 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `a0be10ac456b` folded in (the fold this
-# head carries, over the `ff10fb328891` fold before it, `a0cea310786d` before that and
-# `bbef0b8840d7` before that; the rows below landed across all four and the folds before them;
-# ⛔ this head's own fold touched no row here — `git show --stat a0be10ac456b --
-# config/ci-surfaces.yml` is empty — so it renumbers the chain without moving the derivation),
-# carrying
+# reader of the prose can see. On THIS tree — `origin/main` folds carried, newest first:
+# `8fd022fdd1c5f`, `a0be10ac456b`, `ff10fb328891`, `a0cea310786d` and `bbef0b8840d7`;
+# the rows below landed across them and the folds before them; ⛔ measured, and NOT with
+# `git show --stat` — that prints NO diff for a MERGE commit unless it is given `-m`, and this
+# block's whole subject is merges, so it reads "untouched" over a spliced file: the safe form is
+# `git diff <sha>^1 <sha> -- config/ci-surfaces.yml`. Measured that way, it is empty for THREE of
+# the five — `8fd022fdd1c5f`, `a0be10ac456b` (the two newest) and `bbef0b8840d7` — so those touched
+# nothing here and renumber the chain without moving the derivation; `ff10fb328891` changed ONE
+# `durations` ROW and no line of this block; and `a0cea310786d` is the only one of the five that
+# spliced THIS BLOCK — the splice the paragraph below resolves by provenance. Each splice's figures
+# live on the commit that measured them — never carried into this derivation), carrying
 # `#14597`'s expansion fusion over the residue RATCHET
 # (`tests/test_expansion_fusion_14344.py`, `core`, carrying a `durations` row),
 # `#14415`'s `tests/test_14219_batch_ingest.py` row and `tests/test_14219_batches_api.py` row,
@@ -201,11 +206,11 @@ version: 1
 # picked: both are DELETED and the paragraph above is a fresh re-derivation with
 # `--emit-push-matrix` on this merged tree. Each earlier fold's figures live on the commit that
 # measured them (`git log`), which is where a spliced copy belongs.
-# ⛔ THE FOLD THIS HEAD CARRIES (`a0be10ac456b`) TOUCHED NOTHING HERE — the derivation still reads
-# ONCE and `durations` is untouched, so it spliced nothing at all. ⛔ ITS ATTRIBUTION IS NOT CARRIED
-# FROM THE FOLD THAT DID: the `ff10fb328891` fold before it spliced this block on NEITHER side — it
-# left the derivation reading once — and spliced `durations` instead: under the same `merge=union`
-# driver
+# ⛔ THE TWO MOST RECENT FOLDS THIS HEAD CARRIES (`8fd022fdd1c5f`, then `a0be10ac456b`) TOUCHED
+# NOTHING HERE — the derivation still reads ONCE and `durations` is untouched, so they spliced
+# nothing at all. ⛔ THEIR ATTRIBUTION IS NOT CARRIED FROM THE FOLD THAT DID: the `ff10fb328891`
+# fold before them spliced this block on NEITHER side — it left the derivation reading once — and
+# spliced `durations` instead: under the same `merge=union` driver
 # `test_14560_operator_vectors.py` and `test_13098_cypher_inventory.py` each arrived as a DUPLICATE
 # `durations` key, with no conflict marker raised. ⛔ It is the SILENT form of the same defect, and
 # the scope of "silent" is exact rather than rhetorical: plain `yaml.safe_load` keeps the LAST copy

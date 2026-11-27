@@ -9206,32 +9206,29 @@ _EMISSION_RATIO_RE = re.compile(
 #: the comment above names. The key is therefore read case-insensitively with whitespace around the
 #: colon admitted (TRUE prose must not be refused for its spacing — that is the false-block twin),
 #: and `_EMISSION_KEY_SHAPE_RE` below is the backstop that refuses a spelling nobody consumed.
+#: ⛔ THE SEPARATOR IS `\W{0,8}`, NOT `\s*:\s*` (#14623 round 37, measured). The colon-only form
+#: still let the SAME figure through under `=` and under the emitted JSON spelling —
+#: `watchdog_headroom = 2.04` and `"watchdog_headroom": 2.04` matched NEITHER the reader nor the
+#: backstop (the backstop carried the same `\s*:`), so a falsified figure passed every arm. A
+#: separator of up to eight non-word characters admits all three without turning the pattern into
+#: a prose matcher. ⛔ RESIDUAL, declared: a key followed by a WORD for its figure
+#: (`watchdog_minutes: twenty-eight`) is not read by the READER, but the backstop catches it — by
+#: design, since an unread figure must RED rather than pass as absence.
 _EMISSION_MINUTES_KEY_RE = re.compile(
-    r"\bwatchdog_minutes\b\s*:\s*(?P<minutes>\d+)", re.IGNORECASE)
+    r"\bwatchdog_minutes\b\W{0,8}(?P<minutes>\d+)", re.IGNORECASE)
 _EMISSION_HEADROOM_KEY_RE = re.compile(
-    r"\bwatchdog_headroom\b\s*:\s*(?P<headroom>\d+(?:\.\d+)?)", re.IGNORECASE)
+    r"\bwatchdog_headroom\b\W{0,8}(?P<headroom>\d+(?:\.\d+)?)", re.IGNORECASE)
 #: ⛔ THE SHAPE BACKSTOP for the two keys — the sibling of `_EMISSION_RATIO_SHAPE_RE` below, and the
-#: half the round-36 arm was missing. Every `key: value` occurrence of EITHER key must be consumed by
-#: the reader anchored at the same offset; a re-spelling of THAT form that is not
-#: (`watchdog_minutes: twenty-eight`, or the key un-backticked with a unit) REDs as a figure nobody
-#: reads instead of passing as absence.
+#: half the round-36 arm was missing. Every occurrence of EITHER key must be consumed by the reader
+#: anchored at the same offset; a re-spelling that is not REDs as a figure nobody reads instead of
+#: passing as absence — INCLUDING a word-spelled figure (`watchdog_minutes: twenty-eight`), which is
+#: why the backstop carries no digit lookahead. The cost, stated: prose that mentions one of these
+#: keys without any figure would RED. MEASURED on this block — `_emission_block_header` on the live
+#: manifest — each key occurs ONCE, and that one mention carries its figure (`watchdog_minutes: 28`,
+#: `watchdog_headroom: 2.03`), so the cost is not paid here. No count is quoted beyond that: a
+#: spelling of the count is still a count nothing grades.
 _EMISSION_KEY_SHAPE_RE = re.compile(
-    r"\bwatchdog_(?P<which>minutes|headroom)\b\s*:", re.IGNORECASE)
-#: ⛔ AND THE RESIDUAL, declared rather than implied — the key reader's counterpart of the ratio's
-#: residual two blocks below, and stated as an over-claim until it was measured (#14623). The backstop
-#: is anchored on the COLON, because that is the notation `--emit-push-matrix` prints and the only one
-#: whose shape cannot also be ordinary prose. So a SEPARATOR-LESS re-spelling of the same figure —
-#: `watchdog_minutes = 29`, `watchdog_minutes - 29`, `watchdog_minutes 29` — is not shaped and passes
-#: as ABSENCE (measured: each left this arm GREEN over a falsified figure, while `watchdog_minutes: 29`,
-#: `Watchdog_Minutes: 29`, `watchdog_minutes : 29` and `watchdog_minutes:29` each RED). Widening the
-#: shape to a separator run was NOT taken in the same round and is not claimed here: a hyphen and a
-#: bare number are ordinary prose neighbours in this manifest, so that cut owes its own false-block
-#: measurement first. Until it has one the RULE below is what keeps the reader bounded — the ratio's
-#: rule, one level out: a key figure in this block is stated as `key: <number>`, anything else is not
-#: graded, and that is a residual of reading notation with a pattern rather than a property this arm
-#: can keep. Named here so the next round widens it knowingly instead of re-deriving it — and so the
-#: backstop's own comment cannot claim a reach it does not have, which is the class three review
-#: rounds have filed against this arm's neighbours.
+    r"\bwatchdog_(?P<which>minutes|headroom)\b\W{0,8}", re.IGNORECASE)
 _EMISSION_RATIO_SHAPE_RE = re.compile(
     # Anchored on an unambiguous DIVISION SIGN (`/`, `÷`) rather than on a relation glyph: a stated
     # headroom ratio IS a quotient, so this catches a division statement the reader did not consume
