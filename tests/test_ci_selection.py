@@ -9198,8 +9198,24 @@ _EMISSION_RATIO_RE = re.compile(
 #: figure reds a required leg instead of shipping”; these ARE carried figures, and nothing redded. Read
 #: here and compared to the live emission, under the same GRADED-OR-ABSENT rule the ratio uses:
 #: deleting them is legal, printing a different number is not.
-_EMISSION_MINUTES_KEY_RE = re.compile(r"`watchdog_minutes:\s*(?P<minutes>\d+)`")
-_EMISSION_HEADROOM_KEY_RE = re.compile(r"`watchdog_headroom:\s*(?P<headroom>\d+(?:\.\d+)?)`")
+#: ⛔ AND THE `key` ITSELF IS GRADED, NOT SPELLED (#14623 round 37, measured). The first cut of this
+#: reader required the exact form `` `watchdog_minutes: 28` `` — lower case, backticked, no space
+#: before the colon — so the SAME figure re-spelled one keystroke away was not merely tolerated, it
+#: was read as ABSENT: `Watchdog_minutes: 29` and `watchdog_minutes : 29` each left the whole file
+#: GREEN over a falsified figure, which is the "a figure nobody reads is not an absent figure" class
+#: the comment above names. The key is therefore read case-insensitively with whitespace around the
+#: colon admitted (TRUE prose must not be refused for its spacing — that is the false-block twin),
+#: and `_EMISSION_KEY_SHAPE_RE` below is the backstop that refuses a spelling nobody consumed.
+_EMISSION_MINUTES_KEY_RE = re.compile(
+    r"\bwatchdog_minutes\b\s*:\s*(?P<minutes>\d+)", re.IGNORECASE)
+_EMISSION_HEADROOM_KEY_RE = re.compile(
+    r"\bwatchdog_headroom\b\s*:\s*(?P<headroom>\d+(?:\.\d+)?)", re.IGNORECASE)
+#: ⛔ THE SHAPE BACKSTOP for the two keys — the sibling of `_EMISSION_RATIO_SHAPE_RE` below, and the
+#: half the round-36 arm was missing. Every occurrence of EITHER key must be consumed by the reader
+#: anchored at the same offset; a re-spelling that is not (`watchdog_minutes: twenty-eight`, or the
+#: key un-backticked with a unit) REDs as a figure nobody reads instead of passing as absence.
+_EMISSION_KEY_SHAPE_RE = re.compile(
+    r"\bwatchdog_(?P<which>minutes|headroom)\b\s*:", re.IGNORECASE)
 _EMISSION_RATIO_SHAPE_RE = re.compile(
     # Anchored on an unambiguous DIVISION SIGN (`/`, `÷`) rather than on a relation glyph: a stated
     # headroom ratio IS a quotient, so this catches a division statement the reader did not consume
@@ -9926,6 +9942,24 @@ def _emission_block_claims(
                 f"{expected_headroom} — the printed key is a carried figure graded by nothing else in "
                 "the tree (`rg 'watchdog_headroom: 2'` outside this file finds no reader). Re-emit it "
                 "with the verb.")
+    # ⛔ AND A KEY THE READER DID NOT CONSUME IS A FIGURE NOBODY GRADES (#14623 round 37, MEASURED).
+    # The loops above only see the spelling the reader accepts; everything else ranged over this
+    # sentence reached nothing at all. Measured at the pre-fix head with the live block mutated in
+    # place: `Watchdog_minutes: 29` (one case change) and `watchdog_minutes : 29` (one space) each
+    # left the WHOLE arm GREEN over a falsified figure, while the ratio twenty words away RED its own
+    # false value — so the sentence's "GRADED-OR-ABSENT, like the ratio beside them" claim was true
+    # of the ratio and false of these two. The ratio's answer is the one used here: a grammar the
+    # reader cannot read REDs as UNREAD, never as absent, and the message names the spelling to use
+    # so the repair is mechanical rather than a re-derivation.
+    for shaped in _EMISSION_KEY_SHAPE_RE.finditer(header):
+        reader = (_EMISSION_MINUTES_KEY_RE if shaped.group("which").lower() == "minutes"
+                  else _EMISSION_HEADROOM_KEY_RE)
+        assert reader.match(header, shaped.start()) is not None, (
+            f"the block states `{shaped.group(0).strip()}` in a spelling the emission reader does "
+            "not consume, so that figure is graded by nothing — the same no-op-gate class as a "
+            "ratio-shaped parenthetical nobody reads. Spell it `watchdog_minutes: <int>` / "
+            "`watchdog_headroom: <decimal>` (case-insensitive, whitespace around the colon "
+            "admitted), or delete the figure: an ABSENT figure is legal, an ungraded one is not.")
     # ⛔ A FIGURE NOBODY READS IS NOT AN ABSENT FIGURE. Every ratio-SHAPED parenthetical must be
     # CONSUMED by the reader below; one that is not is a live claim graded by nothing, which is this
     # block's whole subject. This is what makes the widening above safe rather than one more
@@ -10173,6 +10207,68 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
         assert "÷" in str(exc), (
             f"the failure message does not quote the spelling that is actually in the block, so it "
             f"sends the reader looking for text that is not there: {exc}")
+    # ⛔ THE TWO `key: value` FIGURES: GRADED, NOT SPELLED (#14623 round 37, MEASURED). The round-36
+    # arm read only the exact form `` `watchdog_minutes: 28` `` — lower case, backticked, no space
+    # before the colon — so the SAME figure one keystroke away was read as ABSENT. Measured on the
+    # live block before this round: `Watchdog_minutes: 29` and `watchdog_minutes : 29` each left the
+    # whole file GREEN over a falsified figure, while the ratio twenty words away RED its own false
+    # value. Each direction is pinned below, so narrowing the reader back to a spelling, or dropping
+    # the shape backstop, REDs here instead of going silent.
+    def _key_header(keys: str) -> str:
+        return ("# eleven shards at 827.6 s (a, b, c, d, e, f, g, h, i, j, k), so "\
+                "`ceil(827.6/60 x 2)` = 28 m governs " + keys + "\n\nfast_shards: 11\n")
+
+    for legal_keys in ("`watchdog_minutes: 28` with `watchdog_headroom: 2.03`",
+                       "`Watchdog_Minutes: 28` with `WATCHDOG_HEADROOM: 2.03`",
+                       "`watchdog_minutes : 28` with `watchdog_headroom:2.03`"):
+        # ASSERT THE READ first: a fixture whose spelling the reader never consumes pins nothing
+        # about grading it (`_emission_block_claims` still returns non-None, because absence is
+        # legal) — the exact non-discriminating shape round 32 filed against this arm's sibling.
+        assert _EMISSION_MINUTES_KEY_RE.search(legal_keys) is not None, (
+            f"the minutes reader did not READ the legal spelling {legal_keys!r}, so the fixture "
+            "below pins nothing — widen `_EMISSION_MINUTES_KEY_RE`")
+        assert _EMISSION_HEADROOM_KEY_RE.search(legal_keys) is not None, (
+            f"the headroom reader did not READ the legal spelling {legal_keys!r} — widen "
+            "`_EMISSION_HEADROOM_KEY_RE`")
+        assert _emission_block_claims(_key_header(legal_keys)) is not None, (
+            f"`_emission_block_claims` REFUSED the legal key spelling {legal_keys!r} — a widening "
+            "that reds true prose is the false-block twin of the fail-open it closes")
+    # …and the VALUE is graded under EVERY spelling, so tolerating the spelling bought no tolerance
+    # for the figure.
+    for wrong_keys, blame in (
+            ("`Watchdog_minutes: 29` with `watchdog_headroom: 2.03`", "watchdog_minutes"),
+            ("`watchdog_minutes : 29` with `watchdog_headroom: 2.03`", "watchdog_minutes"),
+            ("`watchdog_minutes: 28` with `watchdog_headroom: 2.04`", "watchdog_headroom"),
+            ("`watchdog_minutes: 28` with `Watchdog_Headroom : 2.04`", "watchdog_headroom")):
+        try:
+            _emission_block_claims(_key_header(wrong_keys))
+        except AssertionError as exc:
+            assert blame in str(exc), (
+                f"the false key figure in {wrong_keys!r} was refused for the wrong reason: {exc}")
+        else:
+            raise AssertionError(
+                f"a FALSE `{blame}` figure re-spelled as {wrong_keys!r} passed every check — the "
+                "key spelling is tolerated while the figure it states is graded by nothing, which "
+                "is the round-36 P2 itself (measured GREEN at that head)")
+    # ⛔ A KEY THE READER CANNOT READ IS UNREAD, NOT ABSENT — the shape backstop's own direction.
+    for unread_keys in ("`watchdog_minutes: twenty-eight` with `watchdog_headroom: 2.03`",
+                        "`watchdog_minutes: 28` with `watchdog_headroom: two-point-oh-three`"):
+        try:
+            _emission_block_claims(_key_header(unread_keys))
+        except AssertionError as exc:
+            assert "does not consume" in str(exc), (
+                f"the unreadable key figure {unread_keys!r} was refused for the wrong reason — it "
+                f"must be reported as a figure nobody READS: {exc}")
+        else:
+            raise AssertionError(
+                f"a `key: value` figure in a spelling the reader does not consume "
+                f"({unread_keys!r}) was read as ABSENT, so that figure is graded by nothing — the "
+                "class this PR exists to remove")
+    # …and DELETING the keys is still legal: GRADED-OR-ABSENT, not "must print them".
+    assert _emission_block_claims(
+        _key_header("(1680 / 827.6 = 2.0300)")) is not None, (
+        "the arm now refuses a block that prints no `key: value` figures at all — an ABSENT figure "
+        "is legal and only an UNGRADED one is not")
 
 
 def test_the_fast_shards_header_block_states_no_span_twice():
