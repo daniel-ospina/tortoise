@@ -165,8 +165,7 @@ version: 1
 # returns exactly one row — `tests/test_14691_structure_evidence.py`, the row registered by the
 # commit that added the T6 bundle's falsifiers — and the reverse difference is empty. Run it on one
 # manifest per side; do not read a count out of this sentence.
-# set(fast_pool(main))` returns exactly that file and the reverse difference is empty. ⛔ An earlier
-# revision of this paragraph named a row that was NOT this lane's —
+# ⛔ An earlier revision of this paragraph named a row that was NOT this lane's —
 # `tests/test_13450_ep_position_axis_participation.py` — and at THIS base that file is `main`'s (it
 # landed with its own fold, and `fast_pool(main)` contains it), so reading it as this lane's delta
 # attributes a partition move to a row that had already merged.
