@@ -1415,17 +1415,20 @@ def _cites_a_site_in(cited: tuple[str, int, int], sites) -> bool:
        a span plus its call site (`entity_reads.py:533-559` against `:551-559`).
 
     ⛔ CONTAINMENT IN EITHER DIRECTION WAS NOT ENOUGH, measured: it admitted a range that BEGINS
-    exactly where a refused mutant begins and pads its END onto the pinned site (any such range
-    contains the site, and the site contains it). Equality alone would red on the two honest
+    exactly where a refused mutant begins and pads its END onto the pinned site (such a range
+    CONTAINS the site, which is why a containment test admits it on that one disjunct alone).
+    Equality alone would red on the two honest
     shapes above, and OVERLAP would accept a MOVED range (`:172-179` -> `:166-173`), so the
     three shapes are enumerated rather than approximated.
 
     ⛔ AND BOUNDING THE START ALONE WAS STILL NOT ENOUGH (#14691 review, round 16, finding 1):
     with only the start bound, the same padding attack survived from the OTHER side — a range
     that opens exactly on the artifact's start and pads its END by tens of thousands of lines
-    into the same file left `102 passed` (measured). So shape 3 admits a citation that begins
-    anywhere from `_CITATION_WIDEN_BOUND` lines BEFORE the artifact's start to anywhere INSIDE
-    it, and requires it to end at EXACTLY the artifact's end (`hi - other_hi == 0`). That is
+    into the same file left `102 passed` (measured). So shape 3 admits a citation that begins at
+    the artifact's start or up to `_CITATION_WIDEN_BOUND` lines BEFORE it, and requires it to end
+    at EXACTLY the artifact's end (`hi - other_hi == 0`). A start strictly INSIDE the range is
+    refused by the `lo <= other_lo` clause — measured: holding the end at the artifact's end, start
+    offsets 1..19 inside return False. That is
     what the one honest wider span in the two documents actually does — `entity_reads.py:533-559`
     against the artifact's `:551-559` is slack 18 at the start and 0 at the end (measured) — so
     the honest shape stays green, and an end-padded citation cannot pass at ANY start offset.
