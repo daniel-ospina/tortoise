@@ -982,7 +982,7 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
     (`entities.py:6501`, `excluded = _terminal_object_statuses()` at `:6167` =
     `commit_ops.OBJECT_TERMINAL_STATUSES`), and while the word is SET no fold path
     clears it (`_STAGE_CLEAR_PROPS` is the pending trio only) — ⚠️ not "for ever": a
-    coherent un-supersede does clear `superseded` (`sdk.py:56654-56663`), and this
+    coherent un-supersede does clear `superseded` (`sdk.py:56655-56664`), and this
     read resumes then because it derives from the stored row. So while the word is
     set the row cannot be moved in either direction, and a reader answering
     `"closed"` for it therefore
@@ -1101,7 +1101,7 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     where the fix started looping: the read answered `"closed"` from a LIFECYCLE
     term the fold refuses in BOTH directions while it is set — not one "no writer
     can clear" (a coherent un-supersede DOES clear `superseded`,
-    `sdk.py:56654-56663`) — so each poll minted another `-reopened`
+    `sdk.py:56655-56664`) — so each poll minted another `-reopened`
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
     (`entities.py:6501`).
@@ -1452,7 +1452,7 @@ def test_a_non_scalar_stored_status_does_not_crash_the_reader(sdk):
     Both lifecycle helpers were `frozenset` membership tests, and membership
     HASHES the value — so a stored ARRAY status raised `TypeError: unhashable
     type`. That value is reachable through a PRE-FIX SDK, a raw Cypher producer or a
-    JSONL replay of either (`sdk.py:56502-56504`); it is NOT reachable through
+    JSONL replay of either (`sdk.py:56503-56505`); it is NOT reachable through
     `update_knowledge` any more — the lifecycle doors refuse a non-string status at
     intake (`lifecycle_vocabulary.py:279-286`, reached from `_read_caller_status`),
     so `update_knowledge(id, status=['live'])` raises rather than storing. The row
@@ -3377,9 +3377,9 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # merge resolved this file to) and therefore NOT identical at this head. So the reds this
     # table's own guard raised were this BRANCH's shift (`+6` above `update_knowledge`, `+25`
     # below it), not an inherited `main` red. See the re-derivation that follows.
-    # ⛔ The un-supersede arm's start text occurs TWICE at this head (`56654`, the admission arm
-    # this row pins, and `56693`, a hint-message expression, which is NOT an arm), so its row is
-    # located by its own `continue` terminator (`56663`) — never by the start text alone, which
+    # ⛔ The un-supersede arm's start text occurs TWICE at this head (`56655`, the admission arm
+    # this row pins, and `56694`, a hint-message expression, which is NOT an arm), so its row is
+    # located by its own `continue` terminator (`56664`) — never by the start text alone, which
     # would admit either occurrence. Re-measured with `grep -n` on this tree; the
     # `56529`/`56568`/`56538` triple this sentence used to carry was the `bbe54363ad65`-era address
     # of the same two occurrences and the same terminator, and it names unrelated lines both here
@@ -3399,17 +3399,24 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # two regions the rows live in moved by DIFFERENT amounts — **+6** above `update_knowledge`
     # and **+25** below it. Measured, not carried: at `main` `4b2fba3e8aa0` all four rows resolve,
     # and at this head `git show HEAD:tortoise/sdk.py | grep -n` each row's own FIRST-line text
-    # lands at `56502`/`56654`/`23117`/`57169`, with the arm's `continue` at `56663` — so the
+    # lands at `56503`/`56655`/`23117`/`57170`, with the arm's `continue` at `56664` — so the
     # `+6`/`+25` pair is the consistency check on the measurement, never its input. Every SPAN is
     # unchanged (176, 3, 10 and 1 lines), i.e. the addresses moved WITH the statements rather than
     # being re-pointed at neighbouring code, and the prose citations in this file and in
     # `tortoise/indexer/github_indexer.py` are re-cut to the same values.
-    ("sdk.py", 56502, 56504): (
+    # ⛔ RE-DERIVED AGAIN AT #14721 (this PR): its single `sdk.py` hunk is at `:50767` (+1 — the
+    # `page_limit=limit` kwarg on the rerank call), which sits ABOVE the three rows below
+    # `update_knowledge` and BELOW the `update_knowledge` row itself. So that row's addresses
+    # (`23117`/`23292`) are UNMOVED while the other three all move **+1**: →
+    # `56503`/`56505`, `56655`/`56664` (the arm's `continue`), `57170`. Measured by grepping each
+    # pin's own fragment at this head, not by adding 1 to the old numbers; every SPAN is unchanged
+    # (3, 10 and 1 lines), and the two prose carriers above are re-cut with them.
+    ("sdk.py", 56503, 56505): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
-    ("sdk.py", 56654, 56663): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
+    ("sdk.py", 56655, 56664): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
     ("sdk.py", 23117, 23292): (
         "def update_knowledge(", "return self._update_entity_any(id, **props)"),
-    ("sdk.py", 57169, 57169): (
+    ("sdk.py", 57170, 57170): (
         "MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props", None),
 }
 

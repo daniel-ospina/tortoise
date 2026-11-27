@@ -57,17 +57,20 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `bbef0b8840` folded in, plus THIS
-# change's own row (`tests/test_own_site_fragment_targets.py`, `core` AND `onboarding`, at the flat
-# 2.0 s `DEFAULT_FAST_WEIGHT`) — the verb packs eleven shards at 827.6 s (a, b, c, d, e, f, g, h,
-# i, j, k), so `ceil(827.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the
-# SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
-# (1680 / 827.6 = 2.0300), so the two agree by construction rather than by a hand re-read.
-# ⛔ THAT PAIR IS THIS TREE'S ALONE, and the move is measurable: `fast_pool()` holds 1341 entries
-# here against 1340 on `origin/main` `bbef0b8840`, each read by loading that tree's OWN manifest
-# through the verb, and the set difference is exactly ONE entry —
-# `tests/test_own_site_fragment_targets.py`, this change's own suite. `main` carries nothing this
-# tree lacks. ⛔ Every other row this tree carries is `main`'s at this head, NOT this change's
+# reader of the prose can see. On THIS tree — `#14721`'s own suite added (`tests/
+# test_14721_superseded_never_outranks.py`, `ep`, at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) — the
+# verb packs nine shards at 827.8 s (a, b, e, f, g, h, i, j, k) and two at 827.7 s (c, d), so
+# `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
+# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
+# (1680 / 827.8 = 2.0295), so the two agree by construction rather than by a hand re-read. The
+# partition moved by 0.1 s and the watchdog did NOT: that is the measured case this guard exists for —
+# a minute-only re-read would have called the carried sentence correct.
+# ⛔ THAT PAIR IS THIS TREE'S ALONE, and the move is measurable: `fast_pool()` holds 1342 entries
+# here, read by loading this tree's OWN manifest through the verb; `origin/main`'s manifest, loaded
+# the same way at this head, differs by exactly TWO entries and both are named here rather than
+# inferred — `tests/test_14721_superseded_never_outranks.py` (this change's suite, present only
+# here) and `tests/test_14582_creation_hook.py` (a later `main` landing this branch has not folded).
+# ⛔ Every other row this tree carries is `main`'s at this head, NOT this change's
 # (`#14700`'s `tests/test_14700_capture_in_flight_typed_refusal.py`, `#14621`'s
 # `tests/test_14592_read_parity.py`, `#14548`'s residue RATCHET `tests/test_sdk_privatise_sweep.py`
 # — the one `core` row here whose weight is NOT the flat 2.0 s — `#14607`'s
@@ -83,10 +86,12 @@ version: 1
 # derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. Measured on
 # this rebase: two copies arrived, one naming `origin/main` `c1c8df1a3817` with `#14700`'s row, one
 # naming the same base with this change's row, and NEITHER described the merged tree (both said
-# 827.4/827.5 and a `fast_pool()` of 1340 against the 827.6 and 1341 the verb emits here). Neither
-# side is picked: both are DELETED and the paragraph above is a fresh re-derivation with
+# 827.4/827.5 and a `fast_pool()` of 1340 against the 827.6 and 1341 that fold's verb emitted).
+# Neither side is picked: both are DELETED and the paragraph above is a fresh re-derivation with
 # `--emit-push-matrix` on this merged tree. Each earlier fold's figures live on the commit that
-# measured them (`git log`), which is where a spliced copy belongs.
+# measured them (`git log`), which is where a spliced copy belongs — `#14721` re-derived this block
+# again for the same reason and the figures above are THAT measurement (827.8/827.7, 1342), not this
+# one's.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`

@@ -110,8 +110,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # behind. Re-derived by CONTENT at the #14592 head (not by adding 1 to the old
     # number): each pinned fragment was grepped in `tortoise/sdk.py` and the pin was
     # re-anchored on the line that carries it.
-    (_SUBSTRATE, "tortoise/search_engine.py:3508", _SE, 3508, "``:Source``/``:Document`` row must not contribute"),
-    (_SUBSTRATE, "`:3506`", _SE, 3506, "# #11682: the corpus join is PER FAMILY"),
+    # ⛔ THE TWO `search_engine.py` ROWS MOVED +4 AT #14721: that branch adds four lines to
+    # `tortoise/search_engine.py` at `:2031` (the `superseded_by` provenance keys on
+    # `SearchResult`), above this block, so the whole pair rotates together —
+    # `3508`→`3512` (the `:Document` line) and `3506`→`3510` (the block opener). Re-derived by
+    # CONTENT at this head, not by arithmetic: each fragment was grepped in the file and the
+    # pin re-anchored on the line that carries it.
+    (_SUBSTRATE, "tortoise/search_engine.py:3512", _SE, 3512, "``:Source``/``:Document`` row must not contribute"),
+    (_SUBSTRATE, "`:3510`", _SE, 3510, "# #11682: the corpus join is PER FAMILY"),
     # ⛔ The two `:Document` addresses §5's #12915 move names had NO pin, and that is how BOTH shipped
     # one line high — `:37143`/`:37185` are the `:Source` lines of those two docstrings, so the cites
     # pointed a reader just OUTSIDE the set §5 censuses (§5 counts `git grep -n` lines carrying
@@ -153,10 +159,12 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_SUBSTRATE, '`:37982` is the `:Source` line', _SDK, 37982, "D10: a document is a ``:Source``, not a"),
     (_SUBSTRATE, 'opening `:38003`', _SDK, 38003, "def _file_human_approval(self, approver_id: str, artifact_id: str,"),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
-    (_M3_BRIEF, "tortoise/search_engine.py:2945", _SE, 2945, "def run_fts_query"),
-    (_M3_BRIEF, "search_engine.py:2787", _SE, 2787, "def recency_tie_clause"),
-    (_M3_BRIEF, "tortoise/search_engine.py:5074", _SE, 5074, "for rank, (pid, _score) in enumerate(ranked)"),
-    (_M3_BRIEF, "`search_engine.py:4993`", _SE, 4993, "def rrf_fusion("),
+    # ⛔ ALL FOUR MOVED +4 AT #14721 (its `tortoise/search_engine.py` hunk at `:2031` is above every
+    # one of them) — re-derived by CONTENT at this head, fragment by fragment, not by arithmetic.
+    (_M3_BRIEF, "tortoise/search_engine.py:2949", _SE, 2949, "def run_fts_query"),
+    (_M3_BRIEF, "search_engine.py:2791", _SE, 2791, "def recency_tie_clause"),
+    (_M3_BRIEF, "tortoise/search_engine.py:5078", _SE, 5078, "for rank, (pid, _score) in enumerate(ranked)"),
+    (_M3_BRIEF, "`search_engine.py:4997`", _SE, 4997, "def rrf_fusion("),
     # --- docs/architecture/ENTITY-VERDICT-BANDS.md — the D-1 row "the retrieval filter is status-only"
     # ⚠️ This row is a SECOND false correction, of the same class this file exists for. The document
     # cited `search_engine.py:2973-2997`; other PRs' inserts had already moved the status filter to
@@ -164,7 +172,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `+3` therefore preserved the staleness while reading as a correction, and `2976-3000` is the
     # `build_or_query` byte-identity comment block, not the filter. The pin below is anchored on the line
     # that IS the filter, so the next offset-only edit reds instead of shipping.
-    (_EVIDENCE, "search_engine.py:3138-3153", _SE, 3138, "if label in _STATUS_FILTERED_LABELS"),
+    # ⛔ AND +4 AGAIN AT #14721, for the same single cause as the four `_M3_BRIEF` rows above.
+    (_EVIDENCE, "search_engine.py:3142-3157", _SE, 3142, "if label in _STATUS_FILTERED_LABELS"),
     # --- docs/evidence/13083-capability-census/README.md
     (_CENSUS, "cache_projection.py:2776", _CP, 2776, "tail_denied = forbidden | {"),
     # --- docs/00_index.md — its entity-verdict row carries a SECOND present-tense this-head address
@@ -246,14 +255,14 @@ def test_the_resolver_reds_on_a_double_applied_offset() -> None:
     the note — the do-nothing control then failed for the wrong reason (the note check, not the
     content arm).
     """
-    loop_line = 5074
+    loop_line = 5078
     note_line = next(
         i + 1
         for i, line in enumerate((REPO / _SE).read_text(encoding="utf-8").splitlines())
         if "#7704 (MEASURED MECHANISM" in line
     )
     assert note_line > loop_line, "the `#7704` note must sit BELOW the loop it annotates"
-    row = (_M3_BRIEF, "tortoise/search_engine.py:5074", _SE, loop_line,
+    row = (_M3_BRIEF, "tortoise/search_engine.py:5078", _SE, loop_line,
            "for rank, (pid, _score) in enumerate(ranked)")
     doubled = (row[0], row[1], row[2], note_line, row[4])
     errors = _resolve((doubled,))
@@ -264,7 +273,7 @@ def test_the_resolver_reds_on_a_double_applied_offset() -> None:
 
 def test_the_resolver_reds_when_the_document_no_longer_carries_the_cite() -> None:
     """Negative control for the other arm: a dropped/re-pointed cite cannot pass by being absent."""
-    row = (_M3_BRIEF, "search_engine.py:99999", _SE, 5074,
+    row = (_M3_BRIEF, "search_engine.py:99999", _SE, 5078,
            "for rank, (pid, _score) in enumerate(ranked)")
     errors = _resolve((row,))
     assert errors, "a cite the document does not carry must red the resolver"
@@ -576,11 +585,11 @@ def test_the_resolve_content_arm_is_unchanged_by_the_token_arm() -> None:
     demonstrated, and why a separate arm was needed instead of a stricter `_resolve`.
 
     Built from REAL surviving artifacts rather than a synthetic token: `SUBSTRATE-REBUILD-MAP.md`
-    carries both `:3506` and `search_engine.py:3508`, and line 3508 is the line that carries the
+    carries both `:3510` and `search_engine.py:3512`, and line 3512 is the line that carries the
     fragment, so this row is exactly the shape — content arm silent, token arm red.
     """
     correct_line_wrong_token = (
-        _SUBSTRATE, "`:3506`", _SE, 3508, "``:Source``/``:Document`` row must not contribute",
+        _SUBSTRATE, "`:3510`", _SE, 3512, "``:Source``/``:Document`` row must not contribute",
     )
     assert _resolve((correct_line_wrong_token,)) == [], (
         "the content arm must stay silent here — that silence is why the token arm exists"
