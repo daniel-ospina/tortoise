@@ -124,10 +124,10 @@ version: 1
 # first-parent history carries self-merges there is no sound mechanical reading of “the fold this
 # head carries”, so the RULE survives and the label is re-pointed by hand on each fold — a residual
 # named on the artifact, which is the convention this block uses BELOW for the row-exemption class.
-# ⛔ EVERY file named above is `main`'s — the claim is that none is a file this change ADDS, not
-# that none is touched: `tests/test_14560_operator_vectors.py` IS edited here (a two-line pin), so
-# the bare "is `main`'s at this head" the earlier wording carried was false on the face of
-# this diff. ⛔ Not claiming "and every one is `core`": registration status is a THIS-HEAD fact, and
+# ⛔ EVERY file named above EXISTS on `main` — the claim is that none is a file this change ADDS,
+# not that none is touched: `tests/test_14560_operator_vectors.py` IS edited here (its section
+# banner stops claiming "no database needed" over an arm that needs one), so the bare "is `main`'s
+# at this head" the earlier wording carried was false on the face of this diff. ⛔ Not claiming "and every one is `core`": registration status is a THIS-HEAD fact, and
 # `#14544` is the proof it moves (the sentence below records that file leaving `core`) — which is
 # why the registrations this derivation STATES are GRADED rather than trusted:
 # `test_the_derivation_surface_claims_are_graded_against_the_manifest` reads the four files whose
