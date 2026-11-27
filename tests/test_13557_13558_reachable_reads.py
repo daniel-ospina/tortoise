@@ -1176,3 +1176,83 @@ def test_the_ended_scope_still_refuses_an_explicit_query(sdk):
         sdk._tortoise_fts_query("anything withdrawn", entity_type="point",
                                ended_scope=True)
     assert "ended_scope" in str(err.value)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# #14033 acceptance 4 — the read path REPORTS a state question it declined
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# The detector's own half is pinned hermetically in
+# `tests/test_14033_state_cue_gap.py`. What can only be measured HERE is the
+# WIRING: that the read path actually writes the report to the caller-owned sink,
+# on both sides of the decision, and writes nothing for a query that carries no
+# state cue (so every other caller stays byte-identical). Without this the payload
+# would be a module constant nobody publishes — the "capability that must be
+# invoked with a caller's special words is not a read surface" defect #13558 is
+# about, one level down.
+
+@_docker_only
+def test_a_declined_state_question_is_reported_beside_the_rows(sdk):
+    """The relevance read still answers — and now says the state route declined.
+
+    `what has ended recently` is #14033's own measured miss: the shapes decline it
+    (the adverb tail is deferred on the handler-docstring gate), so the caller gets
+    relevance rows. Before this, an empty page here was byte-identical to an honest
+    "nothing has ended". ⛔ The rows are unchanged — only the report is new.
+    """
+    from tortoise.state_intent import MISSED_ROUTE_HINT
+
+    out: dict = {}
+    rows = sdk._tortoise_fts_query("what has ended recently",
+                                   _state_question_out=out)
+    assert isinstance(rows, list), (
+        "the declined read must still return its rows — the report is additive")
+    report = out.get("state_question")
+    assert report is not None, (
+        "the read saw an ENDING cue and declined a shape, and wrote no report: "
+        "the caller cannot tell that from 'nothing has ended' (#14033 item 4)")
+    assert report["routed"] is False
+    assert report["reason"] == "shape"
+    assert report["population"] is None
+    assert report["cue"] == "ended"
+    assert report["hint"] == MISSED_ROUTE_HINT
+
+
+@_docker_only
+def test_a_routed_state_question_IS_declared_through_the_same_sink(sdk):
+    """A ROUTED read says so too — that is the half that must never be silent.
+
+    A caller who receives the ended population has no other way to know the words
+    selected a population rather than ranked rows; the rows look like hits either
+    way.
+    """
+    from tortoise.state_intent import ENDED
+
+    out: dict = {}
+    rows = sdk._tortoise_fts_query("what ended", _state_question_out=out)
+    assert isinstance(rows, list)
+    report = out.get("state_question")
+    assert report is not None, "a routed state read reported nothing"
+    assert report["routed"] is True
+    assert report["population"] == ENDED
+    assert report["shape"] == "wh_whole_question"
+    assert "hint" not in report, (
+        "a routed read carries no remedy — a hint on it would read as a problem")
+
+
+@_docker_only
+def test_a_query_with_no_state_cue_writes_nothing(sdk):
+    """The sink stays empty for every ordinary read, so nothing else changes.
+
+    This is the byte-identical claim: a caller who never asks about state cannot
+    observe this feature at all.
+    """
+    out: dict = {}
+    sdk._tortoise_fts_query("launch event", _state_question_out=out)
+    assert out == {}, (
+        f"an ordinary content query wrote {out!r} — the report must ride only a "
+        f"query that carries an ENDED-STATE cue")
+
+    # …and the same read with no sink at all is unchanged (the default every
+    # existing caller gets).
+    assert isinstance(sdk._tortoise_fts_query("what has ended recently"), list)

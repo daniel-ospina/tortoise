@@ -1387,7 +1387,7 @@ def test_the_served_note_rides_the_live_search_door_and_stays_inside_the_budget(
     source's, not a preference.
     """
     from tortoise.state_intent import ROUTING_NOTE
-    from tortoise.tool_registry import TOOL_REGISTRY, RETIRED_TOOL_REGISTRY
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
     live = {t.name: t for t in TOOL_REGISTRY}
     retired = {t.name: t for t in RETIRED_TOOL_REGISTRY}
@@ -1550,3 +1550,89 @@ def test_the_report_is_a_closed_vocabulary():
     assert routed["shape"] == "wh_whole_question"
     assert "hint" not in routed, (
         "a routed read needs no remedy — a hint there would read as a problem")
+
+
+def test_the_hosted_search_response_carries_the_report(monkeypatch):
+    """The customer-facing channel: `GET /v1/search` publishes `state_question`.
+
+    ⛔ Hermetic on purpose — no docker, no graph. The route's own dependencies are
+    stubbed (a fake SDK whose read writes the sink exactly as the real one does),
+    because what is pinned here is the PASS-THROUGH: the route must thread its sink
+    into the read and publish what came back. Without this the payload would reach
+    the SDK and stop there, which is the shape of the failure this whole item is
+    about — a report nobody can read is the silence again, one layer up.
+    """
+    import asyncio
+
+    from tortoise import hosted_api as ha
+    from tortoise.state_intent import MISSED_ROUTE_HINT, missed_route_payload
+    from tortoise.truncation import mark_truncation
+
+    class _FakeSDK:
+        """Answers `what has ended recently` the way the real read does: rows, the
+        completeness marker every read must record, and a report saying the state
+        route declined."""
+
+        def __init__(self):
+            self.seen: dict | None = None
+
+        def _tortoise_fts_query(self, q, **kwargs):
+            self.seen = kwargs
+            sink = kwargs.get("_state_question_out")
+            if sink is not None:
+                sink["state_question"] = missed_route_payload("ended", "shape")
+            mark_truncation(kwargs.get("_truncation_out"), returned=1, candidates=1)
+            return [{"id": "p1", "pointKind": "claim", "content": "a row"}]
+
+        def close(self):
+            pass
+
+    fake = _FakeSDK()
+
+    async def _fake_sdk_offloaded(org, **kwargs):
+        return fake
+
+    monkeypatch.setattr(ha, "_data_sdk_offloaded", _fake_sdk_offloaded)
+    monkeypatch.setattr(ha, "_require_scope", lambda *a, **k: None)
+
+    response = asyncio.run(ha.search(q="what has ended recently", limit=10, org={}))
+
+    assert fake.seen is not None, "the route never reached the read"
+    assert "_state_question_out" in fake.seen, (
+        "the route did not thread the state-question sink into the read, so the "
+        "report is computed and thrown away")
+    assert response["count"] == 1, "the rows must be unchanged — the field is additive"
+    assert response["state_question"] == missed_route_payload("ended", "shape"), (
+        "the route received a report from the read and did not publish it")
+    assert response["state_question"]["hint"] == MISSED_ROUTE_HINT
+
+
+def test_the_hosted_search_response_is_unchanged_without_a_state_cue(monkeypatch):
+    """An ordinary query's response gains nothing — the additive-only claim.
+
+    This is the byte-identical arm: a caller who never asks about state must not be
+    able to observe this feature at all.
+    """
+    import asyncio
+
+    from tortoise import hosted_api as ha
+    from tortoise.truncation import mark_truncation
+
+    class _FakeSDK:
+        def _tortoise_fts_query(self, q, **kwargs):
+            mark_truncation(kwargs.get("_truncation_out"), returned=0, candidates=0)
+            return []
+
+        def close(self):
+            pass
+
+    async def _fake_sdk_offloaded(org, **kwargs):
+        return _FakeSDK()
+
+    monkeypatch.setattr(ha, "_data_sdk_offloaded", _fake_sdk_offloaded)
+    monkeypatch.setattr(ha, "_require_scope", lambda *a, **k: None)
+
+    response = asyncio.run(ha.search(q="launch event", limit=10, org={}))
+    assert "state_question" not in response, (
+        f"an ordinary content query published {response.get('state_question')!r} — "
+        f"the field must ride only a query that carries an ENDED-STATE cue")
