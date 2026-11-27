@@ -4886,18 +4886,29 @@ def write_live_record(record: Mapping[str, Any], *,
             #     `arm` FIRST or the allocation itself refuses — `UNCUT_GRAPHS_SQL`
             #     is `no row OR mode <> active`, so `journal_skipped=False` does
             #     NOT imply an active row.
-            #  2. a `40001`/`40P01`/`57014` on the allocation — `IsolationRefused`
-            #     and `RetryableAllocationFailure` are raised UNDER `allocate`
-            #     and are not in the allocator map, so they land HERE; their
-            #     contract is the OPPOSITE of "re-fails": the server aborted the
-            #     transaction and the counter rolled back WITH it, so a replay of
-            #     the same record SUCCEEDS. Naming a replay as the fix would be
-            #     wrong; there is nothing to fix.
+            #  2. a `40001`/`40P01`/`57014` on the allocation —
+            #     `RetryableAllocationFailure` is raised UNDER `allocate` and is
+            #     not in the allocator map, so it lands HERE; its contract is the
+            #     OPPOSITE of "re-fails": the server aborted the transaction and
+            #     the counter rolled back WITH it, so a replay of the same record
+            #     SUCCEEDS. Naming a replay as the fix would be wrong; there is
+            #     nothing to fix. ⛔ `IsolationRefused` is NOT in this group and
+            #     the earlier revision of this block wrongly put it here: it is
+            #     raised by `require_read_committed` BEFORE any statement runs, so
+            #     nothing was aborted and no counter increment exists to roll
+            #     back — every replay RE-RAISES until the transaction isolation is
+            #     fixed, i.e. until the DSN stops asking for a serializable one.
+            #     A reader who edited the shipped text from that sentence would
+            #     have told an operator on such a deployment to do nothing while
+            #     every armed write is refused indefinitely. It is population 4.
             #  3. a statement that EXECUTED and failed on its own data or a
             #     constraint — re-executes and re-fails until that cause is
             #     fixed (#13207's `chk_point_baseline_complete`).
             #  4. a STORE/CONFIG refusal — re-raises on any replay until the DSN
-            #     or the role is fixed.
+            #     or the role is fixed; this is where the ISOLATION guard
+            #     (`IsolationRefused`, raised before any statement) belongs, and
+            #     the shipped sentence covers it in the "until the DSN ... is
+            #     fixed" clause.
             # The earlier revision of this block named only three, asserted a
             # cut-over graph unconditionally, and therefore told population 2 a
             # replay re-fails (false) and population 1's no-row/seeded/halted
