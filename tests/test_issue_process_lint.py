@@ -3858,6 +3858,36 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
             f"Closes #13036 (V1, V3, V4, V5, V6 {elsewhere}).\n\n"
             "Satisfies #13036: V1, V2, V3, V4, V5, V6\n", 500, {13036: _scope(rows)})
         assert findings == [] and stats["clean"] == 0 and stats["ambiguous"] == 1, (elsewhere, stats)
+    # ⛔ AND THE UNIT IS THE CLAUSE, NOT THE LINE (review round 22, F1). Round 21's widening applied the
+    # cue pair to the WHOLE line, so a cue in a sibling clause that names NO rows vetoed an affirmative
+    # clause that named every one — `V1 … V6 are all proved by this PR — docs work is tracked in
+    # #14716` read `ambiguous` while the same content wrapped onto two lines read `clean`. That is the
+    # "same content, two verdicts" class round 21 exists to remove, so both wrappings must agree.
+    for body in (
+        "Closes #13036\n\nV1, V2, V3, V4, V5, V6 are all proved by this PR — "
+        "docs work is tracked in #14716.\n",
+        "Closes #13036\n\nV1, V2, V3, V4, V5, V6 are all proved by this PR.\n"
+        "Docs work is tracked in #14716.\n",
+    ):
+        findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
+        assert findings == [] and stats["clean"] == 1, (body, stats)
+    # CONTROL, and an ACCEPTED tradeoff pinned rather than left silent (round 22): a cue INSIDE the
+    # clause that carries the rows still reads as a disclaimer even when the wording is affirmative
+    # (`measured on a separate CI lane` says the rows WERE measured), so a complete `Satisfies` beside
+    # it stays UNANSWERABLE. That is deliberate breadth — over-detecting costs an `ambiguous`, never a
+    # pass — and narrowing `_ELSEWHERE_RE` is the direction that re-opens false PASSes. Pinned so a
+    # future lane changes it on purpose, with this row to redden.
+    findings, stats = L.classify_partial_close(
+        "Closes #13036\n\nV1, V2, V3, V4, V5, V6 measured on a separate CI lane.\n\n"
+        "Satisfies #13036: V1, V2, V3, V4, V5, V6\n", 500, {13036: _scope(rows)})
+    assert findings == [] and stats["clean"] == 0 and stats["ambiguous"] == 1, stats
+    # …and the other side of that tradeoff: the same affirmative sentence with NO elsewhere-cue is a
+    # clean complete close, so the abstention above is the cue's cost, not an inability to read an
+    # affirmative claim.
+    findings, stats = L.classify_partial_close(
+        "Closes #13036\n\nV1, V2, V3, V4, V5, V6 measured and proved.\n\n"
+        "Satisfies #13036: V1, V2, V3, V4, V5, V6\n", 500, {13036: _scope(rows)})
+    assert findings == [] and stats["clean"] == 1, stats
 
 
 def test_naming_every_row_ANYWHERE_is_a_complete_close():

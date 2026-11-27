@@ -1811,9 +1811,21 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # the false PASS this arm exists for, through the pronunciation a careful author
             # actually uses. All seven `_ELSEWHERE_RE` spellings measured that way; the round-12
             # comment below states the rule this line was violating.
-            if _ids_in(line, rows) and (_DISCLAIMER_RE.search(line)
-                                        or _ELSEWHERE_RE.search(line)):
-                disclaimed = True
+            # ⛔ AND THE UNIT IS THE CLAUSE, NOT THE LINE (review round 22, F1). Round 21 applied the
+            # pair to the WHOLE line while the closing-line path applies it to each CLAUSE — so a cue
+            # sitting in a sibling clause that names NO rows vetoed an affirmative clause that named
+            # every one: `V1 … V6 are all proved by this PR — docs work is tracked in #14716` read
+            # `ambiguous`, and the identical content wrapped onto two lines read `clean` — the very
+            # "same sentence, two verdicts" class round 21 fixed, moved to the clause boundary. A
+            # cue only DISCLAIMS the rows its own clause carries, which is what the polarity rule at
+            # the closing-line loop below says and what `_clause_spans` exists for.
+            if _ids_in(line, rows):
+                for a, b in _clause_spans(line, rows):
+                    clause = line[a:b]
+                    if _ids_in(clause, rows) and (_DISCLAIMER_RE.search(clause)
+                                                  or _ELSEWHERE_RE.search(clause)):
+                        disclaimed = True
+                        break
             continue
         # ⛔ THE LINE IS THE UNIT, the clause is the polarity boundary: the range read needs the whole
         # line to see a SIBLING clause that narrows a bare range (`(rows V1–V6; V2 is what this PR
@@ -2514,8 +2526,10 @@ def main(argv: list[str] | None = None) -> int:
             f"{closing_scope['clean']} clean, {closing_scope['finding']} flagged; "
             f"UNANSWERABLE for {closing_scope['abstained']} (no `## Satisfies` tick state and fewer "
             f"than 2 declared row headings, so the issue does not say how many rows it has — NEVER "
-            f"read as complete), {closing_scope['ambiguous']} declared rows but the PR named none "
-            f"(a complete close and a silent partial are indistinguishable there), "
+            f"read as complete), {closing_scope['ambiguous']} where the PR named no row on its "
+            f"closing line and nothing in the body affirmatively claimed them all, or where its own "
+            f"disclosure contradicted a complete claim (a complete close and a silent partial are "
+            f"indistinguishable in both), "
             f"{closing_scope['unread']} unread")
 
     if args.json:
