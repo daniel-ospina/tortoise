@@ -6698,7 +6698,7 @@ def test_the_pool_split_rows_are_counted_and_named_in_the_departure_record(monke
     r"""⛔ THE ONLY REQUIRED LEGS ON THE POOL ARE ROUTED BY A DYNAMIC MATRIX, SO NO STATIC SCAN SEES THEM (#10237).
 
     The pin above scans workflow FILES for a static `runs-on:` naming a pool-only label. The
-    `pool-split` departure is not written in a workflow at all: `python-ci.yml:716` is
+    `pool-split` departure is not written in a workflow at all: `python-ci.yml`'s `test` job is
     `runs-on: ${{ fromJSON(matrix.runner) }}`, and the label lives in the row the SELECTOR emits
     (`tools/ci_selection.py::fast_shard_runner`). So a static scan returns zero pool rows there by
     construction — and the five REQUIRED legs that actually carry a POOL-ONLY label, with no
