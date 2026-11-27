@@ -75,8 +75,11 @@ its ``refusal`` token is one of eight. NONE of the eight is exactly a term here:
 
 * ``circuit_open`` is the only LITERAL fit — a connect to the record failed, so
   the store is configured and was not reached, which is ``degraded`` exactly;
-* ``write_failed`` is the record being UNREACHABLE, or a connection/statement
-  failing — ``degraded`` literally;
+* ``write_failed`` is the record being UNREACHABLE, or the connection failing —
+  ``degraded`` literally FOR THAT HALF, not for the token as a whole: the other
+  half is a STATEMENT that ran and failed (a CHECK over the record's own data,
+  #13207) — a store that was REACHED and refused the row, i.e. an impairment and
+  not an outage, and one that a replay re-refuses rather than heals;
 * ``plan_refused`` (#11783) is the PROJECTOR being unable to build a plan for
   this record at all — so NO statement ran, even though the connection was up:
   an undeclared/refused record type, a carrier with no snapshot, an unusable

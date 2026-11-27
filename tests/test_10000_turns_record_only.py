@@ -3201,6 +3201,51 @@ def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
             f"this pin exists for")
 
 
+def test_the_write_path_vocabulary_does_not_call_a_statement_failure_an_outage():
+    """⛔ #11783: `degraded` is defined in this same module as the store being
+    configured but NOT REACHED — so the `write_failed` bullet must not claim
+    that token, as a whole, is a literal `degraded`.
+
+    `write_failed` carries TWO halves and its neighbours say so: the record
+    UNREACHABLE, and a STATEMENT that ran and FAILED after the store answered
+    (a CHECK over the record's own data, #13207; a driver error; a connection
+    dropped mid-transaction — `record_writer._plan_refusal_cause` keeps all of
+    them on this token, and measures that the store WAS reached). Only the
+    first half is `degraded`; the second is a store that answered and refused
+    the row — the same misattribution #11783 exists to remove (a record
+    failure read as a transport outage), one layer down in the module that
+    calls itself the vocabulary's ONE home.
+
+    Mutation (MEASURED): restore the pre-fix bullet — *"``write_failed`` is the
+    record being UNREACHABLE, or a connection/statement failing — ``degraded``
+    literally;"* — and the third assertion reddens.
+    """
+    from tortoise import status_vocabulary
+
+    doc = status_vocabulary.__doc__ or ""
+    start = doc.find("* ``write_failed``")
+    assert start != -1, "the vocabulary map no longer lists `write_failed`"
+    bullet = doc[start:]
+    nxt = bullet.find("\n* ``", 1)
+    bullet = bullet[:nxt] if nxt != -1 else bullet
+    assert "UNREACHABLE" in bullet, (
+        "the `write_failed` bullet no longer names the UNREACHABLE half")
+    assert "statement" in bullet.lower(), (
+        "the `write_failed` bullet no longer names the half that REACHED the "
+        "store and failed there — the population a replay re-refuses")
+    assert "not an outage" in bullet, (
+        "the `write_failed` bullet applies `degraded` to the STATEMENT half: "
+        "`degraded` is 'configured but could not be REACHED' (this module's "
+        "own definition) and a statement that ran proves the store WAS "
+        "reached, so that half is an impairment, not an outage")
+    assert "FOR THAT HALF" in bullet, (
+        "the `degraded`-literal claim is not scoped to the unreachable half — "
+        "as a whole `write_failed` is not the literal fit (the bullet above "
+        "says `circuit_open` is, and the size sentence derives its count as "
+        "the members that are NOT a measured outage); if the wording moved, "
+        "update this needle rather than dropping the scope")
+
+
 # ── the demo seeders are writers too (the population, not the capture path) ──
 def _seed_demo_out(monkeypatch, org_id="demo-seed-10000"):
     """The dict `_seed_demo_graph` returns, with its SDK stubbed out."""
