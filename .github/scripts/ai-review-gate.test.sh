@@ -416,6 +416,26 @@ mkdir -p "$T/bin"
 cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 [ -n "${STUB_LOG:-}" ] && printf '%s\n' "$*" >> "$STUB_LOG"
+# ── rule (c) (#4255): the reviewed side, reconstructed by the gate ────────
+# Routed BEFORE the media-type arm: a `compare/<base>...<sha>` diff request
+# carries the SAME media type as the live-diff request, so a stub that routed
+# on the media type first would silently serve the LIVE diff as the REVIEWED
+# diff — and the anchor would then be comparing the live bytes with their own
+# digest, which is the one way rule (c) could pass vacuously.
+if grep -qE -- "/compare/" <<<"$*"; then
+    if [ "${STUB_COMPARE_FAIL:-0}" = "1" ]; then exit 1; fi
+    cat "${STUB_COMPARE_FILE:?}"
+    exit 0
+fi
+# The PR's BASE sha — read only by rule (c).
+if grep -qF -- "--jq .base.sha" <<<"$*"; then
+    if [ "${STUB_BASE_FAIL:-0}" = "1" ]; then
+        printf '{"message":"Not Found","status":404}\n'
+        exit 1
+    fi
+    printf '%s\n' "${STUB_BASE_SHA:?}"
+    exit 0
+fi
 if grep -qF -- "application/vnd.github.v3.diff" <<<"$*"; then
     [ "${STUB_DIFF_FAIL:-0}" = "1" ] && exit 1
     cat "${STUB_DIFF_FILE:?}"
@@ -468,6 +488,13 @@ run_gate() { # <env-body-file> [<rest-body-file>]
         export GATE_SECRET="${GATE_SECRET_OVERRIDE:-$KEY}"
         export STUB_BODY_FILE="$restfile" STUB_LOG="$T/gh.log"
         export STUB_UNRECOGNISED="$T/gh-unrecognised"
+        # (#4255) rule (c) inputs. The defaults make every pre-existing case
+        # behave exactly as before: no base sha and no compare fixture means the
+        # patch arm refuses, which is what a pre-#4255 gate did by not existing.
+        export STUB_BASE_SHA="${STUB_BASE_SHA:-}"
+        export STUB_BASE_FAIL="${STUB_BASE_FAIL:-0}"
+        export STUB_COMPARE_FILE="${STUB_COMPARE_FILE:-}"
+        export STUB_COMPARE_FAIL="${STUB_COMPARE_FAIL:-0}"
         # (#1224) The comment channel. A per-case prefix sets these; the defaults
         # describe a successful fetch that found no comment evidence.
         export STUB_COMMENTS_FAIL="${STUB_COMMENTS_FAIL:-0}"
@@ -520,7 +547,12 @@ fi
 #     matches `--jq .body` — that is #4801's "fail on any THIRD shape" arm.
 _gh_pulls_scope="repos/${REPO_NAME}/pulls/${PR_NUMBER}([^0-9]|$)"
 _gh_comments_scope="repos/${REPO_NAME}/issues/${PR_NUMBER}/comments"
-_gh_off_scope="$(grep -vE -- "${_gh_pulls_scope}|${_gh_comments_scope}" "$T/gh.log" || true)"
+# (#4255) rule (c) reads the repo's COMPARE endpoint to reconstruct the diff at
+# the marker's own signed `@ <sha>`. That endpoint is repo-scoped and carries no
+# PR number, so it is admitted by REPO (never by a free-form path): a compare
+# fetch aimed at another repository still lands off-scope below.
+_gh_compare_scope="repos/${REPO_NAME}/compare/[0-9a-f.]+"
+_gh_off_scope="$(grep -vE -- "${_gh_pulls_scope}|${_gh_comments_scope}|${_gh_compare_scope}" "$T/gh.log" || true)"
 if [ -z "$_gh_off_scope" ]; then
     ok "(a) every gh call is scoped to repos/${REPO_NAME} for #${PR_NUMBER} (set membership)"
 else
@@ -1060,7 +1092,184 @@ assert_rc 1 "(s) a failed comment fetch fails closed"
 assert_contains "(s) says the comment evidence could not be examined" "comment-carried evidence could not be examined"
 
 echo ""
-echo "── Summary ───────────────────────────────────────────────────────"
+echo "── (t) acceptance rule (c): the PATCH projection survives a base advance (#4255) ──"
+# THE WALL THIS SECTION GUARDS. `main` landing work in a file the PR also touches rewrites
+# the hunk CONTEXT around the PR's hunks, so the moment the branch is refreshed onto the
+# new base the BINDING digest moves while every AUTHORED line is byte-identical. Rules (a)
+# and (b) both compare the binding, so before rule (c) that PR was refused as "the reviewed
+# diff changed" — measured 2026-11-26 on four MERGEABLE, clean-reviewed PRs that produced
+# zero merges. Rule (c) compares the PATCH projection instead, with the reviewed side
+# re-derived from the marker's own signed `@ <sha>` and ANCHORED on its signed `diff=`.
+#
+# The fixtures below are the REAL BYTES of that measurement: a git repo where a PR inserts
+# `PR-LINE` and `main` then inserts `MAIN-INSERT` inside the hunk's context window, with
+# the branch merged forward. The digests are LITERALS produced by agent-infra's own
+# `scripts/lib/diff-normalize.py` (the producer half), so this is also the CROSS-REPO
+# CONTRACT VECTOR: if either side's projection changes, one of these two files reddens.
+#
+#   reviewed binding dfebaa86…   patch f7f1d204…
+#   live     binding 4d4d1118…   patch f7f1d204…   ← binding MOVED, patch IDENTICAL
+#   one byte edited  patch d747ddd2…               ← a fresh review IS owed
+#   whitespace added patch 13c304e8…               ← a fresh review IS owed (anti-patch-id)
+REVIEWED_DIFF_FILE="$T/rev-base-moved.diff"
+cat > "$REVIEWED_DIFF_FILE" <<'DIFFEOF'
+diff --git a/f.md b/f.md
+index 1b2a1c5..532af15 100644
+--- a/f.md
++++ b/f.md
+@@ -8,5 +8,6 @@ l7
+ l8
+ l9
+ l10
++PR-LINE
+ l11
+ l12
+DIFFEOF
+LIVE_DIFF_FILE="$T/live-base-moved.diff"
+cat > "$LIVE_DIFF_FILE" <<'DIFFEOF'
+diff --git a/f.md b/f.md
+index 819129e..2355478 100644
+--- a/f.md
++++ b/f.md
+@@ -8,6 +8,7 @@ l7
+ l8
+ l9
+ l10
++PR-LINE
+ l11
+ l12
+ MAIN-INSERT
+DIFFEOF
+EDITED_DIFF_FILE="$T/edited.diff"
+sed 's/PR-LINE/PR-LINe/' "$LIVE_DIFF_FILE" > "$EDITED_DIFF_FILE"
+WS_DIFF_FILE="$T/ws.diff"
+sed 's/PR-LINE/PR-LINE /' "$LIVE_DIFF_FILE" > "$WS_DIFF_FILE"
+PB_REVIEWED="dfebaa86f270853c99b5f809b31f6f5621009e8e5a0f03d3a42597470a62420c"
+PB_LIVE="4d4d1118333448a5c97de826680e7fdcc929e133b179001565c03b2c80583eca"
+PP_REVIEWED="f7f1d204dfd1bcd120e2088c8e6ac3b8cf768e6bb29fac3f947417c6840c5388"
+PP_EDITED="d747ddd2a35a20377203a59ed6137b6e692634d020507840dc9c5319d0aaad60"
+PP_WS="13c304e8ebf5fe32a50f855cb2fc7385fc01703fa7a47e8f3a38758507d80d7a"
+BASE_SHA="$(printf 'c%.0s' $(seq 1 40))"
+
+# ── Direct vector tests of the extracted PATCH projector ──────────────────
+PP_FN="$T/patch-projection-fn.sh"
+awk '/^patch_projection_review_diff\(\) \{/ { f=1 } f { print } f && /^\}$/ { exit }' \
+    "$RUN_BLOCK" > "$PP_FN"
+if [ -s "$PP_FN" ] && grep -q '_IDX' "$PP_FN"; then
+    ok "extracted patch_projection_review_diff from the run block"
+    # shellcheck disable=SC1090
+    source "$PP_FN"
+else
+    bad "could not extract patch_projection_review_diff (the rule-(c) vectors would pass vacuously)"
+fi
+check_patch() { # <label> <input-file> <expected-digest>
+    local got
+    got="$(patch_projection_review_diff < "$2" | openssl dgst -sha256 | awk '{print $NF}')"
+    if [ "$got" = "$3" ]; then ok "patch projection [$1] -> pinned digest"; else bad "patch projection [$1] -> $got (want $3)"; fi
+}
+check_patch "the reviewed diff" "$REVIEWED_DIFF_FILE" "$PP_REVIEWED"
+check_patch "the base-moved live diff (SAME authored change)" "$LIVE_DIFF_FILE" "$PP_REVIEWED"
+check_patch "one byte edited" "$EDITED_DIFF_FILE" "$PP_EDITED"
+check_patch "whitespace added" "$WS_DIFF_FILE" "$PP_WS"
+# The whole point, stated as a vector: the BINDING moves and the PATCH does not.
+_bn="$(normalize_review_diff < "$REVIEWED_DIFF_FILE" | openssl dgst -sha256 | awk '{print $NF}')"
+_bn2="$(normalize_review_diff < "$LIVE_DIFF_FILE" | openssl dgst -sha256 | awk '{print $NF}')"
+if [ "$_bn" = "$PB_REVIEWED" ] && [ "$_bn2" = "$PB_LIVE" ] && [ "$_bn" != "$_bn2" ]; then
+    ok "(t) the BINDING digest really MOVES on this base advance (so the case below is not vacuous)"
+else
+    bad "(t) binding digests are $_bn / $_bn2 (want $PB_REVIEWED / $PB_LIVE and DIFFERENT) — the fixture no longer models a base move"
+fi
+
+# ── (t1) THE FIX: a stale marker whose PATCH is unchanged carries ────────
+diff_marker "$STALE" "$PB_REVIEWED" > "$T/body-t1"
+STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t1"
+assert_rc 0 "(t1) a base advance with an UNCHANGED authored change PASSES (rule (c))"
+assert_contains "(t1) names the PATCH-match path" "passed via PATCH match"
+if grep -qE -- "repos/${REPO_NAME}/compare/${BASE_SHA}\.\.\.${STALE}" "$T/gh.log"; then
+    ok "(t1) the reviewed side was reconstructed from the marker's OWN signed @ sha (compare/<base>...<stale>)"
+else
+    bad "(t1) the gate never asked for the reviewed diff at the marker's sha (stub log: $(cat "$T/gh.log"))"
+fi
+if grep -qE -- "repos/${REPO_NAME}/pulls/${PR_NUMBER} --jq \.base\.sha" "$T/gh.log"; then
+    ok "(t1) …against the PR's CURRENT base (so a moved base is what is being accounted for)"
+else
+    bad "(t1) the gate did not read the PR's base sha (stub log: $(cat "$T/gh.log"))"
+fi
+_t1_off="$(grep -vE -- "repos/${REPO_NAME}/(pulls/${PR_NUMBER}([^0-9]|\$)|issues/${PR_NUMBER}/comments|compare/[0-9a-f.]+)" "$T/gh.log" || true)"
+if [ -z "$_t1_off" ]; then
+    ok "(t1) every gh call is scoped to repos/${REPO_NAME} (set membership)"
+else
+    bad "(t1) gh call(s) outside this repo/PR: $(printf '%s' "$_t1_off" | tr '\n' '|')"
+fi
+[ -s "$T/gh-unrecognised" ] && bad "(t1) the gate made a gh call the stub did not recognise: $(cat "$T/gh-unrecognised")" || ok "(t1) no unrecognised gh call shape"
+
+# ── (t2) ONE BYTE OF AUTHORED CHANGE STILL REQUIRES A FRESH REVIEW ────────
+diff_marker "$STALE" "$PB_REVIEWED" > "$T/body-t2"
+STUB_DIFF_FILE="$EDITED_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t2"
+assert_rc 1 "(t2) one edited byte FAILS — the review does not carry"
+assert_not_contains "(t2) …and does not claim a patch match" "passed via PATCH match"
+assert_contains "(t2) …and says the diff changed" "does not match this PR's current diff hash"
+
+# ── (t3) A WHITESPACE-ONLY EDIT IS AN EDIT (the anti-`patch-id` pin, at rule (c)) ──
+diff_marker "$STALE" "$PB_REVIEWED" > "$T/body-t3"
+STUB_DIFF_FILE="$WS_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t3"
+assert_rc 1 "(t3) an added space FAILS — the patch projection is whitespace-exact"
+assert_not_contains "(t3) …and does not claim a patch match" "passed via PATCH match"
+
+# ── (t4) THE ANCHOR: a marker's `diff=` must be REPRODUCIBLE from its own sha ──
+# The patch would match, but the reconstruction does not reproduce the signed digest —
+# so rule (c) must refuse rather than compare a patch against bytes of unknown provenance.
+diff_marker "$STALE" "$DH2" > "$T/body-t4"
+STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t4"
+assert_rc 1 "(t4) an UNREPRODUCIBLE diff= is refused even when the patch would match (the ANCHOR)"
+assert_not_contains "(t4) …and no patch match is claimed" "passed via PATCH match"
+
+# ── (t5) FAIL CLOSED: no reviewed side, no base sha, no live diff ─────────
+diff_marker "$STALE" "$PB_REVIEWED" > "$T/body-t5"
+STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" STUB_COMPARE_FAIL=1 run_gate "$T/body-t5"
+assert_rc 1 "(t5) a FAILED compare fetch fails closed (never a pass from a failed read)"
+STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" STUB_BASE_FAIL=1 \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t5"
+assert_rc 1 "(t5) an UNREADABLE base sha fails closed"
+STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" STUB_DIFF_FAIL=1 \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t5"
+assert_rc 1 "(t5) an unreadable LIVE diff fails closed (no patch digest to compare)"
+
+# ── (t6) THE GREEN PATH PAYS NOTHING EXTRA ─────────────────────────────
+# Rule (c) is consulted only when (a) and (b) found nothing, so an ordinary PR makes
+# no compare call and no base-sha read — otherwise every gate run would pay two extra
+# API calls, and the queue's entry check is on the critical path of every merge.
+legacy_marker "$HEAD" > "$T/body-t6"
+STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t6"
+assert_rc 0 "(t6) a HEAD-BOUND marker still passes on rule (a)"
+if grep -qE -- "/compare/|--jq \.base\.sha" "$T/gh.log"; then
+    bad "(t6) the green path made a rule-(c) API call (log: $(cat "$T/gh.log")) — rule (c) must cost nothing when (a)/(b) decide"
+else
+    ok "(t6) the green path made NO rule-(c) API call"
+fi
+
+# ── (t7) MUTATION: remove the patch comparison and (t1) must FAIL ────────
+# Proves (t1) is the rule's doing, not an accident of the fixtures.
+MUT_PP="$T/mutant-no-patch-carry.sh"
+sed 's/^  \[ "$p_patch" = "$live_patch_hash" \] || return 1$/  return 1/' "$RUN_BLOCK" > "$MUT_PP"
+if cmp -s "$RUN_BLOCK" "$MUT_PP"; then
+    bad "(t7) the mutation did not apply — the anchored comparison line changed shape, so this control proves NOTHING"
+else
+    _saved_block="$RUN_BLOCK"; RUN_BLOCK="$MUT_PP"
+    STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+        STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t1"
+    RUN_BLOCK="$_saved_block"
+    [ "$GATE_RC" = "1" ]; ck_rc=$?
+    if [ "$ck_rc" = "0" ]; then ok "(t7) the MUTANT FAILS the unchanged-artifact case — so (t1) is rule (c)'s doing"; else bad "(t7) the MUTANT passed (rc=$GATE_RC) — (t1) does not depend on the patch comparison"; fi
+fi
+
+
 echo "  PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { echo "  ❌ FAILURES — fix and re-run"; exit 1; }
 echo "  ✅ all checks passed"

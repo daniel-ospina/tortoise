@@ -122,7 +122,58 @@ name: ai-review-gate
 #   (a) its signed `@ <sha>` equals the PR's current head — the normal path,
 #       and the ONLY path legacy markers (no diff=) can ever use; OR
 #   (b) it carries a signed `diff=<sha256>` equal to the diff hash THIS WORKFLOW
-#       computes live from the GitHub REST API for this PR at check time.
+#       computes live from the GitHub REST API for this PR at check time; OR
+#   (c) its REVIEWED PATCH equals this PR's live patch projection, with the
+#       reviewed side reconstructed here from the marker's own signed
+#       `@ <sha>` and ANCHORED on its signed `diff=` (#4255 — see below).
+#
+# ⛔ THE TWO DIGESTS, STATED ONCE SO THEY CANNOT BE RE-BROKEN (#4255). Both are
+# sha256 over the SAME bytes — `GET /repos/<o>/<r>/pulls/<n>` with
+# `Accept: application/vnd.github.v3.diff`, which is GitHub's own three-dot
+# rendering (`merge-base(base, head)..head`), ALL paths, nothing excluded —
+# pushed through the shared normalizer (producer: agent-infra
+# `scripts/lib/diff-normalize.py`; consumer: the inline copy below).
+#   BINDING digest (`diff=`) = sha256 of the normalized diff. Normalization
+#     drops an entry's `index` line when that entry carries a hunk and rewrites
+#     `@@ -a,b +c,d @@` to `@@ -0,<old> +0,<new> @@`, so blob ids and hunk LINE
+#     NUMBERS stop mattering — but hunk CONTEXT is KEPT (#1362 D1). It is
+#     therefore BASE-MOVE SENSITIVE BY DESIGN: it is the byte identity of the
+#     rendered artifact, and `main` landing work in a file this PR also changes
+#     rewrites the context lines around the PR's hunks.
+#   PATCH digest (#1377) = sha256 of the `--patch-only` projection: blob ids,
+#     hunk line numbers AND hunk context are dropped; every `+`/`-` line, the
+#     `diff --git`/`---`/`+++` path lines, mode/rename/binary lines and
+#     whitespace pass through BYTE-EXACT. It is BASE-MOVE INVARIANT, and it is
+#     the only projection that answers "did the AUTHORED change move?".
+# ⛔ Do NOT try to make the BINDING digest base-move invariant by dropping
+# context there: it is what `diff=` means to every producer in the fleet, and
+# changing it silently invalidates every marker ever signed (the #3076 shape).
+# Two questions, two projections, one byte stream. A patch match is NEVER
+# consulted alone: rule (c) first RE-DERIVES the binding digest of the reviewed
+# side and requires it to equal the marker's own signed `diff=`, so the bytes
+# compared are the bytes that marker was minted over (the same ANCHOR
+# agent-infra's `patch_dimension_carry` uses) — a marker whose reconstruction
+# does not reproduce its own `diff=` is refused, never guessed at.
+#
+# WHY (c) EXISTS: without it, a clean review cannot survive the base advancing.
+# MEASURED (agent-infra#4255): one PR adds a line, `main` inserts a line inside
+# that hunk's context window, the branch is refreshed — binding dfebaa86… →
+# 4d4d1118…, patch f7f1d204… → f7f1d204… (identical). Before (c), that PR was
+# refused as "the reviewed diff changed" although not one authored byte moved,
+# which is how four MERGEABLE, clean-reviewed PRs produced zero merges in one
+# night (two of them re-reviewed, one aborted mid-review on "the DIFF CHANGED
+# during the review", one refused on a truncated-body read).
+#
+# WHAT (c) DOES NOT DO. It cannot tell WHICH revision a reviewer saw — no
+# acceptance rule here can; that binding is the producer's stale-sha guard's job
+# (see the delegation note below). It is not a whitespace-blind match: the patch
+# projection keeps whitespace BYTE-EXACT and keeps PATHS, so an edited line, an
+# added space, a renamed file and a deleted line all move it (pinned by the
+# harness, both directions). The fields it drops are exactly the ones a rebase
+# rewrites — which is the same arm agent-infra's `merge-one.sh` has ALREADY been
+# merging on since #1377 (`patch_dimension_carry`), so (c) widens no acceptance
+# set relative to what the fleet already lands; it removes the requirement that
+# a human re-record before the SERVER-side gate will agree with the local one.
 # (b) carries a verdict across a merge-only update: the head moved, the
 # reviewed diff did not.
 #
@@ -540,6 +591,50 @@ jobs:
           '
           }
 
+          # ── The PATCH projection (#1377; consumed by acceptance rule (c), #4255) ──
+          # A SECOND projection of the SAME bytes, for a DIFFERENT question: "is the
+          # change the reviewer approved still the change in this branch?". It drops
+          # exactly the three fields a rebase/base-move rewrites while the reviewed
+          # change is untouched — `index` blob ids, `@@ … @@` line numbers, and hunk
+          # CONTEXT (a leading single space) — and keeps everything else VERBATIM:
+          # the `diff --git`/`---`/`+++` lines (so the PATH is part of the identity),
+          # every mode/rename/copy/similarity line, every `+`/`-` line BYTE-EXACT
+          # including whitespace, and `\ No newline at end of file` markers. An entry
+          # with NO hunk is emitted WHOLE — for a binary or hunk-less entry the
+          # `index` line IS the content (the 2026-09-23 amendment), so dropping
+          # anything there would make two different binaries project identically.
+          # ⛔ THIS IS A SIGNED CROSS-REPO CONTRACT with agent-infra's
+          # `scripts/lib/diff-normalize.py --patch-only`. Same split("\n") /
+          # "\n".join over a latin-1 decode, same hunk-presence predicate, same
+          # entry scoping — or the consumer disagrees with every producer in the
+          # fleet (the #3076 shape). Pinned by the harness's direct vector tests.
+          patch_projection_review_diff() {
+            python3 -c '
+          import re, sys
+          _IDX = re.compile(r"^index [0-9a-f]+\.\.[0-9a-f]+( [0-7]{6})?$")
+          _HUNK = re.compile(r"^@@ -([0-9]+)(,([0-9]+))? \+([0-9]+)(,([0-9]+))? @@(.*)$")
+          raw = sys.stdin.buffer.read().decode("latin-1")
+          lines = raw.split("\n")
+          bounds = [i for i, l in enumerate(lines) if l.startswith("diff --git ")]
+          bounds.append(len(lines))
+          out = []
+          def project(entry):
+              if not any(l.startswith("@@ ") for l in entry):
+                  return list(entry)
+              kept = []
+              for l in entry:
+                  if _IDX.match(l) or _HUNK.match(l) or l.startswith(" "):
+                      continue
+                  kept.append(l)
+              return kept
+          start = 0
+          for end in bounds:
+              out.extend(project(lines[start:end]))
+              start = end
+          sys.stdout.buffer.write("\n".join(out).encode("latin-1"))
+          '
+          }
+
           # ── Live diff hashes (#2982, #1362) ───────────────────────────
           # The reviewed artifact is the PR's three-dot diff. The producer
           # (record-review.sh) keys its evidence to a sha256 over these same
@@ -568,6 +663,7 @@ jobs:
           # to the weaker legacy arm when the signed-contract half is broken.
           live_diff_hash_norm=""
           live_diff_hash_raw=""
+          live_patch_hash=""
           if command -v gh >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 \
              && command -v python3 >/dev/null 2>&1; then
             live_diff_tmp="$(mktemp)"
@@ -583,11 +679,24 @@ jobs:
                 live_diff_hash_raw=""
               fi
               rm -f "$live_diff_norm_tmp"
+              # The PATCH projection of the SAME fetched bytes, for rule (c).
+              # Computed here so the gate parses the live diff ONCE; it is left
+              # EMPTY when the normalizer half above failed, because a broken
+              # signed-contract half must not leave a weaker arm (rule (c))
+              # standing on its own — the same fail-closed posture as (b).
+              if [ -n "$live_diff_hash_norm" ]; then
+                live_patch_tmp="$(mktemp)"
+                if patch_projection_review_diff < "$live_diff_tmp" > "$live_patch_tmp"; then
+                  live_patch_hash="$(openssl dgst -sha256 < "$live_patch_tmp" | awk '{print $NF}')"
+                fi
+                rm -f "$live_patch_tmp"
+              fi
             fi
             rm -f "$live_diff_tmp"
           fi
           [[ "$live_diff_hash_norm" =~ ^[0-9a-f]{64}$ ]] || live_diff_hash_norm=""
           [[ "$live_diff_hash_raw" =~ ^[0-9a-f]{64}$ ]] || live_diff_hash_raw=""
+          [[ "$live_patch_hash" =~ ^[0-9a-f]{64}$ ]] || live_patch_hash=""
 
           # ── Accepted marker shapes (#3076, #2982) ───────────────────────
           # record-review.sh signs the marker text and appends " sig=<hmac>".
@@ -651,6 +760,7 @@ jobs:
           #       HEAD-BOUND diff= marker still passes with no live hash.
           # The HMAC is verified separately, below, before any is accepted.
           candidates=""
+          candidates_via_patch=0
           if [ -n "$all_markers" ]; then
             while IFS= read -r line; do
               [ -z "$line" ] && continue
@@ -665,6 +775,75 @@ jobs:
             candidates="$(printf '%s' "$candidates" | sed '/^$/d')"
           fi
 
+          # ── Acceptance rule (c): the PATCH projection (#4255) ────────────
+          # Reached ONLY when rules (a) and (b) found nothing, so the green path
+          # pays nothing for it (no extra API call on an ordinary PR).
+          #
+          # WHAT IT ANSWERS: "is the change this marker attests the change this PR
+          # still makes?" — comparing the PATCH projections defined in the header,
+          # not the rendered bytes. This is the only rule that survives a base
+          # advance, because the binding digest keeps hunk context by design.
+          #
+          # HOW THE REVIEWED SIDE IS OBTAINED — and why that is sound. It is NOT
+          # taken from the PR body and NOT taken from the marker's `diff=` on
+          # trust: the gate asks GitHub for the diff at the marker's OWN SIGNED
+          # `@ <sha>` against the PR's CURRENT base (`compare/<base>...<sha>`,
+          # GitHub's three-dot rendering of that pair), re-derives the BINDING
+          # digest of those bytes, and requires it to equal the marker's signed
+          # `diff=`. That is the ANCHOR: if the reconstruction does not reproduce
+          # the marker's own digest — a moved merge base, a rewritten reviewed
+          # commit, a divergence between renderings — the rule REFUSES rather than
+          # comparing a patch against bytes of unknown provenance. Only then is
+          # the patch projection of that reconstructed artifact compared with the
+          # live patch projection computed above.
+          #
+          # FAIL CLOSED, EVERY WAY: no live patch digest (an API blip or a broken
+          # normalizer) → no rule (c); the base sha unreadable → no rule (c); the
+          # compare fetch failing or answering no `diff --git` → no rule (c); the
+          # anchor mismatch → no rule (c). A transient failure can therefore only
+          # leave the pre-#4255 behaviour (red), never become a pass.
+          #
+          # ⛔ IT CANNOT WEAKEN HEAD BINDING. `@ <sha>` is signed, so the reviewed
+          # head is the marker's own claim; the anchor proves the bytes; nothing
+          # here mints or extends evidence, and rule (a) still governs every
+          # head-bound marker.
+          patch_arm_ok() { # <marker line> -> 0 iff its reviewed PATCH == this PR's live PATCH
+            local line="$1" p_sha="" p_diff="" p_base="" p_rt="" p_anchor="" p_patch=""
+            p_sha="$(printf '%s' "$line" | sed -nE 's/^.* @ ([0-9a-f]{40}).*$/\1/p')"
+            p_diff="$(printf '%s' "$line" | sed -nE 's/^.* diff=([0-9a-f]{64}) \(.*$/\1/p')"
+            [ "${#p_sha}" -eq 40 ] && [ "${#p_diff}" -eq 64 ] || return 1
+            # A HEAD-BOUND marker is rule (a)'s; (c) exists only for a stale sha.
+            [ "$p_sha" != "$expected" ] || return 1
+            [ -n "$live_patch_hash" ] || return 1
+            command -v gh >/dev/null 2>&1 || return 1
+            p_base="$(gh api "repos/${REPO_NAME}/pulls/${PR_NUMBER}" --jq .base.sha 2>/dev/null || true)"
+            [[ "$p_base" =~ ^[0-9a-f]{40}$ ]] || return 1
+            p_rt="$(mktemp)"
+            if ! gh api -H "Accept: application/vnd.github.v3.diff" \
+                   "repos/${REPO_NAME}/compare/${p_base}...${p_sha}" > "$p_rt" 2>/dev/null \
+               || [ ! -s "$p_rt" ] \
+               || ! grep -qE '^diff --git ' "$p_rt"; then
+              rm -f "$p_rt"; return 1
+            fi
+            p_anchor="$(normalize_review_diff < "$p_rt" | openssl dgst -sha256 | awk '{print $NF}')"
+            if [ "$p_anchor" != "$p_diff" ]; then rm -f "$p_rt"; return 1; fi
+            p_patch="$(patch_projection_review_diff < "$p_rt" | openssl dgst -sha256 | awk '{print $NF}')"
+            rm -f "$p_rt"
+            [[ "$p_patch" =~ ^[0-9a-f]{64}$ ]] || return 1
+            [ "$p_patch" = "$live_patch_hash" ] || return 1
+            return 0
+          }
+          if [ -z "$candidates" ] && [ -n "$all_markers" ]; then
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              if patch_arm_ok "$line"; then
+                candidates="${candidates}${line}"$'\n'
+                candidates_via_patch=1
+              fi
+            done <<< "$all_markers"
+            candidates="$(printf '%s' "$candidates" | sed '/^$/d')"
+          fi
+
           # ── Verify the HMAC over the marker text, which INCLUDES diff= ────
           # Pass if ANY candidate (decoy lines / accumulated re-reviews) has a
           # valid signature, and take the first that does. A marker is accepted
@@ -673,6 +852,7 @@ jobs:
           marker=""
           marker_chan=""
           accepted_via_diff=0
+          accepted_via_patch=0
           while IFS= read -r line; do
             [ -z "$line" ] && continue
             sig="$(printf '%s' "${line##* sig=}")"
@@ -914,7 +1094,16 @@ jobs:
             exit 1
           fi
 
-          if [ "$accepted_via_diff" -eq 1 ]; then
+          if [ "$accepted_via_diff" -eq 1 ] && [ "$candidates_via_patch" -eq 1 ]; then
+            # Rule (c) (#4255): the candidate set came from the PATCH comparison,
+            # so a stale-sha acceptance here means the authored change is the one
+            # the reviewer approved even though the rendered diff moved.
+            accepted_via_patch=1
+          fi
+          if [ "$accepted_via_patch" -eq 1 ]; then
+            echo "AI review gate passed via PATCH match: the verdict recorded against a previous head carries forward because the change this PR AUTHORED is byte-identical (the rendered diff moved — hunk context and line numbers — which is what a base advance does; every reviewed +/- line, path and whitespace is unchanged). The marker's @ sha is stale; its signed diff= was reproduced from that sha against the current base (the ANCHOR), and the patch projection matched rule (c)."
+            echo "AI review gate passed: ${marker% sig=*} (marker found in ${marker_chan})"
+          elif [ "$accepted_via_diff" -eq 1 ]; then
             # New (#2982) diagnostic: explain WHY a stale-sha marker passed.
             # Name which digest matched (#1362) so a legacy-vs-normalized
             # carry-forward is legible in the log.
