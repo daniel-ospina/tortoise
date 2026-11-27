@@ -1578,7 +1578,7 @@ _DISCLAIMER_RE = re.compile(
 # else is a mention, and mentions are not claims in either direction.
 _AFFIRM_RE = re.compile(
     r"\b(?:prov(?:e|es|ed|en|ing)|measur\w+|done|complet\w+|deliver\w+|cover(?:s|ed)?|verif\w+"
-    r"|satisf\w+|land(?:s|ed)?|shipp(?:ed|ing)|closed|all\s+six|every\s+row)\b",
+    r"|satisf\w+|landed|shipped|closed|all\s+six|every\s+row)\b",
     re.IGNORECASE)
 # Where one CLAIM can end and a disclaimer can begin. A SPACED dash is a boundary (`#N — only V2 is
 # claimed`), but one sitting BETWEEN two declared row ids is a RANGE (`V1 — V6`) and must NOT split:
@@ -1680,8 +1680,15 @@ def _closing_line_claim(pr_body: str, issue: int,
         for i, (a, b) in enumerate(spans):
             if _DISCLAIMER_RE.search(line[a:b]):
                 disclaimed = True
-                chars[a:b] = " " * (b - a)
                 claimable.discard(i)
+            # ⛔ BLANK EVERY CLAUSE THAT IS NOT CLAIMABLE — NOT JUST THE RECOGNISED DISCLAIMERS
+            # (review round 10). Making `claimable` a mere gate on "should I scan the line" left the
+            # rule it implements unenforced: `(row V2 only); V1, V3, V4, V5, V6 are separate PRs` has
+            # no cue word at all, so the five narrowing ids were unioned in as CLAIMS and the arm
+            # reported `clean` on a one-row PR. Claimable clauses stay readable together, so the
+            # sibling rule that turns a bare range in a narrowed line into a mention still applies.
+            if i not in claimable:
+                chars[a:b] = " " * (b - a)
         if claimable:
             named |= _ids_in("".join(chars), rows)
     return named, disclaimed

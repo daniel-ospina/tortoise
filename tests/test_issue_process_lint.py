@@ -4249,6 +4249,13 @@ def test_an_empty_sweep_says_it_read_nothing_not_that_the_arm_did_not_run(capsys
     "Closes #13036\n\nThe capstone rows are V1, V2, V3, V4, V5, V6. This PR proves V2.",
     "Closes #13036\n\n| V1 | pending |\n| V2 | measured |\n| V3 | pending |\n"
     "| V4 | pending |\n| V5 | pending |\n| V6 | pending |",
+    # ⛔ THE ROWS THAT PIN THE RULE RATHER THAN THE VOCABULARY (review round 10): every case above
+    # carries a token `_DISCLAIMER_RE` recognises, so a cue list alone would have passed them. These
+    # carry NO cue word — they narrow in plain prose — and they were the measured false PASS until
+    # `claimable` stopped being a mere gate on "should I scan the line".
+    "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 are separate PRs.",
+    "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 are tracked elsewhere.",
+    "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 land in later PRs.",
 ])
 def test_a_disclosed_partial_close_never_reads_as_a_pass(body):
     """The three shapes a lane actually writes — a TODO list, a NEGATION of the close, a row table.
