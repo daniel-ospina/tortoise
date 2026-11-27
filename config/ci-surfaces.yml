@@ -64,17 +64,16 @@ version: 1
 # the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
 # `watchdog_headroom: 2.03` (1680 / 828.0 = 2.0290) on every one of the eleven shards, so the two
 # agree by construction rather than by a hand re-read.
-# ⛔ #14723 RE-DERIVED THIS SENTENCE, and names the move rather than leaving it unattributed: this
-# lane registers one `core` row at the flat 2.0 s, which puts ONE more file in `fast_pool()` and
-# re-packs the bins — `main` at this base splits nine and two, and this tree splits seven and four,
-# while the MINUTE (28 m) and the headroom (2.03) are the same on BOTH sides. That is why the
-# PARTITION is stated and not only the minute: an arithmetic check on `28 m` cannot see a carried
-# figure, and a reader comparing only minutes would call this move cosmetic.
-# ⛔ THE POOL DELTA IS RE-COUNTED ON THE RESOLVED TREE AND STATED AS THE OPERATION — never carried,
-# and never as a pair of counts: `set(fast_pool(head)) - set(fast_pool(main))` returns exactly ONE
-# entry, `tests/test_14691_structure_evidence.py` (`core`, flat 2.0 s), the row this lane registers,
-# and the reverse difference is empty — measured by loading each tree's OWN manifest
-# (`git show origin/main:config/ci-surfaces.yml`) through `fast_pool()`.
+# ⛔ #14723 RE-DERIVED THIS SENTENCE ON `main` ITSELF, and the attribution is corrected here rather
+# than carried (#14587 review cycle 10, P2, MEASURED): `tests/test_14691_structure_evidence.py` is
+# `main`'s row — it is already in `git show 344a1c086e06:config/ci-surfaces.yml` — so it is NOT this
+# lane's delta. At THIS head the two manifests' pools are IDENTICAL: loading each side's own manifest
+# through `fast_pool()` gives the same 1343 files, `set(fast_pool(head)) - set(fast_pool(main))` is
+# EMPTY and so is the reverse, and the partition is seven-at-828.0 / four-at-827.9 on BOTH sides. So
+# the only honest statement of the delta here is that there is none, and the `nine-and-two ->
+# seven-and-four` move #14723 measured belongs to `main`'s own commit, not to this branch.
+# ⛔ THAT IS WHY THE PARTITION IS STATED AND NOT ONLY THE MINUTE: an arithmetic check on `28 m`
+# cannot see a carried figure, and a reader comparing only minutes would call the move cosmetic.
 # ⛔ No pool SIZE is restated BY THIS RE-DERIVATION, and the reason is a recorded ruling rather
 # than a preference (#14691 review, round 15, finding 4): the repo's own doctrine is at
 # `tests/test_ci_selection.py` — "a pool size is a measurement with several independent reasons to
@@ -84,8 +83,8 @@ version: 1
 # COUNTS, and that is not the same claim: each is written in the past tense OF THE FOLD THAT
 # MEASURED IT and names that fold's base, so it is a fact about that fold rather than a claim about
 # this head — which is what the sentence above forbids (#14723 review, P2: it read as an absolute
-# and a reader could grep three counts out of the block). ⛔ Every OTHER row this tree carries is `main`'s at this head, so
-# reading one of them as this lane's delta would attribute a partition move to a row that did not
+# and a reader could grep three counts out of the block). ⛔ Every OTHER row this tree carries is `main`'s at this head — and so is that one, which is why
+# reading ANY of them as this lane's delta would attribute a partition move to a row that did not
 # cause it.
 # ⛔ THE GRADED CLAUSE IS A CLAIM ABOUT THIS HEAD; the rest of this paragraph is a MEASUREMENT
 # RULE. On THIS tree — `origin/main` folded in at this branch's last merge (`git log --first-parent
@@ -239,10 +238,14 @@ version: 1
 # and the parse on this tree compare EQUAL to `main`'s — every surface list, every `durations` row,
 # every `durations_floors` entry and `tier1`, value by value, zero differing". That was TRUE of the
 # fold whose delta it measured (a two-sentence prose repair, which touched neither the surface map
-# nor the selector) and FALSE from the moment a lane that REGISTERS a row carried it: on this tree
-# the `core` surface list and the `durations` map each hold one entry `main` does not, while
-# `durations_floors` and `tier1` still compare equal — so the blanket word was the defect, not the
-# per-key reading it replaced. ⛔ NO POOL SIZE AND NO ROW COUNT IS STATED HERE as a claim about
+# nor the selector) and it was FALSE for as long as a lane that REGISTERS a row carried it (on that
+# tree the `core` surface list and the `durations` map each held an entry `main` did not). ⛔ IT IS
+# TRUE AGAIN AT THIS HEAD, and the reason is not a wording change: that lane's row landed on `main`
+# (#14723's `tests/test_14691_structure_evidence.py`), so a per-key parse of the two manifests now
+# gives ZERO entries the other side lacks — `surfaces`, `durations`, `durations_floors`, `tier1`,
+# `slow_files`, `on_demand` and `carve_out` all compare equal (measured at this head, #14587 review
+# cycle 10, P2). So the blanket word is right HERE — and the per-key reading stays the durable form,
+# because it is what settles which of the two a given head is (#14587 review cycle 10, P2). ⛔ NO POOL SIZE AND NO ROW COUNT IS STATED HERE as a claim about
 # this head, on purpose: written as figures they owe a re-measurement to whoever next moves one and
 # nothing grades them, which is exactly the rot this block's own doctrine names. ⛔ THE DELTA IS A
 # READING OF THIS HEAD, never a promise about the next fold: `fast_pool()` takes
