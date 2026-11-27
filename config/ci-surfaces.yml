@@ -128,8 +128,11 @@ version: 1
 # the duplicated spellings in the first place.
 # ⛔ IT ARRIVED SPLICED ONCE MORE ON THIS LANE'S REBASE ONTO `origin/main` `c1c8df1a3817` — the same
 # driver, the same failure — and this time NEITHER copy described this tree: both stated the
-# 827.2/827.3 partition and a `fast_pool()` of 1339, against the 827.4/827.5 and 1340 the verb
-# emitted at that rebase. Neither copy was picked either; the paragraph above is a third fresh
+# 827.2/827.3 partition, against the 827.4/827.5 the verb emitted at that rebase. ⛔ No POOL COUNT is
+# written for that fold here, on purpose: a file count is a measurement of exactly ONE tree, so it
+# belongs in the fence above bound to the sha it was measured at, and the spelling those copies used
+# (`a `fast_pool()` of N`) is one this block's guard cannot read — writing it here would be a live
+# claim no arm grades. Neither copy was picked either; the paragraph above is a third fresh
 # re-derivation.
 # ⛔ THIS BLOCK ARRIVES SPLICED, REPEATEDLY, and that is mechanical rather than mysterious:
 # `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
