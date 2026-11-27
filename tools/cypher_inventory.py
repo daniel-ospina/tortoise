@@ -1294,13 +1294,16 @@ def _boundary_is_unaskable(boundary: Path) -> bool:
     damaged gitdir answers 128), which is damage git cannot restore.
 
     Enumerating damage shapes is the mistake rounds 5-11 kept repeating one level out, so
-    this asks git the only question that closes the class: `rev-parse --show-toplevel`
-    must name THIS directory, and — when it answers with a directory ELSEWHERE —
-    `rev-parse --absolute-git-dir` must name this boundary's OWN git dir. A boundary that
-    cannot be shown is a COULD-NOT-RUN, never a permit — the verdict
-    `_plainly_outside_any_repository` already reaches when git says `not a git repository`
-    over a damaged `.git`, reached here for the case where git says nothing at all because
-    it found a repository one level up.
+    this asks git the only question that closes the class: for a boundary that carries a
+    `.git` POINTER, `rev-parse --absolute-git-dir` must name THIS boundary's own git dir —
+    on BOTH the "answered itself" and the "answered elsewhere" branch, because `core.worktree`
+    can make an ENCLOSING repository's work tree coincide with this boundary just as easily
+    as it can move this one away. A metadata-in-place boundary is the exception: it has no
+    pointer and no work tree, so `rev-parse --absolute-git-dir` naming THIS directory is the
+    whole test. A boundary that cannot be shown is a COULD-NOT-RUN, never a permit — the
+    verdict `_plainly_outside_any_repository` already reaches when git says
+    `not a git repository` over a damaged `.git`, reached here for the case where git says
+    nothing at all because it found a repository one level up.
 
     ⛔ BOTH BOUNDARY FORMS ARE VERIFIED, NOT ASSUMED — AND "A BARE GITDIR IS EXEMPT
     BECAUSE THE GIT METADATA GUARD DECIDES IT" WAS FALSE (#14741 review, cycle 3, P2,
@@ -1375,7 +1378,19 @@ def _boundary_is_unaskable(boundary: Path) -> bool:
         return True
     answer_real = os.path.realpath(answer)
     if answer_real == boundary_real:
-        return False
+        # ⛔ "THE ANSWER IS THIS DIRECTORY" IS NOT ASKABLE ON ITS OWN (#14741 review,
+        # cycle 5, **P1**, measured). The previous round learned that `core.worktree` moves
+        # the work tree and never the git dir, and applied that to the ELSEWHERE branch
+        # only. But an ENCLOSING repository retargeted to point AT this boundary makes its
+        # work tree root coincide with the boundary, so a DAMAGED boundary's walked-up
+        # `--show-toplevel` answers the boundary ITSELF — equal, and the old code returned
+        # "askable" here without ever asking the gitdir question. Measured: `--render`
+        # exited **0**, no stderr, and replaced bytes the damaged boundary's OWN index still
+        # held, while `_resolves_to_own_gitdir` answered `False` (correctly) and was never
+        # consulted. So the gitdir identity decides BOTH branches for a pointer form, and
+        # only a metadata-in-place boundary is askable on work-tree identity (it has no
+        # `.git` pointer, and `question` is already the gitdir there).
+        return has_pointer and not _resolves_to_own_gitdir(boundary)
     if has_pointer:
         # ⛔ ANSWERED AS THE REPOSITORY ABOVE IS THE DAMAGE. git walks UP when it will not
         # accept the entry at this directory, so a damaged `.git` answers with an ENCLOSING
@@ -1444,7 +1459,14 @@ def _destination_probes(
     and stops at the filesystem root, because the outermost repository is then NOT ROOT —
     and that is the one provider rounds 7-10 never asked. See the walk's own note below.
 
-    Order matters only for the message: the OUTERMOST refusal is the most legible.
+    Order is NOT outermost-first: `ROOT` is prepended (when the destination is under it),
+    then every boundary from the filesystem root inward, then the destination's nearest
+    existing ancestor — all providers are asked and the FIRST refusal is the verdict, so the
+    message an operator sees is whichever provider refused first, not the most legible one.
+    ⛔ That sentence used to claim "the OUTERMOST refusal is the most legible" (#14741
+    review, cycle 5, P3, measured: with a repository above ROOT, `probes[0]` is ROOT), which
+    a docstring in this file must not get wrong: the ordering is a message-legibility
+    preference, and it does not currently prefer the outer one.
     """
     probes: list[tuple[Path, str | None, str]] = []
     seen: set[tuple[str, str | None]] = set()
