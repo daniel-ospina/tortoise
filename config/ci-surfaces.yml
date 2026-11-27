@@ -231,10 +231,13 @@ version: 1
 # on the commit that measured them — `git log` holds them, and restating one here is what produced
 # the duplicated spellings in the first place.
 # ⛔ IT ARRIVED SPLICED ONCE MORE ON THIS LANE'S REBASE ONTO `origin/main` `c1c8df1a3817` — the same
-# driver, the same failure — and this time NEITHER copy described this tree: both stated the
-# 827.2/827.3 partition and a `fast_pool()` of 1339, against the 827.4/827.5 and 1340 the verb
-# emitted at that rebase. Neither copy was picked either; the paragraph above is a third fresh
-# re-derivation.
+# driver, the same failure — and this time the two copies DISAGREED on the bins, so AT MOST ONE of
+# them could describe that tree. ⛔ WHICH ONE IS NOT STATED AND NEITHER COPY'S FIGURES ARE QUOTED:
+# restating a fold's numbers inline is the carry the paragraph above refuses, and the measurement
+# lives on the commit that took it (`git log`). An earlier spelling of this sentence claimed
+# "NEITHER copy described this tree: both stated" a single partition — which cannot be true of a
+# pair that disagreed, and was measured false. Neither copy was picked; the paragraph above is a
+# third fresh re-derivation.
 # ⛔ NO WINDOW IS STATED HERE, and the reason is a measurement: "the folds after `a0cea310786d`
 # touched nothing" was FALSE in this very paragraph, because `bf16c791a489` landed after it and
 # moved seventeen lines of this block. The derivation reads ONCE because each fold was checked on
