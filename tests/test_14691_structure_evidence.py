@@ -2848,7 +2848,11 @@ def test_the_EXHIBITED_invented_quote_is_the_artifacts_quote():
     expected = [norm(r["quote"]) for r in sanctioned]
     assert body.count('"') % 2 == 0, ("unbalanced exhibit fence", body)
     shown = [q.strip() for q in body.split('"')[1::2]]
-    assert len(shown) == body.count('"') // 2, (len(shown), body.count('"'))
+    # ⛔ (16th review, P3) the pairing check that stood here —
+    # `assert len(shown) == body.count('"') // 2` — could never fail:
+    # `split('"')[1::2]` has exactly `count // 2` elements by construction for an
+    # even count, and the odd case is refused on the line above. Deleted rather
+    # than left as a check no mutant can red.
     assert shown, body
     assert shown == expected[:len(shown)], (
         "REPORT §3's exhibited invented-quotes are not the artifact's own quotes "
@@ -2884,6 +2888,41 @@ def test_the_EXHIBITED_invented_quote_is_the_artifacts_quote():
     assert normed[quoted.lower()]["quote"] in [r["quote"] for r in shown_rows], (
         "W4 exhibits a row that REPORT §3's fence does not show",
         normed[quoted.lower()]["quote"][:80])
+
+    # ⛔ THE PROSE'S OWN EXPLANATION WAS UNGRADED (16th fresh-context review, P3):
+    # "the scorer caps the field at a fixed width, so it ends mid-word" is a claim
+    # about the artifact, and negating it ("the scorer stores the field in full")
+    # measured GREEN. It is graded in BOTH directions now: the sentence must be
+    # STATED (or the reader loses the reason the exhibit stops mid-sentence) and
+    # it must be TRUE of the artifact (the stored field is a strict prefix of the
+    # readback's own `content` for that point, and the cut falls inside a word) —
+    # so neither a negation of the sentence nor a stale artifact can silence it.
+    assert "the scorer caps the field at a fixed width, so it ends mid-word" in norm(_verification()), (
+        "VERIFICATION-independent.md no longer states why W4's exhibit stops "
+        "mid-sentence — that sentence is the artifact fact graded below")
+    stored = norm(normed[quoted.lower()]["point"])
+
+    def _strings(node):
+        if isinstance(node, dict):
+            for value in node.values():
+                yield from _strings(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from _strings(value)
+        elif isinstance(node, str):
+            yield node
+
+    truncated_from = [
+        norm(text) for text in _strings(_readback())
+        if norm(text).startswith(stored) and len(norm(text)) > len(stored)
+    ]
+    assert truncated_from, (
+        "no readback string continues W4's point, so `caps the field at a fixed "
+        f"width` is not an artifact fact: {stored[-40:]!r}")
+    source = min(truncated_from, key=len)
+    assert source[len(stored)].isalnum(), (
+        "the prose says the capped field ends mid-word; the readback continues it "
+        f"with {source[len(stored):len(stored) + 12]!r}, i.e. on a word boundary")
 
 
 def test_each_door_finding_ANSWER_is_the_artifacts_answer_in_SUBSTANCE():
@@ -4044,15 +4083,32 @@ def test_the_cost_table_is_the_receipt():
                 for edge in edges:
                     counts[edge["predicate"]] = counts.get(edge["predicate"], 0) + 1
                 stated: dict[str, int] = {}
+                stated_total = 0
+                stated_items = 0
                 for item in breakdown.split(","):
                     item = item.strip()
                     counted = re.fullmatch(r"(\d+) `([A-Za-z]+)`", item)
                     if counted:
                         stated[counted.group(2)] = int(counted.group(1))
+                        stated_total += int(counted.group(1))
+                        stated_items += 1
                         continue
                     bare = re.fullmatch(r"`([A-Za-z]+)`", item)
                     assert bare, (doc_id, item, cell)
                     stated[bare.group(1)] = int(head.group(1))
+                    stated_total += int(head.group(1))
+                    stated_items += 1
+                # ⛔ A DUPLICATE ITEM COLLAPSED INTO ONE DICT KEY (16th
+                # fresh-context review, P3): `12 (8 `related`, 4 `ownedBy`, 4
+                # `ownedBy`)` measured GREEN. Summing the DICT does not close it —
+                # the duplicate carries the same value, so the collapsed sum is
+                # still 12 (measured, not assumed: that one-line fix was tried and
+                # this mutant stayed green). The ITEM count and the running total
+                # are therefore accumulated over the parsed items, not the map.
+                assert stated_items == len(stated), (
+                    "the breakdown names a predicate twice", doc_id, cell)
+                assert stated_total == int(head.group(1)), (
+                    doc_id, stated_total, cell)
                 assert stated == counts, (doc_id, stated, counts, cell)
             assert "dropped" not in cell, (doc_id, cell)
         total_ack += doc["ack_seconds"]
