@@ -2263,9 +2263,10 @@ _PRE_CUE_ONLY = _inversion_form(
     # safe only because `_cue_governing_clause` has already dropped the
     # pure-sequencer clause (`then`) from this string: the graded clause here is
     # `Check the tools`, not `Check the tools, then` (verified by direct call).
-    # (`_NOT_A_DOC` still DOES work in the (f.2)/(f.3) arms at `:2191`/`:2224`, where
-    # it is followed by more pattern rather than by the end of the clause — those
-    # uses are pinned by their rows and are untouched.)
+    # (`_NOT_A_DOC` still DOES work in the (f.1)/(f.2) arms at `:2191`/`:2224` —
+    # neither is followed by `\s*$`, so the lookahead is the only guard there, which
+    # is why it is load-bearing: removing it reds 2 rows at `:2191` and 15 at `:2224`
+    # (measured). Both uses are pinned by those rows and are untouched.)
     # ⛔ DECLARED RESIDUAL — the bare SINGULAR object (`Check the tool, then restart
     # your client.`) is NOT graded, and the arm stays paired with `_TOOLS_OBJECT`
     # rather than spelling `tools?` itself. Measured at `776c58252c1b`: substituting
