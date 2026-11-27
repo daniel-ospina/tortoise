@@ -4007,7 +4007,7 @@ def _record_column_value(table: str, column: str, value: Any, *,
         # only the FATE of the rest of the row.
         _LOGGER.warning(
             "record column point.%s %s: the value arrived as a %s, which no "
-            "property can hold. The graph's %s, and the column is %s — never "
+            "property can hold. The graph's %s, and %s — never "
             "serialized into a text column as a second representation (#10620) "
             "and never a reason to drop the rest of the row (#11783). Fix the "
             "PRODUCER if this value is meant to persist.",
@@ -4019,7 +4019,7 @@ def _record_column_value(table: str, column: str, value: Any, *,
             ("fold SKIPS it (`_is_persistable_prop_value` refuses a Mapping, so "
              "`SET n += $props` never carries the key), leaving any previous "
              "value alone"),
-            "follows the node" if patch else "left as it was",
+            ("the column follows the node" if patch else "the column is left as it was"),
         )
         return None if patch else _OMIT
     if table == "point" and column in _POINT_FLATTEN_COLUMNS and isinstance(
