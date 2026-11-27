@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -583,6 +584,54 @@ def test_health_answers_with_the_full_refusals_shape_when_the_window_RAISES(
         "/health must still ANSWER, and must not derive `status` from a "
         "degraded monitoring read")
     assert body["refusals"]["share"] is None
+
+
+def test_the_journal_collision_bullet_names_what_a_replay_heals_and_re_refuses():
+    """The write-failure vocabulary is operator-facing, so its remedy is pinned.
+
+    #11783 round 28 measured this sentence with **no assertion behind it**: the
+    ``journal_collision`` bullet of
+    `monitoring.record_record_write_failure`'s docstring said *"``replay`` heals every other failure"*, and restoring that
+    wording reddened no row anywhere (``grep -rn "re-refuses a PLAN BUILD"``
+    matched only the sentence itself). A `journal_collision` is what an operator
+    reads on `/health`'s ``degraded_reasons``, so a wrong remedy here is a wrong
+    instruction on a page nobody's test would notice going stale.
+
+    "Every other failure" was false: the two bullets above split into THREE
+    ``write_failed`` populations (an outage a replay heals; a STATEMENT that
+    executed and failed, and the store/CONFIG refusals raised after the plan
+    build — both of which a replay RE-FAILS), plus ``plan_refused``. The sentence
+    is therefore pinned on all three of its claims at once, and on the two
+    blanket wordings it must never wear again.
+    """
+    doc = monitoring.record_record_write_failure.__doc__ or ""
+    assert doc, "the write-failure vocabulary lost its docstring"
+    tokens = re.findall(r"\n    \* ``([a-z_]+)``", doc)
+    assert "journal_collision" in tokens, (
+        f"the vocabulary no longer documents `journal_collision`: {tokens}")
+    index = tokens.index("journal_collision")
+    assert tokens[index - 2:index] == ["write_failed", "plan_refused"], (
+        "the sentence promises `(the two bullets above)`, so the two bullets "
+        "above `journal_collision` must be `write_failed` and `plan_refused` — "
+        f"got {tokens[index - 2:index]}; re-point the sentence, not this "
+        "assertion")
+    start = doc.find("* ``journal_collision``")
+    end = doc.find("\n    * ``", start + 1)
+    bullet = doc[start:end if end != -1 else len(doc)]
+    assert "heals an OUTAGE" in bullet, (
+        "the bullet must name the ONE `write_failed` population a replay heals "
+        f"(an outage) — got: {bullet[-600:]!r}")
+    assert "re-refuses a PLAN BUILD" in bullet, (
+        "`plan_refused` is a second population and a replay re-refuses it until "
+        f"the cause is fixed — got: {bullet[-600:]!r}")
+    assert "cannot heal THIS" in bullet, (
+        "the sentence exists to say a replay cannot heal a journal COLLISION "
+        f"— got: {bullet[-600:]!r}")
+    for stale in ("heals every other failure", "heals the record"):
+        assert stale not in bullet, (
+            f"the blanket claim {stale!r} is back: a replay re-fails a STATEMENT "
+            "that executed, re-raises a store/CONFIG refusal, and re-refuses a "
+            "plan build — it heals an outage, not `write_failed` as a whole")
 
 
 def test_a_historical_breach_does_not_appear_in_the_window():
