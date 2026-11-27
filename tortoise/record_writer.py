@@ -3615,8 +3615,10 @@ def write_live_record(record: Mapping[str, Any], *,
     is a REFUSAL of a mis-armed deployment rather than a lost row to be healed
     by replay. ⛔ THE DIFFERENCE IS **NOT** VISIBLE IN ``refusal``: all of these
     carry ``refusal="write_failed"``, the same token as a genuine record-write
-    failure, because the vocabulary is closed and a new token would be a
-    surface change. What distinguishes them is the WARNING the door emits
+    failure, because these two allocator refusals stay ONE bucket BY CHOICE —
+    not because the vocabulary cannot grow (it did: ``plan_refused``, #11783,
+    split out for the one refusal whose remedy is the producer rather than a
+    replay). What distinguishes them is the WARNING the door emits
     (``_allocator_refusal_cause`` names the counter's state and the remedy —
     ``arm``/``reopen`` — instead of "a replay heals the record", which cannot
     apply) plus `record_allocator.metrics()`. An earlier cut of this docstring
@@ -3978,9 +3980,34 @@ def write_live_record(record: Mapping[str, Any], *,
             # remedy; the specific column/statement attribution rides the
             # exception text below, never this token.
             _count_write_failure("plan_refused")
+            # ⛔ ON THE RECORD-ONLY ARM THERE IS NO LINE TO CLAIM (#14002, the
+            # rule the sibling module states at `live_write.py:709`).
+            # `journal_skipped` means the CALLER did not append — a cut-over
+            # graph — so "the journal holds the record" and "a replay of the
+            # same record re-refuses" are BOTH false there: the write reached
+            # NEITHER store and has no position row to re-refuse. Saying it
+            # anyway sends the operator to a repair path with no line to replay,
+            # which is the exact misdirection splitting this token out of
+            # `write_failed` exists to end. The pre-existing `write_failed` arm
+            # below carries the unqualified claim; this new arm must not add a
+            # fourth copy of it.
+            journal_clause = (
+                "the record reached NEITHER store (the caller did not append: "
+                "this graph was cut over, so the journal holds no line); "
+                "re-emit the record"
+                if journal_skipped
+                else "the journal holds the record"
+            )
+            remedy_clause = (
+                "A re-emit of the same record re-refuses until the cause is "
+                "fixed"
+                if journal_skipped
+                else "A replay of the same record re-refuses until the cause is "
+                "fixed"
+            )
             _logger.warning(
-                "the record write did not happen (plan_refused) — the "
-                "journal holds the record; the PROJECTION could not BUILD a plan "
+                "the record write did not happen (plan_refused) — %s; the "
+                "PROJECTION could not BUILD a plan "
                 "for it, so NO statement ran (a record type it does not declare, "
                 "a carrier with no snapshot, an unusable key or endpoint, a "
                 "caller watermark it refuses, a value the plan cannot serialize, "
@@ -3989,9 +4016,10 @@ def write_live_record(record: Mapping[str, Any], *,
                 "NOT `write_failed`: no statement was executed, so "
                 "there is no statement fault to look for — check "
                 "the cause: a producer or record-shape fact, or (for a schema "
-                "that is not on disk) a DEPLOYMENT fact. A "
-                "replay of the same record re-refuses until the cause is fixed: "
+                "that is not on disk) a DEPLOYMENT fact. %s: "
                 "record=%s %s: %s",
+                journal_clause,
+                remedy_clause,
                 record.get("type"), _record_identity(record),
                 projection_cause,
             )

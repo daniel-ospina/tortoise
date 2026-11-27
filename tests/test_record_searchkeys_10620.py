@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import logging
 import os
 import re
 import uuid
@@ -1516,6 +1517,81 @@ def test_a_plan_build_failure_that_is_not_a_projection_error_is_also_plan_refuse
     )
     assert after.get("plan_refused", 0) == before.get("plan_refused", 0) + 1
     assert after.get("write_failed", 0) == before.get("write_failed", 0)
+
+
+def test_a_plan_refusal_on_the_record_only_arm_does_not_claim_a_journal_line(
+        monkeypatch, caplog):
+    """#11783 review F1 — the remedy must match the arm, on the NEW line too.
+
+    `journal_skipped=True` is a REACHABLE state at this arm: `live_write` sets it
+    from `record_owns_position` on a CUT-OVER graph (#14002), where the chokepoint
+    deliberately does not append — so there is no `journal_event` line and no
+    position row. `write_live_record` still proceeds to the store on that arm
+    (`allocate = allocate or record_live_allocate() or journal_skipped`), so a
+    plan-build refusal here means the write reached NEITHER store.
+
+    The new `plan_refused` WARN used to assert "the journal holds the record ... a
+    replay of the same record re-refuses" unconditionally, which on this arm sends
+    the operator to a repair path that has no line to replay — the exact
+    misdirection splitting this token out of `write_failed` exists to end. The
+    sibling module already records the rule (`live_write.py:709`) and the door
+    already applies it one arm over (`position_unverifiable` is guarded by
+    `and not journal_skipped`).
+
+    Without this pin the branch is unobservable: reverting it reds nothing.
+    """
+    from tortoise import record_writer
+
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://fake")
+    monkeypatch.setattr(record_writer, "_default_connect",
+                        lambda dsn: _FakeConn())
+    record_writer._close_live_breaker()
+
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        write = record_writer.write_live_record(
+            {"type": "NoSuchRecordType", "id": "pt-11783-skipped"},
+            seq=7, tenant=("org-t", "graph-t"), journal_skipped=True)
+
+    assert write is not None
+    assert write.refusal == "plan_refused", (
+        "the record-only arm must still classify by PHASE, not by arm: "
+        f"{write.refusal!r}"
+    )
+    message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reached NEITHER store" in message, (
+        "on the record-only arm the WARN must say the write reached NEITHER "
+        f"store — got: {message}"
+    )
+    assert "the journal holds the record" not in message, (
+        "the record-only arm has NO journal line, so this claim is false and "
+        f"sends the operator to a replay that cannot exist: {message}"
+    )
+    assert "re-emit the record" in message, (
+        "the remedy on this arm is a RE-EMIT, which is what `live_write.py` "
+        f"already prescribes for it — got: {message}"
+    )
+
+    # ⛔ DISCRIMINATING, not presence-only (the "membership is not the pin" rule
+    # the sibling arms already carry): the SAME door on the JOURNALED arm must
+    # still say the opposite, so this pin reds if the flag stops selecting the
+    # sentence — and it reds if the journaled sentence is dropped outright.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        journaled = record_writer.write_live_record(
+            {"type": "NoSuchRecordType", "id": "pt-11783-journaled"},
+            seq=7, tenant=("org-t", "graph-t"))
+
+    assert journaled is not None and journaled.refusal == "plan_refused"
+    journaled_message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "the journal holds the record" in journaled_message, (
+        "on the JOURNALED arm the line is TRUE and must still be stated — "
+        f"got: {journaled_message}"
+    )
+    assert "reached NEITHER store" not in journaled_message, (
+        "the journaled arm HAS a line, so claiming it reached neither store is "
+        f"the same falsehood in the other direction: {journaled_message}"
+    )
 
 
 def test_a_string_passes_through_unchanged():
