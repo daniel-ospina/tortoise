@@ -796,20 +796,20 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
    follow-up, tracked by open **#10237** — and re-measuring (`--status`, then `gh api …/runners`) is
    still the way to know.
 2. **The pool is still the slower class for long legs.** These runners are not pinned off the
-   fast matrix (`test (a)…(i)`), so a 20m watchdog leg can still be killed here if this box
+   fast matrix (`test (a)…(k)`), so a 28m watchdog leg can still be killed here if this box
    turns out slower than hosted under load. That is the #6897 measurement, unchanged — and while hosted
    is unavailable the version-pinned legs are exactly the ones this pool now has to serve, at that
    measured risk. The rest of the fast matrix is unaffected.
 3. **`ubuntu-latest` remains ambiguous by design.** Any job asking for it can land on
    GitHub-hosted, an ARM64 runner, or one of these — that ambiguity is what the fallback is
    for, and why the legs that need a specific class are version-pinned.
-4. **The OPT-IN split (`CI_SHARD_ROUTING=pool-split`) makes the pool a PIN on 4 of 9 required legs,
-   and that exposure is deliberate but uncomfortable.** It is off by default and it is recorded in
+4. **The OPT-IN split (`CI_SHARD_ROUTING=pool-split`) makes the pool a PIN on 5 of 11 required legs,
+   and that exposure is deliberate but uncomfortable.** It is off as a DEFAULT and it is recorded in
    its own section, with an `OVERRIDES:` line (`→ The fast-matrix split is OPT-IN`). In one line:
-   under `pool-split`, `test (b)`, `(d)`, `(f)` and `(h)` name `[self-hosted, self-hosted-x64]`, so a
-   pool outage or a contended box holds those required checks **pending** rather than answering them
-   from GitHub-hosted — the exact trade the "any POOL-ONLY label" rule refuses, taken
-   deliberately for those four rows and nowhere else.
+   under `pool-split`, `test (b)`, `(d)`, `(f)`, `(h)` and `(j)` name `[self-hosted, self-hosted-x64]`,
+   so a pool outage or a contended box holds those required checks **pending** rather than answering
+   them from GitHub-hosted — the exact trade the "any POOL-ONLY label" rule refuses, taken
+   deliberately for those five rows and nowhere else. ⛔ It is LIVE in this repo: see the EOF record.
 5. **Two housekeeping jobs are POOL-ONLY pins too (#13596).** `closes-coherence` and `redis-guard`
    now name `[self-hosted, self-hosted-x64]` — neither is a required context, and both carry their
    own `OVERRIDES:` record with the three failure modes and the idling measurement (`→ Residual: the
@@ -907,20 +907,20 @@ Measured at head `3eaf43fda`, job scope returned one `ci_ordering_half_violation
 a REQUIRED fast shard (run `41002293616`, `test (e)`). `tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env`
 now forbids the job-scope form, so "put it back on the job" is a red check, not a simplification.
 
-### Residual: under `pool-split` the pool is a PIN on 4 of 9 required legs
+### Residual: under `pool-split` the pool is a PIN on 5 of 11 required legs
 
 **OVERRIDES:** the "any POOL-ONLY label" rule recorded above — `pool-split` names
-`[self-hosted, self-hosted-x64]` on the odd rows (`test (b)`, `(d)`, `(f)`, `(h)`), because a mode
-whose odd rows still raced for a hosted label would not route at all; the departure is OPT-IN, off by
-default, and its cost is stated here rather than inherited silently.
+`[self-hosted, self-hosted-x64]` on the odd rows (`test (b)`, `(d)`, `(f)`, `(h)`, `(j)`), because a mode
+whose odd rows still raced for a hosted label would not route at all; the departure is OPT-IN, off as a
+DEFAULT — ⛔ but ENGAGED here (`CI_SHARD_ROUTING=pool-split`, 2026-11-18), so its cost is LIVE; EOF record.
 
 Label matching is cumulative — a runner must carry EVERY label named in `runs-on` — so the pair
 `[self-hosted, self-hosted-x64]` matches only these x64 runners, which carry both; a bare
 `self-hosted-x64` would select them too. What that costs is exactly the trade the rule refuses:
 
-- **No hosted half on those four legs.** With the gate in `fallback_off` (the normal state on a
+- **No hosted half on those five legs.** With the gate in `fallback_off` (the normal state on a
   healthy day), or the box simply down, a `self-hosted` pin does not degrade to anything — it
-  WAITS. `test (b)`, `(d)`, `(f)`, `(h)` sit `queued`/`pending` with no GitHub-hosted runner able to
+  WAITS. `test (b)`, `(d)`, `(f)`, `(h)`, `(j)` sit `queued`/`pending` with no hosted runner able to
   answer them, so `python-ci-gate` stays pending and the PR does not merge until the pool is back.
   This is what turns "the pool is slower" (residual 2 above) into "the gate is blocked": measured
   2026-10-27..30, three pool legs were killed at their own watchdogs while hosted legs finished in
@@ -928,7 +928,7 @@ Label matching is cumulative — a runner must carry EVERY label named in `runs-
 - **The even rows keep the opposite residual.** `ubuntu-latest` is answered by GitHub-hosted *or* by
   the pool while the gate carries the fallback label, so a pool runner can take an even shard:
   `test (i)` — the canary — was taken by `pi-runner-vm-5` (ARM64) and killed at 32 m 12 s in run
-  `40986603502`. Neither half is class-safe in either mode; that is why the split is off.
+  `40986603502`. Neither half is class-safe in either mode; that is why the split's DEFAULT is off.
 
 Changing the DEFAULT is a decision, and its home is #6897: it needs idle pool capacity at schedule
 time **and** a pool job wall within ~1.2x hosted on these rows, neither of which the runs above
@@ -993,10 +993,10 @@ job itself:
 costs a re-run before that head can land — `repo-harnesses` here, and the two #13596 housekeeping
 pins recorded in *Residual: the two #13596 housekeeping pins* below. A required leg's red also
 reddens the aggregate, which is why
-no required leg is pinned **by default**: the one exception is `pool-split`, which pins the ODD rows
-of a REQUIRED shard (`test (b)`, `(d)`, `(f)`, `(h)`), is OPT-IN and off by default, and records its
-own cost under its `OVERRIDES:` block above (`:910-927`). It bypasses the label attachment
-`scripts/ci_runner_gate.sh` performs, so it has no hosted fallback at all.
+no required leg is pinned **by default**: the one exception is `pool-split`, which is OPT-IN, pins
+the ODD rows of a REQUIRED shard (`test (b)`, `(d)`, `(f)`, `(h)`, `(j)`), and records its own cost
+under its `OVERRIDES:` block above (`:910-935`). It bypasses the label attachment
+`scripts/ci_runner_gate.sh` performs, so it has no hosted fallback at all — see the EOF record.
 
 ### Scope of the #10237 canary's proof — scheduling only; the ask's proof list is NOT discharged
 
@@ -1015,10 +1015,10 @@ docker, no `uv`, no pytest, no DB, and they make no network calls themselves. So
   `actions/setup-python` fetches a toolchain when the tool cache has none and the guard checkout
   fetches from GitHub — "needs no network" is true of the HARNESSES, not of the job.
 
-It does **NOT** discharge ask 1's proof list (docker / image pull / `uv sync` / a real test file
-green). Ask 2 — *"Only then the five `python-ci-gate` legs"* — rests on that proof list, so its
-precondition is deliberately **unmet**: no required leg is pinned to the pool, and this canary's
-green is not licence to move one.
+It does **NOT** discharge the proof list on the CANARY (docker / image pull / `uv sync` / a real test
+file green) — but that list is no longer met only by hope: it is MEASURED GREEN on pool hardware at
+the job class the required legs run in, and required legs ARE on the pool (the split is engaged), so
+"no required leg is pinned to the pool" was true when written and is FALSE now — see the EOF record.
 
 Two further facts measured on the canary, so the next author copies the right premise:
 
@@ -1271,3 +1271,94 @@ MemoryMax=8G
 Knobs (all validated at startup; a value systemd would silently drop is REFUSED): `CI_RUNNER_RESTART_SEC`
 (30s), `CI_RUNNER_START_LIMIT_INTERVAL` (1h), `CI_RUNNER_START_LIMIT_BURST` (20),
 `CI_RUNNER_MEM_MAX_FACTOR` (4).
+
+## Measured 2026-11-27 — `pool-split` is LIVE, and #10237's ask-1 capability list is discharged
+
+Appended at EOF on purpose: this page's cited `:NNN` references are read by name, so the corrections
+in the body above keep their line count and any NEW record lands here.
+
+### The state that is RUNNING, not the state the page describes
+
+`CI_SHARD_ROUTING` is a repo variable, so nothing in this checkout can read it — the tree can state
+the DEFAULT only. Measured 2026-11-27T09:0xZ:
+
+```text
+$ gh api repos/daniel-ospina/tortoise/actions/variables \
+    --jq '.variables[]|"\(.name)=\(.value)  set \(.created_at)"'
+CI_SHARD_ROUTING=pool-split  set 2026-11-18T16:41:44Z
+```
+
+So the split is **engaged**, and the `test` job's own matrix shows it — five required fast shards ask
+for `[self-hosted, self-hosted-x64]` and six for `ubuntu-latest`:
+
+```text
+run 45969747799 — every job of the run, grouped by the label class it asked for
+  5x self-hosted,self-hosted-x64 -> in_progress=2 queued=3      test (b) (d) (f) (h) (j)
+  7x ubuntu-24.04               -> completed=5 in_progress=2
+ 16x ubuntu-latest              -> completed=11 in_progress=1 queued=4
+```
+
+Every sentence above that says "off by default", "4 of 9", or "no required leg is pinned to the
+pool" describes the SHIP state and the shard set as it stood at 9 shards. Both moved without the
+prose moving with them: the variable was set 2026-11-18, and `config/ci-surfaces.yml::fast_shards`
+is now **11**, which silently added `test (j)` to the pool-routed set — the departure-count drift this
+page has been corrected for once already (#13596), one layer over.
+`tests/test_ci_runner_x64_install.py::test_the_pool_split_rows_are_counted_and_named_in_the_departure_record`
+now derives the pool-routed set from the real selector (`fast_matrix_include(..., routing="pool-split")`)
+and reds when the record disagrees, which is why "4 of 9" above reads "5 of 11".
+
+### Ask 1's capability list — MEASURED GREEN on pool hardware
+
+Ask 1 of #10237 waits for *"docker available, the FalkorDB image pullable, `uv sync --extra
+embeddings --extra parity` working, and a representative test file green"*, taken on a NON-required
+canary. The canary (`repo-harnesses`) can discharge SCHEDULING only — it runs stubbed shell harnesses
+with no docker, no `uv`, no pytest, no DB. The capability list itself is measured on the class the
+required legs actually run in, and it is green:
+
+`test (b)` — job `140402179039` (run `45967751519`), runner **`pi-runner-x64-6`**, labels
+`["self-hosted", "self-hosted-x64"]`, `conclusion: success`, 18 m 50 s:
+
+| proof item | evidence in that job's own log |
+| --- | --- |
+| docker available | `#6673 starting passworded service from falkordb/falkordb-server:v4.20.6` — a container was started on the box |
+| FalkorDB image pullable | `#6673 image falkordb/falkordb-server:v4.20.6 already present locally (requested …)` → `#6673 provisioned …` |
+| `uv sync` incl. the extras | step `Install package + test extras` = **success** |
+| a representative test file green | `= 4280 passed, 85 skipped, 1 xfailed, 16 warnings, 241 subtests passed in 965.72s (0:16:05) =` |
+
+The live-FalkorDB guard also ran and passed (`Skip-fail guard: live-FalkorDB tests must run, never
+skip (#1436)` = success). That step is what makes this a GREEN and not an empty one: it reds if the
+DB is absent and the DB-backed tests skipped silently.
+
+### ⛔ The residual this does NOT close: capability is not headroom
+
+Three pool legs completed green in the same hour, each cited with the run it actually ran in — `test (b)` on
+`pi-runner-x64-6` (run `45967751519`) and `test (d)` on `pi-runner-c5-x64-3` (run `45964954107`), `test (b)`
+on `pi-runner-c5-x64-4` (run `45964252900`) — and **one was killed at its own watchdog with ZERO test failures**:
+
+```text
+job 140392397172  test (b)  pi-runner-cell3-x64-1  conclusion: failure
+  WATCHDOG: pytest killed after 28m (3856 passed, 0 failed, 0 errored so far)
+  runner class 'self-hosted' (pi-runner-cell3-x64-1/Linux-X64)
+```
+
+28 m is that shard's committed budget — `WATCHDOG_HEADROOM` 2.0x its ~14 m estimate, above the 19 m
+floor — and every one of the 11 fast rows currently derives **28 m**. The same shard finished in
+**16 m 05 s of pytest** on `pi-runner-x64-6`, so this is not the class: it is ONE box taking about
+twice as long under load, killed at 88% of its population.
+
+The budget is per-SHARD and class-blind by construction (`tools/ci_selection.py::shard_watchdog_minutes()`
+takes the estimate and nothing else), and the repair is deliberately NOT a bigger budget: sizing for
+the slowest box needs >55 m (`WATCHDOG_CEILING_MIN`) on a required leg, and a budget built for the
+slowest class would also let a genuinely hung HOSTED leg hold the aggregate red for 55 m — the
+regression #6135/#6145 exists to prevent. The leg names its own class and its own kill, so the red is
+attributable rather than silent; what it is not is free, because the rail merges with `--admin` and
+any red on the PR's tree blocks that head until it is re-run.
+
+⚠️ **The live engagement is itself an unrecorded adoption, and this page does not ratify it.** The only
+recorded decision on this departure is #6897 (2026-10-30): *"Making the pool a primary class for those
+legs is still **this issue's decision** … it is not a side effect of #10186, which ships the split off."*
+The variable measured above (`CI_SHARD_ROUTING=pool-split`, 2026-11-18) **is** that adoption already
+running in production, and the 28 m kill recorded in this section is #6897's own precondition — "a pool
+job wall within ~1.2× hosted on these rows" — coming out unmet. So the engagement is a state this page
+*records* because it is live and its cost is real; the decision that would authorise it belongs to issue #6897, and the measurement is relayed there
+(2026-11-27) rather than assumed here.
