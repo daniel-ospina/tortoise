@@ -4130,30 +4130,13 @@ def _write_capture_turns(
             # this capture's `now`/`draft` rather than the values a read-back
             # would have given — the residual of deciding after the append. The
             # turn is stored either way; losing it is the alternative.
-            # ⛔ THE REFUSAL TOKEN IS NAMED, AND THE REMEDY IS PER POPULATION (#14746
-            # review, P2). This line used to say "A `write_failed` refusal heals on
-            # replay from the journal; a `journal_collision` one does NOT", which
-            # (a) over-claims for `write_failed` — its post-plan half (a STATEMENT
-            # that executed and failed, a store/CONFIG refusal raised after the plan
-            # was built) re-FAILS on replay — and (b) omits `plan_refused` entirely,
-            # which IS reachable here: `_unrecorded` is any turn the write did not
-            # land, and every refusal token answers that. The reader could not even
-            # tell which population applied, because the message interpolated none.
-            _refusals = sorted({
-                str(getattr(_record_outcome.get(turn_rows[_i]["id"]), "refusal", None)
-                    or "unknown")
-                for _i in _unrecorded})
             _logger.warning(
                 "capture of session %s: the record did not take %d of %d "
                 "turn(s) — writing them to the GRAPH so the transcript is not "
-                "lost (#10000). Refusal(s): %s. A replay heals an OUTAGE only — "
-                "a STATEMENT that executed and failed, and a store/config refusal "
-                "raised after the plan was built, are RE-FAILED; `plan_refused` is "
-                "RE-REFUSED until its cause is fixed (the producer or the record, "
-                "never a replay); a `journal_collision` re-raises and needs "
-                "journal identity in the key (#12894).",
-                session_id, len(_unrecorded), len(turn_rows),
-                ", ".join(_refusals))
+                "lost (#10000). A `write_failed` refusal heals on replay from "
+                "the journal; a `journal_collision` one does NOT — it "
+                "re-raises, and needs journal identity in the key (#12894).",
+                session_id, len(_unrecorded), len(turn_rows))
             #: the rows this fallback rescues, with their vectors RE-ATTACHED
             #: (`#14552`): see the block comment above and the row loop's gate ask.
             _rescued_rows: list[dict] = []
@@ -16811,30 +16794,9 @@ class TortoiseSDK:
         """
         with contextlib.suppress(Exception):
             monitoring.record_record_write_failure(reason)
-        # ⛔ NO BLANKET REPLAY CLAIM — THE REASON DECIDES THE REMEDY (#14746 review,
-        # P3). This line used to append "the journal has the record and a replay heals
-        # the record" to EVERY reason, and its only three call sites pass
-        # `seam_unimportable`, `malformed_dsn` and `no_journal`: for `no_journal` there
-        # IS no journal (the exception this same record prints two lines later says
-        # "no replay could heal it", so the one log record contradicted itself), and a
-        # `malformed_dsn` replay re-fails identically. A false remedy on the line an
-        # operator greps is the defect this PR removes from six other sites.
-        _REMEDY = {
-            "no_journal": "there is no journal on this deployment, so NO replay can "
-                          "heal it — arm the journal, or stop requiring the record",
-            "malformed_dsn": "TORTOISE_RECORD_DSN is unusable, so a replay re-fails "
-                             "identically — fix the DSN",
-            "seam_unimportable": "the record module could not be imported, so the "
-                                 "seam never ran — fix the import error",
-        }
         _logger.warning(
-            "the record write did not happen (%s) — %s: %s",
-            reason,
-            _REMEDY.get(
-                reason,
-                "an unreachable store heals on replay; a statement that executed "
-                "and failed re-fails"),
-            exc,
+            "the record write did not happen (%s) — the journal has the record "
+            "and a replay heals the record: %s", reason, exc,
         )
 
     def _record_write_without_journal(self, type_: str) -> None:
