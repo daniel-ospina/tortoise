@@ -4333,6 +4333,11 @@ def test_an_empty_sweep_says_it_read_nothing_not_that_the_arm_did_not_run(capsys
     "Closes #13036; V1, V2, V3, V4, V5, V6 remain to be proved.",
     "Closes #13036; V1, V2, V3, V4, V5, V6 are the remaining work.",
     "Closes #13036; all six rows V1, V2, V3, V4, V5, V6 come in later PRs.",
+    # ⛔ AND THE ONE THAT SHARES A LINE WITH A CLOSING-WORD STEM WITHOUT BINDING IT (review round 14):
+    # `closes` here describes the ISSUE's own exit condition, so the line is not a closing claim —
+    # `ref.search` + a keyword stem made it one, and the union erased the qualifier above it.
+    "Closes #13036 (row V2 only).\n\n#13036 records six rows V1, V2, V3, V4, V5, V6 and closes "
+    "when all are measured.",
 ])
 def test_a_disclosed_partial_close_never_reads_as_a_pass(body):
     """The three shapes a lane actually writes — a TODO list, a NEGATION of the close, a row table.

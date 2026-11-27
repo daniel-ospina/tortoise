@@ -1729,7 +1729,14 @@ def _closing_line_claim(pr_body: str, issue: int,
     disclaimed = False
     ref = re.compile(rf"#{issue}(?!\d)")
     for line in text.splitlines():
-        if not (ref.search(line) and _CLOSING_WORD_RE.search(line)):
+        # ⛔ THE KEYWORD MUST BIND THIS ISSUE, NOT MERELY SHARE ITS LINE (review round 14). `ref.search`
+        # + `_CLOSING_WORD_RE.search` made any sentence that MENTIONS the issue and carries a
+        # closing-word stem a closing line, so a descriptive body line — `#13036 records six rows … and
+        # closes when all are measured` — was unioned in as a claim on all six and erased the qualifier
+        # above it: `clean` on the exact shape the arm was filed for. The module already owns the
+        # binding grammar (`CLAIM_RE` via `_claims_in`, the same test `closing_targets` trusts), so the
+        # line qualifies only when that grammar says the keyword resolves THIS issue here.
+        if issue not in _claims_in(line)["closing"]:
             # ⛔ NOT a closing line, but it can still DISCLAIM. A disclosure written on its OWN line
             # is the shape the careful author produces — `Closes #N` on one line, then `V2 is proved;
             # V1, V3–V6 remain unmeasured and are follow-ups` on the next — and reading disclaimers
