@@ -25,7 +25,6 @@ import hashlib
 import importlib.util
 import json
 import re
-from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -423,51 +422,6 @@ def _report_line(pattern: str) -> str:
         if re.search(pattern, line):
             return line
     return ""
-
-
-def _number_counts(text: str) -> Counter[str]:
-    """Every numeric token in `text` with its MULTIPLICITY, commas stripped.
-
-    The duplicate-figure rule needs counts, not a set: a row that states the same
-    figure twice is the hole a substring pin cannot see (#14691 review, round 14).
-
-    ⛔ Contexts that are NOT claim figures are masked FIRST, with the same patterns the
-    free-figure scan uses — an address:port (`127.0.0.1:16413` in §1's graph row), a
-    `path:line` citation, an issue id. Without this the rule reds on prose that states
-    no figure at all, which is how a guard earns its own exemption list.
-    """
-    for pattern, _reason in _PROSE_ALLOWED:
-        text = re.sub(pattern, " ", text, flags=re.M)
-    return Counter(t.replace(",", "") for t in
-                   re.findall(r"\b\d[\d,]*(?:\.\d+)?\b", text))
-
-
-def _assert_no_duplicate_figure(got: str, expected: str, why: str, unit: str) -> None:
-    """A pinned line/paragraph may not state a figure MORE TIMES than the pin does.
-
-    ⛔ #14691 review, round 14, finding 2 — the DUPLICATE-FIGURE hole. The pin is
-    `expected in got`, a SUBSTRING test, so a line that states a figure twice keeps one
-    copy pinned and leaves the other free: measured at `0368cbb7` on
-    `| … **5/5** | 5/5 (parent end…`, mutating EITHER copy left `97 passed` and only
-    mutating BOTH reddened its pin.
-
-    ⛔ IT IS NOT "no number `expected` lacks": prose legitimately carries figures its
-    pin does not name (`4,295 characters ≈ 1,074 tokens (5 documents, 30 turns)` is
-    pinned by a different arm), so a blanket multiset equality reds on honest text —
-    measured on §1's own paragraph. The rule is narrower and it is the one that closes
-    the hole: a number may appear at most as many times as the PIN states it, and never
-    twice by accident. A duplicate is exactly a second copy nothing grades.
-    """
-    got_counts = _number_counts(got)
-    surplus = got_counts - _number_counts(expected)
-    offenders = {v: n for v, n in surplus.items() if got_counts[v] > 1}
-    assert not offenders, (
-        f"{why}: REPORT.md's {unit} states a figure more times than the artifact's pin "
-        f"does — {offenders!r}. A figure stated twice leaves the second copy free (the "
-        f"pin is a substring test, so it grades one of them); state it once, or pin the "
-        f"second copy to its own field. {unit.capitalize()}: {got!r}")
-
-
 
 
 def _report_table_row(pattern: str) -> str:
@@ -1407,22 +1361,43 @@ def _citation_key(citation: str) -> tuple[str, int, int]:
     return path.rsplit("/", 1)[-1], int(lo), int(hi or lo)
 
 
-def _cites_a_site_in(cited: tuple[str, int, int], sites) -> bool:
-    """Is `cited` the SAME site as one of `sites`? One range must CONTAIN the other.
+#: How far a wider citation may reach BACK before the artifact's own start. The only honest
+#: wider span in either document is `entity_reads.py:533-559` against the artifact's
+#: `:551-559` — widened by 18 lines — so this bound sits comfortably above it and far below
+#: the padding attack `sdk.py:61000-62758` (a 1,739-line reach onto the pinned site).
+_CITATION_WIDEN_BOUND = 20
 
-    ⛔ CONTAINMENT, not overlap, and not equality. The prose legitimately cites a wider
-    span than the artifact (`entity_reads.py:533-559` against the artifact's
-    `:551-559` — the read plus the call site) and a single line inside it
-    (`sdk.py:62739` against `:62739-62758`), so equality would red on honest prose
-    while OVERLAP would accept the drift this arm exists to catch: `:172-179` ->
-    `:166-173` overlaps the artifact's range without being the same site. Containment
-    is the only relation that accepts both honest shapes and refuses a moved range.
+
+def _cites_a_site_in(cited: tuple[str, int, int], sites) -> bool:
+    """Is `cited` the SAME site as one of `sites`?
+
+    Three shapes are honest, and nothing else is (#14691 review, round 15, finding 5):
+
+    1. **The same range.**
+    2. **One line inside** the artifact's range — `sdk.py:62739` against `:62739-62758`.
+    3. **A wider range that BEGINS at or just before the artifact's start** — the prose quotes
+       a span plus its call site (`entity_reads.py:533-559` against `:551-559`).
+
+    ⛔ CONTAINMENT IN EITHER DIRECTION WAS NOT ENOUGH, measured: it admitted
+    `sdk.py:61000-62758` and `sdk.py:1-99999` — each BEGINS exactly where the refused mutant
+    `61000-61019` begins and pads its END onto the pinned site. The discriminator is the
+    START, not the containment: a range that opens in unrelated code and closes on the site
+    is a different citation however far it reaches. Equality alone would red on the two
+    honest shapes above, and OVERLAP would accept `:172-179` -> `:166-173`, so the three
+    shapes are enumerated rather than approximated.
     """
     name, lo, hi = cited
-    return any(
-        other_name == name and ((other_lo <= lo and hi <= other_hi) or (lo <= other_lo and other_hi <= hi))
-        for other_name, other_lo, other_hi in sites)
-
+    for other_name, other_lo, other_hi in sites:
+        if other_name != name:
+            continue
+        if lo == other_lo and hi == other_hi:
+            return True
+        if lo == hi and other_lo <= lo <= other_hi:
+            return True
+        if (lo <= other_lo and other_hi <= hi
+                and other_lo - lo <= _CITATION_WIDEN_BOUND):
+            return True
+    return False
 
 def test_the_door_EVIDENCE_cells_state_the_artifacts_numbers():
     r"""Reds if a door finding's EVIDENCE cell drifts from the artifact it cites.
@@ -2440,13 +2415,17 @@ def test_the_reports_number_TABLES_are_the_artifacts_tables():
         assert got, f"REPORT.md has no line matching {pattern!r} ({why})"
         assert expected in got, (
             f"{why}: REPORT.md does not carry the artifact's {expected!r} — {got!r}")
-        # ⛔ AND NO NUMBER THE ARTIFACT DOES NOT CARRY THE SAME NUMBER OF TIMES (#14691
-        # review, round 14, finding 2). `expected in got` is a SUBSTRING test, so a row
-        # that states a figure TWICE keeps one copy pinned and leaves the other free:
-        # measured at `0368cbb7` on `| … **5/5** | 5/5 (parent end…` — mutating EITHER
-        # copy left `97 passed`, and only mutating BOTH reddened. The MULTISET is what
-        # a duplicate cannot survive, so the row must carry the artifact's numbers, no
-        # more of them than the artifact states.
+        # ⛔ THE DUPLICATE-FIGURE HOLE IS *NOT* CLOSED HERE, and this comment used to say it
+        # was (#14691 review, round 15, finding 3 — measured: the helper it named was
+        # called from nowhere in 4,900 lines). `expected in got` is a SUBSTRING test, so a
+        # row that states a figure twice keeps one copy pinned and leaves the other free.
+        # The measured instance — `| … **5/5** | 5/5 (parent end…`, where mutating EITHER
+        # copy left `97 passed` — is closed by its OWN arm,
+        # `test_the_A2_class_table_derives_BOTH_cells_from_the_artifact`, which derives both
+        # columns from `A2_edges.totals`; a generic multiplicity bound was tried and
+        # REFUSED because it reds on honest repeats (`| doc-02 | 14.6 | 4 | … | 4 (8
+        # `related`, 4 `ownedBy`) |`, measured). So a duplicate in another row needs its
+        # own arm: this helper carries none, and nothing here pretends it does.
 
     def para(pattern, expected, why):
         """A claim whose sentence WRAPS: grade the whole paragraph, not a line."""
@@ -3803,7 +3782,17 @@ def _prose_tokens() -> set[str]:
     # by `test_EVERY_bytes_figure_in_the_documents_is_the_committed_file` (which reds
     # on `809,813`, measured), and the door citations by
     # `test_every_CODE_citation_in_the_documents_is_one_an_artifact_carries`.
-    text = re.sub(r"(?ms)^## 8\..*?(?=^## 9\.)", " ", text)
+    # ⛔ THE REVIEW LOG IS `### 8.1`..`### 8.18`, NOT the whole of §8 (#14691 review, round
+    # 15, finding 2). The bound used to START at `### 8.1` and run to §9 — excluding 8.2–8.16
+    # as well, under a reason that named only the mutant tables. Bounding at `## 8.` fixed that
+    # and WIDENED the hole in the same move: it also swallowed `## 8. Artifacts`, the bundle's
+    # own artifact INVENTORY (`809,812 bytes`, `39 tools`, `5 transcripts, 4,295 chars`,
+    # `11 verbatim / 27 paraphrase / 12 not in corpus`), under a reason that is FALSE of it —
+    # that table IS a set of bundle measurements. Measured: adding `scored across 1,234 checks`
+    # to its `out/t6-score.json` row left the whole suite GREEN under the `## 8.` bound, and
+    # REDs under this one. So the exclusion is the review LOG only, and §8's artifacts table is
+    # scanned like any other claim table.
+    text = re.sub(r"(?ms)^### 8\.1 .*?(?=^## 9\.)", " ", text)
     text = re.sub(r"```.*?```", " ", text, flags=re.S)
     for pattern, _reason in _PROSE_ALLOWED:
         text = re.sub(pattern, " ", text, flags=re.M)

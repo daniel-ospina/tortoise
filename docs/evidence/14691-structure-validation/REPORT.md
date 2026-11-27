@@ -959,11 +959,14 @@ and three of the P2s, and states the residual rather than implying it away.
   derives both columns from `A2_edges.totals`, and `§8.9`'s `809,812 bytes` is graded by
   `test_EVERY_bytes_figure_in_the_documents_is_the_committed_file`, which reads every
   occurrence (`809,813` reds).
-- **P2 — the §8 exclusion.** It stopped at §8.1 while claiming only that "the mutant tables
-  quote invented figures ON PURPOSE", silently excluding 16 headings under a reason that
-  covered one. It is now bounded at the SECTION and the reason is the true one: §8 is the
-  review-round log — pytest counts from the round that ran them — not a bundle measurement.
-  The §8 figures that ARE artifact claims are graded by their own arms, above.
+- **P2 — the §8 exclusion.** The bound STARTED at `### 8.1` and ran to §9, so it excluded
+  `8.1`–`8.16` under a reason that named only the mutant tables. Round 15 exported the bound to
+  `## 8.` and WIDENED the hole in the same move: that also swallowed `## 8. Artifacts` — this
+  bundle's own artifact INVENTORY — under a reason false of it, because that table IS a set of
+  bundle measurements. Measured: adding `scored across 1,234 checks` to its `out/t6-score.json`
+  row left the whole suite green under the `## 8.` bound. The exclusion is now the review LOG
+  only (`### 8.1`–`### 8.18`), and `§8`'s artifacts table is scanned like any other claim table
+  (the `1,234` mutant reds).
 - ⛔ **THE RESIDUAL, stated rather than closed: a prose figure that is neither a table row
   nor named by a dedicated arm is still supported by set membership alone.** The reviewer's
   measured population was `154` of `373` single-token `+1` mutants staying green across

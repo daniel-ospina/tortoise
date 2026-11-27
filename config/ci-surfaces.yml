@@ -153,12 +153,18 @@ version: 1
 # standing rule is that the direction is kept and the figures are re-derived, never carried.
 # ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
 # own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
-# figures stay on the commit that measured them. The delta is measurable and small: `fast_pool()`
-# holds 1342 files at this head against 1341 on the `#14741` fold (`0204a219aa90`) it folded in,
-# read by running the verb on one manifest per side (`origin/main`'s blob and this
-# tree's), and the ONE addition THIS lane brings is `tests/test_14691_structure_evidence.py`, the row
-# registered by the commit that added the T6 bundle's falsifiers. With nothing `main` carries
-# missing from this tree, that one row is the whole delta: measured, `set(fast_pool(head)) -
+# figures stay on the commit that measured them. ⛔ THE POOL SIZES ARE NOT RESTATED HERE, and the
+# reason is a recorded ruling, not a preference (#14691 review, round 15, finding 4): the repo's own
+# doctrine is at `tests/test_ci_selection.py:319-341` — "a pool size is a measurement with several
+# independent reasons to move, so restating it is the decay this docstring warns about; the
+# derivation pointer is the durable form" — which is why the `1109`/`1111` figures were REMOVED from
+# this block rather than corrected a third time. `1342`/`1341` were the same mistake: any test file
+# landing on `main`, or any pause for an unclassified sibling, moves the count with nothing to red it
+# (measured: mutating `1342` to `1343` leaves the whole suite green). The durable statement of the
+# delta is the OPERATION, and it is the one kept: `set(fast_pool(head)) - set(fast_pool(main))`
+# returns exactly one row — `tests/test_14691_structure_evidence.py`, the row registered by the
+# commit that added the T6 bundle's falsifiers — and the reverse difference is empty. Run it on one
+# manifest per side; do not read a count out of this sentence.
 # set(fast_pool(main))` returns exactly that file and the reverse difference is empty. ⛔ An earlier
 # revision of this paragraph named a row that was NOT this lane's —
 # `tests/test_13450_ep_position_axis_participation.py` — and at THIS base that file is `main`'s (it
@@ -185,8 +191,11 @@ version: 1
 # (`0204a219aa90`) landed on the correction that had named `8fd022fdd1c5` as "the newest" — each a
 # sentence that was FALSE at its own head with nothing to red it.
 # A past tense cannot rot in that way — "that fold merged `a0be10ac456b`" stays true of this head
-# for good, and the next fold brings its own — so no lane owes this block a base re-derivation.
-# What it describes is unchanged: one row, this lane's own.
+# for good, and the next fold brings its own — so no lane owes the BASE token a re-derivation.
+# ⛔ THAT IS NOT A LICENCE TO SKIP THE OTHERS: the shard names, the seconds, the minute and the
+# headroom beside it are GRADED (both header arms read them), and every fold must still re-derive
+# those with the verb. The next lane owes the FIGURES a re-derivation and the base only its own
+# history. What the block describes is unchanged: one row, this lane's own.
 # ⛔ THIS BLOCK ARRIVES SPLICED, REPEATEDLY, and that is mechanical rather than mysterious:
 # `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
 # derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. It has now
