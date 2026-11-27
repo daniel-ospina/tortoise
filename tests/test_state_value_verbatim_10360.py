@@ -7566,6 +7566,24 @@ def _e2_arm_runs(arm: str) -> list[dict]:
     return runs
 
 
+def _session_spreads(runs: list[dict]) -> dict[str, tuple[int, int]]:
+    """Each session's `(min, max)` strict-verbatim survived count across `runs`.
+
+    ⛔ (#14774 review cycle 10, P3.) The arms record's parenthetical named the two
+    widest sessions **with their endpoints** — `wp01_quarry_debug` 7→12 and
+    `wp02_lumen_refactor` 4→9 — and said they were "derived and pinned in clause
+    §25". They were not: §25 derived only the AGGREGATE widest range, so editing
+    `7→12` to `3→12` (a range the committed receipts refute) left the suite
+    green. The endpoints are derived here so §25 can pin them against the record
+    instead of leaving them as prose.
+    """
+    per_session: dict[str, list[int]] = {}
+    for run in runs:
+        for session_id, survived in run["session_survived"].items():
+            per_session.setdefault(session_id, []).append(survived)
+    return {sid: (min(vals), max(vals)) for sid, vals in per_session.items()}
+
+
 def _max_session_spread(runs: list[dict]) -> int:
     """The WIDEST per-session between-run swing across these runs, in units.
 
@@ -7578,11 +7596,7 @@ def _max_session_spread(runs: list[dict]) -> int:
     sizes — so it is derived here and pinned against the record rather than
     restated.
     """
-    per_session: dict[str, list[int]] = {}
-    for run in runs:
-        for session_id, survived in run["session_survived"].items():
-            per_session.setdefault(session_id, []).append(survived)
-    return max(max(values) - min(values) for values in per_session.values())
+    return max(hi - lo for lo, hi in _session_spreads(runs).values())
 
 
 def _figures_in(text: str) -> list[str]:
@@ -8066,12 +8080,50 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     #    `wp02_lumen_refactor` 4→9). The error is conservative, so it rescued no
     #    claim, but it was the sole stated justification for the sample sizes and
     #    nothing derived it. It is derived here now, so it cannot drift again.
+    _spreads = _session_spreads(on + off)
     _spread = _max_session_spread(on + off)
     _arms_doc = " ".join(_E2_ARMS_DOC.read_text(encoding="utf-8").split())
     assert f"swings by up to {_spread} units" in _arms_doc, (
         "the arms record's between-run spread claim must be the DERIVED widest "
         f"per-session range across these six runs ({_spread} units) — it stated "
         "'2–3 units', which the receipts refute")
+
+    # 9b. THE RECORD'S PER-SESSION ENDPOINTS, DERIVED (#14774 review cycle 10,
+    #     P3). Step 9 pinned only the AGGREGATE widest range, so the two sessions
+    #     the paragraph names WITH endpoints were un-derived prose: `7→12` could be
+    #     edited to `3→12` and the suite stayed green. Pin the endpoints of every
+    #     session attaining the widest range, and pin that the record names
+    #     exactly those sessions and no others.
+    _widest = sorted(
+        sid for sid, (lo, hi) in _spreads.items() if hi - lo == _spread)
+    assert _widest, "no session attained the widest per-session range"
+    for _sid in _widest:
+        _lo, _hi = _spreads[_sid]
+        assert f"`{_sid}` {_lo}→{_hi}" in _arms_doc, (
+            f"the arms record names `{_sid}` as one of the widest sessions but "
+            f"with endpoints the receipts refute — they derive {_lo}→{_hi}")
+    _named = sorted(re.findall(r"`(wp\d\d_[a-z_]+)`\s+\d+→\d+", _arms_doc))
+    assert _named == _widest, (
+        "the arms record's per-session endpoints must name exactly the sessions "
+        f"that attain the widest range ({_widest}) — it names {_named}")
+
+    # 9c. THE RECORD'S COMPARATIVE CLAIM (#14774 review cycle 10, P3). The
+    #     paragraph used to say the per-session spread "is larger than any
+    #     aggregate delta anyone has claimed from these arms" — FALSE in the units
+    #     it used: the widest per-session spread is narrower than the mean
+    #     separation the same PR publishes. It now compares the between-run RANGE
+    #     against twice the mean separation, and that ordering is derived here so
+    #     the sentence cannot drift back into a claim the receipts refute.
+    _run_totals = [sum(run["session_survived"].values()) for run in on + off]
+    _all_range = max(_run_totals) - min(_run_totals)
+    _separation = abs(on_mean - off_mean)
+    assert _all_range > 2 * _separation, (
+        f"the arms record says the between-run range ({_all_range} units) is more "
+        f"than twice the separation between the arm means ({_separation} units) "
+        "— the receipts refute that ordering")
+    assert "more than twice the separation" in _arms_doc, (
+        "the arms record must carry the DERIVED comparative claim about the "
+        "between-run range and the arm separation, not an edit of it")
 
 
 def test_the_arm_block_guard_reaches_the_RECEIPTS_OF_RECORD(tmp_path, monkeypatch):
