@@ -54,8 +54,10 @@ is **invisible to the read door** that answers *"what does this person own?"*.
   `as_asked` / `reversed_orientation` / `abstain`. It answers from **two**
   premises, and both are in scope: (a) an EXACT declared pair asked in reverse —
   measured at this head, split the way a REACHABLE ask reaches it: **33 pairs
-  across 24 predicates** carry no label end and are corrected with
-  `evidence="declared-pair"`, while the 4 label-spelled rows (`ownedBy`,
+  across 24 predicates** are CORRECTED on a reverse ask with
+  `evidence="declared-pair"` (the 34th label-free row, `blocks`
+  `pm:card -> pm:card`, asks identically in reverse, so it is `as_asked` and
+  needs no correction), while the 4 label-spelled rows (`ownedBy`,
   `assignedTo` ×2, `holds`) cannot be asked as a declared pair by any write (a
   `Subject` is a LABEL, not a kind) and are premise (b)'s, with
   `evidence="declared-endpoint-label"`. Both counts move with the packs, so they
@@ -236,13 +238,14 @@ So the answer is **detect-and-re-derive, not migrate**:
   `_create_object(..., managedBy=…)` writes through the entity door, which
   already orients correctly (`entity -[:managedBy]-> subject`). Closing the
   narrative-route case is a **pack declaration**, not a verb list in code.
-  ⚠️ **The same gap covers the OTHER PRICED verbs, and it is the one to check
-  first before assuming coverage**: measured, `supports`, `refutes`, `produces`,
-  `related`, `transacts`, `mutuallyExclusive` and `mutuallySupportive` also
-  declare no pair row, so the leg abstains `predicate-not-declared` on every one
-  of them — including on a priced `IMPL`/`NAND`, which is therefore still
-  written in the STATED direction with no correction and no declaration. Only
-  `causes` (and the paired-kind predicates) are reached today.
+  ⚠️ **The same gap covers the OTHER verbs that declare no pair row, and it is
+  the one to check first before assuming coverage**: measured, the PRICED
+  `supports`, `refutes`, `produces`, `mutuallyExclusive` and `mutuallySupportive`
+  — and the non-priced `related`, `transacts` and `managedBy` — declare no pair
+  row, so the leg abstains `predicate-not-declared` on every one of them —
+  including on a priced `IMPL`/`NAND`, which is therefore still written in the
+  STATED direction with no correction and no declaration. Only `causes` (and the
+  paired-kind predicates) are reached today.
 * **The leg is a PLACEMENT rule, not an ownership claim.** It puts the
   label-spelled end on the side the declaration spells it and never infers
   which end owns which. That matters on a `direction: "<-"` row —

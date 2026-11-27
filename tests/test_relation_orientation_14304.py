@@ -156,6 +156,31 @@ def test_an_exactly_declared_pair_reversed_is_also_reversed():
     assert (verdict.payload or {})["evidence"] == "declared-endpoint-label"
 
 
+def test_a_KIND_only_declared_pair_reversed_carries_the_DECLARED_PAIR_evidence():
+    """⛔ PREMISE (a)'s evidence tag, which nothing else pinned.
+
+    `config/ci-surfaces.yml`'s `durations:` row for this file claims the weight
+    covers *the exact declared pair asked in REVERSE — `reversed_orientation` with
+    `evidence="declared-pair"`*, and that string was pinned NOWHERE: the two
+    `payload["evidence"]` assertions above expect `declared-endpoint-label`, and
+    the `hasPart` case asserts the OUTCOME only. So a regression that relabelled
+    premise (a)'s evidence would have merged green while the manifest asserted
+    coverage of it (round-3 review, P2).
+
+    `causes` is the right witness and the one that matters — it is the
+    PRICED direct-arm predicate (`dev:bug -> dev:incident`, `->` → `IMPL`), so
+    this is also the pin that the priced path really is reached. ⚠️ Its reverse
+    ask is the ask a write CAN produce (both ends are KINDS; no `Subject` label
+    is passed as a kind).
+    """
+    verdict = orient_declared_pair("causes", "dev:incident", "dev:bug")
+    assert verdict.outcome == ORIENTATION_REVERSED
+    assert (verdict.payload or {})["evidence"] == "declared-pair"
+    assert verdict.payload["declaredFor"] == [
+        {"fromKind": "dev:bug", "toKind": "dev:incident"}
+    ]
+
+
 def test_a_pair_the_declaration_names_exactly_is_never_touched():
     """A pair the packs declare, in the declared order, is left exactly as asked.
 

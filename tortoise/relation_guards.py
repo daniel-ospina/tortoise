@@ -78,9 +78,11 @@ claimed the leg fires "exactly where this leg abstains or reports
       asked the other way round is corrected here, and the pair leg calls that
       same state ``reversed`` — this leg performs the swap that message already
       prescribes. Measured at `#14304`'s head, and split the way a REACHABLE ask
-      reaches it: the **33 pairs across 24 predicates** that declare no label end
-      are corrected here with ``evidence="declared-pair"`` (``causes``,
-      ``hasPart``, ``addresses``, ``decomposesInto``, …); the 4 label-spelled rows
+      reaches it: **33 pairs across 24 predicates** are CORRECTED on a reverse ask
+      with ``evidence="declared-pair"`` (``causes``, ``hasPart``, ``addresses``,
+      ``decomposesInto``, …) — the 34th label-free row, ``blocks``
+      ``pm:card -> pm:card``, asks identically in reverse, so it is ``as_asked``
+      and needs no correction; the 4 label-spelled rows
       (``ownedBy``, ``assignedTo`` ×2, ``holds``) cannot be asked as a declared
       pair by any write — a ``Subject`` is a LABEL, not a kind — so they are
       premise (b)'s, with ``evidence="declared-endpoint-label"``. Both counts
@@ -89,11 +91,11 @@ claimed the leg fires "exactly where this leg abstains or reports
       ``causes`` now writes ``IMPL(bug -> incident)``, so the expectation it
       raises moves between the two endpoints — that IS the declared correction,
       and it is stated rather than left to be discovered. ⚠️ And the other priced
-      verbs are NOT reached: ``supports``, ``refutes``, ``produces``, ``related``,
-      ``transacts``, ``managedBy``, ``mutuallyExclusive`` and
-      ``mutuallySupportive`` declare no pair row at all, so the leg abstains
-      ``predicate-not-declared`` on every one of them (measured) — a pack
-      declaration is the fix, not a verb list here.
+      verbs are NOT reached: ``supports``, ``refutes``, ``produces``,
+      ``mutuallyExclusive`` and ``mutuallySupportive`` declare no pair row at all,
+      so the leg abstains ``predicate-not-declared`` on every one of them
+      (measured) — as it does on the non-priced ``related``, ``transacts`` and
+      ``managedBy`` (the fix there is a pack declaration, not a verb list here).
   (b) the LABEL-SPELLED side, which is the only premise that can orient a pair
       the packs declare for OTHER kinds, and where this leg does fire exactly
       when the pair leg abstains or reports ``undeclared``.
