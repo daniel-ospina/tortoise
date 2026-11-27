@@ -1993,8 +1993,22 @@ def run_benchmark(
     }
 
 
-#: The switches that decide whether the S2.2 VET pass runs, in the order the
-#: production OR reads them (``extractor_v2.extract_session_v2``).
+#: The switches a write-path arm can be varied by, recorded on every receipt so
+#: an arm can be attributed instead of trusted.
+#:
+#: ⛔ **Three of these decide whether the S2.2 VET pass runs; the fourth does not.\**
+#: ``TORTOISE_VET`` and ``TORTOISE_S2_DECISION_SEAM`` are the two terms
+#: ``extractor_v2._vet_enabled`` ORs, and ``TORTOISE_VALUE_GATE`` is the sibling
+#: term ``extract_session_v2`` ORs alongside it. ``TORTOISE_STATE_VALUE_VERBATIM``
+#: is the `#10360` CARVE-OUT's own off-switch — it moves the write-path refusal,
+#: never the S2.2 arming — and it is in this tuple because a lane flips it and the
+#: receipt must record that it did. This tuple is therefore the arm's SWITCH
+#: SURFACE, not "the S2.2 arming terms in production order": the production OR at
+#: ``extract_session_v2`` reads ``vet_arbiter is not None or _vet_enabled() or
+#: _value_gate_enabled()``, whose order (and whose first term) no env switch can
+#: express. ``test_the_arm_switch_surface_names_every_production_arming_read``
+#: pins the MEMBERSHIP against the resolvers' own code; nothing pins an order,
+#: because no order is a fact about this tuple.
 #:
 #: ⛔ **AN ABSENT ``TORTOISE_VALUE_GATE`` IS THE *ON* SPELLING** (`#10996`), which
 #: is why this tuple exists rather than being inferred from a filename: the
@@ -2056,7 +2070,15 @@ def extractor_arm_readback() -> dict:
         "vet_toggle": vet_toggle,
         "s2_seam": seam,
         "value_gate": value_gate,
-        # …and the one boolean that decides whether the pass runs
+        # …and the boolean that decides whether the pass runs **for an env-only
+        # run**. ⛔ NOT the whole production condition: ``extract_session_v2``
+        # ORs an injected ``vet_arbiter is not None`` ahead of these terms
+        # (``extractor_v2.py``, the arming-OR at the call site), and no receipt
+        # can observe an injected arbiter — none of this runner's call sites
+        # inject one (``rg 'arbiter' tests/eval/write_path/runner.py`` is empty),
+        # so the two agree on every receipt this runner can write. The arbiter is
+        # recorded here rather than silently dropped, because it is the one term a
+        # future caller could add without moving this field.
         "vet_enabled": bool(vet_toggle or value_gate),
     }
 
@@ -2087,6 +2109,39 @@ def _validate_arm_block(arm: dict) -> list[str]:
             "receipt.arm.vet_enabled: a readable arm requires a bool, got "
             f"{arm.get('vet_enabled')!r}"
         )
+    # ⛔ AND THE BOOLEANS MUST BE WHAT THE **RECORDED ENV** RESOLVES TO (#14774
+    # review P2). Shape alone let a receipt claim an arm it did not produce through
+    # the block that exists to stop exactly that: a block whose
+    # `env.TORTOISE_VALUE_GATE` is ABSENT (``#10996``: absent ⇒ the value gate is
+    # ON) while its `value_gate`/`vet_enabled` say False validated as `[]`, and
+    # §25 — which compares `vet_enabled` to the FILENAME's arm — certified it too.
+    # So the recorded booleans are RECOMPUTED from the recorded env through the
+    # PRODUCTION resolvers, over a raw value, so the check cannot drift from the
+    # rule that decides: `value_gate.resolve_enabled` (the one default site,
+    # `#10996`), `env_truthy.is_truthy` for the two `_vet_enabled` terms, and the
+    # same OR `extract_session_v2` composes.
+    if (isinstance(env, dict) and isinstance(arm.get("readable"), bool)
+            and arm["readable"]):
+        from tortoise.env_truthy import is_truthy
+        from tortoise.value_gate import resolve_enabled
+
+        expected_seam = bool(is_truthy(env.get("TORTOISE_S2_DECISION_SEAM")))
+        expected_vet = bool(is_truthy(env.get("TORTOISE_VET")) or expected_seam)
+        expected_gate = bool(resolve_enabled(env.get("TORTOISE_VALUE_GATE")))
+        for field, expected in (
+            ("s2_seam", expected_seam),
+            ("vet_toggle", expected_vet),
+            ("value_gate", expected_gate),
+            ("vet_enabled", bool(expected_vet or expected_gate)),
+        ):
+            if field in arm and arm[field] is not expected:
+                issues.append(
+                    f"receipt.arm.{field}: the recorded env resolves {expected!r}, "
+                    f"but the receipt records {arm[field]!r} — the arm block "
+                    "contradicts itself, so the receipt's arm claim cannot be "
+                    "attributed (an ABSENT TORTOISE_VALUE_GATE is the ON spelling, "
+                    "#10996)"
+                )
     return issues
 
 

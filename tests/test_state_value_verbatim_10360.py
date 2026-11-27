@@ -7348,11 +7348,39 @@ def _e2_arm_commands() -> dict[str, str]:
     found: dict[str, str] = {}
     for arm in ("on", "off"):
         match = re.search(
-            r"(?P<prefix>(?:^|\s)(?:env\s+)?(?:[A-Z_]+=\S+\s+|-u\s+[A-Z_]+\s+)+)"
+            r"(?P<prefix>(?:^|\s)(?:env\s+)?(?:[A-Z0-9_]+=\S+\s+|-u\s+[A-Z0-9_]+\s+)+)"
             r"\S*python\s+-m\s+tests\.eval\.write_path\.runner\s+run\s+"
             r"--out\s+\S*e2-" + arm + r"-",
             flat)
         if match:
+            # ⛔ THE PREFIX MUST BE THE WHOLE ENV REGION (#14774 review P2, MEASURED).
+            # The token class was `[A-Z_]+`, which cannot spell a name containing a
+            # digit — so `TORTOISE_S2_DECISION_SEAM` was INVISIBLE to this parser and
+            # `re.search` returned a silently TRUNCATED prefix. Both directions were
+            # measured: on a control whose first token is `TORTOISE_S2_DECISION_SEAM=1`
+            # the seam was dropped and the command resolved `vet_enabled=False` here
+            # while production resolves it ARMED (`extractor_v2._vet_enabled` ORs
+            # `_s2_seam_armed()`, and `#5087` records that it overrides an explicit
+            # `TORTOISE_VET=0`) — i.e. the test certified a second realization of the
+            # TREATMENT as "the control", the exact defect it was written to close;
+            # and on a correct control carrying `TORTOISE_S2_DECISION_SEAM=0` the
+            # tokens BEFORE it were dropped, so it false-accused a command that does
+            # set the kill-switch. The class is now `[A-Z0-9_]+`.
+            #
+            # The class fix alone would let the same silent truncation return through
+            # any future switch name this pattern cannot spell, so the truncation is
+            # DETECTED rather than assumed away: if the token immediately before the
+            # matched prefix is itself a `NAME=value` / `-u NAME` token, the regex
+            # stopped mid-prefix and the parsed settings are a shorter view of the
+            # real command.
+            before = flat[:match.start("prefix")].rstrip()
+            truncated = re.search(r"(?:^|\s)(?:-u\s+\S+|\S+=\S+)$", before)
+            assert truncated is None, (
+                "the parsed env prefix of the " + arm + " arm command starts after "
+                f"the switch token {truncated.group(0).strip()!r} — the prefix regex "
+                "cannot spell a switch name on this command, so the arm's settings "
+                "are a TRUNCATED view of it and the resolved arm may be the opposite "
+                "of what the doc states. Widen the name class in `_e2_arm_commands`")
             found[arm] = match.group("prefix").strip()
     return found
 
@@ -7382,9 +7410,12 @@ def _arm_settings(prefix: str) -> dict[str, str | None]:
 
 
 #: The receipts that predate the runner's `arm` readback, named explicitly (#14774
-#: review P1). They are the four committed at `4530cd5d54ca`, MINUS the two that
-#: were mislabelled `-off-` and renamed to their true arm — their content is
-#: unchanged; only the label moved from a false one to a true one.
+#: review P1). They are the four committed at `4530cd5d54ca`, WITH the two that
+#: were mislabelled `-off-` renamed to their true arm — their content is
+#: unchanged; only the label moved from a false one to a true one. (The sentence
+#: said "MINUS the two" and that contradicted the set below, which holds all four
+#: of them: the rename moved the pair INTO the on arm, it did not remove it. Two
+#: of the four are now named `-on-3-`/`-on-4-`.)
 #:
 #: ⚠️ WHY THESE FOUR ARE STILL A SOUND ON-ARM: every spelling of the documented ON
 #: command resolves `vet_enabled` True (`TORTOISE_VET=1` arms it, and
@@ -7687,7 +7718,7 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     _derived_figures.append(
         f"{base_survived}/{base_total} = {_pct_1dp(base_survived, base_total)}")
     _scan = re.findall(
-        r"\d+(?:\.\d+)?/\d+(?:\.\d+)? = \d+(?:\.\d+)?%", flattened)
+        r"\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?\s*=\s*\d+(?:\.\d+)?%", flattened)
     assert _scan.count(_retired_figure) == 1, (
         f"clause (b2) must quote the retired `{_retired_figure}` reading EXACTLY "
         f"once — found {_scan.count(_retired_figure)}. Zero means the history this "
@@ -7754,6 +7785,42 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     _stated_once(
         f"{base_total} graded units",
         "the corpus size the power statement names")
+
+    # 7c. …AND THE ROW'S *SPELLED* SAMPLE SIZES AND ITS ROUNDED GAP (#14774 review
+    #     P3, MEASURED). The receipts' arm counts were pinned above by
+    #     `len(on) == 4` / `len(off) == 2`, but that only pins the RECEIPTS: the
+    #     row's own statement of its sample size was prose nothing derived, so
+    #     `over four runs` → `over five runs`, `the four flags-on draws` → `five`,
+    #     `the six draws together` → `seven`, `in all SIX runs` → `SEVEN` and
+    #     `a 5-point gap` → `a 9-point gap` were ALL GREEN while every number the
+    #     row publishes stayed correct — a lane reading the row would be told the
+    #     measurement rests on draws that were never run. Each is now derived from
+    #     the receipts (`len(on)`, `len(on + off)`) and from the arm means, so a
+    #     re-run that changes the arm count moves the row's prose or reds here.
+    _words = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+              7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+    _on_words = _words[len(on)]
+    _all_words = _words[len(on) + len(off)]
+    _stated_once(
+        f"{_on_words} runs",
+        "the row's own statement of how many flags-on draws the mean rests on")
+    _stated_once(
+        f"the {_on_words} flags-on draws",
+        "the row's own statement of the pass-armed sample")
+    _stated_once(
+        f"the {_all_words} draws together",
+        "the row's own statement of the pooled between-run span")
+    _stated_once(
+        f"all {_all_words.upper()} runs",
+        "the loss class the row draws from every run it measured")
+    # ...the separation the row states in WHOLE points is the FLOOR of the
+    # measured separation, not its round: 5.75 rounds to 6 and the row says 5, so
+    # deriving with `round` would red a row that is (mildly) understating the gap.
+    # A power claim should err toward understating the effect, so the floor is the
+    # honest derivation and the row's figure is pinned to it.
+    _stated_once(
+        f"{int(abs(on_mean - off_mean))}-point gap",
+        "the whole-point separation the row says is too small for a power claim")
 
     # 8. the reading this replaces must be gone, not merely supplemented: the
     #    old clause asserted BOTH that the figure was not re-measured and that
@@ -8039,8 +8106,23 @@ def test_the_arm_switch_surface_names_every_production_arming_read():
 @pytest.mark.parametrize(
     "arm, expected",
     [
-        # the arm a healthy receipt carries — the shape every other test builds
-        ({"env": {}, "readable": True, "vet_enabled": False}, None),
+        # the arm a healthy receipt carries — the shape every other test builds.
+        # ⛔ IT MUST BE SELF-CONSISTENT: an EMPTY `env` is not a neutral fixture,
+        # because an absent `TORTOISE_VALUE_GATE` is the ON spelling (#10996) — a
+        # block whose env says nothing while its booleans say `vet_enabled: False`
+        # is exactly the lie the env-vs-booleans arm now refuses, so the healthy
+        # shape here is the one a real disarmed receipt carries (measured on the
+        # two committed `-off-` receipts).
+        ({"env": {"TORTOISE_VET": "0", "TORTOISE_VALUE_GATE": "0",
+          "TORTOISE_S2_DECISION_SEAM": None,
+          "TORTOISE_STATE_VALUE_VERBATIM": None},
+          "readable": True, "vet_toggle": False, "s2_seam": False,
+          "value_gate": False, "vet_enabled": False}, None),
+        # the block contradicts its OWN env: `TORTOISE_VALUE_GATE` absent resolves
+        # ON, so `value_gate`/`vet_enabled` cannot both be False
+        ({"env": {"TORTOISE_VALUE_GATE": None}, "readable": True,
+          "vet_toggle": False, "s2_seam": False, "value_gate": False,
+          "vet_enabled": False}, "contradicts itself"),
         # a switch the runner's own surface does not know: recorded nowhere
         ({"env": {"TORTOISE_UNKNOWN": "1"}, "readable": True, "vet_enabled": True},
          "unknown switches"),
