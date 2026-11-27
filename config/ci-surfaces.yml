@@ -108,9 +108,12 @@ version: 1
 # 827.9 s (b, c, d, e), so `ceil(828.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is
 # the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
 # `watchdog_headroom: 2.03` (1680 / 828.0 = 2.0290), so the two agree by construction rather than by
-# a hand re-read. The partition moved by 0.2 s when `#14772`'s pool-split fold landed on this head
-# and the watchdog did NOT move: that is the measured case this guard exists for — a minute-only
-# re-read would have called the carried sentence correct. `fast_pool()` holds 1343 entries here,
+# a hand re-read. The partition moved by 0.2 s and the watchdog did NOT: that 0.2 s is THIS
+# change's own added suite (a flat 2.0 s weight), NOT `#14772`'s — measured, `#14772` changes NO line of this manifest
+# (`git diff --quiet 32ce876fbf^ 32ce876fbf -- config/ci-surfaces.yml` is IDENTICAL, and its bins
+# equal its parent's), so attributing the move to that fold would be the very "a partition move
+# attributed to a row that did not cause it" this block reds. That is the measured case this guard
+# exists for — a minute-only re-read would have called the carried sentence correct. `fast_pool()` holds 1343 entries here,
 # read by loading this tree's OWN manifest through the verb, and `origin/main`'s manifest loaded the
 # same way differs by exactly ONE entry: this change's suite, present only here.
 # (`tests/test_14582_creation_hook.py` was the second entry in an earlier spelling of this

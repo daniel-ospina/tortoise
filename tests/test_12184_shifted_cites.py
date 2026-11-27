@@ -111,7 +111,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # number): each pinned fragment was grepped in `tortoise/sdk.py` and the pin was
     # re-anchored on the line that carries it.
     # ⛔ THE TWO `search_engine.py` ROWS MOVED +4 AT #14721: that branch adds four lines to
-    # `tortoise/search_engine.py` at `:2031` (the `superseded_by` provenance keys on
+    # `tortoise/search_engine.py` at `:2034` (the `superseded_by` provenance keys on
     # `SearchResult`), above this block, so the whole pair rotates together —
     # `3508`→`3512` (the `:Document` line) and `3506`→`3510` (the block opener). Re-derived by
     # CONTENT at this head, not by arithmetic: each fragment was grepped in the file and the
@@ -159,7 +159,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_SUBSTRATE, '`:37982` is the `:Source` line', _SDK, 37982, "D10: a document is a ``:Source``, not a"),
     (_SUBSTRATE, 'opening `:38003`', _SDK, 38003, "def _file_human_approval(self, approver_id: str, artifact_id: str,"),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
-    # ⛔ ALL FOUR MOVED +4 AT #14721 (its `tortoise/search_engine.py` hunk at `:2031` is above every
+    # ⛔ ALL FOUR MOVED +4 AT #14721 (its `tortoise/search_engine.py` hunk at `:2034` is above every
     # one of them) — re-derived by CONTENT at this head, fragment by fragment, not by arithmetic.
     (_M3_BRIEF, "tortoise/search_engine.py:2949", _SE, 2949, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2791", _SE, 2791, "def recency_tie_clause"),

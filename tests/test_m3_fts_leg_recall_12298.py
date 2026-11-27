@@ -1380,7 +1380,7 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # re-ran this one test to the exclusion of the rest, so one stale locator
     # made the required matrix red repo-wide). Re-derived against the live
     # file, not nudged by a constant, and the brief's §1 row moved with it.
-    # ⛔ AND AGAIN AT #14721: its 4-line `SearchResult.superseded_by` hunk at `:2031` sits ABOVE
+    # ⛔ AND AGAIN AT #14721: its 4-line `SearchResult.superseded_by` hunk at `:2034` sits ABOVE
     # every row in this group, so all four move **+4** together — re-derived with
     # `sed -n "<n>p"` on the live file (2949/3161/2791/5078), never by adding 4 to the old number,
     # and §1 of the brief was re-cut to the same four values.
