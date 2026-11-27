@@ -9206,16 +9206,27 @@ _EMISSION_RATIO_RE = re.compile(
 #: the comment above names. The key is therefore read case-insensitively with whitespace around the
 #: colon admitted (TRUE prose must not be refused for its spacing — that is the false-block twin),
 #: and `_EMISSION_KEY_SHAPE_RE` below is the backstop that refuses a spelling nobody consumed.
+#: ⛔ THE SEPARATOR IS `\W{0,8}`, NOT `\s*:\s*` (#14623 round 37, measured). The colon-only form
+#: still let the SAME figure through under `=` and under the emitted JSON spelling —
+#: `watchdog_headroom = 2.04` and `"watchdog_headroom": 2.04` matched NEITHER the reader nor the
+#: backstop (the backstop carried the same `\s*:`), so a falsified figure passed every arm. A
+#: separator of up to eight non-word characters admits all three without turning the pattern into
+#: a prose matcher. ⛔ RESIDUAL, declared: a key followed by a WORD for its figure
+#: (`watchdog_minutes: twenty-eight`) is not read by the READER, but the backstop catches it — by
+#: design, since an unread figure must RED rather than pass as absence.
 _EMISSION_MINUTES_KEY_RE = re.compile(
-    r"\bwatchdog_minutes\b\s*:\s*(?P<minutes>\d+)", re.IGNORECASE)
+    r"\bwatchdog_minutes\b\W{0,8}(?P<minutes>\d+)", re.IGNORECASE)
 _EMISSION_HEADROOM_KEY_RE = re.compile(
-    r"\bwatchdog_headroom\b\s*:\s*(?P<headroom>\d+(?:\.\d+)?)", re.IGNORECASE)
+    r"\bwatchdog_headroom\b\W{0,8}(?P<headroom>\d+(?:\.\d+)?)", re.IGNORECASE)
 #: ⛔ THE SHAPE BACKSTOP for the two keys — the sibling of `_EMISSION_RATIO_SHAPE_RE` below, and the
 #: half the round-36 arm was missing. Every occurrence of EITHER key must be consumed by the reader
-#: anchored at the same offset; a re-spelling that is not (`watchdog_minutes: twenty-eight`, or the
-#: key un-backticked with a unit) REDs as a figure nobody reads instead of passing as absence.
+#: anchored at the same offset; a re-spelling that is not REDs as a figure nobody reads instead of
+#: passing as absence — INCLUDING a word-spelled figure (`watchdog_minutes: twenty-eight`), which is
+#: why the backstop carries no digit lookahead. The cost, stated: prose that mentions one of these
+#: keys without any figure would RED. Measured on this block: both keys occur exactly twice and
+#: both carry figures, so the cost is not paid here.
 _EMISSION_KEY_SHAPE_RE = re.compile(
-    r"\bwatchdog_(?P<which>minutes|headroom)\b\s*:", re.IGNORECASE)
+    r"\bwatchdog_(?P<which>minutes|headroom)\b\W{0,8}", re.IGNORECASE)
 _EMISSION_RATIO_SHAPE_RE = re.compile(
     # Anchored on an unambiguous DIVISION SIGN (`/`, `÷`) rather than on a relation glyph: a stated
     # headroom ratio IS a quotient, so this catches a division statement the reader did not consume
