@@ -2251,15 +2251,21 @@ _PRE_CUE_ONLY = _inversion_form(
     #
     # while the forward twin `Restart your client, then check the tools.` must
     # stay GREEN — and does, because form (f) is PRE-CUE only.
-    # ⛔ `_NOT_A_DOC` IS WHAT KEEPS THIS FROM REFUSING CORRECT COPY, and it is why
-    # the arm can anchor on the clause END instead of enumerating doc nouns:
-    # `Check the tools overview for the full list, then restart your client.`
-    # stays GREEN (measured), because a documentation noun after the object is not
-    # a claim about the running session — the same discriminator (f.2) records as
-    # "the predicate is the MECHANISM, not a decoration". The `\s*$` is safe only
-    # because `_cue_governing_clause` has already dropped the pure-sequencer clause
-    # (`then`) from this string: the graded clause here is `Check the tools`, not
-    # `Check the tools, then` (verified by direct call).
+    # ⛔ `\s*$` IS THE DISCRIMINATOR HERE, NOT `_NOT_A_DOC` — measured (#14679
+    # review at `76646c7b`, and corrected because the earlier comment claimed the
+    # opposite): deleting `_NOT_A_DOC` from THIS arm changes nothing, because a
+    # documentation noun after the object is non-whitespace and `\s*$` already
+    # refuses it (`Check the tools overview for the full list, then restart your
+    # client.` stays GREEN with the term gone). Measured: remove the term, full file
+    # `865 passed`; a 432-shape fuzz (8 pre-cue verbs × 6 objects × 9 doc-noun tails)
+    # shows 0 verdict differences. The term was INERT, i.e. an unpinned second
+    # mechanism for one behaviour — the class this file refuses elsewhere. `\s*$` is
+    # safe only because `_cue_governing_clause` has already dropped the
+    # pure-sequencer clause (`then`) from this string: the graded clause here is
+    # `Check the tools`, not `Check the tools, then` (verified by direct call).
+    # (`_NOT_A_DOC` still DOES work in the (f.2)/(f.3) arms at `:2191`/`:2224`, where
+    # it is followed by more pattern rather than by the end of the clause — those
+    # uses are pinned by their rows and are untouched.)
     # ⛔ DECLARED RESIDUAL — the bare SINGULAR object (`Check the tool, then restart
     # your client.`) is NOT graded, and the arm stays paired with `_TOOLS_OBJECT`
     # rather than spelling `tools?` itself. Measured at `776c58252c1b`: substituting
@@ -2274,7 +2280,6 @@ _PRE_CUE_ONLY = _inversion_form(
     + _PRE_CUE_VERB
     + r"[^\n]*?"
     + _TOOLS_OBJECT
-    + _NOT_A_DOC
     + r"\s*$"
     + r")"
 )
@@ -4810,16 +4815,24 @@ def test_3232_generic_restart_lines_are_exact():
     # stripped `\brestart` one, then imperative-or-passive) each closed one hole and
     # opened the next: it false-REDded legitimate rewords (`**Restart** your client`,
     # `After the client is restarted`, `Once your client has restarted`,
-    # `must be restarted`), then accepted noun phrasings (`the restart of the
-    # client`) and negations (`You do not need to restart your client`), and left
-    # the passive INVERSION anchored but order-ungraded. An enumerated English
-    # spelling set cannot converge — every widening trades a false PASS for a false
-    # RED, and this file calls a false RED a defect because it trains the next author
-    # to delete the pin. A guard that needs a new spelling per review round is the
-    # defect. The design decision (structural/rendered grading vs a closed declared
-    # vocabulary) is #14751; the members are #14750 (decorated cue ungraded) and
-    # #14738. Until one of those is chosen, this file keeps the DECLARED gap rather
-    # than a guard that has been wrong in three consecutive rounds.
+    # `must be restarted`), then — the `\brestart` round — ACCEPTED noun phrasings
+    # (`the restart of the client`) and negations (`You do not need to restart your
+    # client`), and the last round left the passive INVERSION anchored but
+    # order-ungraded. An enumerated English spelling set cannot converge — every
+    # widening trades a false PASS for a false RED, and this file calls a false RED a
+    # defect because it trains the next author to delete the pin. A guard that needs a
+    # new spelling per review round is the defect. The design decision
+    # (structural/rendered grading vs a closed declared vocabulary) is #14751; the
+    # members are #14750 (decorated cue ungraded) and #14738. Until one of those is
+    # chosen, this file keeps the DECLARED gap rather than a guard that has been wrong
+    # in three consecutive rounds.
+    # ⛔ WHAT REMOVING THE ANCHOR COSTS, stated so the declaration above is not read
+    # as covering it (#14679 review at `76646c7b`, measured): a `:135` replaced by a
+    # NON-imperative (noun) phrasing that KEEPS its tools clause also ships GREEN now
+    # — `865 passed` here, while the removed anchor REDded the identical document
+    # (`assert []`, `1 failed` at `e50f6cde`). That is a SECOND uncaught shape, not
+    # covered by "the paragraph can be deleted", and it is why #14751 needs a
+    # structural anchor rather than one more spelling list.
     # ⛔ POSITION IS NOT ORDER — the index check above has a false PASS.
     # Measured on the landed pin: "Restart your client after confirming the
     # tools are actually there" places `tools` after the cue and is GREEN, while
@@ -7597,7 +7610,16 @@ def test_3232_the_restart_cue_is_found_case_insensitively():
     #    list that NO row or probe could reach, so deleting either changed nothing
     #    (`841 passed` either way) — rot, not protection, by this file's own rule.
     ("Restart its client after confirming the tools are actually there.", True),
-    ("Restart your client after validating the tools are actually there.", True),
+    #    ⛔ THE `validate` ROW IS DELIBERATELY ABSENT (#14679 review at `76646c7b`,
+    #    measured). A `validate` row CANNOT pin `_CONFIRM_PREDICATE`'s member:
+    #    `_PRE_CUE_VERB` already covers the spelling, so deleting
+    #    `validat(?:e|es|ed|ing)` from the predicate leaves the row PASSING (measured:
+    #    both copies of the row grade RED with the member gone). What pins that member
+    #    is the loop `test_3232_pre_cue_verb_carries_every_morphology_the_other_copies_do`
+    #    (removing it reds that loop, measured `1 failed, 864 passed`). The row that
+    #    used to be here was byte-identical to the one at `:6560` and tested nothing
+    #    new — the same "row that cannot fail" class the sibling commit `6cd72e7`
+    #    fixed, one round later.
     # ── arm (f.4): a BARE pre-cue object whose clause ends at the cue
     #    (#14679 review at `3e4dd16d`). Every other form (f) arm needs a predicate
     #    or a locative after the object, so the shortest spelling of the inversion
