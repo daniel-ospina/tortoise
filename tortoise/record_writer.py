@@ -559,8 +559,10 @@ class RecordWrite:
     #: opened (`_live_write_verdict` — `malformed_dsn`, `no_tenant*`, `circuit_open`,
     #: `no_durable_journal`), decided by the projection before a statement ran with the
     #: connection up (`plan_refused`, #11783), or decided by the write itself: the store
-    #: unreachable, a statement that executed and failed, or an allocator/position guard
-    #: (`write_failed`). This one is none of those: it is a VERDICT on
+    #: unreachable, a statement that executed and failed, an allocator/position guard, or a
+    #: STORE/CONFIG refusal after the connection came up (tenant-scope read-back, a role
+    #: that bypasses RLS, a non-READ-COMMITTED transaction, the cutover guard) — all
+    #: `write_failed`. This one is none of those: it is a VERDICT on
     #: a conflict: the position row holds a record this write cannot index —
     #: a different `event_type`, a different capture time, an identity the
     #: surviving row CONTRADICTS, or (with no `ts` for the capture time to be
@@ -580,13 +582,11 @@ class RecordWrite:
     #: the residual it cannot see is the pair that shares an instant AND whose
     #: identities do NOT contradict — `agrees`, `one_sided` (one side names no
     #: identity) or `none` — which keeps the silent repair path.
-    #: Nothing is lost (the
-    #: journal holds the record); what is refused is indexing it under a position
-    #: whose row this write does not CONTINUE (a different `event_type`, a
-    #: different capture time, an identity the surviving row contradicts, or — for
-    #: a write with no `ts` — a payload whose derivation moved),
-    #: which the record cannot fix while its key carries
-    #: no journal identity (#12894).
+    #: Nothing is lost (the journal holds the record); what is refused is indexing
+    #: it under a position this write does not CONTINUE (a different `event_type`,
+    #: a different capture time, an identity the surviving row contradicts, or —
+    #: for a write with no `ts` — a payload whose derivation moved), which the
+    #: record cannot fix while its key carries no journal identity (#12894).
     #:
     #: ⛔ ``no_tenant_carried`` IS A SEPARATE TOKEN ON PURPOSE (#10021 review P3).
     #: The live door splits the nil tenant from a MALFORMED CARRIED pair — one is
