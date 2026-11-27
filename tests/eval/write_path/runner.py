@@ -1996,7 +1996,7 @@ def run_benchmark(
 #: The switches a write-path arm can be varied by, recorded on every receipt so
 #: an arm can be attributed instead of trusted.
 #:
-#: ⛔ **Three of these decide whether the S2.2 VET pass runs; the fourth does not.\**
+#: ⛔ **Three of these decide whether the S2.2 VET pass runs; the fourth does not.**
 #: ``TORTOISE_VET`` and ``TORTOISE_S2_DECISION_SEAM`` are the two terms
 #: ``extractor_v2._vet_enabled`` ORs, and ``TORTOISE_VALUE_GATE`` is the sibling
 #: term ``extract_session_v2`` ORs alongside it. ``TORTOISE_STATE_VALUE_VERBATIM``

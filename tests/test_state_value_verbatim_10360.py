@@ -7339,6 +7339,20 @@ def _b2_region(row_text: str) -> str:
     assert row_text.count(_B2_START) == 1, (
         f"the row must carry exactly ONE {_B2_START!r} clause (found "
         f"{row_text.count(_B2_START)}) — the E2 figures' bound is anchored on it")
+    # ⛔ THE END ANCHOR NEEDS THE SAME UNIQUENESS GUARD AS THE START (`#14774`
+    # review cycle 11, MEASURED). Only the start was count-asserted; the end was
+    # `find`-ed, so it took the FIRST match — and a duplicate terminator appended
+    # at the end of (b2) TRUNCATED the region, putting everything after it
+    # outside every figure pin. Reproduced: inserting a second
+    # `(c) a rewritten CLOCK` line plus `and the pooled arm mean reads
+    # 42/90 = 46.7%.` at the end of (b2) left the derivation row GREEN (1 passed)
+    # — an underived figure published inside clause (b2) with every pin satisfied.
+    # That is the same outcome this file already closed for an APPENDED figure;
+    # moving the boundary must not be the way around it.
+    assert row_text.count(_B2_END) == 1, (
+        "the row must carry exactly ONE " + repr(_B2_END) + " terminator (found "
+        f"{row_text.count(_B2_END)}) — a duplicated one truncates clause (b2) and "
+        "puts every figure after it outside the pin")
     start = row_text.index(_B2_START)
     tail = row_text[start + len(_B2_START):]
     end = tail.find(_B2_END)
@@ -8257,9 +8271,10 @@ def test_the_e2_off_arm_definition_uses_the_REAL_kill_switch(monkeypatch):
 #: Kept here ON PURPOSE, as the mutant rather than a mirror of production: the edit
 #: that reverts the fix is `[A-Z0-9_]+` -> `[A-Z_]+`, and a mutant is only pinned if
 #: something actually runs it — so the replay below COMPOSES ITS PATTERN FROM THIS
-#: CONSTANT (mutating it to `[A-Z0-9_]+` reds the `endswith` assertion: the pre-fix
-#: class then reads the digit-bearing switch, which is the demonstration the row
-#: claims). It lives in this file's test body — never in the parser above — so the
+#: CONSTANT (mutating it to `[A-Z0-9_]+` reds the TRUNCATION-GUARD assertion —
+#: `caught is not None and digit_bearing in caught` — because with the wide class
+#: nothing is truncated, so the guard returns `None`; MEASURED: the `endswith`
+#: assertion is True for BOTH classes, so it is not the row that fires). It lives in this file's test body — never in the parser above — so the
 #: two cannot drift together.
 _E2_PREFIX_TEST_PRE_FIX_CLASS = "[A-Z_]+"
 
@@ -8343,7 +8358,8 @@ def test_the_arm_prefix_parser_cannot_SILENTLY_truncate_a_digit_bearing_switch()
     # the constant to `[A-Z0-9_]+` left the row GREEN and told a reader the pre-fix
     # class was unexercised. A pin that polices hand-written copies cannot itself
     # keep one (the same defect `_arm_prefix_keys()` was fixed for). Read from the
-    # constant, that mutant now reds the `endswith` assertion below.
+    # constant, that mutant now reds the truncation-guard assertion below (NOT the
+    # `endswith` one: the prefix ends at the same token under both classes).
     _pre = _E2_PREFIX_TEST_PRE_FIX_CLASS        # a character class, e.g. "[A-Z_]+"
     narrow = re.search(
         r"(?P<prefix>(?:^|\s)(?:env\s+)?(?:" + _pre + r"=\S+\s+|-u\s+" + _pre + r"\s+)+)"
