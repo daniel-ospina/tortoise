@@ -1368,9 +1368,12 @@ class BackupWatcher:
                 "that IS a `per_team` key, resolved by the `not_eligible` "
                 "branch, which is why the cross-poll diff excludes it; only a "
                 "subject absent from BOTH surfaces (the arm-(i) shape: state "
-                "present, no prefix, gone from the census — or any org while the "
-                "eligibility gate is off) has no key at all, and THAT is the one "
-                "the cross-poll diff resolves.)"),
+                "present, no prefix, gone from the census) has no key at all, "
+                "and THAT is the one the cross-poll diff resolves — and only "
+                "while the eligibility gate is ON and excludes it, since with "
+                "the gate OFF the state-only loop re-lists it into this kind's "
+                "census and the diff cannot see it, so it needs a manual "
+                "close.)"),
         }
 
     def _measured_fresh(self, org: str,
