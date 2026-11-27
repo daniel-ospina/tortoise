@@ -732,8 +732,8 @@ AUDIT_FALLBACK_DROP_COUNT = Counter(
 #   ``no_tenant``             armed with no tenant in scope — refused rather than
 #                             filed under a guessed tenant (#9192);
 #   ``write_failed``          the record was UNREACHABLE, or the connection or
-#                             its statement failed — not a refusal of this one
-#                             record's CONTENT. A replay heals it;
+#                             a statement failed — a replay heals an outage and
+#                             re-fails a CHECK on the record's OWN data till fixed;
 #   ``plan_refused``          the PROJECTOR could not BUILD a plan for this
 #                             record, so NO statement ran — an undeclared/refused
 #                             record type, a carrier that carries no snapshot, an
@@ -2774,8 +2774,8 @@ def record_record_write_failure(reason: str) -> None:
       operator can be in: an env pair CONFIGURED but undeclared names the
       missing declaration, and a half-configured pair names the half; with
       neither set it names the graph-bound credential instead;
-    * ``write_failed`` — the record was UNREACHABLE, or its statement failed;
-      ``replay`` heals it from the journal;
+    * ``write_failed`` — the record was UNREACHABLE, or its statement failed
+      (a CHECK over the record's own data included): a replay heals an outage;
     * ``plan_refused`` — the PROJECTOR could not BUILD a plan for this record,
       so NO statement ran even though the connection was up: an undeclared or
       declared-refused record type, a carrier with no snapshot, an unusable key
