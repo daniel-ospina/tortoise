@@ -12475,11 +12475,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         was recorded (or already was). The older claim is never deleted.
 
         ⛔ THREE GATES, each measured against a corpus shape (review of #14794):
-        * the EMITTED side must be a POINT (`pt_`). `_resolve` hands back
-          `event_ids` as readily as `point_ids`, and an Event is a legal NAND
-          endpoint — but there is no point-supersede channel to an Event
-          successor: the consumer dispatches on the `pt_` prefix of the OLD id
-          and then refuses the successor (`_assert_lifecycle_guard`), so
+        * the EMITTED side must be a point THIS CAPTURE WILL WRITE
+          (`_written_point_ids` — the authority; a `pt_` test here would be
+          inert because every payload point id starts with `pt_`). `_resolve`
+          hands back `event_ids` as readily as `point_ids`, and an Event is a
+          legal NAND endpoint — but there is no point-supersede channel to an
+          Event successor: the consumer dispatches on the `pt_` prefix of the
+          OLD id and then refuses the successor (`_assert_lifecycle_guard`), so
           emitting the record would lose the closure *and* claim it was
           recorded. An event side falls through to the drop warning instead.
         * the direction is decided by WORLD TIME, not by which side happened to

@@ -242,6 +242,7 @@ the *surviving* claims to rank first) is neither implemented nor needed here.
 | **positive (other lookup arm)** | the same declaration on a `resolved` lookup closes the same interval (pre-fix this arm wrote the NAND and closed nothing) | ❌ `assert 0 == 1` | ✅ |
 | **positive (other emission order)** | the SAME declaration with the older claim emitted first closes the same claim (`src`-keyed arm: `assert 0 == 1`) | ❌ | ✅ |
 | **positive (instant precision)** | the DIRECTION is decided on `_created_sort_key` instants, not on the date prefix: a cross-offset pair whose date prefixes invert (`2026-03-06T01:00:00Z` vs `2026-03-05T23:00:00-05:00` = 04:00Z) closes (it is an ordinary arrival order), and a same-day pair whose instants make the arriving claim the OLDER fact is DECLINED with a named warning instead of emitting a refused window while claiming a closure | ❌ | ✅ |
+| **negative (order-independence)** | two refuters of one claim — one DECLINED, one carryable — close exactly ONE record, naming the carryable refuter, in BOTH list orders. RED on base (it asserts a closure, and base closes nothing) and additionally RED under the mutation that takes the closure slot ABOVE the world-time gate | ❌ | ✅ |
 | **negative (backfill, record)** | a later capture carrying an EARLIER world date records **nothing** — world time says the prior is the newer fact, and this channel cannot express that direction: the record's `superseded` side must already be a graph id (`commit_ops.remap_supersession_point_refs` remaps only `supersedes_by`, deliberately — the `pt_` prefix is the lane discriminator), so a payload id there is skipped FAIL-OPEN. ⚠️ The GRAPH-level half of this row passes on the base commit (on base nothing is recorded either, for a different reason) — it is a pin against the mutation that puts the inverted window back | ✅ (pin) | ✅ |
 | **negative (backfill, says so)** | …and the payload NAMES the decline, with both world instants, instead of emitting a record the consumer will skip while the warning claims a closure — RED on base (`assert [{'superseded': …}] == []`) | ❌ | ✅ |
 | **negative (backfill does not block a refuter)** | a DECLINED pair must not spend the one-closure-per-prior budget: a later refuter of the same prior with a forward world date still closes it, and the declined pair keeps its edge — pre-fix `_closed_prior_ids.add` ran before the decline, so the forward refuter returned with no record AND no warning while the only line about that prior asserted it was the newer fact | ❌ | ✅ |
@@ -249,20 +250,22 @@ the *surviving* claims to rank first) is neither implemented nor needed here.
 | **negative (id-less prior row)** | the `superseded` side must name a row the PRIOR SET names, not merely "an id this capture did not emit": consolidation falls back to a content-addressed payload id when a prior row carries no `id`, and that id would be skipped FAIL-OPEN on the graph while the warning claimed a closure | ✅ (pin) | ✅ |
 | **positive (read)** | a current-scope query for the old claim's own wording no longer answers with it; the terminal scope still does | ❌ | ✅ |
 | **negative (support)** | the *same* two documents with the model declaring `IMPL` (support) close **nothing**; the older claim keeps its open interval and stays current | ✅ | ✅ |
-| **negative (event side)** | a NAND whose emitted side is an Event closes nothing AND does not claim it did (no `recorded as a supersession` warning). ⚠️ It passes on the base commit too — it pins the guard against the MUTATION that reverts it, and is labelled a pin, not coverage | ✅ | ✅ |
+| **negative (event side)** | a NAND whose emitted side is an Event closes nothing AND does not claim it did (no `recorded as a supersession` warning). Passes on the base commit too, and is REAL coverage for the surviving guard: removing `_written_point_ids` reds this case and the minted-successor one (measured) | ✅ | ✅ |
 | **negative (minted successor)** | a `NAND` whose newer side is named only INSIDE the edge closes nothing and claims nothing — the `#2552` mint would be pruned once the operator is suppressed, so the closure would name a point that was never written and the document's own claim would vanish (measured in review as the arm's worst shape: `supersessions_written: 0`, "the contradiction is recorded …" still warned) | ✅ | ✅ |
 | **negative (second refuter)** | 2 refuters of one claim → 1 closure, and the SECOND refuter KEEPS its `NAND` (the consumer would skip it silently as an idempotent no-op, so suppressing both would erase that evidence) — pre-fix: `2 operators, 0 closures` | ❌ | ✅ |
 | **negative (undeclared)** | a corpus that reverses itself in **wording** but declares no edge gains no contradiction. ⛔ A PIN, not coverage: no mutation of the arm can red it (the `none` shape emits no operator at all) | ✅ | ✅ |
 
 Suite: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_14198_contradiction_closure.py -q`
-→ **17 passed**, and **10 RED on the base commit** (`3f134560b6c`): every
-positive, plus four negatives whose *new* half is an assertion about what the
-run SAYS or about the budget it spends — the backfill-decline's warning, the
+→ **17 passed**, and **11 RED on the base commit** (`3f134560b6c`): every
+positive — order-independence included, since it asserts one closure and the base
+closes nothing — plus four negatives whose *new* half is an assertion about what
+the run SAYS or about the budget it spends: the backfill-decline's warning, the
 declined-pair budget, the decline's retention claim, and instant precision.
-The counts are measured, not counted by hand: the base run is
-`10 failed, 6 passed` (the 17th case, order-independence, is a MUTATION pin: it
-passes on base — where nothing closes at all — and reds when the budget is taken
-above the world-time gate, which is what it exists to catch). The emission-order, backfill and event-side cases were each measured
+The counts are MEASURED, not counted by hand: the base run of this file is
+`11 failed, 6 passed`. ⚠️ An earlier revision of this paragraph said
+`10 failed, 6 passed` and called order-independence a pin that "passes on base";
+both were false (10 + 6 = 16 of 17), and the case additionally reds under the
+budget-above-gate mutation — the order-dependence it exists to catch. The emission-order, backfill and event-side cases were each measured
 RED under the mutation that reverts their gate — the `src`-only guard, the
 arrival-order direction, and the missing point-only guard — and the
 minted-successor and second-refuter shapes were produced by review, measured

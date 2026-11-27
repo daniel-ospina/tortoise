@@ -393,9 +393,10 @@ def test_a_backfill_declines_in_the_payload_and_names_the_reason():
 def test_an_event_side_is_dropped_not_recorded_as_a_supersession(make_graph):
     """A NAND whose emitted side is an Event closes nothing — and says so.
 
-    PINS the guard; passes on the base commit too — no mutation of this arm can
-    red it (see REPORT §5, "negative (event side)"). Found RED in an earlier cut
-    of the arm, which had no point-only gate (review F5, measured):
+    Passes on the base commit (nothing closes there) AND is real coverage for
+    the surviving guard: removing `_written_point_ids` reds THIS case and the
+    minted-successor one (measured — review of #14794, cycle 4). It is RED in an
+    earlier cut of the arm, which had no point-only gate at all (review F5):
     `_resolve` returns `event_ids` as
     readily as `point_ids`, the arm accepted the event id as the successor, and
     the consumer then dispatched on the `pt_` prefix of the OLD id and refused
