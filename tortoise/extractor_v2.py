@@ -12515,18 +12515,22 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # "names NO graph point — never emit a record onto it".
         if older_id not in _prior_graph_ids:
             return False
-        # The superseder must be a claim of THIS capture. Without this, two
-        # endpoints that BOTH folded onto prior graph ids would close one prior
-        # claim using another prior claim as its successor — a supersession
-        # between two records that both predate this capture, whose successor
-        # window can even sort before the predecessor's (the #4021 refusal).
-        if new_id not in _capture_ids:
-            return False
-        if not new_id.startswith("pt_"):
-            return False
-        # …and it must be a point this capture will WRITE (see _written_point_ids
-        # above): an event has no point lifecycle, a minted endpoint can be
-        # pruned, and a folded prior id is not a claim the successor can be.
+        # The superseder must be a point this capture will WRITE — and this ONE
+        # guard is the authority (review of #14794, cycle 3). `_written_point_ids`
+        # is `payload_points` minus the `#2552` mints, so it already implies
+        # every shape the arm must refuse: an EVENT is not in it (no point
+        # lifecycle), a MINTED endpoint is not in it (the prune can delete it),
+        # and a folded PRIOR id is not in it (a claim that predates this capture
+        # can never be its successor — a supersession between two prior ids can
+        # carry a successor window that sorts before its predecessor's, the
+        # #4021 refusal).
+        # ⛔ The earlier cut ALSO carried `new_id not in _capture_ids` and a
+        # `startswith("pt_")` test. Both were INERT: every payload point id is in
+        # `_capture_ids` and starts with `pt_`, so neither could ever be the
+        # operative refusal (measured: deleting either left every case green),
+        # and the comment between them claimed a failure mode the guard below
+        # already refuses. An inert guard reads as protection while protecting
+        # nothing, so they are gone and the comment names the live one.
         if new_id not in _written_point_ids:
             return False
         if older_id in _closed_prior_ids:

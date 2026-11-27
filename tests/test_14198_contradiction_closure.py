@@ -723,6 +723,33 @@ def test_a_declined_backfill_does_not_block_a_closable_refuter():
         "the closing refuter's edge is replaced by the CORRECTS record")
 
 
+def test_the_closure_order_does_not_depend_on_the_model_list_order():
+    """The SAME two refuters must close the same claim in EITHER list order.
+
+    ⛔ MEASURED (review of #14794, cycle 3): with the budget taken above the
+    world-time gate, a payload whose DECLINED refuter came first kept 0 closures
+    while the same pair in the other order kept 1 — the outcome was a function
+    of the model's list order. `test_a_declined_backfill_does_not_block_a_closable_refuter`
+    pins the shape; this pins the PROPERTY the shape exists for, because a fix
+    that special-cased one order would pass that case and still be order-bound.
+    """
+    later = "ColdPath's certificate was revoked in the March audit"
+    ops = [{"op_type": "NAND", "src": AUDIT, "dst": CERT},
+           {"op_type": "NAND", "src": later, "dst": CERT}]
+    for label, ordered in (("decline-first", ops), ("closure-first", list(reversed(ops)))):
+        out, _payload = _shape_run({
+            "entities": [], "events": [],
+            "points": [_statement(AUDIT, when="2026-02-03"),
+                       _statement(later, when="2026-05-01")],
+            "operators": ordered,
+        }, _RESOLVED, prior_when="2026-04-01")
+        records = out.get("supersessions") or []
+        assert len(records) == 1, f"[{label}] exactly one closure, got {records}"
+        assert records[0]["superseded"] == PRIOR_ID
+        assert records[0]["supersedes_by"] == _pid(later), (
+            f"[{label}] the closure must come from the refuter that can express it")
+
+
 def test_the_backfill_decline_is_instant_granular_not_day_granular():
     """The decline and the consumer must agree on the SAME measure.
 

@@ -45,8 +45,9 @@ run, reading doc-05's `supersessions`), and this file does not stand in for it.
 ⚠️ It also cannot exercise the WORLD-TIME order: the receipt's point rows carry
 no `when` (props are `quote`/`search_keys`/`source_turn_id`), so the arm takes
 its arrival-order fallback here —
-`test_a_backfill_closes_the_claim_world_time_says_is_older` covers the other
-branch, and this file does not.
+`test_a_backfill_DECLINES_and_says_so` and
+`test_the_backfill_decline_is_instant_granular_not_day_granular` cover the other
+branches, and this file does not.
 
 Nothing is invented: every content string and id below is read out of the
 receipt by id, and the run refuses rather than substituting a value it could not

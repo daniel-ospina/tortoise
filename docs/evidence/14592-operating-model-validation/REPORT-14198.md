@@ -86,7 +86,13 @@ future edit that stopped the consumer from removing the edge would break.
 
 **Three gates on the closure, each pinned by a test that reds when removed.**
 The shapes below are not hypothetical — each one was measured against a corpus
-or a contract this PR already names:
+or a contract this PR already names. ⛔ ONE guard is the authority for "the
+superseder must be a writable claim of this capture" (`_written_point_ids`); the
+earlier cut also carried `new_id not in _capture_ids` and a `startswith("pt_")`
+test, and both were INERT — every payload point id satisfies them by
+construction, so neither could ever be the operative refusal (measured: deleting
+either left every case green). They are gone rather than left reading as
+protection.
 
 1. **SYMMETRIC on emission order.** Either side may be the one this capture
    emitted. The drop route keyed on `src` alone for its first cut, so the
@@ -96,12 +102,12 @@ or a contract this PR already names:
    existing-graph endpoint, which a cross-capture NAND always has — and the
    receipt this PR replays carries two `NAND direction canonicalized` lines
    from the same corpus.
-2. **POINT-ONLY on the emitted side.** An Event is a legal operator endpoint,
-   but there is no point-supersede channel to an Event successor: the consumer
-   dispatches on the `pt_` prefix of the old id and then refuses the successor
-   (`_assert_lifecycle_guard`). Emitting the record would lose the closure
-   *and* claim it was recorded; an event side now falls through to the drop
-   warning, which is the truth.
+2. **A WRITABLE POINT, not just a mentioned id.** An Event is a legal operator
+   endpoint but has no point lifecycle, and a `#2552` MINTED endpoint can be
+   pruned once the operator is suppressed — either one named as the superseder
+   yields a record the consumer skips fail-open, while the extractor's warning
+   claims the interval was closed. The single `_written_point_ids` guard refuses
+   both; an event side falls through to the drop warning, which is the truth.
 3. **WORLD TIME, not arrival order — on the CONSUMER'S OWN MEASURE.** #14198's
    recorded decision is *"Facts are compared on world-time dates, not arrival
    order"*, and it is what Zep/Graphiti do (the edge with the earlier `valid_at`
@@ -249,12 +255,14 @@ the *surviving* claims to rank first) is neither implemented nor needed here.
 | **negative (undeclared)** | a corpus that reverses itself in **wording** but declares no edge gains no contradiction. ⛔ A PIN, not coverage: no mutation of the arm can red it (the `none` shape emits no operator at all) | ✅ | ✅ |
 
 Suite: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_14198_contradiction_closure.py -q`
-→ **16 passed**, and **10 RED on the base commit** (`3f134560b6c`): every
+→ **17 passed**, and **10 RED on the base commit** (`3f134560b6c`): every
 positive, plus four negatives whose *new* half is an assertion about what the
 run SAYS or about the budget it spends — the backfill-decline's warning, the
 declined-pair budget, the decline's retention claim, and instant precision.
 The counts are measured, not counted by hand: the base run is
-`10 failed, 6 passed`. The emission-order, backfill and event-side cases were each measured
+`10 failed, 6 passed` (the 17th case, order-independence, is a MUTATION pin: it
+passes on base — where nothing closes at all — and reds when the budget is taken
+above the world-time gate, which is what it exists to catch). The emission-order, backfill and event-side cases were each measured
 RED under the mutation that reverts their gate — the `src`-only guard, the
 arrival-order direction, and the missing point-only guard — and the
 minted-successor and second-refuter shapes were produced by review, measured
