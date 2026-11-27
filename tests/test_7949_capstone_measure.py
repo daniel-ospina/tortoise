@@ -12367,9 +12367,11 @@ def test_the_index_table_row_states_each_anchor_it_names_at_this_head() -> None:
 #: ⛔ THE `sdk.py:147` FIGURES ARE GRADED BY A DECLARED CENSUS, not by one `re.search`
 #: (#14386 review round 6, P2 — MEASURED). Entry 10 of `_INDEX_ROW_ANCHORS` binds the spelling
 #: ``line at `sdk.py:N` is `main`'s own``, which occurs ONCE, on line 102 — the same line
-#: whose single `sdk.py:147` it grades; the other FIVE occurrences — 3 on line 108 and 2 on
-#: line 114, SIX in all (#14386 review rounds 9 and 10: this said seven / TWICE, the pre-dedup
-#: reading, and the first correction's enumeration then counted line 102 twice) — match that
+#: whose single `sdk.py:147` it grades; the rest — 2 on line 108 and 1 on line 114, FOUR in all
+#: at this head (#14587 review cycle 3: the SIX this note enumerated was the pre-repair reading,
+#: and the two statements it counted on line 114 and line 102 were part of the refuted re-point
+#: figures that cycle DELETED rather than routed — lowering the constant is the deliberate form of
+#: that removal, which is what the census exists to force) — match that
 #: shape not at all. Mutating occurrence 2, 3 or 6 to `:148` (whose line is `from .live import
 #: direction_flows`, NOT the insert) left `485 passed`. The arm reads one match, so one
 #: occurrence is graded out of six: the fail-open direction, on prose this PR itself adds.
@@ -12384,14 +12386,21 @@ def test_the_index_table_row_states_each_anchor_it_names_at_this_head() -> None:
 #:
 #: ⛔ AND THE COUNT NEEDS A RIGHT BOUNDARY, or the sentence above is FALSE (#14386 review round 8,
 #: F2 — MEASURED). `doc.count("sdk.py:147")` counts a PREFIX, so `sdk.py:1475` counts as a hit:
-#: entry 10 grades ONE of the six occurrences, and repointing the other five to `:1475` left the
-#: count at 6 and this arm GREEN — the fail-open direction, on the very guarantee this comment
-#: asserts. (Both figures are this head's reading; the live count is `_SDK147_OCCURRENCES`.)
+#: entry 10 grades ONE of them, and repointing the rest to `:1475` left the count UNCHANGED and
+#: this arm GREEN — the fail-open direction, on the very guarantee this comment
+#: asserts. (⛔ THE `six` / `five` / `at 6` IN THIS PARAGRAPH ARE THE READING OF THE HEAD THAT
+#: ROUND MEASURED, kept as history: the live count is `_SDK147_OCCURRENCES`, which cycle 3 lowered
+#: to 4 after deleting two statements of the token that belonged to refuted figures. A reader who
+#: takes these for this head's numbers has the same defect the census exists to catch.)
 #: The census now matches `sdk\.py:147(?!\d)`, and that mutation is replayed as an
 #: assertion in `test_the_index_table_row_states_each_anchor_it_names_at_this_head`, so the
 #: boundary cannot be dropped again without a red.
 _SDK147_NEEDLE = "from .live import canonical_direction"
-_SDK147_OCCURRENCES = 6
+#: FOUR at this head — `grep -c`-style line counts say 3, the CENSUS counts OCCURRENCES and line
+#: 108 carries two. Lowered from 6 only because cycle 3 deleted two statements of it that were
+#: part of refuted re-point figures (#14587 review cycle 3); raise it deliberately when the
+#: document gains another statement.
+_SDK147_OCCURRENCES = 4
 
 
 def _sdk147_census_failures(doc_text: str | None = None) -> list[str]:
