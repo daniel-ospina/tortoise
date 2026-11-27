@@ -1811,21 +1811,22 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # the false PASS this arm exists for, through the pronunciation a careful author
             # actually uses. All seven `_ELSEWHERE_RE` spellings measured that way; the round-12
             # comment below states the rule this line was violating.
-            # ⛔ AND THE UNIT IS THE CLAUSE, NOT THE LINE (review round 22, F1). Round 21 applied the
-            # pair to the WHOLE line while the closing-line path applies it to each CLAUSE — so a cue
-            # sitting in a sibling clause that names NO rows vetoed an affirmative clause that named
-            # every one: `V1 … V6 are all proved by this PR — docs work is tracked in #14716` read
-            # `ambiguous`, and the identical content wrapped onto two lines read `clean` — the very
-            # "same sentence, two verdicts" class round 21 fixed, moved to the clause boundary. A
-            # cue only DISCLAIMS the rows its own clause carries, which is what the polarity rule at
-            # the closing-line loop below says and what `_clause_spans` exists for.
-            if _ids_in(line, rows):
-                for a, b in _clause_spans(line, rows):
-                    clause = line[a:b]
-                    if _ids_in(clause, rows) and (_DISCLAIMER_RE.search(clause)
-                                                  or _ELSEWHERE_RE.search(clause)):
-                        disclaimed = True
-                        break
+            # ⛔ THIS READ IS DELIBERATELY WIDER THAN THE CLAUSE-BOUNDED ONE (review round 23, P2), AND
+            # THAT IS THE WHOLE POINT. Scoping the cue to the clause that carries the rows removed a
+            # REAL detection: English negation and ellipsis scope over the PRECEDING clause's
+            # predicate, which is where the rows are — `All six rows V1 … V6 are proved — not by this
+            # PR`, `… are proved — in the predecessor PR`, and `V1, V3–V6 landed — in later PRs`
+            # beside a complete `Satisfies` ALL read `clean` under clause scoping (measured, and each
+            # one is the arm's headline false PASS), because the cue sits in a rowless sibling clause.
+            # A rowful clause followed by a cue clause therefore disclaims here even where the cue
+            # clause has its own subject (`— docs work is tracked in #14716`), so a legitimate
+            # complete close of that shape reads AMBIGUOUS. That cost is accepted and pinned: in this
+            # file's own ranking an over-abstention is the cheap error and a false PASS is the
+            # expensive one, so the floor stays fail-closed and clause scoping is NOT reapplied
+            # unless it can tell ellipsis from a new subject — which `_ELSEWHERE_RE` cannot.
+            if _ids_in(line, rows) and (_DISCLAIMER_RE.search(line)
+                                        or _ELSEWHERE_RE.search(line)):
+                disclaimed = True
             continue
         # ⛔ THE LINE IS THE UNIT, the clause is the polarity boundary: the range read needs the whole
         # line to see a SIBLING clause that narrows a bare range (`(rows V1–V6; V2 is what this PR
