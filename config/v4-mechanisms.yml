@@ -926,8 +926,10 @@ mechanisms:
       SURVIVAL is now MEASURED on the flags-on arm, and it still stays SHORT of
       target: 44/90 = 48.9%, 40/90 = 44.4%, 45/90 = 50.0% and 50/90 = 55.6% over
       four runs (mean 44.75/90 = 49.7%) against the 49/90 = 54.4% committed
-      baseline (`#7949` E2). The CONTROL arm — same corpus, same judge pin, same
-      extractor, the S2.2 pass DISARMED by the real kill-switch
+      baseline (`#7949` E2). The CONTROL arm — same corpus, same judge pin, and
+      the same extractor AT THE TWO LABELLED COMMITS (what that does and does not
+      establish for the RUNS is stated below, and must not be read back into this
+      sentence), the S2.2 pass DISARMED by the real kill-switch
       (`TORTOISE_VALUE_GATE=0`, SET rather than omitted) — measured
       37/90 = 41.1% and 41/90 = 45.6% (mean 39/90 = 43.3%). ⛔ THE THIRD
       COMPARATOR TERM IS ESTABLISHED FOR THE COMMITS AND INFERRED FOR THE RUNS —
@@ -944,8 +946,9 @@ mechanisms:
       above: `commit` is a HEAD label (`git rev-parse --short HEAD`), not a
       content identity — it is returned whether or not the tree is dirty — and
       the two control receipts carry an `arm` block that the runner at
-      `4530cd5d54ca` CANNOT write (that code first appears at `5fa9634cb9`, ~13
-      minutes after the last control run), so those two runs demonstrably executed
+      `4530cd5d54ca` CANNOT write (that code first appears at `5fa9634cb9`,
+      12:31:07Z — 9 minutes after the LAST control run at 12:21:57Z and 13 after
+      the first at 12:18:29Z), so those two runs demonstrably executed
       a worktree that was dirty in `tests/`. Whether `tortoise/` was also dirty in
       them is UNOBSERVABLE from the artifact set: a receipt records the extractor's
       module, entrypoint and `real` flag, and no content identity. So "same

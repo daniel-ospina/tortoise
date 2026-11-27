@@ -7457,8 +7457,9 @@ def _arm_settings(prefix: str) -> dict[str, str | None]:
 
 
 #: The receipts that predate the runner's `arm` readback, named explicitly (#14774
-#: review P1). They are the four committed at `4530cd5d54ca`, WITH the two that
-#: were mislabelled `-off-` renamed to their true arm — their content is
+#: review P1). They are the four PRODUCED at `234d7db4be` (their own `commit`
+#: field — `4530cd5d54ca` is the CONTROL arm's label, per `_E2_ARM_COMMITS`), WITH
+#: the two that were mislabelled `-off-` renamed to their true arm — their content is
 #: unchanged; only the label moved from a false one to a true one. (The sentence
 #: said "MINUS the two" and that contradicted the set below, which holds all four
 #: of them: the rename moved the pair INTO the on arm, it did not remove it. Two
@@ -7874,7 +7875,8 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     #    is established for the two LABELLED COMMITS and INFERRED for the control
     #    RUNS: `commit` is a HEAD label, the two control receipts carry an `arm`
     #    block that the runner at their label cannot write (that code first appears
-    #    at `5fa9634cb9`, ~13 min after the last control run), and no receipt
+    #    at `5fa9634cb9`, 9 min after the LAST control run and 13 after the first:
+#    12:31:07Z vs 12:21:57Z / 12:18:29Z), and no receipt
     #    records an extractor content hash. Recording that limit is what stops the
     #    next reader inferring a content identity the artifacts never carried, so
     #    it is pinned rather than left to prose discipline.
@@ -7885,7 +7887,22 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     assert "UNOBSERVABLE" in flattened, (
         "clause (b2) must say what is NOT established: whether `tortoise/` was "
         "dirty in the control runs, which no receipt can answer")
+    # ⛔ AND THE DIRECTION OF THE CAVEAT, PINNED (#14774 review cycle 13,
+    # MEASURED): only three substrings were asserted, so replacing the row's
+    # headline with `… ESTABLISHED FOR THE RUNS` — restoring the P1 claim itself —
+    # left 139/139 GREEN, and flipping the arms doc's `**NOT established:**`
+    # bullet to `**Established:**` did too. The caveat's DIRECTION is what a future
+    # edit will break, so it is asserted, not just its vocabulary.
+    assert "ESTABLISHED FOR THE COMMITS AND INFERRED FOR THE RUNS" in (
+        flattened.replace("\n", " ")), (
+        "clause (b2)'s headline must say the comparator term is ESTABLISHED FOR "
+        "THE COMMITS and INFERRED FOR THE RUNS — the qualified form is the whole "
+        "of the P1's correction; without it the row again reads as established "
+        "for the runs")
     _arms_doc_text = _E2_ARMS_DOC.read_text(encoding="utf-8")
+    assert "**NOT established:**" in _arms_doc_text, (
+        "the arms record must keep its 'NOT established' bullet — an `Established:`"
+        " reading of it restores the P1 claim the record exists to retract")
     assert "not a content identity" in _arms_doc_text, (
         "the arms record must carry the same provenance limit as the row — the "
         "record of the experiment may not claim more than the receipts hold")
