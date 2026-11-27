@@ -57,33 +57,12 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — the `origin/main` `ff10fb32` fold, which carries
-# everything the `bbef0b88` and `c1c8df1a` folds brought: `#14548`'s residue RATCHET
-# (`tests/test_sdk_privatise_sweep.py`, `core`, 28.0 s — the ONE
-# non-flat weight in this list), `#14560`'s operator-vector row, `#14565`'s reaper-schedule row,
-# `#14574`'s drift-reporter row, `#14552`'s point-vector-keys row, `#14592`'s operating-model
-# evidence row, `#14597`'s expansion-fusion row, `#14607`'s two `core` rows
-# (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`) and the two rows `main`
-# landed after those (`#14700`'s `tests/test_14700_capture_in_flight_typed_refusal.py` and
-# `#14621`'s `tests/test_14592_read_parity.py`) — the verb packs the pool into TWO bins: nine
-# shards at 827.8 s (a, b, e, f, g, h, i, j, k) and two at 827.7 s (c, d), so
-# `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
-# (1680 / 827.8 ≈ 2.0295, which the verb prints as `2.03`), so the two agree by construction
+# reader of the prose can see. On THIS tree — `origin/main` `ff10fb328891` folded in — the verb packs
+# the pool into two bins: nine shards at 827.8 s (a, b, e, f, g, h, i, j, k) and two at 827.7 s
+# (c, d), so `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST
+# shard's) — and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
+# (1680 / 827.8 = 2.0295) on every one of the eleven shards, so the two agree by construction
 # rather than by a hand re-read.
-# ⛔ THE PARENT NAMED IN THAT CLAUSE IS THIS HEAD'S FOLD, not the `c1c8df1a` one the figure was
-# first read at (#14587 review P3). The fold itself was consistent — at `7281eeab9ccc` this clause
-# stated 827.4/827.5 at `c1c8df1a`, which is exactly what the REBASE paragraph below says that head
-# emitted — and the clash was made by `1f39e3539bdb`, which re-pointed the FIGURE to its own fold's
-# reading and left the parent id behind. ⛔ The partition has MOVED since, and the clause above is
-# re-derived rather than carried: `main`'s two later rows grew the pool, the greedy packer split the
-# eleven shards into nine at 827.8 s and two at 827.7 s, and ONE added row re-packs EVERY bin, which
-# is why the figure is a claim about this head alone. The rows listed are `main`'s at the fold
-# named; the EMISSION is this merge's. ⛔ The SPLICE HISTORY below is not the clause that disagreed:
-# each paragraph there describes the fold it names, and the `bbef0b88` one states one bin because
-# that is what that head emitted.
-# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: no parent's figure may be carried here, and none is —
-# `main`'s own partition must be re-derived on `main`, never read out of this sentence.
 # ⛔ A POOL CENSUS IS NOT A LIVE CLAIM, and stating it as one is how this block went stale twice.
 # `fast_pool()`'s FILE COUNT moves with every merge that adds a test file, so a live figure here
 # would red every such fold — and a figure that reds gets carried rather than re-derived, which is
@@ -93,9 +72,14 @@ version: 1
 # what is GRADED is the FORM rather than the value:
 # `test_the_fast_shards_header_states_no_live_pool_census` reds on a census stated OUTSIDE the
 # fence in the spelling it grades — a bare `fast_pool()` followed by `holds|held|carries|carried`
-# and `N files|entries`. ⛔ SPELLINGS IT CANNOT SEE — and the list is NOT exhaustive, because the
-# pattern needs the unit BARE and directly after the digits, so `1,335 files`, a backticked unit, an
-# unbackticked `fast_pool()`, a leading adjective between the count and the unit, another verb
+# and `N files|entries`, where the count may be MARKDOWN-BOLD (`**1342**`) — that axis is graded
+# because it is the spelling the live census here actually used, and a bare-digits-only pattern
+# stayed green over it (#14587 review cycle 5: injecting `holds **1342** files` returned `[]` before
+# the widening and REDS after it). ⛔ SPELLINGS IT CANNOT SEE — and the list is NOT exhaustive,
+# because the pattern needs the unit BARE and directly after the digits, so `1,335 files` (a
+# COMMA-grouped count, deliberately left unread rather than widened to `[\d,]*`), a backticked
+# unit, an unbackticked `fast_pool()`, a leading adjective between the count and the unit, another
+# verb
 # (`contains`, `numbers`) and another unit (`members`, `rows`) all read as clean — as does a census
 # with no `fast_pool()` in front of it (a quoted fragment is that shape: the quote carries no
 # `fast_pool()` of its own, while the copy it was cut from did).
@@ -110,74 +94,23 @@ version: 1
 # the gate had missed one, and that reading was of the RAW blob rather than of the joined block the
 # guard is actually handed. No fold has to re-derive a census, and a fold that carries one anyway
 # is what the guard reds on.
+# ⛔ THE LIVE CENSUS THIS CLAUSE USED TO CARRY — one `fast_pool()` file count "at this head" beside
+# a second one "on `origin/main` `ff10fb328891`", with a claimed delta of ONE entry naming this
+# PR's own `tests/test_14582_creation_hook.py` — is DELETED rather than re-pointed (#14587 review
+# P3-1), for the two reasons the paragraph above states: the file count moves with every merge that
+# adds a test file, and the "more than `main`" half is zero once the branch merges. Its successor
+# states no figure at all, because there is no tree this block could name for one to be true at.
 # ⛔ HISTORICAL-POOL-CENSUS-BEGIN
-# (measured at `1c3e433cc5b0`: `fast_pool()` held 1341 files. ⛔ The copy before this one was anchored
-# to `06c10adb`, which does NOT resolve in this repo (`git cat-file -t 06c10adb` -> "Not a valid
-# object name"), so the 1335/1334 pair it stated could be checked by nobody; it also named
-# `tests/test_14592_operating_model_evidence.py` as an addition when that file is in `main`'s
-# manifest, so it could not be a delta against `main`. A census measures exactly ONE tree —
-# re-measure it with `ci_selection.fast_pool(ci_selection.load_manifest())` at the head you cite.)
+# (measured at `1c3e433cc5b0`: `fast_pool()` held 1341 files. The two copies before it are named by
+# the commits that actually carry them, rather than by the `06c10adb` spelling an earlier repair
+# cited — that string resolves to no object (`git cat-file -t 06c10adb` -> "Not a valid object
+# name"), while `06c10adf` resolves to `06c10adfb9`, whose blob states `fast_pool()` held 1335 files
+# against `origin/main` `1333` with TWO additions. Its own child `dbdb8abfa9` records the retraction:
+# 1335 against `a29b5f24ce95`'s 1334 with ONE addition, and both halves of the earlier copy were
+# false, because `#14606`'s `tests/test_14592_operating_model_evidence.py` is in `main`'s manifest
+# and so cannot be a delta against `main`. A census measures exactly ONE tree — re-measure it with
+# `ci_selection.fast_pool(ci_selection.load_manifest())` at the head you cite.)
 # ⛔ HISTORICAL-POOL-CENSUS-END
-# ⛔ No parent's FIGURE is carried here either: the fold re-packed every bin (the packer is greedy),
-# so the per-fold readings this block carried before the union splice — `#14565`'s, `#14574`'s,
-# `#14559`'s, the `826.0`/`825.9` pair and the `826.4`/`826.3` pair this branch carried one fold
-# earlier — describe trees that no longer exist, and they are deleted rather than re-pointed. The
-# name lists are what the guard COMPARES against the live emission
-# (`test_the_fast_shards_header_block_states_the_measured_emission`), so they are a graded claim
-# about THIS head — a fold re-derives them with the verb, it never carries them.
-# ⛔ THIS BLOCK ARRIVED SPLICED AGAIN AT THE `origin/main` `4b2fba3e8a` MERGE, and the repair is
-# recorded rather than hidden: `config/ci-surfaces.yml` carries a `merge=union` driver, so the fold
-# applied BOTH parents' derivations — one naming `origin/main` `29bb16b5b6` with this branch's own
-# `tests/test_14592_read_parity.py`, one spelling the same base with `#14607`'s two rows called this
-# branch's own. The copies DISAGREED on the figures (826.7/826.6 against 826.9/826.8) and neither
-# describes this head. Neither side is picked: the sentence above is a fresh reading taken with
-# `--emit-push-matrix` on the tree this fold produced, and both parents' copies are deleted rather than
-# re-pointed. ⛔ AND IT ARRIVED SPLICED AGAIN AT THE `origin/main` `c1c8df1a` FOLD, so the
-# same repair is applied again and recorded here: `merge=union` applied BOTH parents' hunks with no
-# marker, the second copy opening mid-sentence at "INTO, never carried from the branch…", and it
-# carried TWO things this deletion does not silently drop — a `#13450` row attributed to a lane
-# rather than to `main`, which the tree refutes (#13450 landed on `main` in `c1c8df1a` itself), and
-# **a LIVE pool census** (a `fast_pool()` file count stated as a live fact about that head, with
-# `main`'s count beside it as the comparison), which is the claim the fenced-history rule above
-# exists to keep out (the guard grades a bare `fast_pool()` + `N files|entries` spelling — the
-# `entries` alternative was added for `main`'s copy at the `bbef0b88` fold — while a QUOTED fragment
-# of that census, with no `fast_pool()` in front of it, is still outside what the guard can see),
-# and what the fenced HISTORY above exists to hold instead. Deleting the copy is therefore the
-# repair, not a loss: the census is a measurement of ONE tree that goes stale on the next fold, so
-# it is not restated here as a live claim.
-# ⛔ IT ARRIVED SPLICED ONCE MORE ON THIS LANE'S REBASE ONTO `origin/main` `c1c8df1a3817` — the same
-# driver, the same failure — and there NEITHER copy described that tree: both stated the
-# 827.2/827.3 partition, against the 827.4/827.5 the verb emitted at that head. Neither copy was
-# picked either; the sentence above was a third fresh re-derivation, and it has since been
-# re-derived again rather than re-pointed. ⛔ Neither copy's CENSUS is quoted here: a census figure
-# is history and belongs inside the fence, bound to the sha it was measured at.
-# ⛔ AND IT ARRIVED SPLICED AGAIN AT THE `origin/main` `bbef0b88` FOLD (the previous head), where the
-# `merge=union` driver applied BOTH parents' derivations once more: this branch's read nine shards
-# at 827.4 s and two at 827.5 s, `main`'s own paragraph — opening mid-sentence, the splice's usual
-# tell — restated that same pair, and `main`'s copy ALSO carried a LIVE `fast_pool()` census (this
-# branch's was already inside the fence above). Neither copy was kept: the partition there was a
-# fresh `--emit-push-matrix` reading of THAT fold, which packed all eleven shards into one bin — so
-# both parents' two-bin readings described trees that no longer existed — while at THIS head the same
-# verb emits a DIFFERENT partition, which the graded clause above states ONCE and which is why no
-# figure here is carried from that fold. The census is not restated as a
-# claim about THIS tree either, because it measures ONE tree and goes stale on the
-# next fold, which is why the fenced HISTORY above exists. ⛔ The 28 m minute did not move across
-# that fold, which is why nothing but the emission guard can catch this class: the arithmetic on the
-# minute agrees either way.
-# reader of the prose can see. On THIS tree — `origin/main` `ff10fb328891` folded in — the verb packs
-# the pool into two bins: nine shards at 827.8 s (a, b, e, f, g, h, i, j, k) and two at 827.7 s
-# (c, d), so `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST
-# shard's) — and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
-# (1680 / 827.8 = 2.0295) on every one of the eleven shards, so the two agree by construction
-# rather than by a hand re-read.
-# ⛔ THE POOL DELTA IS RE-COUNTED ON THE RESOLVED TREE, not carried: `fast_pool()` holds **1342**
-# files at this head against **1341** on `origin/main` `ff10fb328891`, both counted by loading each
-# tree's OWN manifest (`git show origin/main:config/ci-surfaces.yml`) through `fast_pool()` — and
-# the set difference is exactly ONE entry: `tests/test_14582_creation_hook.py` (`core`, flat 2.0 s),
-# this PR's own (#14582) suite. `main` carries nothing this tree lacks, and every other row the
-# emission names — `#14726`'s `tests/test_own_site_fragment_targets.py` included — landed on
-# `main` BEFORE this fold, so counting one of them as this PR's would contradict the 1342 − 1341 = 1
-# the two readings give.
 # The name lists are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), and
 # `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
@@ -200,21 +133,13 @@ version: 1
 # re-derivation.
 # ⛔ THIS BLOCK ARRIVES SPLICED, REPEATEDLY, and that is mechanical rather than mysterious:
 # `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
-# derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. THIS PR HAS
-# BEEN SPLICED MORE THAN ONCE and no count is written here — an ordinal is a remembered number that
-# rots: the `4b2fba3e8a` merge, the `c1c8df1a` and `bbef0b88` rebases and this merge with
-# `ff10fb32` are the ones the paragraphs above narrate, earlier de-splices live on this branch's own
-# commits (`git log`), and in every case NEITHER copy described the tree it landed on. No side is
-# picked on any of them: both copies are DELETED and the graded clause above is a re-derivation with
-# `--emit-push-matrix` on the merged tree. ⛔ This fold's copy also carried a LIVE pool census and a
-# one-bin emission, which is why the emission, census and splice arms all reddened at once — a
-# splice a CHECK caught rather than a reviewer reading the block, which is what those arms are for.
-# ⛔ No census figure is stated here AS A CLAIM: a count of that pool measures ONE tree, so it is
-# HISTORY bound to the sha it was read at (the fenced span above) or it is not stated at all — the
-# only census-shaped digits elsewhere in this block are the SPELLINGS-IT-CANNOT-SEE list above,
-# which names a spelling rather than asserting a reading. Each
-# fold's emission figures live on the commit that measured them (`git log`), which is where a
-# spliced copy belongs.
+# derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. Measured on
+# this rebase: two copies arrived, one naming `origin/main` `c1c8df1a3817` with `#14700`'s row, one
+# naming the same base with this change's row, and NEITHER described the merged tree (both said
+# 827.4/827.5 and a pool count that this block at this head no longer states). Neither
+# side is picked: both are DELETED and the paragraph above is a fresh re-derivation with
+# `--emit-push-matrix` on this merged tree. Each earlier fold's figures live on the commit that
+# measured them (`git log`), which is where a spliced copy belongs.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`

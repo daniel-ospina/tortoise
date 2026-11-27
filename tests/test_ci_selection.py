@@ -9233,13 +9233,20 @@ _HISTORICAL_POOL_CENSUS_RE = re.compile(
 #: `files` because the census that actually arrived at the `bbef0b88` fold was written with
 #: `entries` (`fast_pool()` holds 1340 entries …): a `files`-only unit left that live claim
 #: invisible to this guard while it sat outside the fence (#14587 review P2, measured on that
-#: head's own blob). ⛔ A COMMENT WRAP is NOT a gap and this pattern does not need to cross one:
-#: `_emission_block_header` JOINS the block's comment lines before anything here reads it, so
-#: `\s+` already spans what was two lines in the file. An earlier cut of this fix widened the
-#: separator to `[\s#]*` on a raw-blob measurement and wrote that the wrap was a false PASS; that
-#: read the wrong artifact — over the joined header the pre-existing pattern matches.
+#: head's own blob). ⛔ THE DIGITS ARE READ WITH OR WITHOUT MARKDOWN BOLD, and that axis is not
+#: decoration: the census THIS guard was written for was spelled `holds **1342** files` — bold count,
+#: bare unit — so a pattern reading bare digits alone stayed green over the very sentence the repair
+#: deleted, and a fold that re-added it verbatim would have passed (`#14587` review cycle 5, measured
+#: by injecting that spelling into the header: `[]` before this widening). `\*{0,2}\d+\*{0,2}` closes
+#: it; a COMMA-grouped count (`1,335 files`) remains clean on purpose, because the population that
+#: spells it that way is not this block and widening to `[\d,]*` would re-open a form the disclosure
+#: below calls safe only because it is unread. ⛔ A COMMENT WRAP is NOT a gap and this pattern does
+#: not need to cross one: `_emission_block_header` JOINS the block's comment lines before anything
+#: here reads it, so `\s+` already spans what was two lines in the file. An earlier cut of this fix
+#: widened the separator to `[\s#]*` on a raw-blob measurement and wrote that the wrap was a false
+#: PASS; that read the wrong artifact — over the joined header the pre-existing pattern matches.
 _POOL_CENSUS_RE = re.compile(
-    r"`fast_pool\(\)`\s+(?:holds|held|carries|carried)\s+\d+\s+(?:files|entries)")
+    r"`fast_pool\(\)`\s+(?:holds|held|carries|carried)\s+\*{0,2}\d+\*{0,2}\s+(?:files|entries)")
 #: How far past an operand its stated minute may sit. The `rounds …/60 x 2.0 up to … m` prose
 #: form (the header's own history clause until #14415 folded it away, reproduced by the fixture
 #: below) puts it 14 characters after the operand.
@@ -10245,14 +10252,21 @@ def test_the_per_file_shard_letter_guard_is_not_vacuous():
 def test_the_fast_shards_header_states_no_live_pool_census():
     """#14587 review P3-1: a pool census is a HISTORY, never a live claim in this block.
 
-    Measured at `06c10adb`, the block stated: "`fast_pool()` holds 1335 files at this head against
+    Measured at `06c10adfb9` — the commit whose blob carries the sentence below, and the commit
+    that the `06c10adb` spelling this line used to cite is a mis-transcription OF (`git cat-file -t
+    06c10adb` → "Not a valid object name"; the resolvable prefix is `06c10adf`) — the block stated:
+    "`fast_pool()` holds 1335
+    files at this head against
     **1333** on `origin/main`, and the **two** additions are `tests/test_14582_creation_hook.py`
     (this PR's) and `tests/test_14592_operating_model_evidence.py` (`#14606`'s, **landed on `main`
     and folded in here**)". Three things were wrong and only one of them was the figure: `main`
-    held **1334**, the delta was **one** file, and a file already in `main`'s manifest cannot be an
+    held **1334** (recorded on this branch's own `dbdb8abfa9` fence, which re-measured `main` at
+    `a29b5f24ce95` and counted ONE addition), the delta was **one** file, and a file already in
+    `main`'s manifest cannot be an
     addition RELATIVE to `main` — so the sentence contradicted itself as well as the measurement.
-    Nothing graded it, which is why it went stale twice (its predecessor read "1333 here against
-    1333").
+    Nothing graded it, and the copy that preceded it is recorded ONLY by its retraction: the same
+    block declares that a copy stating `1333 here against 1333` is FALSE at that fold, so no
+    reachable blob still carries that spelling (measured: `git show 06c10adfb9:config/ci-surfaces.yml`).
 
     ⛔ THE FIX IS THE BLOCK'S OWN RULE, not a tighter figure. A count that must be re-derived on
     every fold, graded by nothing, is a claim that rots — and grading the VALUE here would be worse
@@ -10285,8 +10299,9 @@ def test_the_fast_shards_header_states_no_live_pool_census():
 def test_the_pool_census_guard_is_not_vacuous():
     """The pre-fix sentence must RED, and the fence must exempt only what it encloses.
 
-    `stale` reproduces the sentence this PR carried at `06c10adb` — the very text the sibling arm
-    was written for — so the pattern is measured against the defect that shipped rather than a
+    `stale` reproduces the sentence this PR carried BEFORE its repair — the very text the sibling arm
+    was written for, at `06c10adfb9`, which is why the pattern is measured against the defect that
+    shipped rather than a
     string invented to match it. The two fixtures after it are the false negatives that a looser
     or a wider reading would let through: a census the pattern cannot see (narrowed into silence),
     and a census stated AFTER the fence (a regex that swallows the rest of the block).
@@ -10295,7 +10310,8 @@ def test_the_pool_census_guard_is_not_vacuous():
         "# ⛔ AND THE DELTA IS NOT THIS PR'S ALONE: `fast_pool()` holds 1335 files at this head\n"
         "# against 1333 on `origin/main`, and the two additions are\n"
         "# `tests/test_14582_creation_hook.py` (this PR's) and\n"
-        "# `tests/test_14592_operating_model_evidence.py` (`#14606`'s, landed on `main`).\n"
+        "# `tests/test_14592_operating_model_evidence.py` (`#14606`'s, landed on `main` and folded\n"
+        "# in here) — a sentence that names only one of them states a delta it did not measure.\n"
         "\nfast_shards: 11\n")
     assert _POOL_CENSUS_RE.findall(stale), (
         "the pre-fix census sentence was not read — the pattern has been narrowed into silence, "
@@ -10314,6 +10330,21 @@ def test_the_pool_census_guard_is_not_vacuous():
     assert _POOL_CENSUS_RE.findall(
         "`fast_pool()` held 1335 entries where `main` held 1334"), (
         "the past tense of the `entries` unit was not read")
+    # ⛔ THE BOLD COUNT IS THE SPELLING THIS GUARD WAS WRITTEN FOR, and it is the one the repair
+    # DELETED from the block: `holds **1342** files at this head against **1341** …`. A pattern that
+    # read bare digits only stayed GREEN over that sentence, so a fold re-adding it verbatim would
+    # have passed the sibling arm (`#14587` review cycle 5, measured: `[]` before the widening).
+    assert _POOL_CENSUS_RE.findall("`fast_pool()` holds **1342** files at this head"), (
+        "the BOLD-count spelling of the same claim was not read — that is the spelling the repair "
+        "deleted, so this is the false PASS the arm exists to refuse, not a formatting preference")
+    assert _POOL_CENSUS_RE.findall("`fast_pool()` held **1340** entries here against 1339"), (
+        "the bold count with the `entries` unit was not read")
+    # …and a COMMA-grouped count stays clean, which is the disclosed blind spot: widening the digits
+    # to `[\d,]*` would silently re-open it, so the arm below pins the decision rather than leaving
+    # it to a future edit's guess.
+    assert not _POOL_CENSUS_RE.findall("`fast_pool()` holds 1,335 files at this head"), (
+        "a comma-grouped count is now READ — this is no longer the disclosed blind spot, and the "
+        "block's own disclosure (config/ci-surfaces.yml) now over-claims")
     # ⛔ A WRAP IS READ BY THE READER, not by this pattern: `_emission_block_header` joins the
     # block's comment lines, so a census split across two lines in the FILE reaches this pattern as
     # one line. Pinning it here also pins the join — if the reader stops joining, this arm reds.
