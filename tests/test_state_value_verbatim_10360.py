@@ -7349,14 +7349,35 @@ def _b2_region(row_text: str) -> str:
     return tail[:end]
 
 
-def _e2_arm_commands() -> dict[str, str]:
+def _prefix_truncation_before(flat: str, start: int) -> str | None:
+    """The `NAME=value` / `-u NAME` token the prefix parse started AFTER.
+
+    `None` means the parse began at the start of the env region; anything else is
+    the token the regex could not spell, i.e. the settings read are a SHORTER view
+    of the command. Extracted so the guard is reachable from a test: it was inline
+    in `_e2_arm_commands`, where the only input that makes it fire is a doc
+    carrying a switch name the class cannot spell — and the committed arms doc
+    carries none, so no test row could red it (#14774 review F1, MEASURED).
+    """
+    before = flat[:start].rstrip()
+    hit = re.search(r"(?:^|\s)(?:-u\s+\S+|\S+=\S+)$", before)
+    return hit.group(0).strip() if hit else None
+
+
+def _e2_arm_commands(text: str | None = None) -> dict[str, str]:
     """The two committed arm commands, as the arms doc states them.
 
     Read out of the doc rather than re-typed here, because the doc is the record:
     a copy of the command in this file could agree with itself while the doc — the
     thing a lane replays — drifted to a spelling that resolves the other arm.
+
+    `text` overrides the doc's own bytes, for the SYNTHETIC fixtures that make the
+    name class and the truncation guard falsifiable: both are unreachable from the
+    committed doc, whose switches happen to contain no digit and no unspellable
+    character (#14774 review F1).
     """
-    text = _E2_ARMS_DOC.read_text(encoding="utf-8")
+    if text is None:
+        text = _E2_ARMS_DOC.read_text(encoding="utf-8")
     flat = re.sub(r"\\\s*\n\s*", " ", text)   # join the shell continuations
     found: dict[str, str] = {}
     for arm in ("on", "off"):
@@ -7386,11 +7407,10 @@ def _e2_arm_commands() -> dict[str, str]:
             # matched prefix is itself a `NAME=value` / `-u NAME` token, the regex
             # stopped mid-prefix and the parsed settings are a shorter view of the
             # real command.
-            before = flat[:match.start("prefix")].rstrip()
-            truncated = re.search(r"(?:^|\s)(?:-u\s+\S+|\S+=\S+)$", before)
+            truncated = _prefix_truncation_before(flat, match.start("prefix"))
             assert truncated is None, (
                 "the parsed env prefix of the " + arm + " arm command starts after "
-                f"the switch token {truncated.group(0).strip()!r} — the prefix regex "
+                f"the switch token {truncated!r} — the prefix regex "
                 "cannot spell a switch name on this command, so the arm's settings "
                 "are a TRUNCATED view of it and the resolved arm may be the opposite "
                 "of what the doc states. Widen the name class in `_e2_arm_commands`")
@@ -8178,6 +8198,128 @@ def test_the_e2_off_arm_definition_uses_the_REAL_kill_switch(monkeypatch):
     assert "TORTOISE_VALUE_GATE=0" in commands["off"], (
         f"the flags-OFF command does not use the kill-switch: {commands['off']!r}"
         " — an unset default-ON switch is the ON arm")
+
+
+#: The arm-prefix name class this parser used BEFORE the `#14774` review P2 fix.
+#:
+#: Kept here ON PURPOSE, as the mutant rather than a mirror of production: the edit
+#: that reverts the fix is `[A-Z0-9_]+` -> `[A-Z_]+`, and a mutant is only pinned if
+#: something actually runs it. It lives in this file's test body — never in the
+#: parser above — so the two cannot drift together.
+_E2_PREFIX_TEST_PRE_FIX_CLASS = "[A-Z_]+"
+
+
+def _synthetic_arms_doc(off_prefix: str) -> str:
+    """An arms doc shaped like the committed one, with a chosen OFF env prefix.
+
+    Same two blocks, same `--out …e2-<arm>-` filenames and the same shell
+    continuations, because those are what `_e2_arm_commands` parses. Only the OFF
+    command's switches differ — which is the whole point: the committed doc's
+    switches happen to contain no digit, so no assertion over it can reach the
+    name class or the truncation guard.
+    """
+    return (
+        "# synthetic `#10360` E2 arms — NOT the record, a fixture\n\n"
+        "```bash\n"
+        "TORTOISE_VET=1 TORTOISE_VALUE_GATE=1 TORTOISE_EXTRACT_MODEL=x \\\n"
+        "  .venv/bin/python -m tests.eval.write_path.runner run \\\n"
+        "  --out /tmp/w2b-e2-on-1.json\n"
+        f"{off_prefix} \\\n"
+        "  .venv/bin/python -m tests.eval.write_path.runner run \\\n"
+        "  --out /tmp/w2b-e2-off-1.json\n"
+        "```\n")
+
+
+def test_the_arm_prefix_parser_cannot_SILENTLY_truncate_a_digit_bearing_switch():
+    """The name class and the truncation guard are both FALSIFIABLE. (`#14774` F1)
+
+    Why this row exists: the class widening `[A-Z_]+` -> `[A-Z0-9_]+` was a
+    review-mandated P2 fix on this PR, and reverting it left the WHOLE suite GREEN
+    — the committed arms doc contains no switch name with a digit, so both arms
+    parsed byte-identically either way and `assert truncated is None` could not
+    fire for any input the tests fed it. A fixture that cannot exhibit the failure
+    mode is not coverage (equivalent-mutant / input-gap rule: an unreached mutant
+    survives until a fixture reaches it).
+
+    MUTANTS, each measured to RED this row rather than argued:
+      * `[A-Z0-9_]+` -> `[A-Z_]+` at the prefix pattern: the digit-bearing
+        `TORTOISE_S2_DECISION_SEAM` is dropped, so either the settings assertion
+        below is missing the switch or the guard raises — both are failures here,
+        and the suite was previously green on exactly this edit.
+      * `_prefix_truncation_before` -> `return None`: the guard's detection
+        assertion below cannot fire, and `…REFUSES_a_switch_its_class_cannot_spell`
+        stops refusing — both rows RED.
+    """
+    from tests.eval.write_path import runner as wp_runner
+
+    # The switch the narrow class could not spell, and the reason it matters: the
+    # seam ORs into `extractor_v2._vet_enabled` and OVERRIDES an explicit
+    # `TORTOISE_VET=0` (`#5087`), so a dropped `=0` would certify an ARMED run as
+    # the control — a comparison of the treatment against itself.
+    digit_bearing = f"{wp_runner.ARM_SWITCHES[2]}=0"
+    assert digit_bearing == "TORTOISE_S2_DECISION_SEAM=0", (
+        "this fixture is built around the one arm switch whose name carries a "
+        f"digit; ARM_SWITCHES moved to {digit_bearing!r} — re-point it, do not "
+        "delete the row")
+    doc = _synthetic_arms_doc(
+        f"TORTOISE_VET=0 TORTOISE_VALUE_GATE=0 {digit_bearing} TORTOISE_EXTRACT_MODEL=x")
+
+    # (1) The SHIPPED parser reads the whole env region, digit-bearing switch and
+    #     all. Under the pre-fix class the parse starts at `TORTOISE_EXTRACT_MODEL`
+    #     and the guard raises, so this cannot pass vacuously.
+    commands = _e2_arm_commands(doc)
+    settings = _arm_settings(commands["off"])
+    assert settings.get("TORTOISE_S2_DECISION_SEAM") == "0", (
+        "the arm parser dropped a digit-bearing switch, so the resolved arm is a "
+        f"TRUNCATED view of the command: {commands['off']!r} parsed as {settings}")
+    assert set(settings) == {"TORTOISE_VET", "TORTOISE_VALUE_GATE",
+                            "TORTOISE_S2_DECISION_SEAM", "TORTOISE_EXTRACT_MODEL"}, (
+        f"the parser read a partial prefix: {settings}")
+
+    # (2) The pre-fix class, replayed over the SAME fixture, really does truncate —
+    #     and the guard NAMES the switch it could not spell. This is the detection
+    #     half: without it the class fix alone would let the failure return silently
+    #     through the next switch name nobody anticipated.
+    flat = re.sub(r"\\\s*\n\s*", " ", doc)
+    narrow = re.search(
+        r"(?P<prefix>(?:^|\s)(?:env\s+)?(?:[A-Z_]+=\S+\s+|-u\s+[A-Z_]+\s+)+)"
+        r"\S*python\s+-m\s+tests\.eval\.write_path\.runner\s+run\s+--out\s+\S*e2-off-",
+        flat)
+    assert narrow is not None, (
+        "the pre-fix class must still match SOME prefix on this fixture — the "
+        "failure being pinned is truncation, not a non-match")
+    assert narrow.group("prefix").strip().endswith("TORTOISE_EXTRACT_MODEL=x"), (
+        "the pre-fix class unexpectedly read the digit-bearing switch, so this "
+        f"fixture no longer reproduces the defect: {narrow.group('prefix')!r}")
+    caught = _prefix_truncation_before(flat, narrow.start("prefix"))
+    assert caught is not None and digit_bearing in caught, (
+        "the truncation guard did not name the switch the narrow class could not "
+        f"spell (got {caught!r}) — a guard that cannot name the dropped token "
+        "leaves the truncated parse passing as a complete one")
+
+
+def test_the_arm_prefix_parser_REFUSES_a_switch_its_class_cannot_spell():
+    """The truncation guard is reachable through the SHIPPED parser. (`#14774` F1)
+
+    The row above proves the guard's DETECTION logic against a replay of the
+    pre-fix class. This one proves the guard is wired: `_e2_arm_commands` parses a
+    command carrying a switch name its class cannot spell (`TORTOISE-SEAM=0` — a
+    hyphen is outside `[A-Z0-9_]`) and must REFUSE, naming the token it could not
+    read, rather than returning the shorter prefix as if it were the whole env
+    region. MUTANT: `_prefix_truncation_before` -> `return None` makes this row's
+    `else` branch raise instead of the refusal below.
+    """
+    try:
+        _e2_arm_commands(_synthetic_arms_doc(
+            "TORTOISE_VET=0 TORTOISE_VALUE_GATE=0 TORTOISE-SEAM=0 TORTOISE_EXTRACT_MODEL=x"))
+    except AssertionError as exc:
+        assert "TORTOISE-SEAM=0" in str(exc), (
+            f"the refusal must name the token it could not spell: {exc}")
+    else:  # pragma: no cover - reached only if the guard is disarmed
+        raise AssertionError(
+            "an arm command carrying a switch name the prefix regex cannot spell "
+            "was parsed as a COMPLETE prefix — the truncation guard is disarmed, "
+            "so any future switch spelling silently shortens the arm's settings")
 
 
 _SWITCH_NAME = re.compile(r"TORTOISE_[A-Z0-9_]+")
