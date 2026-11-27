@@ -1428,14 +1428,28 @@ def _destination_probes(
     """Every repository BOUNDARY on the destination's ancestor chain, ROOT first.
 
     ⛔ NOT "EVERY REPOSITORY THAT COULD HOLD THE DESTINATION" — that wider claim was TRUE
-    of the walk below only for repositories whose work tree contains the destination, and
-    it is FALSE for two disclosed residuals (#14741 review, cycle 4, P2): a repository
-    RETARGETED by `core.worktree` holds the destination while sitting nowhere on its
-    ancestor chain (measured: `--render` exited **0** over a tracked file), and on a
-    case-insensitive filesystem a wrongly-cased destination is permitted over a tracked
-    file (measured: `git ls-files` is case-SENSITIVE even with `-c core.ignorecase=true`).
-    Both are filed as follow-ups, not closed here; the narrow claim is the one this code
-    earns, and a docstring that claims more is what a later lane reads instead of the arm.
+    of the walk below only for repositories whose WORK-TREE ROOT is the boundary, and it is
+    FALSE for THREE disclosed residuals (#14741 review, cycles 4-6, P2):
+
+    1. a repository RETARGETED by `core.worktree` off the destination's ancestor chain holds
+       the destination while sitting nowhere on it (measured: `--render` exited **0** over a
+       tracked file);
+    2. a repository whose boundary IS on the chain but whose `core.worktree` is a strict
+       DESCENDANT of that boundary is asked with the BOUNDARY-relative spec
+       (`target.relative_to(boundary)`), while its index is keyed on the work-tree root — so
+       the same repository answers rc 1 about a spelling it does not hold and rc 0 about the
+       one it does (measured: `outer` with `core.worktree=outer/mid`, `outer`'s index naming
+       `inner/docs/K.md`, `--render` rc 0 over it). The spec must be derived from the
+       WORK-TREE ROOT, not the boundary directory;
+    3. on a case-insensitive filesystem a wrongly-cased destination is permitted over a
+       tracked file (measured: `git ls-files` is case-SENSITIVE even with
+       `-c core.ignorecase=true`).
+
+    All three are filed as follow-ups, not closed here; the narrow claim is the one this
+    code earns, and a docstring that claims more is what a later lane reads instead of the
+    arm. Two of them are PRE-EXISTING on `origin/main` (which carries the boundary walk from
+    #14625 without `_own_gitdir`), so this PR narrows the fail-open surface rather than
+    closing it.
 
     ⛔ NOT THE TWO ENDPOINTS (#14625 review, round 10, P3, measured). Rounds 7 and 8
     each fixed the endpoint they were shown — the destination's own repository, then
@@ -1461,12 +1475,14 @@ def _destination_probes(
 
     Order is NOT outermost-first: `ROOT` is prepended (when the destination is under it),
     then every boundary from the filesystem root inward, then the destination's nearest
-    existing ancestor — all providers are asked and the FIRST refusal is the verdict, so the
-    message an operator sees is whichever provider refused first, not the most legible one.
-    ⛔ That sentence used to claim "the OUTERMOST refusal is the most legible" (#14741
-    review, cycle 5, P3, measured: with a repository above ROOT, `probes[0]` is ROOT), which
-    a docstring in this file must not get wrong: the ordering is a message-legibility
-    preference, and it does not currently prefer the outer one.
+    existing ancestor. ⛔ THE LOOP STOPS AT THE FIRST REFUSAL, so the providers after it are
+    NEVER ASKED — the message an operator sees is whichever provider refused first, not the
+    most legible one, and the number of `git` invocations a render costs is "up to" this
+    list, not "one per provider". (An earlier revision claimed "the OUTERMOST refusal is the
+    most legible"; #14741 review, cycle 5, P3, measured `probes[0]` is ROOT when a
+    repository sits above it. A later one claimed "all providers are asked", which
+    contradicted the very next clause; #14741 review, cycle 6, P3, measured only `[0]` asked
+    of a two-provider list. Both are the precise-claim class this docstring is written in.)
     """
     probes: list[tuple[Path, str | None, str]] = []
     seen: set[tuple[str, str | None]] = set()
@@ -1621,11 +1637,14 @@ def _destination_probes(
 def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
     """Refuse if ANY repository on the destination's path tracks it; `None` = free.
 
-    Every probe in `_destination_probes` is asked, and a refusal from any one of them is
-    the verdict — the composite is MONOTONE: adding a provider can only add refusals,
-    never remove one, which is the property that makes "ask one more repository" safe to
-    repeat instead of the sequence of fail-OPENS rounds 5, 7 and 8 each produced by
-    following whichever single provider they had been shown.
+    Probes are asked in `_destination_probes` order and the loop returns at the FIRST
+    refusal, so a refusal from any one of them is the verdict and the providers after it are
+    not asked — the composite is MONOTONE: adding a provider can only add refusals, never
+    remove one, which is the property that makes "ask one more repository" safe to repeat
+    instead of the sequence of fail-OPENS rounds 5, 7 and 8 each produced by following
+    whichever single provider they had been shown. (Not "every probe is asked": the early
+    return means a later provider's permit can never undo an earlier refusal, which is the
+    invariant that matters — see #14741 review, cycle 6, P3.)
     """
     for cwd, spec, label in _destination_probes(target, rel):
         if spec is None:
