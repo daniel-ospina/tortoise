@@ -1,0 +1,587 @@
+{
+ "graph": "xv14691_business_structure",
+ "measured_by": "second lane, independent probe (/tmp/t6_probe2.py + /tmp/t6_probe4.py), depth-2 subgraph reads over MCP stdio",
+ "declared": {
+  "products": [
+   "Lumen Core",
+   "Lumen Field"
+  ],
+  "features": [
+   "Grid Map",
+   "Outage Alerts",
+   "Load Forecast",
+   "Crew Dispatch",
+   "Asset Register"
+  ],
+  "teams": [
+   "Platform team",
+   "Product team",
+   "Customer team"
+  ],
+  "roles": [
+   "Staff Engineer",
+   "Site Reliability Engineer",
+   "Product Manager",
+   "Account Executive"
+  ],
+  "people": [
+   "Dana Whitlock",
+   "Tomas Ferreira",
+   "Amara Osei",
+   "Jonas Bauer"
+  ],
+  "components": [
+   "ingest-gateway",
+   "event-bus",
+   "fact-store",
+   "signal-engine",
+   "web-dashboard",
+   "auth-service",
+   "identity-db"
+  ],
+  "customers": [
+   "Northwind Logistics",
+   "Helio Health"
+  ],
+  "customerSegments": [
+   "mid-market utilities"
+  ],
+  "containment": [
+   [
+    "Lumen Core",
+    "Grid Map"
+   ],
+   [
+    "Lumen Core",
+    "Outage Alerts"
+   ],
+   [
+    "Lumen Core",
+    "Load Forecast"
+   ],
+   [
+    "Lumen Field",
+    "Crew Dispatch"
+   ],
+   [
+    "Lumen Field",
+    "Asset Register"
+   ]
+  ],
+  "membership": [
+   [
+    "Dana Whitlock",
+    "Platform team"
+   ],
+   [
+    "Tomas Ferreira",
+    "Platform team"
+   ],
+   [
+    "Amara Osei",
+    "Product team"
+   ],
+   [
+    "Jonas Bauer",
+    "Customer team"
+   ]
+  ],
+  "ownership": [
+   [
+    "Lumen Core",
+    "Amara Osei"
+   ],
+   [
+    "ingest-gateway",
+    "Dana Whitlock"
+   ],
+   [
+    "on-call rotation",
+    "Tomas Ferreira"
+   ],
+   [
+    "enterprise renewals",
+    "Jonas Bauer"
+   ]
+  ],
+  "dependencies": [
+   [
+    "ingest-gateway",
+    "event-bus"
+   ],
+   [
+    "event-bus",
+    "fact-store"
+   ],
+   [
+    "signal-engine",
+    "event-bus"
+   ],
+   [
+    "signal-engine",
+    "fact-store"
+   ],
+   [
+    "web-dashboard",
+    "signal-engine"
+   ],
+   [
+    "web-dashboard",
+    "auth-service"
+   ],
+   [
+    "auth-service",
+    "identity-db"
+   ]
+  ],
+  "serves": [
+   [
+    "Lumen Core",
+    "Northwind Logistics"
+   ],
+   [
+    "Lumen Field",
+    "Helio Health"
+   ]
+  ]
+ },
+ "A1": {
+  "typed_nodes": {
+   "product-strategy:product": 2,
+   "product-strategy:customerSegment": 4,
+   "core:naturalPerson": 4,
+   "product-strategy:customer": 2,
+   "product-strategy:feature": 5,
+   "core:team": 3,
+   "core:role": 4,
+   "dev:code": 7,
+   "core:workflow": 2,
+   "agent-ops:rule": 1,
+   "dev:architectureDoc": 1
+  },
+  "objects": [
+   [
+    "Asset Register",
+    "product-strategy:feature"
+   ],
+   [
+    "Crew Dispatch",
+    "product-strategy:feature"
+   ],
+   [
+    "Grid Map",
+    "product-strategy:feature"
+   ],
+   [
+    "Helio Health",
+    "product-strategy:customer"
+   ],
+   [
+    "Load Forecast",
+    "product-strategy:feature"
+   ],
+   [
+    "Lumen Core",
+    "product-strategy:product"
+   ],
+   [
+    "Lumen Field",
+    "product-strategy:product"
+   ],
+   [
+    "Northwind Logistics",
+    "product-strategy:customer"
+   ],
+   [
+    "Outage Alerts",
+    "product-strategy:feature"
+   ],
+   [
+    "auth-service",
+    "dev:code"
+   ],
+   [
+    "control-room customers",
+    "product-strategy:customerSegment"
+   ],
+   [
+    "enterprise renewals",
+    "core:workflow"
+   ],
+   [
+    "event-bus",
+    "dev:code"
+   ],
+   [
+    "fact-store",
+    "dev:code"
+   ],
+   [
+    "field crews",
+    "product-strategy:customerSegment"
+   ],
+   [
+    "identity-db",
+    "dev:code"
+   ],
+   [
+    "ingest-gateway component",
+    "dev:code"
+   ],
+   [
+    "mid-market utilities",
+    "product-strategy:customerSegment"
+   ],
+   [
+    "mid-market utilities segment",
+    "product-strategy:customerSegment"
+   ],
+   [
+    "on-call rotation",
+    "core:workflow"
+   ],
+   [
+    "ownership accountability convention",
+    "agent-ops:rule"
+   ],
+   [
+    "signal-engine",
+    "dev:code"
+   ],
+   [
+    "the seven-component dependency graph",
+    "dev:architectureDoc"
+   ],
+   [
+    "web-dashboard",
+    "dev:code"
+   ]
+  ],
+  "subjects": [
+   [
+    "Account Executive",
+    "core:role"
+   ],
+   [
+    "Amara Osei",
+    "core:naturalPerson"
+   ],
+   [
+    "Customer team",
+    "core:team"
+   ],
+   [
+    "Dana Whitlock",
+    "core:naturalPerson"
+   ],
+   [
+    "Jonas Bauer",
+    "core:naturalPerson"
+   ],
+   [
+    "Platform team",
+    "core:team"
+   ],
+   [
+    "Product Manager",
+    "core:role"
+   ],
+   [
+    "Product team",
+    "core:team"
+   ],
+   [
+    "Site Reliability Engineer",
+    "core:role"
+   ],
+   [
+    "Staff Engineer",
+    "core:role"
+   ],
+   [
+    "Tomas Ferreira",
+    "core:naturalPerson"
+   ]
+  ]
+ },
+ "A2": {
+  "hasPart": [
+   {
+    "src": "Lumen Core",
+    "dst": "Grid Map",
+    "src_kind": "object",
+    "dst_kind": "object"
+   },
+   {
+    "src": "Lumen Core",
+    "dst": "Outage Alerts",
+    "src_kind": "object",
+    "dst_kind": "object"
+   },
+   {
+    "src": "Lumen Core",
+    "dst": "Load Forecast",
+    "src_kind": "object",
+    "dst_kind": "object"
+   },
+   {
+    "src": "Lumen Field",
+    "dst": "Crew Dispatch",
+    "src_kind": "object",
+    "dst_kind": "object"
+   },
+   {
+    "src": "Lumen Field",
+    "dst": "Asset Register",
+    "src_kind": "object",
+    "dst_kind": "object"
+   }
+  ],
+  "dependsOn": [
+   {
+    "src": "web-dashboard",
+    "dst": "signal-engine"
+   },
+   {
+    "src": "web-dashboard",
+    "dst": "auth-service"
+   },
+   {
+    "src": "ingest-gateway component",
+    "dst": "event-bus"
+   },
+   {
+    "src": "event-bus",
+    "dst": "fact-store"
+   },
+   {
+    "src": "signal-engine",
+    "dst": "event-bus"
+   },
+   {
+    "src": "signal-engine",
+    "dst": "fact-store"
+   },
+   {
+    "src": "auth-service",
+    "dst": "identity-db"
+   }
+  ],
+  "ownedBy": [
+   {
+    "src": "Amara Osei",
+    "src_kind": "subject",
+    "dst": "Lumen Core",
+    "dst_kind": "object"
+   },
+   {
+    "src": "Dana Whitlock",
+    "src_kind": "subject",
+    "dst": "ingest-gateway component",
+    "dst_kind": "object"
+   },
+   {
+    "src": "Tomas Ferreira",
+    "src_kind": "subject",
+    "dst": "on-call rotation",
+    "dst_kind": "object"
+   },
+   {
+    "src": "Jonas Bauer",
+    "src_kind": "subject",
+    "dst": "enterprise renewals",
+    "dst_kind": "object"
+   }
+  ],
+  "managedBy": [
+   {
+    "src": "Jonas Bauer",
+    "src_kind": "subject",
+    "dst": "Northwind Logistics",
+    "dst_kind": "object"
+   },
+   {
+    "src": "Jonas Bauer",
+    "src_kind": "subject",
+    "dst": "Helio Health",
+    "dst_kind": "object"
+   }
+  ],
+  "produces": [
+   {
+    "src": "Product team",
+    "dst": "web-dashboard"
+   },
+   {
+    "src": "Platform team",
+    "dst": "ingest-gateway component"
+   },
+   {
+    "src": "Platform team",
+    "dst": "event-bus"
+   },
+   {
+    "src": "Platform team",
+    "dst": "fact-store"
+   },
+   {
+    "src": "Platform team",
+    "dst": "signal-engine"
+   },
+   {
+    "src": "Platform team",
+    "dst": "auth-service"
+   },
+   {
+    "src": "Platform team",
+    "dst": "identity-db"
+   }
+  ],
+  "related_person_team_or_role": [
+   {
+    "src": "Amara Osei",
+    "dst": "Product team"
+   },
+   {
+    "src": "Amara Osei",
+    "dst": "Product Manager"
+   },
+   {
+    "src": "Northwind Logistics",
+    "dst": "Lumen Core"
+   },
+   {
+    "src": "Northwind Logistics",
+    "dst": "mid-market utilities"
+   },
+   {
+    "src": "Northwind Logistics",
+    "dst": "mid-market utilities segment"
+   },
+   {
+    "src": "Helio Health",
+    "dst": "mid-market utilities"
+   },
+   {
+    "src": "Helio Health",
+    "dst": "Lumen Field"
+   },
+   {
+    "src": "Helio Health",
+    "dst": "mid-market utilities segment"
+   },
+   {
+    "src": "Dana Whitlock",
+    "dst": "Platform team"
+   },
+   {
+    "src": "Dana Whitlock",
+    "dst": "Staff Engineer"
+   },
+   {
+    "src": "Tomas Ferreira",
+    "dst": "Platform team"
+   },
+   {
+    "src": "Tomas Ferreira",
+    "dst": "Site Reliability Engineer"
+   },
+   {
+    "src": "Jonas Bauer",
+    "dst": "Customer team"
+   },
+   {
+    "src": "Jonas Bauer",
+    "dst": "Account Executive"
+   }
+  ]
+ },
+ "A2_edge_row_counts_from_receipt": {
+  "hasPart": 8,
+  "IMPL": 2,
+  "related": 14,
+  "ownedBy": 6,
+  "dependsOn": 7,
+  "produces": 7,
+  "managedBy": 2
+ },
+ "A3": {
+  "distinct_hasPart_pairs": 5,
+  "hasPart_rows_in_receipt": 8,
+  "products": [
+   "Lumen Core",
+   "Lumen Field"
+  ],
+  "children": [
+   "Asset Register",
+   "Crew Dispatch",
+   "Grid Map",
+   "Load Forecast",
+   "Outage Alerts"
+  ]
+ },
+ "A5": {
+  "features-of-product": {
+   "search_ok": true
+  },
+  "who-on-team": {
+   "search_ok": true
+  },
+  "depends-on": {
+   "search_ok": true
+  },
+  "who-owns": {
+   "search_ok": true
+  }
+ },
+ "witness_governance_door_returns_empty": {
+  "Amara Osei": [],
+  "Jonas Bauer": [],
+  "Dana Whitlock": [],
+  "Tomas Ferreira": [],
+  "TEAM::Product team": [],
+  "TEAM::Platform team": [],
+  "TEAM::Customer team": [],
+  "Lumen Core": [],
+  "ingest-gateway component": []
+ },
+ "witness_neighbourhood_doors": {
+  "Amara Osei": {
+   "explore_rows": 0,
+   "explore": [],
+   "list_topics": {
+    "error": "Entity 1a2165cddc0-0f8b3f3ba2e1 not found"
+   }
+  },
+  "Lumen Core": {
+   "explore_rows": 1,
+   "explore": [
+    {
+     "predicate": "supports",
+     "mechanism": "IMPL",
+     "related_id": "1a2165ca01a-05d22d3877b0",
+     "related_kind": "product-strategy:customerSegment",
+     "related_content": "control-room customers",
+     "direction": "outgoing",
+     "operator_id": "",
+     "related_status": "live"
+    }
+   ],
+   "list_topics": {
+    "error": "Entity 1a2165c9fd5-bb074a074bd4 not found"
+   }
+  },
+  "ingest-gateway component": {
+   "explore_rows": 0,
+   "explore": [],
+   "list_topics": {
+    "error": "Entity 1a2165cddf7-d987f60b8c51 not found"
+   }
+  }
+ },
+ "tool_surface": {
+  "advertised_tools": 39,
+  "tortoise_recall_listed": false,
+  "tortoise_get_governance_listed": false
+ }
+}
