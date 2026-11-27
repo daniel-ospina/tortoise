@@ -2459,9 +2459,12 @@ def test_watcher_arm_ii_missing_set_closes_when_its_state_disappears():
     state goes (a CONFIRMED listing still finds no manifest, so nothing ever
     dumped), which is what the payload says. NEVER_BACKED_UP is then the only
     kind open, and the set is closed by the cross-poll diff: the `never` arm
-    resolves STALE/METADATA_LOST only, so exactly ONE resolve is pushed in the
-    poll that closes it (#3146 hysteresis: a second call would close on the
-    first healthy poll).
+    resolves STALE/METADATA_LOST only, so this kind gets exactly ONE resolve
+    ATTEMPT in the poll that closes it (#3146: the store counts one healthy
+    observation per call, so a second attempt in the same poll would close on
+    the first healthy poll and defeat the window). Asserted on the watcher's own
+    decision point, not on the store's reaction, for the same reason the
+    `stamp_missing` test spies its leg.
     """
     ch = _Channels()
     storage = MemoryStorage()
@@ -2472,14 +2475,23 @@ def test_watcher_arm_ii_missing_set_closes_when_its_state_disappears():
     assert first["per_team"]["team_a"] == "backup_set_missing", first["per_team"]
     assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_a"], ch.issues
 
+    legs: list[tuple[str, str]] = []
+    real_leg = w._alert_leg
+
+    def _spy(op, kind, subject="", detail=None):
+        legs.append((op, kind))
+        return real_leg(op, kind, subject, detail)
+
+    w._alert_leg = _spy  # type: ignore[method-assign]
+
     storage.delete("ops/teams/team_a/state.json")
     second = w.poll()
     assert second["per_team"]["team_a"] == "never", second["per_team"]
     assert second["backup_set_missing"] == [], second["backup_set_missing"]
     assert list(ch.issues.values()) == ["[DR] NEVER_BACKED_UP — team_a"], ch.issues
-    resolves = [m for m in ch.telegram
-                if "resolved" in m.lower() and "BACKUP_SET_MISSING" in m]
-    assert len(resolves) == 1, ch.telegram
+    bsm_resolves = [1 for op, kind in legs
+                    if op == "resolve_incident" and kind == "BACKUP_SET_MISSING"]
+    assert len(bsm_resolves) == 1, legs
 
 
 def test_status_confirmed_state_org_without_manifest_is_backup_set_missing():
