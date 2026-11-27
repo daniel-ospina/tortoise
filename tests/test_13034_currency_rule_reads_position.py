@@ -532,6 +532,146 @@ class TestTheEpEvidenceSet:
             sdk.close()
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 3b. #14796 — a record ended on the POSITION axis at every READER
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestAnEndedOnPositionRecordIsNotServedAsMeasured:
+    """#14796 — the reader sites, on a record ended ONLY by the position axis.
+
+    `why._assemble_ep_rows` and all three rankers' signal batches gate a stored
+    posterior on `is_terminal_status` so a terminal record never serves it as a
+    MEASUREMENT (#2490). Every one of those sites passed TWO of the four
+    inputs — `(status, outdated)` — so a record ended on the POSITION axis
+    (`isClosed`, or a stage in the resolved `terminal` slot) with its status
+    still `live` took neither branch: `why` — the surface every agent read goes
+    through — answered `ep_state: "measured"` at the full stored posterior, and
+    so did the ranking rows.
+
+    The assertions are on the CLASSIFICATION, both sides of one write, on the
+    same claim: the value itself does not move (a #2490 ending freezes the
+    decayed posterior, it does not delete it), so a test that only asserted
+    "confidence changed" would pass for the wrong reason. `confidence_mean`
+    stays at the stored 0.9 and only `has_ep` / `ep_state` move — `measured` ⇒
+    `baseline`, the shared resolver's word for "a stored value EP did not
+    measure".
+    """
+
+    #: The two position markers, written verbatim through the props door — the
+    #: same two shapes `tests/test_13450_ep_position_axis_participation.py`
+    #: parameterises for the EP input arm, plus the WORD-axis control that
+    #: already worked, so a regression in either direction is visible.
+    _ENDINGS: ClassVar[tuple[tuple[str, str], ...]] = (
+        ("isClosed", "SET n.isClosed = true"),
+        ("terminal slot",
+         "SET n.pipelineSlot = 'terminal'"),
+        ("word axis (control)", "SET n.status = 'superseded'"),
+    )
+
+    @staticmethod
+    def _measured_claim(sdk) -> str:
+        """A live Point carrying a MEASURED pair — α=9, β=1 ⇒ mean 0.9."""
+        sfx = uuid.uuid4().hex[:8]
+        pid = sdk._create_point("statement", f"pos-{sfx}",
+                               status="live")["id"]
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.posterior_alpha = 9.0, "
+            "n.posterior_beta = 1.0", params={"id": pid})
+        return pid
+
+    @staticmethod
+    def _end(sdk, pid: str, write: str) -> None:
+        sdk._get_proj().g.query(f"MATCH (n:Point {{id:$id}}) {write}",
+                                params={"id": pid})
+
+    @staticmethod
+    def _surfaces(sdk, pid: str) -> dict:
+        """Every reader that decides "is this a measurement?" for one claim.
+
+        The same five `tests/test_11702_absent_belief_state.py` reads in
+        `_assert_absent_everywhere`, reached through the SAME calls: the real
+        queries, not a hand-built row — a hand-built row would pin this test to
+        the column order it was written against and could pass while the live
+        `RETURN` had stopped carrying the position columns.
+        """
+        from tortoise.ranking import (
+            GapsRanker,
+            GraphRanker,
+            StateRanker,
+            SubgraphExpander,
+        )
+        from tortoise.why import assemble_why_blocks
+
+        proj = sdk._get_proj()
+        node = next(n for n in SubgraphExpander(projection=proj).expand(
+            [pid], depth=1)["nodes"] if n.get("id") == pid)
+        return {
+            "why": assemble_why_blocks(proj, [pid])[pid].get("ep") or {},
+            "graph_ranking": GraphRanker(
+                projection=proj)._fetch_signals([pid], "point")[pid],
+            "recall_ranking": StateRanker(
+                projection=proj)._fetch_point_signals([pid])[pid],
+            "gaps_ranking": GapsRanker(
+                projection=proj)._fetch_confidence_signals(
+                    [pid], labels=["Point"])[pid],
+            "subgraph_node": node,
+        }
+
+    @pytest.mark.parametrize("axis,write", _ENDINGS)
+    def test_every_reader_stops_calling_it_measured(self, axis, write):
+        sdk = _fresh_sdk()
+        try:
+            pid = self._measured_claim(sdk)
+            before = self._surfaces(sdk, pid)
+            # ⛔ THE FIXTURE MUST REACH `measured` FIRST. Without this the
+            # assertions below could pass because nothing was ever believed —
+            # the vacuity class this file's own comments keep naming.
+            assert before["why"].get("has_ep") is True, before["why"]
+            assert before["why"].get("ep_state") == "measured", before["why"]
+            for surface in ("graph_ranking", "recall_ranking",
+                            "gaps_ranking", "subgraph_node"):
+                assert before[surface].get("ep_state") == "measured", (
+                    f"{surface} did not reach `measured` before the ending: "
+                    f"{before[surface]}")
+
+            self._end(sdk, pid, write)
+            after = self._surfaces(sdk, pid)
+
+            # (a) `why` — the customer-visible one. `has_ep` false ⇒ no
+            # measured posterior for an ended record.
+            assert after["why"].get("has_ep") is False, (
+                f"a record ended by {axis} is still served as MEASURED EP on "
+                f"`why`: {after['why']}")
+            assert after["why"].get("measured") is False, after["why"]
+            assert after["why"].get("ep_state") == "baseline", after["why"]
+
+            # (b) the ranking rows + the subgraph metadata. Collected, not
+            # short-circuited: the failure must name EVERY surface still
+            # calling it measured, not just the first one in the tuple.
+            still_measured = sorted(
+                surface for surface in ("graph_ranking", "recall_ranking",
+                                        "gaps_ranking", "subgraph_node")
+                if after[surface].get("ep_state") != "baseline")
+            assert not still_measured, (
+                f"a record ended by {axis} is still classified `measured` on "
+                f"{still_measured}: "
+                + repr({s: after[s] for s in still_measured}))
+            for surface in ("recall_ranking", "gaps_ranking"):
+                assert after[surface].get("has_ep") is False, after[surface]
+
+            # (c) the VALUE does not move — an ending reclassifies, it does not
+            # erase. This is what stops a green here from meaning "the read
+            # broke": the same stored 0.9 is still reported, only no longer as
+            # a measurement.
+            assert after["why"].get("confidence_mean") == pytest.approx(0.9), (
+                after["why"])
+            assert after["recall_ranking"].get("confidence") == pytest.approx(
+                0.9), after["recall_ranking"]
+        finally:
+            sdk.close()
+
+
 class TestTheMcpTagArm:
     """`tortoise_query(tag=…)` used to carry its own `status != 'retracted'`."""
 
