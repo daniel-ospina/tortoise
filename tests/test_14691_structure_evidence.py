@@ -1631,8 +1631,21 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
     containment-in-either-direction predicate this replaced admitted them — mutated
     back in, this arm reds on the end-padded and inside-start rows).
 
-    Every vector is an OFFSET from a site a committed artifact carries, never a literal
-    line number, so this arm cannot expire when a product file is rebased.
+    ⛔ AND THE BOUND'S *VALUE* IS GRADED, not derived from itself (#14723, round 23).
+    The two rows that state the slack as `_CITATION_WIDEN_BOUND` / `+1` move WITH the
+    constant, so they can only grade the relationship: measured at this head,
+    `_CITATION_WIDEN_BOUND = 30` left all **103 passed** while the predicate's docstring
+    ("The START allowance is 20 … a range beginning 21 lines before it is RED") and
+    REPORT.md's §8.20 ("at most **20 lines** before the artifact's start") both became
+    false — the widening "tidy" that docstring forbids, graded by nothing. The last two
+    rows therefore carry the PROSE's own figures as LITERALS — 19-before must be
+    admitted and 21-before refused, which pins the allowance to 19 or 20 and reds a
+    widening to 21+ as well as a tightening below the honest D1 citation's 18.
+
+    Every vector is an offset FROM A SITE a committed artifact carries, never a literal
+    line number, so this arm cannot expire when a product file is rebased. The literals
+    below are slack WIDTHS — the prose's own figures, which must not move with the
+    constant they describe.
     """
     artifacts: set[tuple[str, int, int]] = set()
     for path in (BUNDLE / "out").glob("*.json"):
@@ -1661,6 +1674,12 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
             ((name, lo, hi + span), False),
         "a range that brackets the artifact on both sides": ((name, lo - span, hi + span), False),
         "a MOVED range (the next span down), same width": ((name, lo - span, hi - span), False),
+        # …and the prose's two figures as literals, so the allowance's value cannot be
+        # widened or tightened while the rows above keep moving with it (#14723, round 23).
+        "start slack of the PROSE's green figure (19 lines before), end exact":
+            ((name, lo - 19, hi), True),
+        "start slack of the PROSE's red figure (21 lines before), end exact":
+            ((name, lo - 21, hi), False),
     }
     wrong = {shape: got for shape, (cited, expected) in table.items()
              if (got := _cites_a_site_in(cited, one)) is not expected}
