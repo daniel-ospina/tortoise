@@ -278,11 +278,11 @@ def compute_status(
       no archive
     confirmed, state PRESENT,   ``backup_set_missing``     ``backup_set_missing``
       no manifest                                          (#2374)
-    measured age > threshold    ``stale``                  ``stale``
-    measured age <= threshold,  ``stamp_missing``          ``stamp_missing``
-      no state                                             
+    measured age > threshold,   ``stale``                  ``stale``
+      state PRESENT
+    measured age ANY, no state  ``stamp_missing``          ``stamp_missing``
     measured age <= threshold,  ``ok``                     ``ok``
-      state                                                
+      state PRESENT
     org the sweep skips         ``not_eligible``           (key omitted)
     ==========================  =========================  ================
 
@@ -464,9 +464,15 @@ class BackupWatcher:
         self._eligible_degraded: bool = False
         # Subjects of the previous BACKUP_SET_MISSING census, so a subject that
         # leaves the set resolves. The census has TWO disjoint arms (#9938): an
-        # org with state and NO prefix (never present in ``per_team``, so the
-        # per_team scan cannot close it) and an org with state + a prefix but no
+        # org with state and NO prefix — it is NOT outside ``per_team`` (it
+        # carries the class ``never`` for as long as it stays in the census, the
+        # double-file #14769) but it is inside ``cur_bsm``, so the per_team scan
+        # can only close it once its state is gone, and cannot see it at all if
+        # it also left the census — and an org with state + a prefix but no
         # default manifest (a ``per_team`` key whose class IS the kind).
+        # The two arms are disjoint because arm (ii) requires ``org in
+        # r2_orgs`` and arm (i) requires ``org not in r2_orgs``, NOT because
+        # arm (i) is missing from ``per_team``.
         self._last_backup_set_missing: set[str] = set()
         # #3658 review (cycle 7): the universe-shrink reference, re-baselined
         # ONLY on a CONFIRMED poll — the mirror of `_last_graph_keys`. A
@@ -1300,9 +1306,12 @@ class BackupWatcher:
                 "store holds this kind's resolve for the recovery window; an "
                 "archive that merely REAPPEARS without a manifest is still not a "
                 "measurement. ALSO: the team state disappears (the class is then "
-                "`never`, and the state-only arm of this kind takes the subject "
-                "over), or the org leaves the census and its archive listing "
-                "entirely (universe-shrink: the subject is gone)."),
+                "`never` and NEVER_BACKED_UP is filed — NOT arm (i) of this kind, "
+                "which requires state PRESENT), or the class becomes "
+                "`not_eligible` (the org left the DR surface: this closes and "
+                "NOTHING is opened), or the org leaves the census and its "
+                "archive listing entirely (universe-shrink: the subject is "
+                "gone)."),
         }
 
     def _measured_fresh(self, org: str,
@@ -1550,9 +1559,12 @@ class BackupWatcher:
                 # never measured.
                 #
                 # #9938: this list is the kind's WHOLE census, and its two arms
-                # are disjoint — (i) state present, NO R2 prefix at all (the
-                # state-only org, never a `per_team` key) and (ii) state present,
-                # prefix present, NO default manifest (`compute_status`'s
+                # are disjoint because arm (ii) requires `org in r2_orgs` and
+                # arm (i) requires `org not in r2_orgs` — NOT because arm (i) is
+                # missing from `per_team`: a state-only org that is still in the
+                # census carries the class `never` there (the double-file #14769).
+                # (i) is state present, NO R2 prefix at all; (ii) is state
+                # present, prefix present, NO default manifest (`compute_status`'s
                 # `backup_set_missing` class, always a `per_team` key). Arm (ii)
                 # exists so the org's class and its incident are the SAME
                 # condition: before it, such an org read `stale` (a false age
@@ -1582,8 +1594,9 @@ class BackupWatcher:
                 # poll — the incident would stay open and its dedup state
                 # could absorb the next genuine recurrence.
                 # ...and a state-only org that LEFT the set (tracked across
-                # polls — it is never in `per_team`, so the scan above cannot
-                # close it).
+                # polls — once its state is gone it drops out of `cur_bsm`, and
+                # if it has also left the census it is in NO `per_team` key at
+                # all, where the scan above cannot see it).
                 #
                 # #3146 (review P1): a state-only org is in NO other set, so
                 # its cross-poll resolve gets a single attempt; a resolve left

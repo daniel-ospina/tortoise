@@ -2394,6 +2394,13 @@ def test_a_confirmed_no_manifest_org_that_HAS_state_is_not_called_never():
     assert "merely REAPPEARS without a manifest is still not a measurement" in body, body
     assert "universe-shrink: the subject is gone" in body, body
     assert "the class is then `never`" in body, body
+    # `not_eligible` is a SHIPPED closer for this exact arm too — the branch at
+    # `_drive_alerts`'s `not_eligible` leg resolves KIND_BACKUP_SET_MISSING, and
+    # on a DEGRADED poll it is the only closer (`test_watcher_not_eligible_
+    # closes_preexisting_backup_set_missing`). A closers list that omits it reads
+    # as exhaustive (#9940), so an incident closed by the org leaving the DR
+    # surface looks like the watcher invented a resolve.
+    assert "not_eligible" in body, body
 
 
 def test_status_confirmed_state_org_without_manifest_is_backup_set_missing():
