@@ -1764,17 +1764,23 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
     # strictly inside the range refused, the LAST-LINE offset (`span`, the degenerate single line)
     # admitted, and every offset past the end refused. A sweep, because the figures cannot then be
     # restated wrong — the defect above WAS a restated figure, and a literal is what expired.
-    for k in range(1, span + 4):
-        table[f"start offset {k} inside a span-{span} site, end exact"] = (
-            (name, lo + k, hi), k == span)
+    # ⛔ …and BUILT AS DATA, so the sweep's own EXTENT is gradable (#14723, round 28): a needle in
+    # the docstring proves the SENTENCE exists, not that the loop implements it. Measured at the
+    # previous head, shrinking this loop to `range(1, span + 1)` left `103 passed` while the
+    # sentence "SWEEPS every offset in `1..span + 3`" went false at the tree it describes.
+    start_sweep = {k: ((name, lo + k, hi), k == span) for k in range(1, span + 4)}
+    for k, (cited, expected) in start_sweep.items():
+        table[f"start offset {k} inside a span-{span} site, end exact"] = (cited, expected)
     # ⛔ …and the END side is swept too (#14723, round 25). The paragraph above says shape 3
     # requires the citation to end at EXACTLY the artifact's end, and the table's only end-padded
     # row pads by the site's WHOLE span — so every tolerance narrower than that was graded by
     # nothing. Measured at the previous head, widening `hi - other_hi == 0` to `<= 5` and to
     # `<= 1` left all **103 passed** while the sentence became false at the tree it describes.
-    for k in range(1, span + 1):
-        table[f"end offset {k} past a span-{span} site, start at its start"] = (
-            (name, lo, hi + k), False)
+    # …and likewise as data, for the same reason: `range(1, span + 1)` -> `range(1, span)` at the
+    # previous head left `103 passed` while "every end offset `1..span`" became false.
+    end_sweep = {k: ((name, lo, hi + k), False) for k in range(1, span + 1)}
+    for k, (cited, expected) in end_sweep.items():
+        table[f"end offset {k} past a span-{span} site, start at its start"] = (cited, expected)
     # ⛔ …and NEITHER home of the rule may name an artifact by LINE RANGE. A literal site
     # expired twice here (round 21, and the +23-line hook that also widened the span), so a
     # literal — qualified or bare — is the defect the offset rule exists to remove. Grade it in
@@ -1852,9 +1858,30 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
             _CITATION_WIDEN_BOUND - 1, _CITATION_WIDEN_BOUND + 1), (
         f"the docstring states the pair as {green_txt.group(1)}/{red_txt.group(1)} while the "
         f"constant makes it {_CITATION_WIDEN_BOUND - 1}/{_CITATION_WIDEN_BOUND + 1}")
-    assert "1..span + 3" in doc_all, (
-        "`_cites_a_site_in`'s docstring no longer names the sweep as \"1..span + 3\" — the sweep "
-        "below is `range(1, span + 4)`, i.e. 1..span+3 inclusive")
+    # ⛔ AND EACH SWEEP'S EXTENT IS GRADED — BOTH WAYS (#14723, round 28). The docstring states a
+    # RANGE, so the sentence is true only if the table actually reaches that far; a needle proves
+    # the sentence exists, not that the loop implements it. Measured at the previous head, each
+    # mutant applied alone and the file restored byte-for-byte (`sha256sum` compared): the start
+    # sweep `range(1, span + 4)` -> `range(1, span + 1)` and the end sweep `range(1, span + 1)` ->
+    # `range(1, span)` both left **103 passed** while their sentences went false. A sweep that
+    # stops early is exactly the defect the sweeps were added to remove, one level down: it grades
+    # nothing past the offset where it stops.
+    stated_past = re.search(r"(?i)sweeps\s+every\s+offset\s+in\s+`1\.\.span\s*\+\s*(\d+)`",
+                      doc_all)
+    assert stated_past, (
+        "`_cites_a_site_in`'s docstring no longer names the start sweep as \"sweeps every offset "
+        "in `1..span + <n>`\" — the sweep's extent is graded against that sentence")
+    deepest = span + int(stated_past.group(1))
+    assert (min(start_sweep), max(start_sweep)) == (1, deepest), (
+        f"the start sweep covers offsets {min(start_sweep)}..{max(start_sweep)} while the "
+        f"docstring states `1..span + {stated_past.group(1)}`, i.e. 1..{deepest} on the "
+        f"span-{span} site — a sweep that stops early grades nothing past where it stops")
+    assert re.search(r"every end offset `1\.\.span` past the artifact's end", doc_all), (
+        "`_cites_a_site_in`'s docstring no longer names the end sweep as \"every end offset "
+        "`1..span` past the artifact's end\" — its extent is graded against that sentence")
+    assert sorted(end_sweep) == list(range(1, span + 1)), (
+        f"the end sweep covers offsets {min(end_sweep)}..{max(end_sweep)} while the docstring "
+        f"states `1..span`, i.e. 1..{span} on the span-{span} site")
     # …and REPORT's copies, which are the ones a reader of the EVIDENCE doc actually meets. The
     # slack copy is a REGEX, not a needle, because it is the same figure the docstring copy is
     # graded on and it sits one line below §8.20's allowance needle (#14723, round 28: measured

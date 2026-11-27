@@ -1167,6 +1167,35 @@ GREEN (so the sweep is not red on a change that keeps the rule) · bound `20` �
 exactly `test_the_citation_shape_table_is_the_predicate_the_docstring_states`. No artifact, pin,
 row or predicate changed.
 
+### 8.24 Round 28 — each sweep's own EXTENT was graded by nothing
+
+Rounds 25–27 graded the sweeps' ROWS and every copy of the figures beside them — and left the thing
+those rows are generated from free: the loops' bounds. The docstring states a RANGE — *"SWEEPS
+every offset in 1..span + 3"*, and *"every end offset 1..span past the artifact's end"* — and a
+needle proves the SENTENCE exists, not that the loop implements it. Measured at `8764d4dd3217`, each
+mutant applied
+alone and the file restored byte-for-byte (`sha256sum` compared):
+
+| mutant | result | what became false |
+|---|---|---|
+| start sweep `range(1, span + 4)` → `range(1, span + 1)` | **103 passed** | "SWEEPS every offset in 1..span + 3" |
+| end sweep `range(1, span + 1)` → `range(1, span)` | **103 passed** | "every end offset 1..span" |
+
+A sweep that stops early is the same defect the sweeps were added to remove, one level down: it grades
+nothing past the offset where it stops, and the sentence keeps claiming it does.
+
+**Fix (extent derived from the table that actually ran, not restated).** Both sweeps are now built as
+data before their rows are emitted, so their extent is a value the arm can read; the stated start
+bound is parsed from the docstring and compared against the swept maximum, and the stated end range
+against the swept set. Mutating the loop and mutating the sentence now each red the same arm.
+
+Mutants, each applied alone, file restored byte-for-byte: start sweep → `span + 1` RED · start sweep
+→ `span + 3` (one short) RED · end sweep → `span` RED · end sweep → `span + 2` RED · docstring `+ 3`
+→ `+ 2` RED · docstring end range → `1..span - 1` RED · the end-sweep sentence deleted RED · control
+**103 passed**. Every red is exactly
+`test_the_citation_shape_table_is_the_predicate_the_docstring_states`. No artifact, pin, row or
+predicate changed; no new test file, so no `config/ci-surfaces.yml` row is needed.
+
 ---
 
 ## 9. Mandate-preflight disclosure
