@@ -87,28 +87,27 @@ version: 1
 # and a reader could grep three counts out of the block). ⛔ Every OTHER row this tree carries is `main`'s at this head, so
 # reading one of them as this lane's delta would attribute a partition move to a row that did not
 # cause it.
-# ⛔ PER-COMMIT FOLD FACTS ABOUT THIS BRANCH — never a claim about this head. On THIS tree — `origin/main`
-# `e2a9c695adfb` folded in, over `a0cea310786d`, the fold THIS BRANCH de-spliced (the de-splice is a
-# commit of this branch's own, not an act that fold performed — the possessive spelling credited it
-# with an edit it never made). The rows below landed across the folds and the
-# ones before them. ⛔ NO POOL SIZE, NO ROW COUNT AND NO FOLD LIST here either — the rule the
-# paragraph below states, and the reason it is stated twice: an earlier spelling of THIS sentence
-# named a fold as "the newest" that was not, and credited another with a splice its file never
-# took. What a reader needs is PER-COMMIT fact, not a window: `e2a9c695adfb` is the fold this head
-# LAST de-spliced — the splice the paragraph below resolves by a fresh RE-DERIVATION, not by
-# provenance (that resolution belongs to `ff10fb328891`'s fold `24493da53136`, which is the one
-# that produced DUPLICATE `durations` keys) — and `ff10fb328891` changed ONE `durations` ROW and
-# no line of this block. ⛔ AND NOT "the folds after X touched nothing": that window was FALSE
-# here. `bf16c791a489`, the fold cited in the next sentence, is itself after `a0cea310786d` and
-# moved seventeen lines INSIDE this block; and an earlier fold, `f2d4f2408cf5`, spliced a SECOND
-# derivation in it (`de311a35a2da`), so `e2a9c695adfb` — not `a0cea310786d` — is the last fold
-# this head found splicing a second DERIVATION — not the only fold to splice anything, since `ff10fb328891` spliced `durations`.
+# ⛔ THE GRADED CLAUSE IS A CLAIM ABOUT THIS HEAD; the rest of this paragraph is a MEASUREMENT
+# RULE. On THIS tree — `origin/main` folded in at this branch's last merge (`git log --first-parent
+# --merges` names it; the sha is deliberately NOT restated: it moves with every fold, nothing grades
+# it, and a named one rots into the stale attribution a reader then quotes as a fact — #14723 review,
+# P2 twice: first a base two folds behind, then a "LAST de-spliced" ordinal the NEXT fold falsified)
+# — the clause above is a fresh RE-DERIVATION with `--emit-push-matrix`, never a pick-a-side of two
+# spliced copies. The rows below landed across the folds and the ones before them. Fold provenance
+# lives on the commit that measured it, which is where any "which fold" answer belongs.
+# ⛔ NO POOL SIZE, NO ROW COUNT AND NO FOLD LIST here either — the rule the paragraph below states,
+# and the reason it is stated twice: an earlier spelling of this sentence named a fold as "the
+# newest" that was not, and credited another with a splice its file never took.
+# ⛔ THE ONE PER-COMMIT FACT THAT JUSTIFIES THE RE-DERIVATION is about `durations`, not about this
+# clause: `ff10fb328891` changed ONE `durations` row and NO line of this block (measured:
+# `git diff ff10fb328891^1 ff10fb328891 -- config/ci-surfaces.yml`) — so a fold CAN move a
+# `durations` row without touching this clause, which is why the clause is re-derived per fold
+# rather than inferred from "nothing changed here". ⛔ AND NOT "the folds after X touched
+# nothing": that window is the same census rot one level up, and it has been false on this branch.
 # ⛔ AND MEASURED, NOT with `git show --stat` — that prints NO diff for a MERGE commit unless it
 # is given `-m` (it falls back to the combined `--cc` form, which lists a file only when it
-# differs from EVERY parent), and this block's whole subject is
-# merges, so it reads "untouched" over a spliced file: measured on `bf16c791a489`, a two-parent
-# fold in THIS branch's history that moved seventeen lines of this block, and
-# `git show --stat bf16c791a489 -- config/ci-surfaces.yml` printed nothing. The safe form is
+# differs from EVERY parent), and this block's whole subject is merges, so it reads "untouched"
+# over a spliced file. The safe form is
 # `git diff <sha>^1 <sha> -- config/ci-surfaces.yml`, run PER FOLD — never as "empty since X",
 # which is the same census rot one level down. Each splice's figures live on the commit that
 # measured them — never carried into this derivation. THIS TREE'S DERIVATION CARRIES:
@@ -288,8 +287,12 @@ version: 1
 # is a window the NEXT fold renumbers — the same reason the paragraph below states no window — so
 # it is left unstated rather than stated and re-staled, on the schedule the figures above refuse.
 # ⛔ NO WINDOW IS STATED HERE, and the reason is a measurement: "the folds after `a0cea310786d`
-# touched nothing" was FALSE in this very paragraph, because `bf16c791a489` landed after it and
-# moved seventeen lines of this block. The derivation reads ONCE because each fold was checked on
+# touched nothing" was FALSE in this very paragraph — a later fold moved seventeen lines of this
+# block. ⛔ THAT FOLD IS NOT NAMED HERE ON PURPOSE: three shas measured on a SIBLING branch's folds
+# had entered this paragraph as facts about THIS branch, and #14723's review measured them absent
+# from this history — so `git merge-base --is-ancestor <sha> HEAD` is the test before any sha is
+# restated as a fact here, and a fact that loses that test belongs on the commit/lane that measured
+# it. The derivation reads ONCE because each fold was checked on
 # its OWN commit. ⛔ THOSE FOLDS' ATTRIBUTION IS NOT CARRIED FROM THE FOLD THAT DID: the `ff10fb328891`
 # fold before them spliced this block on NEITHER side — it left the derivation reading once — and
 # spliced `durations` instead: under the same `merge=union` driver
