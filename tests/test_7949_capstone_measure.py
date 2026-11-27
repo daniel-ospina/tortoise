@@ -12456,11 +12456,21 @@ _MEMBERSHIP_CMD_RE = re.compile(
     # number three other claims quote.
     r"(?:numstat|name-only|name-status) origin/main\.\.\.HEAD -- "
     r"docs/epics/2026-11-04-7949-extractor-v4-capstone/(?P<path>[0-9A-Za-z._-]+\.md)`"
-    r"(?P<tail>[^;]{0,60})"
+    # ⛔ 120, not 60 (#14587 review P2): at 60 the tail was cut off mid-verdict — measured on
+    # `05-verify.md`, the D5 row's own sentence reached the window's edge at
+    # `" -> `1 1` at this head, and the EMPTY reading this clause us"`, so a verdict written
+    # past the 60th character was unread by construction rather than absent.
+    r"(?P<tail>[^;]{0,120})"
 )
 
 #: The two spellings the documents used for "this file is in no part of this diff".
 _NEGATIVE_MEMBERSHIP_VERDICTS = ("prints NOTHING", "is EMPTY")
+
+#: The spellings a document uses for a MEASURED pair. ⛔ BOTH, and the second one is the
+#: bug (#14587 review P2): the documents write `-> `1 1``, the detector read `prints `1 1``
+#: only, so the one live claim on this head was classified by NOTHING while the fixture below
+#: — cut from the retired assertion's spelling — kept the arm's own mutation test green.
+_POSITIVE_MEMBERSHIP_VERDICTS = ("prints `1 1`", "-> `1 1`")
 
 
 def _membership_claims(doc_text: str) -> tuple[list[str], list[str]]:
@@ -12476,13 +12486,22 @@ def _membership_claims(doc_text: str) -> tuple[list[str], list[str]]:
         tail = match.group("tail")
         if any(verdict in tail for verdict in _NEGATIVE_MEMBERSHIP_VERDICTS):
             negative.append(f"{match.group('path')} -> {tail.strip()[:70]!r}")
-        elif "prints `1 1`" in tail:
-            positive.append(match.group("path"))
+        elif any(verdict in tail for verdict in _POSITIVE_MEMBERSHIP_VERDICTS):
+            positive.append(f"{match.group('path')} -> {tail.strip()[:70]!r}")
     return negative, positive
 
 
 def test_no_bundle_document_states_a_negative_membership_claim_it_cannot_keep():
-    """A `numstat … prints NOTHING` sentence is the shape that was FALSE at `6c2c4d06`."""
+    """A `numstat … prints NOTHING` sentence is the shape that was FALSE at `6c2c4d06`.
+
+    ⛔ IT GRADES BOTH POLARITIES (#14587 review P2), because the affirmative form is the SAME
+    head-bound claim with its sign flipped (`#13853` review round 12) and it is the form that was
+    actually live: measured on this head, the D5 row asserted *"the CURRENT I7 span re-point IS
+    this diff's … -> `1 1` at this head"* while `04-plan.md`'s blob is byte-identical to
+    `origin/main`'s (one `git rev-parse` id for both). Read on `negative` alone, that sentence was
+    graded by nothing — and the arm stayed green over it, which is the no-op-gate class this
+    whole block exists to remove rather than to reproduce one layer up.
+    """
     # ⛔ NON-VACUITY ON THE PATTERN ITSELF (#14587 review P3), before it reads a
     # document: the three command prefixes a bundle document can quote must ALL be
     # READ, and each must yield the negative claim when the claim is stated. This
@@ -12503,14 +12522,20 @@ def test_no_bundle_document_states_a_negative_membership_claim_it_cannot_keep():
             f"document can quote. Fixture that produced no finding: {fixture!r}")
     failures = []
     for name in ("04-plan.md", "05-verify.md"):
-        negative, _ = _membership_claims(_EPIC_CITE_DOCS[name].read_text(encoding="utf-8"))
+        negative, positive = _membership_claims(
+            _EPIC_CITE_DOCS[name].read_text(encoding="utf-8"))
         for claim in negative:
-            failures.append(f"{name}: {claim}")
+            failures.append(f"{name}: NEGATIVE {claim}")
+        for claim in positive:
+            failures.append(f"{name}: TYPED PAIR {claim}")
     assert not failures, (
-        "a bundle document states a NEGATIVE membership claim about a file in this diff. "
-        "Membership changes with every commit that touches that file — and `2bedbc41` made "
-        "this sentence FALSE two lines away from the repair it was describing. State the pair "
-        f"the command prints (`prints \\`1 1\\``) instead. Measured: {failures}")
+        "a bundle document states a membership verdict about a file in this diff — negative "
+        "(`prints NOTHING` / `is EMPTY`) or a TYPED PAIR. Membership changes with every commit "
+        "that touches that file, and `2bedbc41` / the D5 row each made their own sentence FALSE "
+        "two lines away from the repair it was describing, in one polarity and then the other. "
+        "Neither figure survives a fold: ROUTE the question to the command that answers it and "
+        "let a reader re-run it. Measured: "
+        f"{failures}")
 
 
 #: The sentence that ROUTES membership for the one path this block used to type a figure for.
@@ -12567,6 +12592,32 @@ def test_the_membership_detectors_fire_on_the_sentences_that_actually_shipped():
         "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints `1 1` "
         "at the head it was read at")
     negative2, positive2 = _membership_claims(fixed_shape)
-    assert positive2 == ["04-plan.md"] and not negative2, (
+    assert positive2 and not negative2, (
         "the positive half of the detector no longer parses the pair shape, so an EMPTY `positive` "
         f"list in the documents would prove nothing — negative={negative2} positive={positive2}")
+    # ⛔ THE DOCUMENT'S OWN SPELLING, not the retired assertion's (#14587 review P2). The fixture
+    # above is `prints `1 1``; `05-verify.md` writes `-> `1 1``. Parsing only the fixture's
+    # spelling is how the one live affirmative claim went unread while this arm stayed green —
+    # the fixture proved the parser handled a shape the subject never uses.
+    doc_shape = (
+        "`git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` -> `1 1` "
+        "at this head")
+    negative3, positive3 = _membership_claims(doc_shape)
+    assert positive3 and not negative3, (
+        "the detector does not parse the spelling the DOCUMENTS use (`-> `1 1``), so the live "
+        f"affirmative claim is graded by nothing — negative={negative3} positive={positive3}")
+    # ⛔ AND THE SUBJECT IS ASSERTED, not assumed: an arm over a document that contains no
+    # membership command reads NOTHING and passes — measured before this line existed, the arm
+    # yielded `negative=0 positive=0` over a `05-verify.md` that carried four commands and one
+    # live claim. A guard must prove it was handed the shape, not only that it would grade it.
+    # ⛔ The count is asserted over the DOCUMENT SET rather than per file: `04-plan.md` mentions
+    # the command ZERO times at this head (it is `05-verify.md` that carries the claims), so a
+    # per-file assertion would red on a document the arm was never meant to grade.
+    commands = sum(len(_MEMBERSHIP_CMD_RE.findall(_EPIC_CITE_DOCS[name].read_text(encoding="utf-8")))
+                   for name in ("04-plan.md", "05-verify.md"))
+    assert commands, (
+        "neither graded document carries a membership command for `_MEMBERSHIP_CMD_RE` to read, "
+        "so the `negative`/`positive` arms above grade an EMPTY subject and their green proves "
+        "nothing — re-point the regex at the sentence the documents actually use, or retire the "
+        "arms rather than leaving them reading nothing")
