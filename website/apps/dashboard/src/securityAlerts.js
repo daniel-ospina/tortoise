@@ -37,9 +37,10 @@
 // happened, and an unrecognised row cannot support that claim.
 //
 // Kept as pure derivations so `node --test` can execute the decisions without a
-// React renderer; the panel that renders them is `securityAlertsPanel.jsx`
-// (vitest + jsdom) and the copy lives here, once, so the render and the tests
-// cannot disagree about it.
+// React renderer; the surface that renders them is `notificationPanel.jsx`
+// (#14686 — the notifications menu; before it, `securityAlertsPanel.jsx`), and
+// the copy lives here, once, so the render and the tests cannot disagree about
+// it.
 
 export const REGISTER_ALERT = 'alert'
 export const REGISTER_ACTIVITY = 'activity'
@@ -248,6 +249,41 @@ export function episodeRangeLabel(alert) {
     ? `${time(first)} → ${time(last)}`
     : `${first.toLocaleDateString()} ${time(first)} → ${last.toLocaleDateString()} ${time(last)}`
 }
+
+// ── #14686: RESIDUE ────────────────────────────────────────────────────────
+//
+// ⛔ THE NAMES BELOW, NOT "everything below this line": `feedStateOf` sits below
+// too and is LIVE (`main.jsx` imports it and parses the feed with it). A blanket
+// positional claim in the one note whose purpose is to let a lane delete dead copy
+// is how live copy gets deleted.
+//
+// These exports lost their only production consumer when the
+// two-register panel (`securityAlertsPanel.jsx`, deleted) became the notifications
+// ledger: `ALERTS_HEADING`/`ALERTS_LEAD`/`ACTIVITY_HEADING`/`ACTIVITY_LEAD`,
+// `ACKED_CHIP`/`ACK_BUTTON`, `SHOW_OLDER`/`HIDE_OLDER`,
+// `NOTHING_RECENT`/`ALL_RECENT_ACKED`, `isCurrent`, `groupAlerts`, `isEmptyFeed`.
+// They are NOT reachable from any render — a reader looking for the copy a
+// customer sees must read `notificationLedger.js` (the ledger's copy) and the
+// server's `_alert_dict` (the per-row sentences), not this file's headings.
+//
+// ⛔ TWO CLASSES, SAID APART, because only one of them is safe to delete blind.
+// `ALERTS_HEADING`/`ALERTS_LEAD`/`ACTIVITY_HEADING`/`ACTIVITY_LEAD`, `isCurrent`,
+// `groupAlerts` and `isEmptyFeed` are still ASSERTED by this file's suite, so
+// deleting them reds a test and the deleter finds out.
+// `ACKED_CHIP`/`ACK_BUTTON`/`SHOW_OLDER`/`HIDE_OLDER`/`NOTHING_RECENT` and
+// `ALL_RECENT_ACKED` are referenced by NOTHING at all — no render and no test —
+// so they are deletable blind (verified: the only hits for each name in the repo
+// are its own declaration and this note). `ACK_PENDING` left this list entirely:
+// the ack button's pending label now imports it, so it has a live consumer.
+// A single sentence for both classes is how this note used to read — "kept only
+// because their tests still assert them" was false for the six a lane would act
+// on, which is the "export with coverage" illusion the note exists to dispel
+// (#14694 review P2).
+//
+// This note exists so a lane can tell DEAD COPY from live copy instead of
+// trusting that an export with passing tests is in use; deleting them is a copy
+// review (the register distinction they encode is now a per-row chip), not a
+// mechanical remove.
 
 /**
  * Split the feed into the two registers, each further split into what renders

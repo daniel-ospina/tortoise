@@ -1210,6 +1210,40 @@ class TestR1Calibration:
             row["message"])
         assert "rule" not in row["details"]
         assert "point_create" not in row["message"]
+        # #14694 review P2: the SURFACE must travel in `details` too, derived
+        # through the same fixed map. The dashboard keys a Dismiss/Snooze
+        # decision on `details.surface`; without it the key falls back to the
+        # MESSAGE, which now embeds the measured count (#14702) and changes every
+        # window — so on a pre-plumbing row a dismissal stopped matching and the
+        # alert came back with no explanation. Deriving it here fixes the ~4 500
+        # historical rows as well as the message was already fixed.
+        assert row["details"]["surface"] == "Memory writes", row["details"]
+        # …and the derivation must not become a leak of the internal rule token.
+        assert "rule" not in row["details"]
+        assert "point_create" not in str(row["details"])
+
+    def test_a_recorded_surface_wins_over_the_derived_one(self):
+        """#14694 review residual: the derivation is a FALLBACK, not an override.
+
+        `_customer_details` must keep a surface the row itself recorded. The
+        dashboard keys a Dismiss/Snooze decision on `details.surface`, so
+        replacing a recorded name with a re-derived one changes that key and
+        evaporates the reader's dismissal — the exact failure the derivation
+        closed for rows that carry no name at all, just for a different
+        population.
+
+        This needs its own row because today's only writer records the same name
+        the map derives (`SupabaseAbuseStore.flag_org`), which is precisely what
+        makes an unconditional derive-and-override invisible: the historical-row
+        assertion above passes either way. Only a recorded name that DIFFERS from
+        the rule's derivation tells the two implementations apart.
+        """
+        row = abuse._alert_dict({"event_type": "flag", "details": {
+            "rule": "point_create", "surface": "Reads",
+            "count": 12, "threshold": 5, "window_s": 60}})
+        assert row["details"]["surface"] == "Reads", row["details"]
+        # The recorded name travels to the prose too — one name, not two.
+        assert row["message"].startswith("Reads reached 12 units"), row["message"]
 
     def test_the_allowance_read_is_cached_per_org(self, notified):
         """The read sits on the capture path, so it is cached; the cache is what
