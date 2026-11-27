@@ -555,12 +555,12 @@ class RecordWrite:
     #: thing, and a second word list is a second thing to drift.
     #:
     #: ⛔ ``journal_collision`` IS THE ONE POST-WRITE CONFLICT TOKEN (#9318, #12904).
-    #: Every other value is one of three earlier shapes: decided before a socket
-    #: is opened (`_live_write_verdict` — `malformed_dsn`, `no_tenant*`,
-    #: `circuit_open`, `no_durable_journal`), decided by the projection BEFORE a
-    #: statement ran and after the connection was up (`plan_refused`, #11783), or
-    #: decided by a statement that executed and failed (`write_failed`). This one
-    #: is none of those: it is a VERDICT on
+    #: Every other value is one of three earlier shapes: decided before a socket is
+    #: opened (`_live_write_verdict` — `malformed_dsn`, `no_tenant*`, `circuit_open`,
+    #: `no_durable_journal`), decided by the projection before a statement ran with the
+    #: connection up (`plan_refused`, #11783), or decided by the write itself: the store
+    #: unreachable, a statement that executed and failed, or an allocator/position guard
+    #: (`write_failed`). This one is none of those: it is a VERDICT on
     #: a conflict: the position row holds a record this write cannot index —
     #: a different `event_type`, a different capture time, an identity the
     #: surviving row CONTRADICTS, or (with no `ts` for the capture time to be
@@ -3966,9 +3966,12 @@ def _plan_refusal_cause(
     ``test_9318_journal_collision.py::test_a_write_that_failed_for_another_
     reason_is_still_write_failed`` monkeypatches ``replay`` wholesale — deleting
     the exclusion here AND at the stamp leaves it GREEN. What holds it is the
-    marker's ABSENCE. The exclusion is DEFENCE IN DEPTH, for a raise that later
-    moves INSIDE ``replay_plan``; the pin that actually exercises this boundary
-    is ``test_record_searchkeys_10620.py::
+    marker's ABSENCE. ⛔ AND THE EXCLUSION BELOW IS DEFENCE IN DEPTH THAT CANNOT
+    FIRE WHILE THE STAMP'S OWN EXCLUSION STANDS (measured): the stamp refuses a
+    ``RecordStatementError`` (``record_projection.py:9072-9073``), so a raise that
+    moved INSIDE ``replay_plan`` would be unstamped rather than exempted here, and
+    this type test does work only once THAT one is removed or narrowed. The pin
+    that exercises this boundary is ``test_record_searchkeys_10620.py::
     test_a_store_refusal_after_the_plan_was_built_stays_write_failed``.
 
     ``__cause__`` first, ``__context__`` second, bounded with a visited set —
