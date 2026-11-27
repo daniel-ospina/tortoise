@@ -2814,7 +2814,9 @@ def record_record_write_failure(reason: str) -> None:
       SILENTLY. "Alone" is load-bearing: a re-derivation whose identities DID
       move IS counted (every state OUTSIDE `_SILENT_IDENTITY_STATES` — `disagrees`,
       plus anything a later edit leaves unenumerated, #9318), and so is
-      a `ts`-less one, where there is no capture time to compare. ``replay`` heals an OUTAGE and re-refuses a PLAN BUILD (the two bullets above); it cannot heal THIS
+      a `ts`-less one, where there is no capture time to compare. ``replay``
+      heals an OUTAGE and re-refuses a PLAN BUILD (the two bullets above); it
+      cannot heal THIS
       one, because the append-only row that owns the position carries that
       other content, and the key carries no journal identity — that is ``#12894``'s
       schema decision. A genuine REPLAY (same position, same content — and, when

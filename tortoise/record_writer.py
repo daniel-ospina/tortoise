@@ -1969,8 +1969,10 @@ def derived_embedding_columns(
     derives nothing, so every row it CREATES lands `embedding` NULL. ⚠️ NOT
     "every row it folds", which an earlier cut said: `embedding` is absent from
     the node UPSERT's column list AND from `ON CONFLICT … DO UPDATE SET` (both
-    name only the BOUND columns — the SET list is built from `col_values`,
-    `record_projection.py:3446`), so a row that already HAS a vector keeps it
+    name only the BOUND columns — the SET list is `_upsert_statement`'s
+    `", ".join(f"{c} = EXCLUDED.{c}" for c in col_values)`, cited by SYMBOL since
+    a line number here had already rotted on `origin/main`, #11783 round 29),
+    so a row that already HAS a vector keeps it
     through a no-derived re-fold (measured: `payload_SURVIVED=t vec_SURVIVED=t`).
     The scope matters — it is the difference between "the backfill mints blank
     rows" and "the backfill wipes the population". The long form, with the
@@ -4738,14 +4740,15 @@ def write_live_record(record: Mapping[str, Any], *,
             # sentence; an unqualified copy left behind in any of them is the
             # defect this note exists to stop. ⛔ THE OTHER ARMS that name the
             # journal's provenance, each for its own reason: `journal_collision`
-            # cannot fire on this arm at all — the flag forces `allocate`
-            # (:4273) and an allocated plan writes the position through
-            # `ALLOCATION_SQL` rather than the journal INSERT the collision guard
-            # keys on (``replay``'s ``_JOURNAL_INSERT_PREFIX`` call site — by
-            # SYMBOL, not a line number: the number that stood here was off by
-            # one on arrival, #11783 round 29); `position_unverifiable` is
-            # exempt by its OWN guard (`and not journal_skipped`, :4281) rather
-            # than by reachability; and `position_divergence` is unreachable FROM
+            # cannot fire on this arm at all — the flag is one of the THREE terms
+            # of the `allocate` fold (`allocate = allocate or
+            # record_live_allocate() or journal_skipped`); an allocated plan writes
+            # the position through `ALLOCATION_SQL` rather than the journal INSERT
+            # the collision guard keys on (``replay``'s ``_JOURNAL_INSERT_PREFIX``
+            # call site — by SYMBOL, not a line number: the number that stood here
+            # was off by one on arrival, #11783 round 29); `position_unverifiable`
+            # is exempt by its OWN guard (`and not journal_skipped`) rather than by
+            # reachability; and `position_divergence` is unreachable FROM
             # `live_write` only WHEN IT SETS THIS FLAG, which passes `seq=None`
             # (`live_write.py:650`) — but NOT from a direct caller that passes
             # both, which the suite itself does and now pins, so its WHOLE
