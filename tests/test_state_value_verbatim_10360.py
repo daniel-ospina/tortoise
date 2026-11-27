@@ -7648,9 +7648,9 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     on = _e2_arm_runs("on")
     off = _e2_arm_runs("off")
     # ⚠️ THE ARM DEFINITION, and why the counts are asserted: one run under
-    # stochastic decoding is one draw, and the run-to-run range on this corpus
-    # is as large as the arms' mean separation. A receipt count other than these
-    # must move the row's own statement of its sample size.
+    # stochastic decoding is one draw, and the run-to-run range on this corpus is
+    # more than twice the separation between the arms' means. A receipt count
+    # other than these must move the row's own statement of its sample size.
     # 4 pass-armed draws + 2 control draws: the two receipts originally labelled
     # `-off-` were produced by the `-u TORTOISE_VALUE_GATE` spelling, which
     # resolves the gate ON (#10996), so they are pass-armed realizations and are
