@@ -4342,6 +4342,17 @@ def test_an_empty_sweep_says_it_read_nothing_not_that_the_arm_did_not_run(capsys
     # `ref.search` + a keyword stem made it one, and the union erased the qualifier above it.
     "Closes #13036 (row V2 only).\n\n#13036 records six rows V1, V2, V3, V4, V5, V6 and closes "
     "when all are measured.",
+    # ⛔ AND THE `Satisfies` LINE THAT IS NOT A CLAIM (review round 17, F1): the documented partial form
+    # is eight words that also appear in a PLAN, a QUOTATION, an unticked TEMPLATE and a sentence about
+    # somebody else's PR. Reading those as claims overrode the qualifier above them and restored the
+    # arm's headline false PASS.
+    "Closes #13036 (row V2 only)\n\n- [ ] Satisfies #13036: V1, V2, V3, V4, V5, V6",
+    "Closes #13036 (row V2 only)\n\nA later PR will write Satisfies #13036: V1, V2, V3, V4, V5, V6 "
+    "once every row is measured.",
+    "Closes #13036 (row V2 only)\n\nThe predecessor PR carries Satisfies #13036: V1, V2, V3, V4, V5, V6.",
+    "Closes #13036 (row V2 only)\n\nOther PRs write Satisfies #13036: V1, V2, V3, V4, V5, V6.",
+    "Closes #13036 (row V2 only)\n\n> Satisfies #13036: V1, V2, V3, V4, V5, V6",
+    "Closes #13036 (row V2 only)\n\n## Will write: Satisfies #13036: V1, V2, V3, V4, V5, V6",
 ])
 def test_a_disclosed_partial_close_never_reads_as_a_pass(body):
     """The three shapes a lane actually writes — a TODO list, a NEGATION of the close, a row table.
@@ -4402,3 +4413,23 @@ def test_a_fully_qualified_closing_ref_is_read_with_its_repo(body, expected, unc
         assert findings[0].evidence["unclaimed"] == unclaimed, findings[0].evidence
     else:
         assert findings == [], [f.as_dict() for f in findings]
+
+
+@pytest.mark.parametrize("body,expected", [
+    # the documented partial form still CLAIMS when it is an affirmative statement, bare or
+    # fully-qualified (round 17, F2 — the qualified form was simply not matched, so the claim vanished)
+    ("Closes #13036\n\nSatisfies #13036: V2\n", "finding"),
+    ("Closes #13036\n\nSatisfies daniel-ospina/tortoise#13036: V2\n", "finding"),
+    # …and it still CLOSES when it names every row
+    ("Closes #13036\n\nSatisfies #13036: V1, V2, V3, V4, V5, V6\n", "clean"),
+    # …while an UNTICKED template claims nothing at all (it is a mention, so the verdict is the honest
+    # non-answer, never a pass)
+    ("Closes #13036\n\n- [ ] Satisfies #13036: V1, V2, V3, V4, V5, V6\n", "ambiguous"),
+])
+def test_the_satisfies_form_is_read_under_its_own_polarity(body, expected):
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)},
+                                              "daniel-ospina/tortoise")
+    assert stats[expected] == 1, (body, stats)
+    if expected == "finding":
+        assert findings[0].evidence["claimed"] == ["V2"], findings[0].evidence

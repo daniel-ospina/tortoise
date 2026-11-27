@@ -1392,7 +1392,12 @@ ROW_HEADING_RE = re.compile(rf"^[ \t]{{0,3}}#{{2,4}}[ \t]+(?P<id>{ROW_ID})(?![A-
                             re.MULTILINE)
 # The documented PARTIAL form, `Satisfies #<N>: <ids>` (`docs/ops/ISSUE-WORKING-PROCESS.md` §7) — the
 # one place the process already asks a lane to write the ids it claims.
-SATISFIES_IDS_RE = re.compile(r"Satisfies\s*#(?P<num>\d{1,7})\s*:(?P<ids>[^\n]*)", re.IGNORECASE)
+# `owner/repo#N` is accepted too (review round 17, F2): the mount passes `--repo`, and a fully-qualified
+# partial form was simply not MATCHED here, so the claim vanished and a real partial close read
+# `ambiguous` — a lost warning in the one form the docs tell a lane to write.
+SATISFIES_IDS_RE = re.compile(
+    r"Satisfies\s*(?:(?P<owner>[\w.-]+)/(?P<repo_name>[\w.-]+))?#(?P<num>\d{1,7})\s*:(?P<ids>[^\n]*)",
+    re.IGNORECASE)
 _CLOSING_WORD_RE = re.compile(r"\b(?:" + "|".join(CLOSING_WORDS) + r")\b", re.IGNORECASE)
 
 
@@ -1593,7 +1598,7 @@ _DISCLAIMER_RE = re.compile(
 # complete claim on all six, i.e. `clean` on a one-row close — the false PASS this rule exists for.
 _AFFIRM_RE = re.compile(
     r"\b(?:prov(?:e|es|ed|en|ing)|measur\w+|done|complet\w+|deliver\w+|cover(?:s|ed)?|verif\w+"
-    r"|satisf\w+|landed|shipped|closed|all\s+six|every\s+row)\b",
+    r"|landed|shipped|closed|all\s+six|every\s+row)\b",
     re.IGNORECASE)
 # ⛔ AND "PROVED … IN OTHER PRs" IS NOT A CLAIM ON THESE ROWS (review round 11): the whole-body
 # fallback asks "does this body affirmatively name every row", and a disclosure saying the other rows
@@ -1696,6 +1701,42 @@ def _closing_line_range_claim(line: str, claim_text: str, rows: list[str]) -> se
     return out
 
 
+# ⛔ A `Satisfies` LINE THAT IS NOT A CLAIM. The documented partial form is an AFFIRMATIVE statement of
+# what the PR delivered; the same eight words appear in a PLAN, in a quotation, in an unticked template
+# and in a sentence about somebody else's PR — and reading those as claims turned the arm's headline
+# false PASS back on (review round 17, F1). The line must not be an unchecked checkbox, a blockquote, a
+# heading, a question, or a remark about other/future work.
+_NOT_A_CLAIM_LINE_RE = re.compile(r"^\s*(?:[-*+]\s*\[[ ~-]?\]|>|#{1,6}\s)|\?\s*$", re.MULTILINE)
+
+
+def _satisfies_claim(text: str, issue: int, rows: list[str], repo: str | None) -> set[str]:
+    """The rows a `Satisfies #<issue>: <ids>` clause CLAIMS — the documented partial form.
+
+    Read only where polarity is positively established: an unticked checkbox, a quotation, a heading,
+    a question, or a clause that points at other/future work is a mention, and mentions are not claims
+    in either direction. A fully-qualified `owner/repo#N` must name THIS repo when the repo is known.
+    """
+    claimed: set[str] = set()
+    for match in SATISFIES_IDS_RE.finditer(text):
+        if int(match.group("num")) != issue:
+            continue
+        owner, name = match.group("owner"), match.group("repo_name")
+        if owner and repo and f"{owner}/{name}".lower() != repo.lower():
+            continue
+        if owner and not repo:
+            continue
+        start = text.rfind("\n", 0, match.start()) + 1
+        end = text.find("\n", match.end())
+        line = text[start:end if end != -1 else len(text)]
+        if _NOT_A_CLAIM_LINE_RE.search(line):
+            continue
+        clause = SATISFIES_IDS_RE.sub(lambda m: m.group("ids"), line, count=1)
+        if _DISCLAIMER_RE.search(clause) or _ELSEWHERE_RE.search(clause):
+            continue
+        claimed |= _ids_in(match.group("ids"), rows)
+    return claimed
+
+
 def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
                         repo: str | None = None,
                         skipped: list[int] | None = None) -> tuple[set[str], bool]:
@@ -1733,9 +1774,6 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
     """
     text, _hidden = strip_code(pr_body, strict=True)
     named: set[str] = set()
-    for match in SATISFIES_IDS_RE.finditer(text):
-        if int(match.group("num")) == issue:
-            named |= _ids_in(match.group("ids"), rows)
     disclaimed = False
     ref = re.compile(rf"#{issue}(?!\d)")
     for line in text.splitlines():
@@ -1815,6 +1853,14 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             claim_text = "".join(chars)
             named |= _explicit_ids(claim_text, rows)
             named |= _closing_line_range_claim(line, claim_text, rows)
+    # ⛔ THE CLOSING LINE WINS, AND `Satisfies` IS READ ONLY WHEN IT SAID NOTHING (review round 17,
+    # F1). The `Satisfies` loop ran FIRST and UNIONED, with no clause context at all — so an
+    # unticked `- [ ] Satisfies #N: V1..V6`, a future-tense plan (`A later PR will write Satisfies
+    # #N: …`), a BLOCKQUOTED template or a `## Will write:` heading enumerated all six rows and
+    # overrode the qualifier: `Closes #N (row V2 only)` + an unticked checklist read `clean`, the
+    # false PASS this arm exists for. A `Satisfies` line is now read under the same polarity rules
+    # every other read uses, and only where the closing line named nothing.
+    named |= _satisfies_claim(text, issue, rows, repo)
     return named, disclaimed
 
 
@@ -1994,6 +2040,8 @@ def classify_partial_close(body: str, number: int | str,
             # rows must name themselves in a clause carrying a COMPLETION verb and no disclaimer.
             affirmative_all = False
             for line in strip_code(body, strict=True)[0].splitlines():
+                if _NOT_A_CLAIM_LINE_RE.search(line):
+                    continue
                 for a, b in _clause_spans(line, rows):
                     clause = line[a:b]
                     if (_AFFIRM_RE.search(clause) and not _DISCLAIMER_RE.search(clause)
