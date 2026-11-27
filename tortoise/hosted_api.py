@@ -1877,6 +1877,17 @@ _CAPTURE_INTAKE_SLOT_WAIT_S = 5.0
 _CAPTURE_INTAKE_SLOT_WAIT_TRIES = 6
 #: How long a drain sleeps when the store itself is unavailable.
 _CAPTURE_INTAKE_STORE_BACKOFF_S = 30.0
+#: How many CONSECUTIVE claim faults a drain absorbs before it ENDS.
+#: ⛔ BOUNDED ON PURPOSE (#14707 review P3): the claim arm used to `continue` on
+#: every store fault forever, so a permanently unreadable store left one immortal
+#: drainer per tenant — holding its `key` in `_CAPTURE_INTAKE_DRAINERS`, which is
+#: exactly what makes `_capture_intake_sweep` skip that tenant from then on. Three
+#: absorbed faults (90 s of grace at the backoff above) cover a restart or a blip;
+#: past that, returning releases the key and the SWEEP (or the tenant's next
+#: ordinary capture) re-arms the drain, which is the self-healing path that exists
+#: for every other stranded-queue case. An unreadable store is not a reason to
+#: pin a task to it.
+_CAPTURE_INTAKE_CLAIM_FAULT_TRIES = 3
 #: Drain faults that are TRANSIENT — the item is not at fault, so it goes back
 #: with NO attempt charged (`CaptureIntake.defer`). Everything else is a verdict
 #: about the ITEM or the ENTRY and parks the row `failed` immediately, visible,
@@ -2056,6 +2067,17 @@ async def _capture_accept_into_intake(body, request, org: dict) -> JSONResponse:
         # 503 is retryable for both client legs (neither unlinks on 5xx).
         # A `graph_unavailable` from the pool's own bound collapses into the same
         # code on purpose — from the caller's side both mean "not stored, retry".
+        # ⚠️ STATED RESIDUAL (#14707 review P3): the entry-gate preflight already
+        # took this org's ingest charge (`commit_ingest_admit`) before this write,
+        # so a failure HERE leaves the window spent and each retry spends it
+        # again — under a sustained store outage that can surface as
+        # `ingest_rate_limited` instead of this 503. The safe order is not
+        # available: charging AFTER the row would either miss the charge (the
+        # drain re-enters with `ingest_charged=True`) or double-charge it, and
+        # `commit_ingest_admit` has no refund. No turn is lost — a 503 is
+        # retryable and both client legs keep their spool entry — so this is a
+        # DELAY under an already-degraded condition, recorded in plan §6 rather
+        # than closed with a fallback that would let an org overspend.
         _logger.warning("capture intake accept failed org=%r: %s",
                         org.get("org_id"), exc)
         raise HTTPException(
@@ -2232,15 +2254,29 @@ async def _capture_intake_drain(org: dict, graph: str | None, key: str) -> None:
         await _graph_offload(
             functools.partial(_capture_intake_reclaim_sync, org),
             op="capture_intake.reclaim")
+    claim_faults = 0
     while True:
         try:
             item = await _graph_offload(
                 functools.partial(_capture_intake_claim_sync, org),
                 op="capture_intake.claim")
         except (_IntakeStoreUnavailable, HTTPException) as exc:
-            _logger.warning("capture intake claim failed (%s): %s", key, exc)
+            claim_faults += 1
+            _logger.warning("capture intake claim failed (%s, %s/%s): %s",
+                            key, claim_faults, _CAPTURE_INTAKE_CLAIM_FAULT_TRIES,
+                            exc)
+            if claim_faults >= _CAPTURE_INTAKE_CLAIM_FAULT_TRIES:
+                # ⛔ END, do not loop: `_done` releases this tenant's key, so the
+                # sweep re-arms the drain (and `reclaim()` runs again) instead of
+                # one immortal task holding the key and being skipped forever.
+                _logger.warning(
+                    "capture intake drain (%s) gives up after %s claim faults — "
+                    "the sweep or the next capture re-arms it",
+                    key, claim_faults)
+                return
             await asyncio.sleep(_CAPTURE_INTAKE_STORE_BACKOFF_S)
             continue
+        claim_faults = 0
         if item is None:
             return
         slot = None

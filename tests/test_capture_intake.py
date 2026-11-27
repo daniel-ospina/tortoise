@@ -9,6 +9,17 @@ property of the queue rather than of the route:
 2. no depth ceiling ever drops work;
 3. a claimed item is never lost by the claim (a dead worker's lease is reclaimed);
 4. exhaustion is not deletion (a `failed` item stays listable).
+
+⛔ ONE test here is NOT graph-free: `test_the_graph_store_round_trips_put_claim_
+defer_reclaim_park_complete` drives the PRODUCTION substrate
+(`GraphIntakeStore` over a real projection, through `hosted_api._graph_query_seam`)
+against a live engine (#14707 review P3). It exists because every other test in
+this file drives `MemoryIntakeStore`, so a defect in the Cypher itself — the
+atomic claim, the `CASE WHEN $refund` arm, the `next_attempt_at` predicate, the
+9-column RETURN order — was ungraded. It found one on its first run: the store
+read engine rows with `list(result)` while the engine returns a non-iterable
+`QueryResult`, so EVERY statement raised `TypeError` on the only substrate
+production wires.
 """
 
 from __future__ import annotations
@@ -342,3 +353,97 @@ def test_queued_for_session_answers_the_live_row_and_ignores_a_parked_one():
     item = q.next_item()
     q.park(item, "402 quota")
     assert store.queued_for_session(item.session_id) is None
+
+
+# ── the GRAPH store on a REAL engine (#14707 review P3) ────────────────────
+def test_the_graph_store_round_trips_put_claim_defer_reclaim_park_complete():
+    """⛔ The PRODUCTION substrate, executed by an ENGINE — not a fake.
+
+    #14707 review P3: every other test in this file drives `MemoryIntakeStore`,
+    and `GraphIntakeStore` was graded only by a hand-written interpreter keyed on
+    substrings of the Cypher. The statements carry the invariants — the atomic
+    single-statement claim, the `CASE WHEN $refund …` arm that makes a transient
+    condition cost no attempt, `SET i.next_attempt_at = null` against the
+    `IS NULL OR <= $now` predicate, and the 9-column RETURN order `_item_from_row`
+    unpacks positionally — so a defect in any of them would have shipped silently
+    with every unit test green.
+
+    This drives the whole lifecycle through the seam PRODUCTION wires
+    (`hosted_api._graph_query_seam` over a real projection) with only the CLOCK
+    injected.
+    """
+    ha = pytest.importorskip("tortoise.hosted_api")
+    from tests.test_hosted_api import TEST_ORG_ID
+
+    proj = ha._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+    wipe = f"MATCH (i:{CAPTURE_INTAKE_LABEL}) DETACH DELETE i"
+    proj.g.query(wipe)
+    clock = _Clock()
+
+    def _queue() -> CaptureIntake:
+        return CaptureIntake(store=GraphIntakeStore(ha._graph_query_seam(proj)),
+                             now=clock)
+
+    q = _queue()
+    try:
+        first = q.accept(org_id="o1", graph="g1", session_id="s1",
+                         payload={"session_id": "s1", "harness": "pi",
+                                  "conversation": [{"role": "user",
+                                                    "content": "the fact"}]})
+        clock.advance(1)
+        q.accept(org_id="o1", graph="g1", session_id="s2",
+                 payload={"session_id": "s2", "harness": "pi",
+                          "conversation": [{"role": "user", "content": "b"}]})
+
+        # PUT + DEPTH + OLDEST: the row is really there, JSON payload intact.
+        assert q.store.depth() == 2
+        assert q.store.oldest_queued_at() == pytest.approx(first.enqueued_at)
+        stored = [i for i in q.store.rows() if i.item_id == first.item_id]
+        assert stored and stored[0].session_id == "s1"
+        assert stored[0].graph == "g1"
+        assert stored[0].payload["conversation"][0]["content"] == "the fact"
+
+        # CLAIM: FIFO by id, and the claim is a state transition with a lease.
+        claimed = q.next_item()
+        assert claimed is not None and claimed.item_id == first.item_id
+        assert claimed.attempts == 1 and claimed.state == IntakeState.EXTRACTING.value
+        assert q.store.depth() == 1, "a claimed item is no longer queued"
+
+        # DEFER: the refund arm — a transient condition costs NO attempt, and the
+        # `next_attempt_at` predicate really holds the item back. With two items
+        # queued, the deferred HEAD being skipped is what proves the predicate:
+        # FIFO would hand it out again immediately.
+        assert q.defer(claimed, "capacity", delay_s=30) == IntakeState.QUEUED.value
+        refunded = [i for i in q.store.rows() if i.item_id == first.item_id][0]
+        assert refunded.attempts == 0, (
+            "defer must REFUND the attempt it did not spend, or five transient "
+            "conditions park a turn that was only waiting")
+        nxt = q.next_item()
+        assert nxt is not None and nxt.session_id == "s2", (
+            "the deferred head must not be claimable during its backoff")
+
+        # RECLAIM: `next_attempt_at = null` must clear the predicate, or a
+        # reclaimed item stays invisible until the old backoff expires.
+        assert q.store.reclaim_stale(clock() + 10_000) == 1
+        reclaimed = q.store.queued_for_session("s2")
+        assert reclaimed is not None and reclaimed.state == IntakeState.QUEUED.value
+        assert "reclaim" in (reclaimed.last_error or "")
+
+        # PARK: terminal, VISIBLE, and the status address stops calling it queued.
+        assert q.park(reclaimed, "quota") == IntakeState.FAILED.value
+        assert q.store.queued_for_session("s2") is None
+        parked = q.store.rows(state=IntakeState.FAILED.value)
+        assert [i.item_id for i in parked] == [reclaimed.item_id]
+        assert parked[0].last_error == "quota"
+
+        # COMPLETE: the only deletion path. The deferred head is claimable again
+        # once its backoff has elapsed.
+        clock.advance(31)
+        head = q.next_item()
+        assert head is not None and head.item_id == first.item_id
+        q.finish(head)
+        assert q.store.depth() == 0
+        assert [i.item_id for i in q.store.rows()] == [reclaimed.item_id], (
+            "complete() deletes its own row and nothing else")
+    finally:
+        proj.g.query(wipe)

@@ -170,16 +170,20 @@ captured more than once.
 
 **Chosen:** the ceiling is a **depth**, not a refusal, and **it never refuses**. `_CAPTURE_QUEUE_MAX_DEPTH`
 (default 512) is a **PUBLISHING** threshold: below it the drain runs at `_CAPTURE_MAX_IN_FLIGHT`; at or above
-it the drain keeps running (nothing is dropped) and the condition is **published** (`intake.over_depth` in the
-202 and in `/health`'s `intake` block) so the shape is visible instead of turning into a 429 the agent cannot
-act on. ⛔ **What bounds intake GROWTH is the door's per-org ingest window** (`commit_ingest_admit`, charged in
+it the drain keeps running (nothing is dropped) and the condition is **published** on the 202's `intake`
+block (`depth`, `over_depth`, `position`) so the shape is visible instead of turning into a 429 the agent
+cannot act on. ⛔ **NOT on `/health`** (#14707 review P3): `_capture_health` publishes the counters only, and
+§6 records why that promise is withdrawn — a deploy-wide depth would scan every tenant's graph on a health
+path that collects no I/O. An earlier revision of this D3 named `/health`'s `intake` block as a second
+publisher, which §6 had already withdrawn; the two disagreed until this line was corrected.
+⛔ **What bounds intake GROWTH is the door's per-org ingest window** (`commit_ingest_admit`, charged in
 the entry-gate preflight BEFORE the accept is written — see §4), not this number: an earlier revision of this
 D3 called the threshold "pacing" while nothing read it except an `over_depth` flag, i.e. no bound of any kind
 (#14707 review P3).
 
 **Why a queue depth and not a byte budget as the trigger:** depth is the thing that predicts latency;
 bytes are bounded by `BATCH_MAX_INLINE_BYTES`-style request limits already enforced at the door. Both
-are reported; only depth gates pacing.
+are reported on the 202; only depth is the published over-threshold flag.
 
 **The rule that outranks the ceiling:** *a captured turn is never lost* (#10479 — a full spool refuses
 new work rather than destroying undelivered work). The only refusal this design may produce is
@@ -269,12 +273,14 @@ already makes for a cancelled request, extended to a queued one.
 ## 6. Evidence this plan owes, and where it lands
 
 | Claim | Evidence |
-|---|---|| a burst past the old ceiling is accepted, not refused | one test: N concurrent captures against a pinned ceiling of 4, **all 2xx**, none 429 |
+|---|---|
+| a burst past the old ceiling is accepted, not refused | one test: N concurrent captures against a pinned ceiling of 4, **all 2xx**, none 429 |
 | every accepted turn is eventually processed | the same test: N in, N out, count published |
 | nothing is lost on a mid-flight kill | a test that kills the drain between accept and process, then drains again: N in, N out |
 | per-item status is answerable | `GET /v1/sessions/{id}` returns phase `queued` while the item waits — **delivered**: the route consults the tenant's queue when no `:Session` exists yet, so the 202's `status_url` does not 404 for the whole queued period |
 | the queue is bounded by depth, published | `/health` publishes `intake: {enabled, accepted, completed, failed}` — **counters only, and restated here** (#14707 review P3): a deploy-wide DEPTH would have to scan every tenant's graph on a health path that collects no I/O, and rows are tenant-scoped, so the depth an operator can read for free is the 202's `intake.depth`/`over_depth` and the tenant's own status address. This table previously promised `intake_depth`/`intake_oldest_age_s` on `/health`; that promise is withdrawn, not quietly dropped |
 | the intake survives a rebuild | **NOT DELIVERED — `#14712`.** The row lives in the graph (the derived cache), so a rebuild drops it while the client has pruned its copy |
+| a failed accept does not spend the org's ingest window | **NOT DELIVERED — accepted residual, stated (#14707 review P3).** The entry-gate preflight takes `commit_ingest_admit` BEFORE the intake row is written (it must: the drain re-enters the capture path with `ingest_charged=True`, so a charge taken later would either be missed or double-charged). So a store failure at `accept()` answers 503 with the window already spent, and every client retry spends it again — which under a sustained store outage can surface as `ingest_rate_limited` rather than the 503. The safe order is not available without a refundable charge (`quota.commit_ingest_admit` has no refund and a negative charge would let an org overspend) or an accepted-row-then-charge walk that would queue work the caller was refused. **No turn is lost by this**: a 503 is retryable and both client legs keep their spool entry; the cost is DELAY under an already-degraded condition, which is why it is recorded here rather than fixed by a fallback |
 
 ## 7. What this plan explicitly does NOT do
 

@@ -56,8 +56,12 @@ The full map, the alternatives and the recorded decisions this obeys are in
    did not land is a destroyed turn (#10479).
 2. ⛔ **NO DEPTH CEILING EVER DROPS WORK.** `CAPTURE_QUEUE_MAX_DEPTH` is a
    **PUBLISHING** threshold, not a refusal and not a pacer: at or above it the
-   queue still accepts and the condition is published (`stats()["depth"]`,
-   `["over_depth"]`). What bounds intake GROWTH is the door's per-org ingest
+   queue still accepts and the condition is published on the 202's `intake`
+   block (`depth`, `over_depth`, `position` — see `_capture_intake_ack`).
+   ⛔ `stats()` is this module's own accessor for those numbers; it is NOT wired
+   into `/health`, which publishes the counters only, because a deploy-wide depth
+   would have to scan every tenant's graph on a health path that collects no I/O
+   (plan §6 records that withdrawal). What bounds intake GROWTH is the door's per-org ingest
    window (`commit_ingest_admit`, charged before the accept — see
    `hosted_api._capture_accept_into_intake`'s caller), not this number. The
    ceiling exists so an operator can SEE a stuck drain instead of discovering
@@ -446,15 +450,33 @@ class GraphIntakeStore:
         self.label = label
 
     def _run(self, cypher: str, params: Mapping[str, Any]) -> list:
+        """Run one statement and return its ROWS.
+
+        ⛔ THE ROWS LIVE ON `.result_set` (#14707 review P3). `proj.g.query`
+        returns FalkorDB's `QueryResult`, which is NOT iterable, so the previous
+        `list(result)` raised `TypeError` on EVERY statement — `put`, `claim`,
+        `complete`, `release`, `depth`, `rows`, `queued_for_session` and
+        `reclaim_stale` — i.e. the whole store, on the only substrate production
+        wires. Measured on a real engine: `put` -> `TypeError: 'QueryResult'
+        object is not iterable`, so `accept()` answered the door's retryable 503
+        for every over-capacity capture and the queue never accepted anything.
+        The sibling `batch_ingest.GraphBatchStore._q` reads `.result_set` for the
+        same reason; this store now does the same, and the conversion is INSIDE
+        the `try` so an engine fault surfaces as the one fault class the callers
+        classify instead of a bare `TypeError`.
+
+        `getattr(result, "result_set", result)` keeps a plain list answer (and
+        the narrowed fake interpreters the unit tests use) working: the seam's
+        contract is "gave me rows", and both shapes satisfy it.
+        """
         try:
             result = self._query(cypher, params=dict(params))
+            rows = getattr(result, "result_set", result)
+            return [] if rows is None else list(rows)
         except Exception as exc:  # noqa: BLE001, RUF100 - normalised to ONE fault class
             raise IntakeStoreUnavailable(
                 f"capture intake store query failed: {type(exc).__name__}: {exc}"
             ) from exc
-        if result is None:
-            return []
-        return list(result)
 
     def put(self, item: CaptureIntakeItem) -> None:
         self._run(_PUT_CYPHER, item.as_row())
@@ -748,7 +770,17 @@ class CaptureIntake:
             return None
 
     def stats(self) -> dict:
-        """The published shape (`/health`, and the 202's `intake` block)."""
+        """This module's own view of the queue: depth, oldest age, over-depth.
+
+        ⛔ NOT the `/health` shape, and the earlier docstring said it was
+        (#14707 review P3): `_capture_health` publishes the COUNTERS only, and a
+        deploy-wide depth would have to scan every tenant's graph on a health
+        path that collects no I/O. This accessor has no production caller — it is
+        the module's own seam for a tool or an operator, and the numbers the
+        DOOR publishes are `acceptance.as_payload()`'s `depth`/`over_depth`.
+        Claiming `/health` here made the plan's /health promise look delivered
+        when §6 had already withdrawn it.
+        """
         c = self.counters
         try:
             depth = int(self.store.depth())

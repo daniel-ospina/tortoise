@@ -415,3 +415,52 @@ def test_the_drain_separates_transient_conditions_from_permanent_verdicts():
     ]
     for exc in permanent:
         assert ha._capture_intake_fault_is_transient(exc) is False, exc
+
+
+def test_a_permanently_unreadable_store_does_not_leave_an_immortal_drainer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ A drain that cannot CLAIM must END, not spin forever holding its key.
+
+    #14707 review P3. The claim arm used to `continue` on every store fault, so a
+    permanently unreadable store left one immortal drainer per tenant — and
+    because the key stayed in `_CAPTURE_INTAKE_DRAINERS`, `_capture_intake_sweep`
+    skipped that tenant forever (`if key in _CAPTURE_INTAKE_DRAINERS: continue`).
+    The sweep is the only path that runs `reclaim()` for a stranded queue, so the
+    spin made a recovering store unreachable to the drain that exists to serve it.
+
+    The assertion is on the OUTCOME the sweep depends on: the key is released.
+    """
+    key = "org_1:None"
+    calls: list[int] = []
+
+    def _boom(_org: dict) -> None:
+        calls.append(1)
+        raise ci.IntakeStoreUnavailable("graph down")
+
+    monkeypatch.setattr(ha, "_capture_intake_claim_sync", _boom)
+    monkeypatch.setattr(ha, "_capture_intake_reclaim_sync", lambda _org: 0)
+    monkeypatch.setattr(ha, "_CAPTURE_INTAKE_DRAINERS", set())
+    monkeypatch.setattr(ha, "_CAPTURE_INTAKE_TASKS", set())
+    # the real backoff is 30 s; the BOUND is what this test grades, not the wait
+    monkeypatch.setattr(ha, "_CAPTURE_INTAKE_STORE_BACKOFF_S", 0.0)
+
+    async def _drive() -> str:
+        ha._capture_intake_kick(_org(), None)
+        assert key in ha._CAPTURE_INTAKE_DRAINERS, (
+            "the kick did not start a drain, so this test would grade nothing")
+        for _ in range(200):
+            await asyncio.sleep(0)
+            if key not in ha._CAPTURE_INTAKE_DRAINERS:
+                break
+        return key
+
+    assert asyncio.run(_drive()) not in ha._CAPTURE_INTAKE_DRAINERS, (
+        "the drain is still registered after a permanently failing claim — an "
+        "immortal drainer holds the key, and the sweep then skips this tenant "
+        "forever, so `reclaim()` never runs for its stranded queue")
+    assert len(calls) == ha._CAPTURE_INTAKE_CLAIM_FAULT_TRIES, (
+        f"the drain absorbed {len(calls)} claim faults, expected exactly the "
+        f"bound ({ha._CAPTURE_INTAKE_CLAIM_FAULT_TRIES}) — an unbounded retry is "
+        "the spin this test exists to remove, and a smaller number would give up "
+        "before a restart or a blip is over")
