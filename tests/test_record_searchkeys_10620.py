@@ -1167,6 +1167,16 @@ def test_a_mapping_valued_search_keys_is_omitted_not_serialized(caplog):
         f"the omission of point.quote must DECLARE itself (column + shape): {messages}"
     )
     assert any("point.search_keys" in m for m in messages), messages
+    assert all(
+        m.startswith(f"record column point.{column} ")
+        for column in ("search_keys", "quote")
+        for m in messages
+        if f"point.{column}" in m
+    ), (
+        "the declaration must LEAD with the column and then the state word — a "
+        "message that opens `record column omitted (point.quote)` puts the STATE "
+        f"in the column's slot, so an operator grepping the column reads a verb: {messages}"
+    )
     assert not any("'k'" in m or '"k"' in m for m in messages), (
         "the declaration must name the SHAPE, never the value: a quote is the "
         f"user's own text and this line goes to the deployment's log: {messages}"
