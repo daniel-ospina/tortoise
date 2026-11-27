@@ -13,9 +13,11 @@ aboutObjects: ONTOLOGY.md, canonical ontology, ONTOLOGY-CHANGELOG.md
 
 > **This is a PROPOSAL, not the document.** `docs/ONTOLOGY.md` is owner-gated
 > (`ONTOLOGY.md:41`: *"no modification to this file is allowed without explicit approval of the
-> exact changes by Daniel Ospina"*). Nothing here has been applied. Each batch below is one
-> commit on this branch so that any batch — or any single section inside a batch — can be
-> approved on its own and the rest deferred or rejected without unpicking anything.
+> exact changes by Daniel Ospina"*). Nothing here has been applied. Each batch below is
+> **separable text**: any batch — or any single section inside a batch — can be approved on its
+> own and the rest deferred or rejected without unpicking anything. The per-batch commits named
+> in §6's table are **placeholders** for work that is cut on approval; this branch carries only
+> the proposal itself (plus follow-up edits to this document), not six per-batch commits.
 
 ## 1. The instruction this draft implements
 
@@ -128,8 +130,8 @@ batch whose section contains a fenced block).
 
 ## 6. How to approve this — per batch, per section
 
-Each batch is its own commit. Each section inside a batch is separately approvable and carries
-this line:
+Each batch becomes its own commit **on approval**. Each section inside a batch is separately
+approvable and carries this line:
 
 > **Approve:** ☐ text as written · ☐ with changes (list them) · ☐ reject (section keeps its numbers)
 
@@ -137,7 +139,7 @@ this line:
 whose sections are partly rejected is simply re-cut. Nothing is applied to `ONTOLOGY.md` until
 the owner's approval of the exact text is recorded.
 
-| Batch | Commit | Sections | Refs | State |
+| Batch | Planned commit (placeholder) | Sections | Refs | State |
 |---|---|---|---|---|
 | 1 | `batch 1` | header, §1, §2 | 9 | **proposed** |
 | 2 | `batch 2` | §3.1–§3.9 | 63 | **proposed** |
@@ -146,6 +148,10 @@ the owner's approval of the exact text is recorded.
 | 5 | `batch 5` | §5 | 40 | **proposed** |
 | 6 | `batch 6` | §6–§12 (+§10.5) | 37 | **proposed** |
 | — | — | **total** | **324** | see **Final state** at the end |
+
+⛔ **The `Planned commit` column is a placeholder, not a sha.** No per-batch commit exists on
+this branch — it carries the proposal (plus follow-up edits to this document) and no per-batch
+commits — and the six batches are cut as six commits only when, and if, they are approved.
 
 ---
 
@@ -258,7 +264,7 @@ this section, and each is now either restored or named here:
    not a tidy-up: it is proposed for approval in **§1.8, P-1**, and the owner can keep the
    carve-out by rejecting that one line.
 
-Everything else is verbatim, including line 39's CRITICAL RULE and the *"THIS DOCUMENT IS
+Everything else is verbatim, including line 41's CRITICAL RULE and the *"THIS DOCUMENT IS
 RIGHT"* authority.
 
 <!-- PROPOSED:header -->
