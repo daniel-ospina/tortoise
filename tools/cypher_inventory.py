@@ -1205,6 +1205,70 @@ def _path_in_HEAD(probe_cwd: Path, probe_path: str) -> bool | None:
     return None
 
 
+def _own_gitdir(boundary: Path) -> Path | None:
+    """The git dir THIS boundary's own metadata names, resolved — or None when it names none.
+
+    `core.worktree` moves the WORK TREE and never the git dir, which is what makes this
+    path a valid identity for "which repository is this": a normal checkout names
+    ``<b>/.git``, a linked worktree / submodule / `--separate-git-dir` checkout names the
+    target of its `.git` gitfile, and a damaged boundary still names its own git dir while
+    git (walking up) answers with somebody else's.
+
+    A gitfile's `gitdir:` target is resolved RELATIVE TO THE BOUNDARY, which is where git
+    itself resolves it; an unreadable or unrecognised pointer yields None, and the caller
+    treats "cannot be shown to be this boundary's" as a refusal, never a permit.
+    """
+    pointer = boundary / ".git"
+    try:
+        if pointer.is_dir():
+            return Path(os.path.realpath(pointer))
+        if pointer.is_file():
+            with open(pointer, encoding="utf-8", errors="surrogateescape") as handle:
+                first_line = handle.readline().strip()
+            prefix = "gitdir:"
+            if first_line.startswith(prefix):
+                named = first_line[len(prefix):].strip()
+                if named:
+                    return Path(os.path.realpath(boundary / named))
+    except OSError:
+        return None
+    return None
+
+
+def _resolves_to_own_gitdir(boundary: Path) -> bool:
+    """True when `git -C <boundary>` resolves to THIS boundary's own git dir.
+
+    ⛔ THE DISCRIMINATOR THAT IS INVARIANT UNDER `core.worktree` (#14741 review, cycle 4,
+    P2, measured). Comparing work-tree roots cannot separate "a healthy boundary retargeted
+    elsewhere" from "a damaged boundary whose ENCLOSING repository is retargeted" — both
+    answer with a directory elsewhere — and reading the second as a permit replaced content
+    a damaged boundary's own index still held, at rc 0. The git dir is not moved by
+    `core.worktree`, so its identity separates them for every pointer form.
+
+    Any failure — timeout, OSError, a non-zero exit, empty output, or a boundary whose own
+    metadata names no git dir — answers False, i.e. "not shown to be this boundary's", the
+    fail-closed direction.
+    """
+    expected = _own_gitdir(boundary)
+    if expected is None:
+        return False
+    try:
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--absolute-git-dir"],
+            cwd=boundary, capture_output=True, text=True,
+            encoding="utf-8", errors="surrogateescape",
+            env=_git_env(), timeout=_GIT_PROBE_TIMEOUT_S,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    if resolved.returncode != 0:
+        return False
+    answer = resolved.stdout.strip()
+    if not answer:
+        return False
+    return Path(os.path.realpath(answer)) == expected
+
+
 def _boundary_is_unaskable(boundary: Path) -> bool:
     """True when `git -C <boundary>` cannot be shown to resolve THAT boundary's repository.
 
@@ -1230,11 +1294,16 @@ def _boundary_is_unaskable(boundary: Path) -> bool:
     damaged gitdir answers 128), which is damage git cannot restore.
 
     Enumerating damage shapes is the mistake rounds 5-11 kept repeating one level out, so
-    this asks git the only question that closes the class: `rev-parse --show-toplevel`
-    must name THIS directory. A boundary that cannot be shown is a COULD-NOT-RUN, never a
-    permit — the verdict `_plainly_outside_any_repository` already reaches when git says
-    `not a git repository` over a damaged `.git`, reached here for the case where git
-    says nothing at all because it found a repository one level up.
+    this asks git the only question that closes the class: for a boundary that carries a
+    `.git` POINTER, `rev-parse --absolute-git-dir` must name THIS boundary's own git dir —
+    on BOTH the "answered itself" and the "answered elsewhere" branch, because `core.worktree`
+    can make an ENCLOSING repository's work tree coincide with this boundary just as easily
+    as it can move this one away. A metadata-in-place boundary is the exception: it has no
+    pointer and no work tree, so `rev-parse --absolute-git-dir` naming THIS directory is the
+    whole test. A boundary that cannot be shown is a COULD-NOT-RUN, never a permit — the
+    verdict `_plainly_outside_any_repository` already reaches when git says
+    `not a git repository` over a damaged `.git`, reached here for the case where git says
+    nothing at all because it found a repository one level up.
 
     ⛔ BOTH BOUNDARY FORMS ARE VERIFIED, NOT ASSUMED — AND "A BARE GITDIR IS EXEMPT
     BECAUSE THE GIT METADATA GUARD DECIDES IT" WAS FALSE (#14741 review, cycle 3, P2,
@@ -1262,8 +1331,38 @@ def _boundary_is_unaskable(boundary: Path) -> bool:
     measured). A work tree that has been RETARGETED (`git config core.worktree <elsewhere>`)
     legitimately answers `--show-toplevel` with a directory that is NOT an ancestor of this
     boundary — the destination is simply not in that work tree, so there is nothing here to
-    protect and `origin/main` permits. Only an answer that is a strict ANCESTOR means "git
-    walked up and answered as the repository above".
+    protect and `origin/main` permits. ⛔ BUT ANCESTOR-HOOD IS NOT THE DISCRIMINATOR, and
+    believing it was shipped a fail-open (#14741 review, cycle 4, P2, measured): a DAMAGED
+    boundary whose ENCLOSING repository is retargeted ALSO answers with a directory
+    elsewhere, and reading that as a permit replaced content the damaged boundary's own
+    index still held, at rc 0. `core.worktree` moves the work tree and never the git dir, so
+    the verdict is decided by `_resolves_to_own_gitdir` on EVERY answer a pointer form can
+    give: this boundary's own git dir means git resolved THIS boundary (askable); an
+    enclosing repository's git dir means it walked up (a could-not-run).
+
+    ⛔ ANCESTOR-HOOD IS NOT A SAFE PROXY ON **ANY** BRANCH, including the one an earlier
+    revision exempted (#14741 review, cycle 7, P2, measured). A strict ANCESTOR answer was
+    treated as walked-up without asking the gitdir, "because it needs no second
+    subprocess" — but a strictly-ancestor answer is ALSO the legitimate shape of a HEALTHY
+    repository whose own `core.worktree` names a PARENT of the boundary (metadata in a
+    subdirectory of its work tree, the inverse of the layout `--separate-git-dir`
+    creates): measured, `--show-toplevel` → the parent, `--absolute-git-dir` → its OWN
+    gitdir, and `git ls-files` rc 0 over the destination. The fast path refused it — while
+    `_resolves_to_own_gitdir` would have permitted — and reported "that directory's `.git`
+    entry does not resolve to a repository git will use", every clause of which is false
+    for that shape. The gitdir question therefore decides EVERY pointer-form answer, and
+    the fast path is gone rather than narrowed: it bought one subprocess on the
+    strict-ancestor answer, which a HEALTHY retargeted repository takes too (that is exactly
+    the shape the shortcut was refusing), at the price of a false diagnosis on a healthy
+    repository.
+
+    ⛔ AND THE FAIL-CLOSED DIRECTION IS UNTOUCHED BY THAT REMOVAL, structurally rather than
+    by enumeration: every damage shape this function refuses answers with the repository
+    ABOVE, so `--absolute-git-dir` names that repository's git dir — never this boundary's
+    own — and mismatches; a dangling or unparseable pointer makes `_own_gitdir` return
+    None, which also refuses. The four ordinary pointer forms (`<b>/.git`, a linked
+    worktree `<common>/worktrees/<n>`, `.git/modules/<n>`, an external
+    `--separate-git-dir`) all answer with their own git dir and stay permitted.
 
     ⛔ AND A BOUNDARY WHOSE METADATA DECLARES NO WORK TREE (`core.bare=true` on a worktree
     `.git`) STAYS REFUSED — a KNOWN, DISCLOSED OVER-BLOCK, not a claim of coverage
@@ -1281,10 +1380,16 @@ def _boundary_is_unaskable(boundary: Path) -> bool:
     """
     has_pointer = os.path.lexists(boundary / ".git")
     boundary_real = os.path.realpath(boundary)
-    # ⛔ THE QUESTION IS WHICH REPOSITORY GIT RESOLVED, AND THE ANSWER'S SHAPE IS THE
-    # VERDICT (#14741 review, P2/P3, measured). The pointer form asks for its WORK TREE
-    # root, because that is the repository whose index the probe reads; the
-    # metadata-in-place form asks for the gitdir, because a bare gitdir has no work tree.
+    # ⛔ THE QUESTION IS WHICH REPOSITORY GIT RESOLVED, AND FOR A POINTER FORM ITS ANSWER
+    # SHAPE IS **NEVER** CONSULTED (#14757 review, P3, measured). The pointer form asks for
+    # its WORK TREE root only to establish that git resolves a working tree here at all —
+    # a `core.bare=true` boundary makes this question ERROR, which is refused above — and
+    # WHICH repository it resolved is decided by `_resolves_to_own_gitdir` alone. The
+    # pointer path below returns before the answer is ever compared, so no shape can decide
+    # anything on it; the metadata-in-place form is the one whose verdict IS the gitdir
+    # comparison, because a bare gitdir has no work tree to ask about. (The answer text is
+    # still read for the returncode/empty gauges above, which is why the question is asked
+    # rather than skipped.)
     question = "--show-toplevel" if has_pointer else "--absolute-git-dir"
     try:
         resolved = subprocess.run(
@@ -1300,28 +1405,80 @@ def _boundary_is_unaskable(boundary: Path) -> bool:
     answer = resolved.stdout.strip()
     if not answer:
         return True
-    answer_real = os.path.realpath(answer)
-    if answer_real == boundary_real:
-        return False
     if has_pointer:
-        # ⛔ ANSWERED AS THE REPOSITORY ABOVE IS THE DAMAGE. git walks UP when it will not
-        # accept the entry at this directory, so a damaged `.git` answers with an ENCLOSING
-        # work tree root — a strict ANCESTOR of this boundary, i.e. a repository with a
-        # different index. That answer is a could-not-run for THIS boundary. Every other
-        # answer from this question is a healthy work tree that is ELSEWHERE
-        # (`core.worktree`): the destination is not in THAT work tree, so there is nothing
-        # for this guard to protect — `origin/main` permits, and refusing it would be an
-        # over-block on a healthy repository.
-        return Path(boundary_real).is_relative_to(Path(answer_real))
-    # The gitdir form answered with a gitdir that is not this directory: git resolved this
-    # metadata-in-place boundary to something else (the repository ABOVE it).
-    return True
+        # ⛔ THE GITDIR IDENTITY DECIDES **EVERY** ANSWER A POINTER FORM CAN GIVE — equal,
+        # strict-ancestor, or elsewhere — and no answer shape is askable on work-tree
+        # identity (#14741 review, cycles 4, 5 and 7). Each of the three shapes had to be
+        # shown before the equivalence was abandoned; the comments below keep the two
+        # fail-OPEN measurements and the over-block one, because each is why a different
+        # tempting shortcut is not here.
+        #
+        # `core.worktree` moves the work tree and NEVER the git dir, so the gitdir identity
+        # separates every one of them for every pointer form: a normal checkout answers
+        # `<b>/.git`, a linked worktree `<common>/worktrees/<n>` (exactly what its `.git`
+        # gitfile names), a submodule or `--separate-git-dir` checkout its external gitdir,
+        # and a `core.worktree`-retargeted repository still its own git dir. Only THIS
+        # boundary's own gitdir means git resolved this boundary; an enclosing
+        # repository's gitdir means it walked up, which is a could-not-run for this
+        # boundary.
+        #
+        # ⛔ THE `== boundary` SHAPE IS NOT A PERMIT ON ITS OWN (#14741 review, cycle 5,
+        # **P1**, measured). Assuming it was gave the LAST copy of the file away: an
+        # ENCLOSING repository retargeted to point AT this boundary makes its work-tree
+        # root coincide with the boundary, so a DAMAGED boundary's walked-up
+        # `--show-toplevel` answers the boundary ITSELF — equal — while
+        # `_resolves_to_own_gitdir` answers `False` (correctly) and was never consulted.
+        # Measured: `--render` exited **0**, no stderr, and replaced bytes the damaged
+        # boundary's OWN index still held.
+        #
+        # ⛔ THE STRICT-ANCESTOR SHAPE IS NOT A REFUSAL ON ITS OWN (#14741 review, cycle 7,
+        # P2, measured) — the mirror image, and the reason no shortcut on `answer` survives.
+        # A damaged `.git` answers with an ENCLOSING root, so ancestor-hood was treated as
+        # walked-up without a subprocess; but a HEALTHY repository whose own `core.worktree`
+        # names a PARENT of the boundary answers a strict ancestor too, and it was refused
+        # with a diagnosis that is false about it (its gitdir IS its own, and it DOES track
+        # the destination). Removing the shortcut costs one `rev-parse` on the
+        # strict-ancestor answer — which a HEALTHY retargeted repository produces too, so
+        # this is not a cost only damaged trees pay — and buys a true verdict on both
+        # shapes. (The answer text is deliberately NOT realpath'd above this return: on a
+        # pointer-form boundary it decides nothing, and computing it here is what let an
+        # earlier revision believe a shape was the verdict.)
+        return not _resolves_to_own_gitdir(boundary)
+    # No `.git` pointer: the metadata-in-place form has no work tree, so its `question` IS
+    # the gitdir, and naming this directory is the whole test for it. A gitdir answer that
+    # names something else means git resolved this boundary to the repository ABOVE it.
+    return os.path.realpath(answer) != boundary_real
 
 
 def _destination_probes(
     target: Path, rel: str | None
 ) -> tuple[tuple[Path, str | None, str], ...]:
-    """Every repository that could hold the destination, ROOT first.
+    """Every repository BOUNDARY on the destination's ancestor chain, ROOT first.
+
+    ⛔ NOT "EVERY REPOSITORY THAT COULD HOLD THE DESTINATION" — that wider claim was TRUE
+    of the walk below only for repositories whose WORK-TREE ROOT is the boundary, and it is
+    FALSE for THREE disclosed residuals (#14741 review, cycles 4-6, P2):
+
+    1. a repository RETARGETED by `core.worktree` off the destination's ancestor chain holds
+       the destination while sitting nowhere on it (measured: `--render` exited **0** over a
+       tracked file);
+    2. a repository whose boundary IS on the chain but whose `core.worktree` is a strict
+       DESCENDANT of that boundary is asked with the BOUNDARY-relative spec
+       (`target.relative_to(boundary)`), while its index is keyed on the work-tree root — so
+       the same repository answers rc 1 about a spelling it does not hold and rc 0 about the
+       one it does (measured: `outer` with `core.worktree=outer/mid`, `outer`'s index naming
+       `inner/docs/K.md`, `--render` rc 0 over it). The spec must be derived from the
+       WORK-TREE ROOT, not the boundary directory;
+    3. on a case-insensitive filesystem a wrongly-cased destination is permitted over a
+       tracked file (measured: `git ls-files` is case-SENSITIVE even with
+       `-c core.ignorecase=true`).
+
+    All three are PRE-EXISTING on `origin/main` (which carries the boundary walk from
+    #14625 without `_own_gitdir`), so this PR narrows the fail-open surface rather than
+    closing it — it closes neither of the three. Measured on both trees: each reproduces at
+    rc 0 with the tracked bytes replaced, before and after this change. They are filed as
+    follow-ups rather than half-fixed here; the narrow claim is the one this code earns, and
+    a docstring that claims more is what a later lane reads instead of the arm.
 
     ⛔ NOT THE TWO ENDPOINTS (#14625 review, round 10, P3, measured). Rounds 7 and 8
     each fixed the endpoint they were shown — the destination's own repository, then
@@ -1345,7 +1502,16 @@ def _destination_probes(
     and stops at the filesystem root, because the outermost repository is then NOT ROOT —
     and that is the one provider rounds 7-10 never asked. See the walk's own note below.
 
-    Order matters only for the message: the OUTERMOST refusal is the most legible.
+    Order is NOT outermost-first: `ROOT` is prepended (when the destination is under it),
+    then every boundary from the filesystem root inward, then the destination's nearest
+    existing ancestor. ⛔ THE LOOP STOPS AT THE FIRST REFUSAL, so the providers after it are
+    NEVER ASKED — the message an operator sees is whichever provider refused first, not the
+    most legible one, and the number of `git` invocations a render costs is "up to" this
+    list, not "one per provider". (An earlier revision claimed "the OUTERMOST refusal is the
+    most legible"; #14741 review, cycle 5, P3, measured `probes[0]` is ROOT when a
+    repository sits above it. A later one claimed "all providers are asked", which
+    contradicted the very next clause; #14741 review, cycle 6, P3, measured only `[0]` asked
+    of a two-provider list. Both are the precise-claim class this docstring is written in.)
     """
     probes: list[tuple[Path, str | None, str]] = []
     seen: set[tuple[str, str | None]] = set()
@@ -1407,6 +1573,16 @@ def _destination_probes(
     while cursor != cursor.parent:
         chain.append(cursor)
         cursor = cursor.parent
+    # ⛔ AND THE FILESYSTEM ROOT IS A BOUNDARY TOO, which `while cursor != cursor.parent`
+    # never reached (#14741 review, cycle 4, P2, code-read — NOT measured: constructing the
+    # shape needs a repository at `/`, so this session could not build the fixture and
+    # there is deliberately no arm for it rather than a pin that cannot vary). The loop
+    # stops one iteration short of the terminal ancestor, so a repository initialised at
+    # `/` was asked only through `probe_dir`, whose single `git -C` answers from the
+    # INNERMOST repository — never `/`. Including it costs nothing when `/` is not a
+    # repository (the `.git`/metadata test below rejects it without a subprocess) and makes
+    # "every boundary on the destination's path" literally true.
+    chain.append(cursor)
     for boundary in reversed(chain):
         # ⛔ AND A METADATA-IN-PLACE BOUNDARY MUST HOLD AN INDEX, or a directory that
         # merely LOOKS like git metadata is refused for no reason (#14741 review, cycle
@@ -1490,11 +1666,14 @@ def _destination_probes(
 def _tracked_destination_refusal(target: Path, rel: str | None) -> int | None:
     """Refuse if ANY repository on the destination's path tracks it; `None` = free.
 
-    Every probe in `_destination_probes` is asked, and a refusal from any one of them is
-    the verdict — the composite is MONOTONE: adding a provider can only add refusals,
-    never remove one, which is the property that makes "ask one more repository" safe to
-    repeat instead of the sequence of fail-OPENS rounds 5, 7 and 8 each produced by
-    following whichever single provider they had been shown.
+    Probes are asked in `_destination_probes` order and the loop returns at the FIRST
+    refusal, so a refusal from any one of them is the verdict and the providers after it are
+    not asked — the composite is MONOTONE: adding a provider can only add refusals, never
+    remove one, which is the property that makes "ask one more repository" safe to repeat
+    instead of the sequence of fail-OPENS rounds 5, 7 and 8 each produced by following
+    whichever single provider they had been shown. (Not "every probe is asked": the early
+    return means a later provider's permit can never undo an earlier refusal, which is the
+    invariant that matters — see #14741 review, cycle 6, P3.)
     """
     for cwd, spec, label in _destination_probes(target, rel):
         if spec is None:

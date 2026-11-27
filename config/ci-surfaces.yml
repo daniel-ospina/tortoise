@@ -164,6 +164,40 @@ version: 1
 # next fold, which is why the fenced HISTORY above exists. ⛔ The 28 m minute did not move across
 # that fold, which is why nothing but the emission guard can catch this class: the arithmetic on the
 # minute agrees either way.
+# reader of the prose can see. On THIS tree — `origin/main` `ff10fb328891` folded in — the verb packs
+# the pool into two bins: nine shards at 827.8 s (a, b, e, f, g, h, i, j, k) and two at 827.7 s
+# (c, d), so `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST
+# shard's) — and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
+# (1680 / 827.8 = 2.0295) on every one of the eleven shards, so the two agree by construction
+# rather than by a hand re-read.
+# ⛔ THE POOL DELTA IS RE-COUNTED ON THE RESOLVED TREE, not carried: `fast_pool()` holds **1342**
+# files at this head against **1341** on `origin/main` `ff10fb328891`, both counted by loading each
+# tree's OWN manifest (`git show origin/main:config/ci-surfaces.yml`) through `fast_pool()` — and
+# the set difference is exactly ONE entry: `tests/test_14582_creation_hook.py` (`core`, flat 2.0 s),
+# this PR's own (#14582) suite. `main` carries nothing this tree lacks, and every other row the
+# emission names — `#14726`'s `tests/test_own_site_fragment_targets.py` included — landed on
+# `main` BEFORE this fold, so counting one of them as this PR's would contradict the 1342 − 1341 = 1
+# the two readings give.
+# The name lists are what the guard COMPARES against the live emission
+# (`test_the_fast_shards_header_block_states_the_measured_emission`), and
+# `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
+# derivation, so they are a graded claim about THIS head — a fold re-derives them with the verb, it
+# never carries them.
+
+# ⛔ THIS BLOCK ARRIVED SPLICED AGAIN AT THE `origin/main` `4b2fba3e8a` MERGE, and the repair is
+# recorded rather than hidden: `config/ci-surfaces.yml` carries a `merge=union` driver, so the fold
+# applied BOTH parents' derivations — one cut against `origin/main` `1aef0b618b` with this PR's own
+# row as its delta, one cut against `origin/main` `4b2fba3e8a` with `#14607`'s two rows attributed
+# to that lane. Neither describes this head, and the copies disagreed on every figure. Neither side
+# is picked: the sentences above are a fresh re-derivation with `--emit-push-matrix` on this merged
+# tree, and both parents' copies are deleted rather than re-pointed. Each fold's own figures stay
+# on the commit that measured them — `git log` holds them, and restating one here is what produced
+# the duplicated spellings in the first place.
+# ⛔ IT ARRIVED SPLICED ONCE MORE ON THIS LANE'S REBASE ONTO `origin/main` `c1c8df1a3817` — the same
+# driver, the same failure — and this time NEITHER copy described this tree: both stated the
+# 827.2/827.3 partition and a `fast_pool()` of 1339, against the 827.4/827.5 and 1340 the verb
+# emitted at that rebase. Neither copy was picked either; the paragraph above is a third fresh
+# re-derivation.
 # ⛔ THIS BLOCK ARRIVES SPLICED, REPEATEDLY, and that is mechanical rather than mysterious:
 # `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
 # derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. THIS PR HAS
@@ -3158,8 +3192,11 @@ surfaces:
   # and `tortoise/record_writer.py`, so `core` is its surface (the same
   # `--changed-files` measurement the two `test_12894` rows above record).
   - test_13043_record_allocator_cli.py
-  # #14582: the creation hook, its three doors, `/health`'s `armed_but_uncut`
-  # fold, and the `backfill` verb. `core`, MEASURED not stylistic: its subjects
+  # #14582: the creation hook and every door it is wired into, `/health`'s
+  # `armed_but_uncut` fold, and the `backfill` verb. ⛔ NO DOOR COUNT here on
+  # purpose: the number is graded structurally by `_DOORS`/`_DOOR_HOOK_CALLS`, and
+  # a count repeated in prose is what staled when the two mint-on-demand doors
+  # were wired (#14624). `core`, MEASURED not stylistic: its subjects
   # are `tortoise/record_writer.py`, `tortoise/record_allocator.py`,
   # `tortoise/hosted_api.py`, `tortoise/supabase_control.py`, `tortoise/sdk.py`
   # and `tools/record_allocator_cli.py` — `--changed-files
@@ -13614,37 +13651,21 @@ durations:
   test_11609_structural_blockers.py: 2.0  # new in #11609 P4 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): `tools/ci_selection.py --integrity` stays green either way, so only this row records the weight. ⛔ The CASE COUNT is deliberately not quoted (`tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it).
   test_11609_write_containers.py: 4.2  # new in #12915 (repair of the #11609 lane-B review): the #3400/#4348 trap; The row must EXIST, not merely default ("a default is not a reading"): the `core` row above puts the file in `fast_pool()`, and `--integrity`'s 0.90 coverage ratio stays green either way, so only this row records the weight. What the weight covers: the #11609 WRITE/MUTATE container contract, hermetically — each container observed FORWARDING to its member handler (a recorder stands in for the member, so a re-implementation or a mis-routed arm reds), the one-arm-per-call refusals (`action='mitigate'` with an annotation dimension, `action='annotate'` with reason/strength/credibility), `credibility` reaching `mitigate_operator` on BOTH spellings, the `goalState` cache writing through a LIVE SDK name, a retired SDK name raising with its replacement (#3836(c)), a retired MCP name still served by the #3883 shim, and an AST walk asserting no module under `tortoise/` reaches a retired SDK name (a docstring mention is not a call site, which is why the walk is AST and not a grep); plus the SDK container's POINT arm, which is where the absorbed door's BEHAVIOUR is pinned (the `restatus` journal record, and a refused transition that NAMES the target word — the two halves the retired `update_entity` carried and `update_point` does not). ⛔ The SAME two halves are pinned at the MCP level as well (#12915 review F1): the ADVERTISED door — not a recorder standing in for it — is driven end to end through `tortoise_update_knowledge(id, props={…})` against a real embedded engine, because a delegation stub cannot see the routing behind it (measured at the reviewed head: the container refused with `update_point only promotes draft→live` and appended 0 records while the door it absorbs wrote 1). One further case covers the routing itself (`tortoise_update` must reach `sdk.update_knowledge`, never `sdk.update`), and `dry_run` is pinned PER ARM (#12915 review F2): the annotation arm REFUSES a preview instead of writing one while the harness records "writes nothing", the property arm already refused, and the two temporal arms still preview. ⛔ NOT uniformly hermetic, and this row says which half is which: the two Point-arm cases AND the two MCP end-to-end cases open a per-test EMBEDDED engine (`TortoiseSDK(str(tmp_path / "t11609_containers.db"), event_log_path=…)`) and do real graph writes — the same distinction the `test_percent_value_11915.py` row records for its own mixture — while every other case in the file stays hermetic (no graph, no docker, no network, no model call). ⛔ The CASE COUNT is deliberately not quoted: it moves whenever a review round adds a pin. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0
   test_12894_record_cursor.py: 1.0  # new in #12894 stage C; The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local timing and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count is `tools/ci_selection.py --integrity`'s business. What the weight covers, on the DB-free lane: the cursor table's declared shape and its membership in `THE_RECORD_TABLES` / both `RECORD_MIGRATIONS` directions / `RECORD_REAPPLY_STEPS`; the corrected `seq >= 0` signature and why `journal_event` keeps `> 0`; the seed's `GREATEST(row_max, enumerated_floor)` arithmetic and case 2's unrepresentability asserted against the RAW statement; the tenant GUC the seed sets itself; every allocator statement surviving `to_dollar_placeholders`; `unnest … WITH ORDINALITY` pairing and the ABSENCE of `ON CONFLICT DO NOTHING` on the allocated insert; `replay()`'s allocated watermark and the byte meter reading it; the isolation/retry vocabulary with its counters; the absence of a global `statement_timeout`; and the #9318 collision question never being asked of the allocation — driven through `replay()` on recording fakes. Hermetic: no docker, no graph, no network, no model call — ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0
-  test_13043_record_allocator_cli.py: 2.0  # new in #13043's P1 repair — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. What the weight covers, on the DB-free lane: `arm` refusing without `--acknowledge-cutover` and the refusal's CONTENT (the flag by name, the WRITER's environment, the order of operations, the absent creation hook, `sweep`, the backfill) plus its non-vacuity (an acknowledged run past the gate fails on the DSN instead); every graph-scoped verb still refusing `--graph-id`-less use while `sweep` does not; the DSN name IMPORTED from the seam rather than re-declared; `UNCUT_GRAPHS_SQL` reading `journal_event` (not `public.graphs`, which the record role cannot see) with one `%s`; `_cmd_sweep`'s payload answering `journal_max_seq` as the MAX(seq) it is, refusing an operator-stated floor on a multi-graph sweep, and stating what it cannot see; `status` labelling `allocates` as the RECORD's state; and the five `record_wiring_check` mutations (helper deleted / answers without the env / door never binds it / constant renamed / not exported / bound-but-not-forwarded) each redding the gate over a mutated COPY of `record_writer.py`. ⚠️ The DB-BACKED leg (`test_sweep_finds_a_born_uncut_graph_and_not_the_cut_over_one`) skips without `TEST_RECORD_DB_URI`; it runs in `test-record-postgres`, which is why the file is listed there too. Hermetic otherwise: no docker, no graph, no network, no model call. ⛔ The CASE COUNT is deliberately not quoted: it moves whenever a review round adds a pin — `tools/ci_selection.py --integrity` is the authority. — ci-timing junit-census+top-15 2026-11-23 (run 45071394329): the reading saw 20 of 21 testcases pytest collects = 0.3s in the largest single job (not summed across legs), a LOWER bound; kept 2.0
+  test_13043_record_allocator_cli.py: 2.0  # new in #13043's P1 repair — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. What the weight covers, on the DB-free lane: `arm` refusing without `--acknowledge-cutover` and the refusal's CONTENT (the flag by name, the WRITER's environment, the order of operations, the creation hook (`provision_graph_record`, `#14582`), `sweep`, the backfill) plus its non-vacuity (an acknowledged run past the gate fails on the DSN instead); every graph-scoped verb still refusing `--graph-id`-less use while `sweep` does not; the DSN name IMPORTED from the seam rather than re-declared; `UNCUT_GRAPHS_SQL` reading `journal_event` (not `public.graphs`, which the record role cannot see) with one `%s`; `_cmd_sweep`'s payload answering `journal_max_seq` as the MAX(seq) it is, refusing an operator-stated floor on a multi-graph sweep, and stating what it cannot see; `status` labelling `allocates` as the RECORD's state; and the five `record_wiring_check` mutations (helper deleted / answers without the env / door never binds it / constant renamed / not exported / bound-but-not-forwarded) each redding the gate over a mutated COPY of `record_writer.py`. ⚠️ The DB-BACKED leg (`test_sweep_finds_a_born_uncut_graph_and_not_the_cut_over_one`) skips without `TEST_RECORD_DB_URI`; it runs in `test-record-postgres`, which is why the file is listed there too. Hermetic otherwise: no docker, no graph, no network, no model call. ⛔ The CASE COUNT is deliberately not quoted: it moves whenever a review round adds a pin — `tools/ci_selection.py --integrity` is the authority. — ci-timing junit-census+top-15 2026-11-23 (run 45071394329): the reading saw 20 of 21 testcases pytest collects = 0.3s in the largest single job (not summed across legs), a LOWER bound; kept 2.0
   # #14582 (new in the creation-hook change): the same #3400/#4348 trap the
   # `test_13043_record_allocator_cli.py` row records — a file a PR ADDS can never
   # carry a CI junit reading yet, so it takes the header's flat
   # `DEFAULT_FAST_WEIGHT` and NOT a local reading. What the weight covers, on the
-  # DB-free lane — ⛔ named by the pin that holds it, because a `durations` row is
-  # read by a verifier INSTEAD of the test, so a paraphrase here is a claim in its
-  # own right (`#14587` review P3-1: this row used to restate the "every creation
-  # door calls the hook, `sdk._graph_create` included" sentence the change retracts,
-  # and a three-key `/health` that is six): the TWO minting doors call the hook,
-  # ONCE for `hosted_api._provision_graph` and THREE times for
-  # `supabase_control.ensure_default_graph_row` (one per id-yielding arm), each
-  # through its helper (`_DOORS`, `_DOOR_HOOK_CALLS`, `_HELPERS`) — and the hook's
-  # own call site (inside `_provision_graph`) is GATED on
-  # `control_plane_owns_graph` (the arm that persisted a `public.graphs` row), so a
-  # REGISTRY-arm create never reaches the hook; the seven DELEGATING creation sites reach a graph-creating door
-  # transitively — the HTTP and default-graph ones at
-  # `_provision_graph`/`ensure_default_graph_row`, the SDK and signup ones at
-  # `sdk._graph_create`, a door the hook is deliberately NOT called from
-  # (`_DELEGATED`, `_same_module_call_graph`);
-  # ⛔ and `sdk._graph_create` is pinned the OPPOSITE way — it must NOT call the
-  # hook (`_UNHOOKED`, F1/F3: its Supabase arm persists no `public.graphs` row and
-  # its registry arm mints one the record's FK refuses, so hooking it manufactures
-  # a permanent false red on `/health`); the hook ARMS (the plan's §A7.8 item 8 /
-  # M16 falsifier) and reuses `seed`; the uncut registry's cap, its overflow counter
-  # and its NO-tenant-identifiers rule; `/health` seeding the SIX `armed_but_*` keys
-  # and folding `ok` on an armed deployment carrying a graph this process has
-  # OBSERVED uncut (`test_health_is_a_window_not_a_census` — the registry is
-  # per-process state with no population source, so it is a WINDOW, not a census)
-  # while leaving `degraded`'s window meaning alone. The DB-backed legs (a first
-  # record write APPLYING after
+  # DB-free lane: the two fileable creation doors call the hook (AST-pinned for
+  # `hosted_api._provision_graph_record` and
+  # `supabase_control._provision_default_graph_record`), and `sdk._graph_create`
+  # is pinned UNHOOKED — both of its arms are findings rather than omissions;
+  # the hook ARMS (the plan's §A7.8 item 8 / M16 falsifier)
+  # and reuses `seed`; the uncut registry's cap, its overflow counter and its
+  # NO-tenant-identifiers rule; `/health` seeding its `armed_but_*` keys and
+  # folding `ok`
+  # on an armed deployment carrying an uncut graph while leaving `degraded`'s
+  # window meaning alone. The DB-backed legs (a first record write APPLYING after
   # the hook, the divergence refusal, the door helpers against a real
   # `public.graphs` row, and `backfill`'s three counts + `--dry-run`) skip
   # without `TEST_RECORD_DB_URI`. ⛔ The CASE COUNT is deliberately not quoted: it

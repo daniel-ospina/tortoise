@@ -5022,7 +5022,7 @@ the fail-closed Fly secret-provenance gate no longer reports it as `UNDECLARED`:
 ### Arming the allocator's cutover — `TORTOISE_RECORD_ALLOCATE` (#12894)
 
 > ⛔ **THIS FLAG RENUMBERS LIVE WRITES, AND IT IS ROLLED LAST — AFTER THE GRAPHS, NEVER BEFORE.**
-> `record_writer.record_live_allocate()` (`tortoise/record_writer.py:2775-2786`) reads
+> `record_writer.record_live_allocate()` (`tortoise/record_writer.py:2697-2708`) reads
 > `TORTOISE_RECORD_ALLOCATE` **at call time** through `env_flag(..., False)` — read per call, never cached
 > at import — and its default is **OFF**, including for any value `env_flag` cannot parse. That fail-safe
 > direction is deliberate: the ON arm refuses writes on a graph that has not been seeded.
@@ -5032,19 +5032,15 @@ enumerating one. With it OFF, nothing changes on a graph that has not been cut o
 consequences, both load-bearing:
 
 1. **On a graph that holds a `public.record_cursor` row, the ENUMERATED arm is REFUSED by name** —
-   `record_projection._refuse_an_enumerated_replay` (`tortoise/record_projection.py:8183`). The cursor
+   `record_projection._refuse_an_enumerated_replay` (`tortoise/record_projection.py:7569`). The cursor
    ROW is the fact, not the mode, which is exactly why the flag must be rolled **after** the seeding.
 2. **The order is `sweep` → `seed --journal <path>` → `arm` (per graph) → THEN the flag for the box.**
    `tortoise/live_write.py:105-109` states that order and names
-   `tools/record_allocator_cli.py`'s `CUTOVER_ACK_TEXT` (`:130-172`) as its authority — that text is the
+   `tools/record_allocator_cli.py`'s `CUTOVER_ACK_TEXT` (`:143-186`) as its authority — that text is the
    procedure, not this paragraph; it also carries the four preconditions `arm` refuses without
    `--acknowledge-cutover` (the flag lives in the WRITER's environment; every graph written after the
-   cutover needs its own counter row, and the hook that now gives a NEW graph one
-   (`record_writer.provision_graph_record`, `#14582`) is BEST-EFFORT — a record outage at creation
-   leaves the graph uncut in `record.armed_but_uncut` rather than failing the create — while
-   `backfill` DOES NOT reach that population, because `sweep` reads `public.journal_event` and a graph
-   whose record writes are refused has no row there; cutover is per graph; and
-   `tools/backfill_copy_turns.py` needs the flag too).
+   cutover needs its own counter row and the provisioning hook is not in this tree; cutover is per graph;
+   and `tools/backfill_copy_turns.py` needs the flag too).
 
 ⚠️ **`set` and `unset` both RESTART the Machine.** App secrets are injected at boot, so the restart is
 the mechanism by which the change takes effect — schedule it, do not read the brief 502s as a regression.

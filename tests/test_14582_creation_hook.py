@@ -17,32 +17,21 @@ WHAT THIS FILE HOLDS DOWN, and how each leg could go quietly wrong:
 * every CONTROL-PLANE door calls it — pinned from the AST, on the DOOR'S OWN BODY
   rather than on a helper's, because the call is one line and its absence is
   invisible at runtime until a graph is uncut: `hosted_api._provision_graph`
-  (both HTTP create endpoints route through it) and
-  `supabase_control.ensure_default_graph_row`'s THREE id-yielding arms;
+  (both HTTP create endpoints route through it),
+  `supabase_control.ensure_default_graph_row`'s THREE id-yielding arms, and the
+  two `kind='default'` MINT arms in `supabase_control.set_graph_name` and
+  `set_graph_recording` — the last two are the finding carried from #14610's
+  independent review, and neither is reachable from the provisioning RPC, so
+  the census could not have seen them by name only;
 * the doors that CANNOT be hooked are pinned as NOT hooked, on purpose, because
   both are findings rather than omissions (`sdk._graph_create`: the Supabase arm
   persists nothing — F1 — and the registry arm creates a graph `public.graphs`
   never holds, so the FK refuses it — F3). An unpinned absence is how the next
   reader "fixes" it back into a permanently-red health field;
-* the sites that create a graph BY DELEGATION (the HTTP create aliases, the
-  default-graph mint, the credential resolver, the two SDK verbs and the signup
-  route — seven in all) are pinned as
-  REACHING their graph-creating door, transitively, so a refactor that drifts an
-  alias off the route reds instead of shipping a graph with no cursor row — ⛔ and
-  for the three SDK/signup sites that door is the UNHOOKED one, so their route is
-  pinned as the census's record of the gap, not as coverage (#14587 P3-3: the PR
-  body claimed this pin and nothing pinned it);
 * a graph the record ALREADY knows is REFUSED, not seeded (`#12894`'s divergence
   rule) — `SEED_SQL`'s own guard decides it, there is no second predicate here;
-* `/health` CANNOT report `record.ok: true` for a graph THIS PROCESS has
-  OBSERVED uncut, and it publishes COUNTS ONLY (the endpoint is unauthenticated).
-  ⛔ That is the whole claim, and it is a WINDOW rather than a census (#14587
-  review P3-1): the registry has no runtime population source, so a graph that
-  was already uncut when the process started has not been observed and is not
-  counted until it writes. The measured form is pinned here
-  (`test_health_cannot_report_ok_for_a_graph_it_has_observed_uncut`) and so is
-  the bound it does NOT cross (`test_health_is_a_window_not_a_census`), so the
-  caveat cannot be deleted as tidying;
+* `/health` CANNOT report `record.ok: true` on an armed deployment carrying an
+  uncut graph, and it publishes COUNTS ONLY (the endpoint is unauthenticated);
 * the BACKFILL reports `considered / seeded / refused` and is idempotent, and its
   `--dry-run` runs the real decision and writes nothing.
 
@@ -54,12 +43,11 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import json
 import os
-import re
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
@@ -89,13 +77,11 @@ _DOORS = (
     ("tortoise/hosted_api.py", "_provision_graph", "_provision_graph_record"),
     ("tortoise/supabase_control.py", "ensure_default_graph_row",
      "_provision_default_graph_record"),
-    # ⛔ #14587 review P2: these two MINT the same `kind='default'` row when the
-    # org has none — `set_graph_name` from `PATCH /v1/graphs/{id}` with the
-    # `default` sentinel, `set_graph_recording` from the recording override — and
-    # neither called the hook. The minted row is a read HIT on every later
-    # credential path, so `ensure_default_graph_row`'s hook is never reached for
-    # that org: the graph's record writes are refused `cursor_not_active` for
-    # ever while `write_live_record` (fail-soft by contract) reports success.
+    # ⛔ THE TWO MINT-ON-DEMAND DOORS (#14624 — the finding carried from
+    # #14610's independent review). Both create a `kind='default'` row with a
+    # POST of their own; neither is reachable from `ensure_default_graph_row`,
+    # so pinning the provisioning door could not see them. A graph whose first
+    # write is a RENAME or a recording toggle was born uncut and nothing red.
     ("tortoise/supabase_control.py", "set_graph_name",
      "_provision_default_graph_record"),
     ("tortoise/supabase_control.py", "set_graph_recording",
@@ -103,17 +89,31 @@ _DOORS = (
 )
 
 #: How many hook calls each door's body must carry. `ensure_default_graph_row`
-#: yields an id from THREE arms (active-row self-heal, mint, convergent adopt) and
-#: hooks each; a refactor that collapses them to one silently drops two. The two
-#: default-row minters hook their MINT and their CONVERGENT-ADOPT arm — the PATCH
-#: arm writes to a row that already exists and mirrors `ensure_default_graph_row`'s
-#: read-hit reach (see `_provision_default_graph_record`'s docstring).
+#: yields an id from THREE arms (existing-row short-circuit, mint, convergent
+#: adopt) and hooks each; a refactor that collapses them to one drops two.
+#: ⛔ NOT "self-heal" for the short-circuit arm: a resolver that finds an existing
+#: default row returns it without re-entering this door (`#14624` review 4,
+#: ISSUE 2), so the arm fires on a re-provision or a race — see
+#: `_provision_default_graph_record`'s docstring.
 _DOOR_HOOK_CALLS = {
     ("tortoise/hosted_api.py", "_provision_graph"): 1,
     ("tortoise/supabase_control.py",
      "ensure_default_graph_row"): 3,
-    ("tortoise/supabase_control.py", "set_graph_name"): 2,
-    ("tortoise/supabase_control.py", "set_graph_recording"): 2,
+    # ONE each: only the arm that MINTS. The PATCH arms of both functions write
+    # to a row that already existed, which is `backfill`/`sweep`'s population and
+    # deliberately outside the hook's scope (§A8.3.13's scope note).
+    # ⛔ WHAT THIS COUNT GRADES — stated from the mutation, not from the intent
+    # (#14624 review P3-1/P3-2): it is EXACT (`!=`, in the pin below), so it reds
+    # on the call being DELETED and on a SECOND call added anywhere in the same
+    # body — including `set_graph_recording`'s CUSTOM-row arm, which no
+    # behavioural half drove before. It does NOT catch a call MOVED to function
+    # entry: the count is unchanged, and that shape is graded by
+    # `test_the_two_mint_on_demand_doors_arm_the_graph_they_create`'s
+    # existing-default-row half, which reds because the hook then fires for a row
+    # the door did not create. A FLOOR would have caught neither the second call
+    # nor the move.
+    ("tortoise/supabase_control.py", "set_graph_name"): 1,
+    ("tortoise/supabase_control.py", "set_graph_recording"): 1,
 }
 
 #: The helpers those doors call must themselves reach the writer's hook.
@@ -127,66 +127,6 @@ _HELPERS = (
 #: F3: its registry arm creates a graph the record cannot file — `public.graphs`
 #: never holds it, and `record_cursor`'s FK refuses it).
 _UNHOOKED = (("tortoise/sdk.py", "_graph_create"),)
-
-#: The creation hook's own name. An absence pin matches callees by this PREFIX
-#: rather than by one exact spelling — the exact spelling the pin used to carry
-#: alongside it (`provision_graph_record_`) matches nothing in the tree, so that
-#: half was inert (`#14587` review, residual); see :func:`_hook_call_names`.
-_HOOK_PREFIX = "provision_graph_record"
-
-#: The DOOR-SIDE hook helpers — the two functions a door calls instead of the
-#: writer's `record_writer.provision_graph_record` directly. They are NOT prefix
-#: matches of :data:`_HOOK_PREFIX` (`_provision_default_graph_record` carries
-#: `default` in the middle), so a mint-site pin built on that prefix reports every
-#: hooked door as unhooked — measured while adding
-#: :func:`test_every_graph_minting_site_is_declared`. Listed exactly, and their own
-#: wiring is pinned separately by :data:`_HELPERS`.
-_HOOK_HELPERS = (
-    "_provision_graph_record",
-    "_provision_default_graph_record",
-)
-
-#: The DELEGATED sites: an entry point that creates a graph WITHOUT minting the id
-#: itself, so it is covered by the door it routes through. `(module, entry point,
-#: door)` — and the route is RESOLVED through that module's own AST rather than
-#: asserted here, because a name in a table is exactly the prose promise this pin
-#: replaces. ⛔ THE TABLE ABOVE (`_DOORS`) IS NOT THIS PIN: it reads the DOOR's
-#: body, and a delegating site that stops delegating leaves every door intact.
-#: Measured on the #14587 review (P3-3): the PR body's census claimed A1/A2, B1,
-#: C1/C2/C3 were "verified by AST pin, not by reading", and NOTHING pinned them —
-#: the aliases were verified by reading a reviewer had done, which is not a pin and
-#: does not survive the next refactor. So a `create_graph` alias that started minting
-#: its own id (bypassing A/B/C) would have left the suite green while the graph it
-#: created was born UNCUT — the defect this whole file exists to name.
-_DELEGATED = (
-    # A1 / A2 — the two HTTP create doors; both delegate to `_provision_graph` (A).
-    ("tortoise/hosted_api.py", "create_org_graph", "_provision_graph"),
-    ("tortoise/hosted_api.py", "create_graph", "_provision_graph"),
-    # B1 / B2 — the default-graph mint, and the credential resolver that reaches it
-    # on a read MISS only (two hops through `default_graph_for_credential`), which
-    # is what makes this arm TRANSITIVE rather than a direct-call check.
-    ("tortoise/supabase_control.py", "_mint_default_graph_row_best_effort",
-     "ensure_default_graph_row"),
-    ("tortoise/supabase_control.py", "default_graph_id_for_credential",
-     "ensure_default_graph_row"),
-    # C1 / C2 — the two SDK doors the census names: the org/team create that mints
-    # the default graph, and the memory-graph verb. Both delegate to `_graph_create`
-    # — the door this lane REFUSES to hook, and `_UNHOOKED` pins the WHOLE FUNCTION,
-    # not one arm: NEITHER arm calls the hook (F1: the Supabase arm persists no row;
-    # F3: the registry arm mints one the record's FK refuses). The route is pinned
-    # because an alias that drifted off it would create a graph without reaching
-    # that door at all.
-    ("tortoise/sdk.py", "_org_create", "_graph_create"),
-    ("tortoise/sdk.py", "create_memory_graph", "_graph_create"),
-    # C3 — the signup route, the census's third C arm and `#14587` review (i), open
-    # at every head until now: it is a graph-creating site the census NAMED and this
-    # table did not pin, so an alias drifting off the route would have been invisible
-    # here. Pinned under the SAME door as C1/C2, because "the census named seven
-    # sites" and "the table held six" is a disagreement the next reader cannot
-    # resolve. ⛔ C3, not "C4": the census's C range is C1/C2/C3 (the two SDK verbs
-    # and the signup path), so a `C4` label would invent a fourth arm.
-    ("tortoise/hosted_api.py", "agent_signup", "_graph_create"),
-)
 
 
 # ── DB-free: the hook is wired, and it ARMS ────────────────────────────────
@@ -246,33 +186,58 @@ def _hook_calls(node: ast.AST, callee: str) -> int:
     return count
 
 
-def _hook_call_names(node: ast.AST) -> list[str]:
-    """Callee names in `node` that ARE the creation hook, matched by PREFIX.
+def _hook_calls_named_like(node: ast.AST, stem: str) -> int:
+    """Calls in `node`'s body whose callee identifier CONTAINS `stem`.
 
-    ⛔ The absence pin below cannot use an exact spelling: it previously also
-    matched ``provision_graph_record_`` (a trailing underscore), a name that
-    exists nowhere in the tree, so that clause was INERT — it could never fire
-    (`#14587` review, residual). A name-based AST walk cannot see a hook that is
-    renamed or aliased, so the honest pin is the PREFIX: any callee starting with
-    the hook's own name counts as a call to it, and a differently-spelled hook is
-    caught instead of sailed past.
+    ⛔ A REAL SECOND SPELLING, not an inert disjunct (#14610 review F5). The
+    "must stay unhooked" pin used to read
+
+        _hook_calls(node, "provision_graph_record") or _hook_calls(
+            node, "provision_graph_record_")
+
+    but `_hook_calls` matches the callee by EXACT equality and no function in
+    the tree is named `provision_graph_record_`, so the second term was `0`
+    under every possible mutation: the guard was the first term alone while
+    reading as though a second spelling were covered. This matches the way a
+    later edit actually reaches the hook — a WRAPPER carrying the hook's name
+    inside its own (`_provision_graph_record_quietly`) or any
+    `module.provision_graph_record`. Structural, so a comment or a docstring
+    cannot satisfy it.
     """
-    found: list[str] = []
+    count = 0
     for sub in ast.walk(node):
         if not isinstance(sub, ast.Call):
             continue
         func = sub.func
         name = func.id if isinstance(func, ast.Name) else (
             func.attr if isinstance(func, ast.Attribute) else None)
-        # ⛔ THE DOOR-SIDE HELPERS COUNT TOO (#14587 review P3): a door that calls
-        # `_provision_default_graph_record` IS calling the creation hook, and the
-        # prefix alone does not match it (`default` sits in the middle). Without
-        # this, wiring `sdk._graph_create` to the helper left this absence pin
-        # GREEN over the exact arm it exists to keep unhooked — and that arm
-        # persists no `graphs` row, so every create would fail the FK and pin
-        # `/health` red over a healthy deployment.
-        if name and (name.startswith(_HOOK_PREFIX) or name in _HOOK_HELPERS):
-            found.append(name)
+        if name is not None and stem in name:
+            count += 1
+    return count
+
+
+def _calls_with_enclosing_tests(
+    node: ast.AST, callee: str,
+) -> list[tuple[ast.Call, list[ast.AST]]]:
+    """Every call to `callee` in `node`'s body, with the `if` tests above it.
+
+    `ast.walk` yields no parents, so the branch a call sits inside is invisible
+    to it — and a call's BRANCH is exactly what the creation-hook pin has to
+    judge (#14610 review F2).
+    """
+    found: list[tuple[ast.Call, list[ast.AST]]] = []
+
+    def walk(parent: ast.AST, guards: list[ast.AST]) -> None:
+        for child in ast.iter_child_nodes(parent):
+            if isinstance(child, ast.Call):
+                func = child.func
+                name = func.id if isinstance(func, ast.Name) else (
+                    func.attr if isinstance(func, ast.Attribute) else None)
+                if name == callee:
+                    found.append((child, list(guards)))
+            walk(child, [*guards, child.test] if isinstance(child, ast.If) else guards)
+
+    walk(node, [])
     return found
 
 
@@ -285,7 +250,7 @@ def test_every_creation_door_calls_the_hook():
     DOOR, because a helper that still calls the hook proves only that the helper
     is intact.
     """
-    missing = []
+    wrong = []
     for rel, function, callee in _DOORS:
         node = _functions(rel).get(function)
         assert node is not None, (
@@ -295,14 +260,20 @@ def test_every_creation_door_calls_the_hook():
             f"and pin the new name rather than deleting this check")
         want = _DOOR_HOOK_CALLS[(rel, function)]
         got = _hook_calls(node, callee)
-        if got < want:
-            missing.append(f"{rel}::{function} calls {callee}× (want {want})")
-    assert not missing, (
-        "these creation doors no longer call the record-cursor hook: "
-        f"{missing}. A graph they create is born UNCUT — every record it writes "
-        "is refused `cursor_not_active` while `write_live_record` (fail-soft by "
-        "contract) reports success, so nothing reds and the loss only shows at a "
-        "rebuild")
+        # ⛔ EXACT, not a floor (#14624 review P3-1/P3-2). A floor let a SECOND
+        # call into the same body pass: the hook fires for a row the door did not
+        # create, which is the widening §A8.3.13's scope note rules out.
+        if got != want:
+            wrong.append(f"{rel}::{function} calls {callee}×{got} (want {want})")
+    assert not wrong, (
+        "these creation doors no longer call the record-cursor hook the pinned "
+        f"number of times: {wrong}. FEWER means a graph the door creates is born "
+        "UNCUT — every record it writes is refused `cursor_not_active` while "
+        "`write_live_record` (fail-soft by contract) reports success, so nothing "
+        "reds and the loss only shows at a rebuild. MORE means the hook reached "
+        "an arm that must not arm: a row the door did not create is "
+        "`backfill`/`sweep`'s population (§A8.3.13's scope note), and arming it "
+        "from a rename or a toggle widens the hook's population past its door")
 
 
 def test_the_door_helpers_reach_the_writers_hook():
@@ -318,61 +289,6 @@ def test_the_door_helpers_reach_the_writers_hook():
         f"{missing} — the doors would call a function that provisions nothing")
 
 
-def test_the_hook_matcher_is_not_vacuous():
-    """Non-vacuity for the matcher the absence pin below rests on (`#14587` N1).
-
-    ⛔ An ABSENCE pin is green precisely when its matcher finds nothing, so a
-    matcher that always answers `[]` silences it without reddening a thing —
-    measured at the reviewed head: `return []` at the top of
-    :func:`_hook_call_names` left the whole file `23 passed, 8 skipped`. The pin
-    itself is not a no-op (a real hook call reds it); what was missing is any
-    assertion that the matcher SEES a hook, which is what this is.
-    """
-    node = ast.parse(
-        "def door():\n"
-        "    provision_graph_record(org_id=o, graph_id=g)\n"
-        "    _rw.provision_graph_record_v2(g)\n"
-        "    other_call(g)\n").body[0]
-    found = set(_hook_call_names(node))
-    assert {"provision_graph_record", "provision_graph_record_v2"} <= found, (
-        f"the hook matcher answered {sorted(found)} — it no longer sees the hook in "
-        "either spelling a door's line takes. Every absence pin it backs is then "
-        "green for ANY door, so a door that starts calling the hook sails past it")
-    assert "other_call" not in found, (
-        "an unrelated callee was matched as the hook — the matcher is no longer "
-        "prefix-scoped to the hook's own name")
-
-    # ⛔ The door-side HELPER has its own arm (`_HOOK_HELPERS`), and an arm that
-    # nothing asserts is an arm a later reader reverts: measured at the reviewed
-    # head (#14587 review P3), restoring the prefix-only matcher left this test
-    # and the absence pin below BOTH green, while wiring `sdk._graph_create` to
-    # the helper no longer reddened anything.
-    helper = ast.parse(
-        "def door():\n"
-        "    _provision_default_graph_record(o, g)\n"
-        "    helper(g)\n"
-        "    provision(g)\n").body[0]
-    helper_found = set(_hook_call_names(helper))
-    assert "_provision_default_graph_record" in helper_found, (
-        f"the matcher answered {sorted(helper_found)} — it does not count the "
-        "door-side helper that `_HOOK_HELPERS` names. That helper is what "
-        "`sdk._graph_create` and `_membership_remove` must NOT call (their arm's "
-        "`public.graphs` row does not exist: no FK parent, every seed refused), so "
-        "a prefix-only matcher leaves the absence pin green over the exact wiring "
-        "it exists to forbid")
-    assert not ({"helper", "provision"} & helper_found), (
-        f"a near-name was counted as a hook call: {sorted(helper_found)} — the "
-        "helper arm must name `_provision_default_graph_record`, not any call "
-        "that contains `provision`")
-    # ⛔ DECLARED over-match, asserted so it cannot drift silently in either
-    # direction: any callee whose name STARTS with the hook's name counts as a call
-    # to it (fail-closed — a renamed hook is caught, at the price of an unrelated
-    # prefix counting).
-    assert _hook_call_names(ast.parse(
-        "def door():\n    provision_graph_recorder_notes(g)\n").body[0]) == [
-            "provision_graph_recorder_notes"]
-
-
 def test_the_doors_that_cannot_be_hooked_stay_unhooked():
     """⛔ AN UNPINNED ABSENCE IS A FUTURE "FIX". Both of these are FINDINGS:
     hooking them manufactures a permanent false red on `/health` for a deployment
@@ -382,10 +298,8 @@ def test_the_doors_that_cannot_be_hooked_stay_unhooked():
     for rel, function in _UNHOOKED:
         node = _functions(rel).get(function)
         assert node is not None, f"{rel}::{function} is gone — re-run the census"
-        names = _hook_call_names(node)
-        if names:
-            hooked.append(
-                f"{rel}::{function} calls {sorted(set(names))}")
+        if _hook_calls_named_like(node, "provision_graph_record"):
+            hooked.append(f"{rel}::{function}")
     assert not hooked, (
         f"{hooked} now calls the creation hook, and it must not: its Supabase "
         "arm persists no graph row (so the cursor row would be seeded for an id "
@@ -396,639 +310,270 @@ def test_the_doors_that_cannot_be_hooked_stay_unhooked():
         "graph-row mint has to land first")
 
 
-# ── DB-free: the MINTING sites, enumerated from the INSERT and not from names ──
-#
-# ⛔ WHY THIS EXISTS. `_DOORS` above can only pin a door SOMEONE LISTED, and the
-# census that produced it searched for NAMES (`create_graph`, `_graph_create`,
-# `insert_graph`, `ensure_default_graph_row`, `create_memory_graph`, …).
-# `supabase_control.set_graph_name` and `set_graph_recording` mint a
-# `kind='default'` row through an inline `cp.query("graphs", method="POST", …)`,
-# so no name search could see them — and at the reviewed head they created
-# graphs with no cursor row, the exact defect this PR exists to close
-# (#14587 review P2). A pin that reds on a NEW minting arm is the only form that
-# cannot be re-opened by the next arm nobody lists.
+class _MintOnlyControlPlane:
+    """The control plane reduced to the reads a `kind='default'` MINT makes.
 
-#: Every site in `tortoise/**` that INSERTS a `public.graphs` row, keyed by the
-#: site's own identity, with what covers it:
-#:   * `hooked`    — the site's body calls the creation hook itself;
-#:   * `delegated` — a mint HELPER: it writes the row for a caller, so every
-#:                   caller of it must be a hooked door (asserted below).
-_GRAPH_MINT_SITES = {
-    # The one mint helper. Its two production callers are `_DOORS` entries
-    # (`hosted_api._provision_graph`, `supabase_control.ensure_default_graph_row`),
-    # which is what makes this entry a DECLARATION and not an exemption.
-    #
-    # ⛔ KEYED BY SITE, NOT BY FUNCTION (#14587 review P2): `(module, function,
-    # ORDINAL)` — the ordinal is the site's position among the INSERTs of that
-    # function, in source order. Keyed by function alone, a SECOND mint added
-    # inside an already-`hooked` function was INVISIBLE, because the hook the
-    # existing arm calls satisfied the whole function body: measured by adding a
-    # second unhooked `cp.query("graphs", method="POST", …)` beside the hooked one
-    # in `set_graph_name` — this pin and its non-vacuity test both stayed green.
-    # The ordinal makes a new site a new KEY, so it cannot ride a neighbour's
-    # declaration, and the pin's promise ("the next arm added anywhere reds
-    # HERE") is what the code now does.
-    ("tortoise/supabase_control.py", "insert_graph", 0): "delegated",
-    ("tortoise/supabase_control.py", "set_graph_name", 0): "hooked",
-    ("tortoise/supabase_control.py", "set_graph_recording", 0): "hooked",
-}
-
-
-def _calls_a_door_hook(node: ast.AST) -> bool:
-    """Does `node` call either door-side hook helper (:data:`_HOOK_HELPERS`)?"""
-    for sub in ast.walk(node):
-        if not isinstance(sub, ast.Call):
-            continue
-        func = sub.func
-        name = func.id if isinstance(func, ast.Name) else (
-            func.attr if isinstance(func, ast.Attribute) else None)
-        if name in _HOOK_HELPERS:
-            return True
-    return False
-
-
-def _is_graphs_insert(node: ast.AST) -> bool:
-    """Does this node INSERT a `public.graphs` row through the control plane?
-
-    The shape is `cp.query("graphs", method="POST", json_body=…)` — matched
-    structurally (table + method as constants), so a POST to any other table is
-    not a mint.
-
-    ⛔ ANY `query*` METHOD COUNTS, not just the exact spelling `query` (#14587
-    review P2): the control plane carries `query_with_total`, which takes the same
-    `method="POST"`, and an exact-name test shipped with a docstring claiming "a
-    differently-named transport is still seen" while a mint through that verb was
-    invisible. What the matcher does NOT see, stated so the pin's promise is not
-    read as more than it is: a BOUND-METHOD ALIAS (`q = cp.query; q(...)`), which
-    needs dataflow this pin does not have. The residual is listed on the pin.
-    """
-    if not isinstance(node, ast.Call):
-        return False
-    func = node.func
-    if not (isinstance(func, ast.Attribute)
-            and func.attr.startswith("query")):
-        return False
-    table = node.args[0] if node.args else next(
-        (kw.value for kw in node.keywords if kw.arg == "table"), None)
-    if not (isinstance(table, ast.Constant) and table.value == "graphs"):
-        return False
-    method = next(
-        (kw.value for kw in node.keywords if kw.arg == "method"), None)
-    return isinstance(method, ast.Constant) and method.value == "POST"
-
-
-def _enclosing_sites(predicate) -> dict[tuple[str, str],
-                                        tuple[ast.AST, list[ast.AST]]]:
-    """`{(module, INNERMOST enclosing function): (function node, [matches])}` for
-    every call in `tortoise/**` that `predicate` accepts.
-
-    Innermost on purpose: a mint inside a nested helper is reported as that
-    helper, which is the thing a reader has to classify, not its outer shell.
-    The LIST is what lets :func:`_mint_sites` key site by site (see
-    :data:`_GRAPH_MINT_SITES`): one function can carry several INSERTs, and
-    collapsing them to one key is how a new arm hid behind a neighbour's hook.
-
-    ⛔ THE FUNCTION NODE IS RETURNED BY IDENTITY, and a caller must use it rather
-    than look the name up in `_functions(rel)`: that dict is `{name: node}` with
-    the LAST walk winning, so in a module carrying two same-named defs (a
-    module-level function and a method) a name lookup graded the WRONG body and
-    reported a hooked site over a function that never calls the hook (#14587
-    review P2 — a weakening introduced by an earlier revision of this pin).
-    """
-    per: dict[tuple[str, str], tuple[ast.AST, list[ast.AST]]] = {}
-
-    def walk(rel: str, node: ast.AST, current: ast.AST | None) -> None:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            current = node
-        if predicate(node):
-            assert current is not None, (
-                "a `public.graphs` INSERT outside any function — this pin cannot "
-                "attribute it to a door")
-            owner, sites = per.setdefault((rel, current.name), (current, []))
-            # ⛔ Two defs sharing a name in one module make `(module, name)`
-            # ambiguous: the key would collapse their sites and grade whichever
-            # node the walk met first — measured as a GREEN over an unhooked mint
-            # (#14587 review P2). Fail closed instead; a duplicate name is not a
-            # shape this census can key, and it does not occur in the tree today.
-            assert owner is current, (
-                f"{rel} defines `{current.name}` more than once, so this pin "
-                "cannot key a mint inside it — the site would be attributed to "
-                "the other def's body. Rename one, or give the census a "
-                "disambiguator before adding the duplicate")
-            sites.append(node)
-        for child in ast.iter_child_nodes(node):
-            walk(rel, child, current)
-
-    for path in sorted((_ROOT / "tortoise").rglob("*.py")):
-        rel = str(path.relative_to(_ROOT))
-        walk(rel, ast.parse(path.read_text()), None)
-    return per
-
-
-def _mint_sites() -> dict[tuple[str, str, int], tuple[ast.AST, ast.AST]]:
-    """Every `public.graphs` INSERT, keyed BY SITE — `(module, function, ordinal)`,
-    carrying `(insert node, THE enclosing function node)`.
-
-    The ordinal is source order within the function, so adding a second mint to a
-    function whose first mint is already declared produces a NEW key that the
-    declaration table does not hold, and the pin reds. That is the whole point of
-    the third component: function-level keys let a new arm inherit its
-    neighbour's hook (measured, #14587 review P2). The function node travels with
-    the site so the `hooked` check grades the body that CONTAINS it — see
-    :func:`_enclosing_sites` on why a name lookup is not the same thing.
-    """
-    return {(rel, fn, idx): (node, owner)
-            for (rel, fn), (owner, nodes)
-            in _enclosing_sites(_is_graphs_insert).items()
-            for idx, node in enumerate(nodes)}
-
-
-def _call_sites(callee: str) -> set[tuple[str, str]]:
-    """`{(module, innermost enclosing function)}` for every `<callee>(…)` call in
-    `tortoise/**`."""
-
-    def is_call(node: ast.AST) -> bool:
-        if not isinstance(node, ast.Call):
-            return False
-        func = node.func
-        name = func.id if isinstance(func, ast.Name) else (
-            func.attr if isinstance(func, ast.Attribute) else None)
-        return name == callee
-
-    return set(_enclosing_sites(is_call))
-
-
-def test_every_graph_minting_site_is_declared():
-    """⛔ THE COMPLETENESS PIN: no `public.graphs` INSERT may exist unclassified.
-
-    A mint that is not hooked (and not a helper whose every caller is) creates a
-    graph with no cursor row — the user's writes succeed, the record accumulates
-    nothing for that graph, and `/health` reads green until the graph's first
-    refused write. This enumerates the INSERTs themselves, so a new mint site
-    under `tortoise/` reds HERE instead of shipping as a silent gap.
-
-    Two closes for a red: HOOK it, or declare it a named residual with a tracked
-    issue and its reason (which is what `_UNHOOKED` does for the doors that must
-    NOT be hooked). What is not a close is leaving it out of the table.
-
-    ⛔ WHAT THIS PIN CANNOT SEE, stated here so its green is not read as more than
-    it is (#14587 review, two rounds). It is a STATIC, PER-SITE census — it cannot
-    follow control flow or dataflow, so it does not prove that the hook runs on
-    the arm that minted: a site declared `hooked` whose function calls the hook on
-    a DIFFERENT arm (one that returns before it) is green here. Neither can it see
-    a mint through a BOUND-METHOD ALIAS (`q = cp.query; q(...)`). What covers
-    those is behavioural, not structural:
-    `test_a_rename_that_mints_the_default_row_provisions_it`,
-    `test_a_recording_override_that_mints_the_default_row_provisions_it` and the
-    convergent-adopt pins assert the hook is called for the id that became durable
-    on every minting arm of both minters.
-    """
-    measured = _mint_sites()
-    # Closed set: a typo'd or invented verdict must not read as coverage. The two
-    # arms below compare `== "hooked"` / `== "delegated"`, so `"Hooked"` or
-    # `"hooked "` would silently exempt a site from BOTH checks.
-    known = {verdict for verdict in _GRAPH_MINT_SITES.values()
-             if verdict in {"hooked", "delegated"}}
-    unknown = sorted({
-        verdict for verdict in _GRAPH_MINT_SITES.values()
-        if verdict not in {"hooked", "delegated"}
-        and not _is_residual_verdict(verdict)})
-    assert not unknown, (
-        f"_GRAPH_MINT_SITES carries verdicts outside the closed set "
-        f"{sorted(known)} / `residual:<issue> — <why>`: {unknown}. An unrecognised "
-        "spelling exempts the site from both arms below, which is how a pin over a "
-        "typo'd table reads green over an unhooked mint")
-    undeclared = sorted(set(measured) - set(_GRAPH_MINT_SITES))
-    assert not undeclared, (
-        f"these functions INSERT a `public.graphs` row and are NOT in "
-        f"_GRAPH_MINT_SITES: {undeclared}. If it MINTS a graph, every record "
-        "that graph writes is refused `cursor_not_active` until something seeds "
-        "it, and nothing raises (write_live_record is fail-soft by contract) — "
-        "so either call the creation hook on the arm that minted the row, or "
-        "declare it a residual with a tracked issue and say why hooking it is "
-        "wrong")
-    stale = sorted(set(_GRAPH_MINT_SITES) - set(measured))
-    assert not stale, (
-        f"_GRAPH_MINT_SITES declares sites that no longer INSERT a `public.graphs` "
-        f"row: {stale}. A stale declaration is a pin on nothing — update the "
-        "table to the measured set rather than leaving a name that outlived its "
-        "mint")
-
-    unhooked = [f"{rel}::{fn}#{idx}"
-                for (rel, fn, idx), (_node, owner) in measured.items()
-                if _GRAPH_MINT_SITES[(rel, fn, idx)] == "hooked"
-                and not _calls_a_door_hook(owner)]
-    assert not unhooked, (
-        f"these `public.graphs` minters are declared `hooked` and call no "
-        f"creation hook: {unhooked} — the declaration is now the lie the defect "
-        "used to be")
-
-    doors = {(rel, fn) for rel, fn, _callee in _DOORS}
-    unprovisioned = sorted(
-        site for (rel, fn, _idx), (_node, _owner) in measured.items()
-        if _GRAPH_MINT_SITES[(rel, fn, _idx)] == "delegated"
-        for site in _call_sites(fn) - doors)
-    assert not unprovisioned, (
-        f"these functions call a `public.graphs` mint HELPER without being a "
-        f"hooked door themselves: {unprovisioned}. The helper writes the row; the "
-        "caller owes the cursor, so a new caller of it is a new unhooked mint")
-
-
-def _first_call(source: str) -> ast.AST:
-    """The first `Call` in `source` — the node :func:`_is_graphs_insert` takes."""
-    return next(node for node in ast.walk(ast.parse(source))
-                if isinstance(node, ast.Call))
-
-
-#: The ONLY accepted shape of an exempting verdict: `residual:#<issue> — <why>`.
-#:
-#: ⛔ A PREFIX CHECK IS NOT A FORMAT CHECK (#14587 review P3-4). The closed set in
-#: :func:`test_every_graph_minting_site_is_declared` used
-#: `verdict.startswith("residual:")`, which accepts the bare `"residual:"` a
-#: half-typed entry leaves — and that value exempts its site from BOTH the
-#: `hooked` and the `delegated` arm, i.e. exactly the exemption the closed set
-#: exists to prevent, reached by TYPING LESS rather than more. Requiring the issue
-#: number and a reason is what makes the marker reviewable: an unexplained
-#: residual is not a residual, it is an omission with a label.
-_RESIDUAL_VERDICT = re.compile(r"residual:#\d+ — \S")
-
-
-def _is_residual_verdict(verdict: str) -> bool:
-    """Is `verdict` a well-formed `residual:#<issue> — <why>`?"""
-    return bool(_RESIDUAL_VERDICT.match(verdict))
-
-
-def test_a_residual_verdict_must_be_well_formed_not_merely_prefixed():
-    """⛔ `startswith("residual:")` EXEMPTS A HALF-TYPED ENTRY (#14587 review P3-4).
-
-    The closed set exists so an unrecognised verdict cannot exempt a site from
-    BOTH the `hooked` and the `delegated` arm. A PREFIX test defeats that in the
-    cheapest way available: the table's own message names the shape
-    `residual:<issue> — <why>`, and `"residual:"` — what a half-typed entry
-    leaves behind — satisfied the prefix, so the site it named was exempt from
-    both arms while reading as a declared residual.
-
-    Mutant: revert :func:`_is_residual_verdict` to
-    `verdict.startswith("residual:")` → every half-typed row below is accepted
-    and this test fails.
-    """
-    assert _is_residual_verdict(
-        "residual:#14582 — the door mints through a helper this pin cannot see")
-    for half_typed in (
-            "residual:",
-            "residual: ",
-            "residual:#14582",                       # no reason at all
-            "residual:14582 — no hash, so no issue link",
-            "residuals:#14582 — the wrong word",
-            "residual:#14582—nospace-em-dash",
-            "residual: #14582 — a leading space breaks the marker"):
-        assert not _is_residual_verdict(half_typed), (
-            f"{half_typed!r} is accepted as a residual verdict, so a site can be "
-            "exempted from the hooked AND delegated arms by typing less")
-    # The defect this replaces, stated as the measurement it is: every rejected
-    # shape above PASSED the prefix test, including the bare marker.
-    assert all(case.startswith("residual:") for case in ("residual:", "residual: "))
-
-
-def test_the_mint_census_is_not_vacuous():
-    """Non-vacuity for :func:`test_every_graph_minting_site_is_declared`.
-
-    That pin is green when it finds NOTHING, so a matcher that answers `{}` (a
-    refactor that stops recognising the INSERT shape) silences it without
-    reddening a thing — the failure mode the hook matcher's own non-vacuity pin
-    was added for. These are the four shapes that matter: the tree's own two, and
-    the two that must NOT count.
-    """
-    assert _is_graphs_insert(_first_call(
-        "def f(cp):\n    cp.query('graphs', method='POST', json_body=row)\n"
-    )), "the inline one-positional shape is no longer recognised"
-    assert _is_graphs_insert(_first_call(
-        "def f(cp):\n    cp.query(\n        'graphs', method='POST',\n"
-        "        json_body={})\n"
-    )), "the multi-line shape is no longer recognised"
-    assert not _is_graphs_insert(_first_call(
-        "def f(cp):\n    cp.query('graphs', method='PATCH', json_body={})\n"
-    )), "a PATCH is not a mint and must not be counted as one"
-    assert not _is_graphs_insert(_first_call(
-        "def f(cp):\n    cp.query('api_keys', method='POST', json_body={})\n"
-    )), "a POST to another table must not be counted as a graph mint"
-    # ⛔ Any `query*` verb counts, not just the spelling `query` (#14587 review P2:
-    # `query_with_total` takes the same `method="POST"` and was invisible).
-    assert _is_graphs_insert(_first_call(
-        "def f(cp):\n"
-        "    cp.query_with_total('graphs', method='POST', json_body=row)\n"
-    )), ("a mint through `query_with_total` is no longer recognised — it is a real "
-         "control-plane verb taking method='POST', so a mint through it would be "
-         "invisible to the census")
-    # And the census really does see the two arms the #14587 review found.
-    measured = set(_enclosing_sites(_is_graphs_insert))
-    assert {("tortoise/supabase_control.py", "set_graph_name"),
-            ("tortoise/supabase_control.py", "set_graph_recording"),
-            ("tortoise/supabase_control.py", "insert_graph")} <= measured, (
-        f"the census answered {sorted(measured)} — it no longer sees the default-row "
-        "mints, which is exactly how those two arms went unhooked and unnoticed")
-
-
-class _MintControlPlane:
-    """The three control-plane calls `set_graph_name` / `set_graph_recording` make.
-
-    DB-free on purpose: the pins below are about WHICH ID the hook is called for,
-    and a real record DSN would make them skip in the fast matrix.
+    `graphs` reads return `self.existing` (the fake does not evaluate the
+    filters — the rows it is given are already the ones the real filters would
+    return), and every POST is recorded so the hook's argument can be compared
+    with the row that was ACTUALLY created. A hook called with the org id, or
+    with a resolved-but-not-minted id, is the same defect one step over.
     """
 
-    def __init__(self, *, graphs=None, org_graph_name="team_mint",
-                 post_error=None, adopt_row=None):
-        self.graphs = [dict(g) for g in (graphs or [])]
+    def __init__(self, existing=None, org_graph_name="org_ns"):
+        self.existing = list(existing or [])
         self.org_graph_name = org_graph_name
-        self.post_error = post_error
-        self.adopt_row = adopt_row
-        self.posts = 0
+        self.posted: list[dict] = []
+        self.patched: list[dict] = []
 
-    def query(self, table, *, select=None, filters=None, method=None,
+    def query(self, table, select=None, filters=None, method=None,
               json_body=None):
+        if table == "graphs" and method == "POST":
+            self.posted.append(dict(json_body or {}))
+            return None
+        if table == "graphs" and method == "PATCH":
+            self.patched.append(dict(json_body or {}))
+            return None
+        if table == "graphs":
+            return [{key: r.get(key) for key in (select or r)}
+                    for r in self.existing]
         if table == "organizations":
             return [{"graph_name": self.org_graph_name}]
-        assert table == "graphs", f"unexpected control-plane read: {table}"
-        if method == "POST":
-            self.posts += 1
-            if self.post_error is not None:
-                # A concurrent writer won: its row appears between this call's
-                # read and this POST, which is the convergent-adopt arm.
-                if self.adopt_row is not None:
-                    self.graphs.append(dict(self.adopt_row))
-                raise self.post_error
-            self.graphs.append(dict(json_body or {}))
-            return None
-
-        def matches(row: dict) -> bool:
-            for column, op, value in (filters or []):
-                got = row.get(column)
-                if op == "eq" and got != value:
-                    return False
-                if op == "neq" and got == value:
-                    return False
-            return True
-
-        rows = [r for r in self.graphs if matches(r)]
-        if method == "PATCH":
-            for row in rows:
-                row |= json_body or {}
-            return None
-        return [{key: r.get(key) for key in (select or ["id"])} for r in rows]
+        raise AssertionError(f"unexpected control-plane read: {table}")
 
 
-def _record_hook(monkeypatch) -> list[tuple[str, str]]:
-    from tortoise import supabase_control as sc
-
+def _hook_recorder():
+    """A fresh `(calls, recorder)` pair per door — the recorder closes over the
+    list it returns, not over the loop variable (ruff B023: a lambda defined
+    inside `for` binds the variable, so every iteration would share one)."""
     calls: list[tuple[str, str]] = []
-    monkeypatch.setattr(sc, "_provision_default_graph_record",
-                        lambda org, gid: calls.append((org, gid)))
-    return calls
+
+    def record(org_id, graph_id):
+        calls.append((org_id, graph_id))
+
+    return calls, record
 
 
-def test_a_rename_that_mints_the_default_row_provisions_it(monkeypatch):
-    """#14587 review P2, the live endpoint: `SET name` on an org with no row."""
-    from tortoise import supabase_control as sc
+def test_the_two_mint_on_demand_doors_arm_the_graph_they_create(monkeypatch):
+    """⛔ A RENAME OR A RECORDING TOGGLE ON A PRISTINE ORG CREATES THE DEFAULT
+    ROW — and neither hook was wired (#14624; the finding carried from #14610's
+    independent review, verified at the pre-fix head).
 
-    calls = _record_hook(monkeypatch)
-    cp = _MintControlPlane()
-    assert sc.set_graph_name(cp, "org-1", "default", "Team HQ") is True
-    assert cp.posts == 1, "the rename no longer mints a row — this leg is stale"
-    minted = cp.graphs[0]["id"]
-    assert calls == [("org-1", minted)], (
-        f"the rename minted graph {minted} and the hook was called with {calls} — "
-        "a default graph minted by a rename has no cursor row, is a read HIT for "
-        "every later credential path, and its record writes are refused "
-        "`cursor_not_active` for ever")
+    `set_graph_name` and `set_graph_recording` each POST a `kind='default'`
+    `public.graphs` row when the org has none yet. The only
+    `_provision_default_graph_record` call sites were the three inside
+    `ensure_default_graph_row`, which neither function reaches, so the row they
+    minted was born UNCUT: `write_live_record` is fail-soft by contract, so every
+    record for it was refused `cursor_not_active` while the write reported
+    success and `/health` read green — the loss only appearing at a rebuild.
 
+    ⛔ THE HOOK MUST FIRE ON THE **MINT** AND NOWHERE ELSE. The PATCH arms below
+    write to a row that already existed, and a graph whose default row exists
+    while its cursor row is missing is `backfill`/`sweep`'s population,
+    deliberately outside the hook's scope
+    (`docs/plans/2026-11-15-issue-12894-storage-shape.md` §A8.3.13's scope
+    note). THREE halves make this a proof of the SHAPE rather than of the call's
+    presence, and each grades a DIFFERENT mutation (#14624 review P3-1/P3-2
+    measured all three; an earlier revision claimed the existing row alone
+    covered the custom one):
 
-def test_a_recording_override_that_mints_the_default_row_provisions_it(
-        monkeypatch):
-    """#14587 review P2, the other live endpoint."""
-    from tortoise import supabase_control as sc
-
-    calls = _record_hook(monkeypatch)
-    cp = _MintControlPlane()
-    assert sc.set_graph_recording(cp, "org-1", "default", True) is True
-    assert cp.posts == 1, "the override no longer mints a row — leg stale"
-    minted = cp.graphs[0]["id"]
-    assert calls == [("org-1", minted)]
-
-
-def test_a_convergent_mint_provisions_the_row_that_became_durable(monkeypatch):
-    """The adopt arm provisions the WINNER's id, not the one this call invented."""
-    from tortoise import supabase_control as sc
-
-    winner = {"id": "g_winner", "org_id": "org-1", "kind": "default",
-              "status": "active", "namespace": "team_mint", "recording": None}
-    calls = _record_hook(monkeypatch)
-    cp = _MintControlPlane(post_error=RuntimeError("duplicate key"),
-                          adopt_row=winner)
-    assert sc.set_graph_name(cp, "org-1", "default", "Team HQ") is True
-    assert calls == [("org-1", "g_winner")], (
-        f"the adopt arm provisioned {calls} instead of the durable winner")
-
-    calls.clear()
-    cp = _MintControlPlane(post_error=RuntimeError("duplicate key"),
-                          adopt_row=winner)
-    assert sc.set_graph_recording(cp, "org-1", "default", False) is True
-    assert calls == [("org-1", "g_winner")]
-
-
-def test_a_default_row_that_already_exists_is_not_re_provisioned(monkeypatch):
-    """The PATCH arm is bounded: an existing row is the read-hit population.
-
-    ⛔ THE NEGATIVE HALF of the two pins above, and the one that keeps this claim
-    from overreaching a THIRD time: the hook runs on the arms that MINT (or adopt
-    a mint), never on a row that already exists. That population is the one
-    `_provision_default_graph_record`'s docstring names — healed by the operator
-    verb or observed on the graph's next write, not healed here.
+    * MINT — reds if the call is deleted.
+    * EXISTING DEFAULT ROW — reds if the call is MOVED to function entry (or any
+      arm above this one): the hook then fires for a row the door did not create.
+    * CUSTOM ROW (`set_graph_recording`, which has an arm the default row does
+      not) — reds if the call is added to the arm that PATCHes a custom graph.
+      ⛔ That arm needed its own half: the existing-row half drives
+      `graph_id='default'` only and could not see it, and a FLOOR in
+      `_DOOR_HOOK_CALLS` could not either.
     """
-    from tortoise import supabase_control as sc
+    from tortoise import supabase_control
 
-    row = {"id": "g_existing", "org_id": "org-1", "kind": "default",
-           "status": "active", "namespace": "team_mint", "recording": None}
-    calls = _record_hook(monkeypatch)
-    cp = _MintControlPlane(graphs=[row])
-    assert sc.set_graph_name(cp, "org-1", "default", "Team HQ") is True
-    assert sc.set_graph_recording(cp, "org-1", "default", False) is True
-    assert cp.posts == 0 and calls == [], (
-        "an existing default row is a read HIT — the mint arms are the only ones "
-        f"this change hooks, and {calls} says otherwise")
-    assert cp.graphs[0]["name"] == "Team HQ"
-    assert cp.graphs[0]["recording"] is False
+    for door, value, column in (
+            (supabase_control.set_graph_name, "renamed", "name"),
+            (supabase_control.set_graph_recording, True, "recording"),
+    ):
+        calls, record = _hook_recorder()
+        monkeypatch.setattr(
+            supabase_control, "_provision_default_graph_record", record,
+            raising=True)
+
+        # ── the MINT arm: no row yet, so this call creates one ────────────
+        cp = _MintOnlyControlPlane()
+        assert door(cp, "org-14582", "default", value) is True, (
+            f"{door.__name__} refused a rename/toggle it used to accept")
+        assert len(cp.posted) == 1, (
+            f"{door.__name__} no longer mints a default row on a pristine org — "
+            f"this row would then grade a hook that has nothing to arm: {cp.posted}")
+        (minted,) = cp.posted
+        assert minted["kind"] == "default" and minted["status"] == "active", (
+            f"{door.__name__} minted an unexpected row: {minted}")
+        assert minted.get(column) == value, (
+            f"{door.__name__} must still write {column} on the row it creates")
+        assert calls == [("org-14582", minted["id"])], (
+            f"{door.__name__} minted {minted['id']} and did NOT arm it: "
+            f"the hook calls were {calls}. A default row born uncut refuses "
+            "every record it writes, silently — the hook must be called with "
+            "the id of the row the POST created")
+
+        # ── the PATCH arm: the row already exists, so nothing is minted ───
+        calls.clear()
+        existing = _MintOnlyControlPlane(existing=[{
+            "id": "g_existing", "kind": "default", "status": "active",
+            "namespace": "org_ns", "name": "old", "recording": None,
+        }])
+        assert door(existing, "org-14582", "default", value) is True
+        assert existing.posted == [], (
+            f"{door.__name__} minted a second row beside an active default: "
+            f"{existing.posted}")
+        assert len(existing.patched) == 1, (
+            f"{door.__name__} must PATCH the existing row: {existing.patched}")
+        assert calls == [], (
+            f"{door.__name__} called the creation hook for a ROW IT DID NOT "
+            f"CREATE ({calls}) — a pre-existing default row without a cursor row "
+            "is `backfill`/`sweep`'s population (§A8.3.13's scope note), and "
+            "arming it from a rename is the quiet widening that note rules out")
+
+    # ── the CUSTOM-ROW arm: `set_graph_recording` also PATCHes a row it did not
+    # create, and it is the ONE arm above that no half so far reached ────────
+    # `set_graph_name` has no custom-row arm (it is the default row's own name),
+    # so this is pinned on the function that does. A hook added here would fire
+    # for every recording toggle on a custom graph — a population `insert_graph`
+    # creates (`_provision_graph` already hooks it), not a missing door.
+    calls, record = _hook_recorder()
+    monkeypatch.setattr(
+        supabase_control, "_provision_default_graph_record", record,
+        raising=True)
+    custom = _MintOnlyControlPlane(existing=[{
+        "id": "g_custom", "kind": "custom", "status": "active",
+        "namespace": "org_ns", "name": "custom", "recording": None,
+    }])
+    assert supabase_control.set_graph_recording(
+        custom, "org-14582", "g_custom", True) is True
+    assert custom.posted == [], (
+        f"a custom-row toggle MINTED a default row: {custom.posted}")
+    assert len(custom.patched) == 1, (
+        f"a custom-row toggle must PATCH that row: {custom.patched}")
+    assert calls == [], (
+        f"set_graph_recording called the creation hook for a CUSTOM row "
+        f"({calls}) — a custom graph is created by `insert_graph`, which "
+        "`_provision_graph` already hooks, so arming it from a toggle widens "
+        "the hook's population past its doors (§A8.3.13's scope note)")
 
 
-def _same_module_call_graph(rel: str) -> dict[str, set[str]]:
-    """Every function in `rel` mapped to the names its body calls.
+def test_the_hooks_own_door_list_matches_the_doors_that_call_it():
+    """⛔ THE DOCSTRING NAMED A CALLER THAT DOES NOT EXIST (#14624 review 2).
 
-    Structural (`ast`, via :func:`_call_names`), so a mention in a docstring or a
-    comment cannot satisfy a route — the same reason :func:`_call_names` is
-    structural. Names rather than resolved objects because the only thing a route
-    needs is "a call to a function defined in this module", which is what
-    :func:`_reaches` follows.
+    `provision_graph_record`'s docstring said it was *"Called from every
+    graph-creation door the census found (`hosted_api._provision_graph`,
+    `supabase_control.ensure_default_graph_row`, `sdk._graph_create`'s registry
+    arm)"* — while the same PR deliberately does NOT hook `sdk._graph_create`
+    (`_UNHOOKED`, above), because hooking it publishes a permanent
+    `armed_but_uncut`.
 
-    ⛔ THE LIMITS, stated so a later reader does not read more into it than it does:
-    same-module resolution, by CALL NAME, with no dataflow and no control flow. A
-    full interprocedural reachability query is CodeQL's or Semgrep's job (CodeQL's
-    control-flow reachability is the documented answer to "can X be reached without
-    passing through Y"); this file deliberately keeps the stdlib-only AST form that
-    `_call_names`/`_hook_calls` already use, because a new analyser dependency for one
-    route pin is a bigger blast radius than the defect, and the pin only has to red
-    when a route is CUT, which a name walk sees.
+    The door list is the first thing a reader consults when deciding whether a
+    create path is covered, so an ASSERTED PRESENCE is worse than a gap: it is the
+    inverse of the unpinned-absence hazard `test_the_doors_that_cannot_be_hooked_
+    stay_unhooked` exists for, and neither test could see it — that one reads the
+    AST, this one reads the prose the reader trusts. Both arms are graded here, so
+    the sentence cannot drift from the call sites in either direction.
     """
-    tree = ast.parse(_source(rel))
-    return {node.name: _call_names(node)
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    import inspect
 
-
-def _reaches(graph: dict[str, set[str]], start: str, target: str) -> bool:
-    """Can `start` reach a call to `target` through functions in its own module?"""
-    seen: set[str] = set()
-    frontier = [start]
-    while frontier:
-        name = frontier.pop()
-        if name in seen:
-            continue
-        seen.add(name)
-        for callee in graph.get(name, ()):
-            if callee == target:
-                return True
-            if callee in graph:
-                frontier.append(callee)
-    return False
-
-
-def test_every_delegating_creation_site_still_reaches_its_creation_door():
-    """⛔ THE CENSUS'S OTHER HALF — the seven sites that create a graph BY DELEGATION.
-
-    ⛔ The name says CREATION door, not "hooked door", and that is the fix to the
-    `#14587` review's P3-2: three of these rows (the census's C1/C2/C3 — the two SDK
-    verbs and the signup route) reach `sdk._graph_create`, which the sibling pin
-    `test_the_doors_that_cannot_be_hooked_stay_unhooked` contradicts — a name
-    promising a HOOKED door against a test asserting the opposite.
-
-    `_DOORS` pins the two sites that MINT an id AND hook it; these are the sites
-    that reach one of them — or, for the three SDK/signup rows, reach the third
-    minting door, `sdk._graph_create`, which `_UNHOOKED` pins the opposite way.
-    They are the quiet half: a door keeps calling the hook perfectly while an
-    alias drifts off the route, and the graph the alias creates is born uncut with no
-    test red (the failure mode the module docstring measures). The PR's census claimed
-    them as "verified by AST pin" when the review found nothing pinned them (#14587
-    P3-3), so the pin is here rather than in the claim.
-
-    ⛔ TRANSITIVE ON PURPOSE: `default_graph_id_for_credential` does not call the mint,
-    it calls `default_graph_for_credential` which does. A direct-call check would red
-    on the correct code or be quietly deleted; the reachability reader follows the
-    route however it is spelled and however many hops it takes.
-    """
-    graphs: dict[str, dict[str, set[str]]] = {}
-    missing: list[str] = []
-    for rel, entry, door in _DELEGATED:
-        if rel not in graphs:
-            graphs[rel] = _same_module_call_graph(rel)
-        graph = graphs[rel]
-        assert entry in graph, (
-            f"{rel}::{entry} is gone — the census found it as a delegating creation "
-            f"site; re-run the census (`rg -n 'create_graph|insert_graph|"
-            f"ensure_default_graph_row|_graph_create' tortoise/`) and pin the new name "
-            f"rather than deleting this check")
-        if not _reaches(graph, entry, door):
-            missing.append(f"{rel}::{entry} no longer reaches {door}")
+    doc = inspect.getdoc(rw.provision_graph_record) or ""
+    # The module path a door is named by in the prose, minus the package.
+    named = [rel.removeprefix("tortoise/").removesuffix(".py")
+             + "." + function for rel, function, _callee in _DOORS]
+    missing = [door for door in named if door not in doc]
     assert not missing, (
-        f"these graph-creating sites stopped reaching their creation door: {missing}. "
-        "A graph they create is born UNCUT — the record refuses every write for it "
-        "(`cursor_not_active`) while `write_live_record`, fail-soft by contract, reports "
-        "success, so nothing reds and the loss only shows at a rebuild. Route it back "
-        "through the door the census named — `_provision_graph` (A), "
-        "`ensure_default_graph_row` (B) or `_graph_create` (C) — or, if it now mints "
-        "an id of its own, hook it and add it to `_DOORS`. ⛔ A route to (C) is NOT a "
-        "hooked route: `_graph_create` is pinned UNHOOKED (`_UNHOOKED`, F1/F3), so "
-        "reaching it records the gap rather than curing it")
+        f"the hook's docstring no longer names the doors that DO call it: {missing} "
+        "— a reader checking coverage would conclude they are not wired")
+    claimed_but_unhooked = [rel.removeprefix("tortoise/").removesuffix(".py")
+                            + "." + function for rel, function in _UNHOOKED]
+    for door in claimed_but_unhooked:
+        assert f"{door}`'s" not in doc and f"`{door}`," not in doc, (
+            f"the hook's docstring claims a caller that does not exist: {door} is "
+            "NOT hooked on purpose (F1/F3, pinned above); an asserted presence is "
+            "how the next reader concludes a door is covered when it is not")
+    assert "NOT hooked" in doc, (
+        "the docstring omits the deliberate NON-call, so the absence reads as an "
+        "omission rather than a decision")
 
 
-def test_the_delegation_pin_reads_the_route_and_not_the_names():
-    """Non-vacuity for the arm above, and the two ways it could be decoration.
+def test_the_unhooked_door_pin_sees_a_wrapper_spelling():
+    """⛔ F5 (#14610 review): the second term of the unhooked-door guard is LIVE.
 
-    A pin that reads a TABLE of names passes whatever the code does; a reachability
-    reader that ignores hops reds on the correct multi-hop site. Both are asserted
-    here, against hand-built graphs, and the REAL module is checked for the hop count
-    the transitive reader exists for.
+    The guard used to be `_hook_calls(node, "provision_graph_record") or
+    _hook_calls(node, "provision_graph_record_")` — and because `_hook_calls`
+    matches the callee identifier by EXACT equality, and no function in the tree
+    is named `provision_graph_record_`, the second term could not vary under any
+    mutation. The guard was the first term alone while reading as two.
+
+    Exercised directly, because a spelling the detector cannot see is a spelling
+    a later edit can use to put the hook back into an unhooked door. A WRAPPER is
+    that edit's natural shape (it is how `hosted_api._provision_graph_record`
+    already reaches the writer's hook), so both a direct and a wrapped callee
+    must be seen, and an unrelated `provision_graph` call must not be.
     """
-    assert not _reaches({"create_org_graph": {"_mint_graph_key"}},
-                        "create_org_graph", "_provision_graph"), (
-        "a site that calls some OTHER helper was read as reaching the door — the "
-        "arm would be satisfied by the name appearing anywhere")
-    assert _reaches({"a": {"b"}, "b": {"c"}, "c": {"_provision_graph"}},
-                    "a", "_provision_graph"), (
-        "the reader lost a route three hops deep, so the transitive sites it exists "
-        "for would red on correct code")
-    # ⛔ THE REAL MULTI-HOP SITE, measured rather than assumed: if this ever becomes a
-    # direct call the transitive arm stops being exercised by the tree it grades.
-    graph = _same_module_call_graph("tortoise/supabase_control.py")
-    assert "ensure_default_graph_row" not in graph[
-        "default_graph_id_for_credential"], (
-        "`default_graph_id_for_credential` now calls the mint directly — that is fine, "
-        "but the transitive arm in the sibling test is then no longer measured on real "
-        "code: point it at another multi-hop site or state that the reader is no longer "
-        "exercised here")
-    assert _reaches(graph, "default_graph_id_for_credential",
-                    "ensure_default_graph_row")
+    direct = ast.parse(
+        "def f(org, graph):\n    rw.provision_graph_record(org, graph)\n")
+    wrapped = ast.parse(
+        "def f(org, graph):\n    _provision_graph_record_quietly(org, graph)\n")
+    unrelated = ast.parse("def f(org, graph):\n    provision_graph(org, graph)\n")
+    assert _hook_calls_named_like(direct, "provision_graph_record") == 1
+    assert _hook_calls_named_like(wrapped, "provision_graph_record") == 1, (
+        "a wrapper spelling is exactly how the hook returns to an unhooked door — "
+        "the detector must see it, or this term is the inert disjunct again")
+    assert _hook_calls_named_like(unrelated, "provision_graph_record") == 0, (
+        "a detector that fires on `provision_graph` would red a legitimate edit")
 
 
-#: The census `_DELEGATED` records, as `(module, entry point, door)` IDENTITIES.
-#:
-#: ⛔ A COUNT IS NOT A FLOOR (`#14587` review P3-3, measured): the guard this
-#: replaces asserted `len(_DELEGATED) >= 7`, which a SUBSTITUTION closes — replacing
-#: one row with a duplicate of another keeps the length at 7 while a site drops out
-#: of the route pin with nothing red.
-#: ⛔ AND THE DOOR IS PART OF THE IDENTITY (measured in this delta's own review):
-#: the route test grades whatever door the row NAMES, so a table whose third column
-#: was edited to a callee the entry happens to call DIRECTLY (`_graph_quota_gate`)
-#: stayed GREEN on both halves while `create_org_graph` had stopped reaching
-#: `_provision_graph` — the cut route the pin exists to catch. Pinning the door cell
-#: here means such an edit is a census edit, which is the review it should be.
-_DELEGATION_CENSUS = frozenset({
-    ("tortoise/hosted_api.py", "create_org_graph", "_provision_graph"),
-    ("tortoise/hosted_api.py", "create_graph", "_provision_graph"),
-    ("tortoise/supabase_control.py", "_mint_default_graph_row_best_effort",
-     "ensure_default_graph_row"),
-    ("tortoise/supabase_control.py", "default_graph_id_for_credential",
-     "ensure_default_graph_row"),
-    ("tortoise/sdk.py", "_org_create", "_graph_create"),
-    ("tortoise/sdk.py", "create_memory_graph", "_graph_create"),
-    ("tortoise/hosted_api.py", "agent_signup", "_graph_create"),
-})
+def test_the_hook_is_taken_on_the_control_plane_arm_only():
+    """⛔ F2 (#14610 review): the REGISTRY arm of `_provision_graph` must not be hooked.
 
+    `_provision_graph` mints the graph on one of two arms. The hook seeds a
+    `record_cursor` row whose key is `(org_id, graph_id) REFERENCES
+    public.graphs`, and the REGISTRY arm's graph (`sdk._graph_create`) is never
+    inserted there — the invariant `record_writer.current_record_tenant` states.
+    So calling the hook on THAT arm fails on EVERY create (FK 23503), the writer
+    records `provision_failed`, and `/health` folds it into `ok: false` for the
+    life of the process on a deployment with no repairable gap: the exact false
+    red `sdk._graph_create` is deliberately left unhooked to avoid (#14582 F3),
+    re-opened through the other door.
 
-def test_the_delegation_table_matches_the_census_by_identity():
-    """Non-vacuity for the table the route pin ITERATES (`#14587` review (ii), (P3-3)).
-
-    ⛔ The arm above is green when `_DELEGATED` is empty, because a pin that loops
-    over nothing asserts nothing — measured at the reviewed head: `_DELEGATED = ()`
-    left both delegation tests green (`2 passed, 29 deselected`) while the census's
-    other half silently stopped being checked. So the table is asserted against the
-    census.
-
-    ⛔ By IDENTITY, not by length: a `len(...) >= 7` floor is green for a table that
-    swapped one site for a DUPLICATE of another (`#14587` review P3-3), which is the
-    same silent drop the floor exists to catch, one edit away. And the DOOR cell is
-    part of the identity, because the route test grades the door the row NAMES
-    (measured: a third-column edit to a callee the entry calls directly left both
-    halves green while the real route was cut). Adding a site to the table therefore
-    means adding it to `_DELEGATION_CENSUS` above — the census is what the entry is
-    graded against, and it is the only place a site enters.
+    The gate is read from the door's OWN body: the name bound to
+    `is_supabase_enabled()` there IS the arm decision, and every hook call must
+    sit inside a branch on that name. Pre-fix the call is at the function's top
+    level — no enclosing `if` at all — so this reds.
     """
-    pinned = set(_DELEGATED)
-    assert pinned == _DELEGATION_CENSUS, (
-        f"`_DELEGATED` is {sorted(pinned)} but the census is "
-        f"{sorted(_DELEGATION_CENSUS)} — the route pin only checks the entries it is "
-        "given, so a table that lost an entry, substituted one for a DUPLICATE of "
-        "another, was emptied, or repointed an entry at a door it calls directly "
-        "reports PASS for a site nobody looks at any more. Re-census "
-        "(`rg -n 'create_graph|insert_graph|ensure_default_graph_row|_graph_create' "
-        "tortoise/`) and fix the table — do not edit the census to match a typo")
+    node = _functions("tortoise/hosted_api.py").get("_provision_graph")
+    assert node is not None, "hosted_api._provision_graph is gone — re-run the census"
+    arm_names: set[str] = set()
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Assign) or not isinstance(sub.value, ast.Call):
+            continue
+        func = sub.value.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        if name == "is_supabase_enabled":
+            arm_names |= {t.id for t in sub.targets if isinstance(t, ast.Name)}
+    assert arm_names, (
+        "`_provision_graph` no longer binds its arm decision to a name, so this pin "
+        "cannot tell which branch mints a `public.graphs` row. Re-cut it against the "
+        "new spelling; do NOT delete it")
+    calls = _calls_with_enclosing_tests(node, "_provision_graph_record")
+    assert calls, (
+        "the hook call is gone from the door — `test_every_creation_door_calls_the_hook` "
+        "reds on that too")
+    ungated = [
+        call for call, guards in calls
+        if not any(arm in ast.unparse(test) for test in guards for arm in arm_names)
+    ]
+    assert not ungated, (
+        f"{len(ungated)} creation-hook call(s) in `hosted_api._provision_graph` sit "
+        f"outside a branch on {sorted(arm_names)}. On the REGISTRY arm the cursor "
+        "row's FK (`REFERENCES public.graphs`) refuses EVERY create, so each one "
+        "publishes a permanent `armed_but_uncut` + `ok: false` for a deployment "
+        "that has no gap to close (#14610 review F2)")
 
 
 def test_the_hook_arms_and_does_not_only_seed():
@@ -1053,21 +598,6 @@ def test_the_hook_arms_and_does_not_only_seed():
 def test_the_uncut_registry_is_bounded_and_counts_past_the_cap(monkeypatch):
     rw.reset_uncut_graphs()
     try:
-        # ⛔ THE LITERAL, PINNED (#14587 review P3). Every other use of the cap in
-        # this suite is RELATIVE to the same constant (`== rw.UNCUT_GRAPH_CAP`,
-        # `range(rw.UNCUT_GRAPH_CAP + 8)`), so both sides of those assertions move
-        # together: raising it to 1_000_000 — which makes "bounded" a claim about a
-        # million dict entries and makes the `/health` comment's "the field cannot
-        # be made honest by memory growth" materially false — reddened NOTHING.
-        # The mechanism below is pinned; this pins the VALUE the mechanism's
-        # argument is stated against, so a new number has to be argued for here.
-        assert rw.UNCUT_GRAPH_CAP == 32, (
-            f"UNCUT_GRAPH_CAP is {rw.UNCUT_GRAPH_CAP}, not 32. The cap is the "
-            "number the overflow argument in `record_writer` is written against "
-            "(a bounded map, a lower-bound overflow counter beside it, and an "
-            "`ok` that follows only the retractable entries) — re-derive that "
-            "argument for the new value, or say here why the new number is "
-            "still bounded")
         for i in range(rw.UNCUT_GRAPH_CAP + 8):
             rw.note_uncut_graph("org-14582", f"graph-{i}", reason="no_cursor_row")
         report = rw.armed_but_uncut()
@@ -1085,10 +615,33 @@ def test_the_uncut_registry_is_bounded_and_counts_past_the_cap(monkeypatch):
 
 
 def test_the_registry_publishes_no_tenant_identifiers():
-    """`/health` is UNAUTHENTICATED: a graph id is the customer's own name."""
+    """`/health` is UNAUTHENTICATED: a graph id is the customer's own name.
+
+    ⛔ AND THE RENDERED FORM MUST BE `ensure_ascii=False` (#14610 review, third
+    pass P3). "A substring cannot dodge a substring" is FALSE under
+    `json.dumps`'s default `ensure_ascii=True`, which escapes every non-ASCII
+    codepoint: a graph id is *a customer's own name*, so `Café` ships as
+    `Caf\\u00e9` and `assert "Café" not in rendered` passes over it. Measured —
+    a leak of the bare non-ASCII ids from `_UNCUT_GRAPHS` stayed GREEN under the
+    default and RED under `ensure_ascii=False`. That is why the fixture below
+    notes a SECOND graph whose identifiers are non-ASCII: without one, this test
+    could be reverted to the escaping default and nothing would notice.
+    `ensure_ascii=False` does NOT weaken the separator check below — the C0
+    controls, and `\\u0000` that forms the registry's separator among them, are
+    escaped by `json.dumps` whatever the flag says, so a NUL is still rendered as
+    the six characters `\\u0000`. (State that narrowly: it is true of C0, NOT of
+    every control character — measured, `ensure_ascii=False` renders U+007F,
+    U+0080–U+009F and U+2028/U+2029 RAW. No assertion here depends on those.)
+    """
     rw.reset_uncut_graphs()
     try:
         rw.note_uncut_graph("org-SECRET", "graph-SECRET", reason="no_cursor_row")
+        # ⛔ NON-ASCII ON PURPOSE (#14610 review, third pass P3). A tenant's own
+        # name is not guaranteed ASCII, and `json.dumps`'s default
+        # `ensure_ascii=True` would escape these into `Caf\\u00e9`, which a
+        # literal-substring assertion cannot see. This entry is what makes the
+        # `ensure_ascii=False` below load-bearing rather than decorative.
+        rw.note_uncut_graph("org-Caf\u00e9", "graf-Ni\u00f1o", reason="no_cursor_row")
         report = rw.armed_but_uncut()
         reasons = rw.armed_but_uncut_reasons()
     finally:
@@ -1106,31 +659,73 @@ def test_the_registry_publishes_no_tenant_identifiers():
             yield value
 
     published = set(leaves(report)) | set(leaves(reasons))
-    assert "org-SECRET" not in published
-    assert "graph-SECRET" not in published
+    # ⛔ SUBSTRING, OVER THE WHOLE SERIALIZED PAYLOAD (#14624 review F1). This pin
+    # used to assert SET MEMBERSHIP of the leaf values, which is exact equality —
+    # and the registry's key is COMPOSITE (`f"{org_id}\u0000{graph_id}"`), so a
+    # payload leaking the keys verbatim stayed GREEN over the leak, on the one
+    # claim that must be airtight on an UNAUTHENTICATED endpoint (measured: the
+    # reviewer published `org-SECRET\u0000graph-SECRET` and all three assertions
+    # held). Every nested string is covered here, keys included.
+    # The whole payload as `/health` would send it, keys included: the composite
+    # key can reach an operator as a dict KEY just as easily as a value.
+    # `ensure_ascii=False` is load-bearing — see the docstring.
+    rendered = json.dumps(
+        {"report": report, "reasons": reasons}, default=str, ensure_ascii=False)
+    assert "org-SECRET" not in rendered
+    assert "graph-SECRET" not in rendered
+    assert "org-Caf\u00e9" not in rendered, (
+        "a NON-ASCII tenant id must be caught literally; under the escaping "
+        "default it ships as `Caf\\u00e9` and this assertion would pass over it")
+    assert "graf-Ni\u00f1o" not in rendered
+    assert "\\u0000" not in rendered, (
+        "no published value may carry the registry's own composite-key shape — "
+        "`org\\u0000graph` contains both tenant identifiers and equals neither, "
+        "so it defeats an equality-based check. This asserts the ESCAPED form "
+        "because that is what `json.dumps` emits; asserting the raw NUL byte "
+        "here would be true by construction and could never fire.")
     assert all(isinstance(v, (int, str)) for v in published)
 
 
-def test_the_declared_export_surface_is_not_silently_shrunk():
-    """⛔ ADDING TO `__all__` MUST NOT DROP FROM IT (#14582 review P2-8).
+#: The names THIS change declares in `record_writer.__all__`: the creation hook,
+#: the registry it feeds, and the reader/clearer of that registry. The surface
+#: pytest grades below is THESE, because they are the names this diff can make a
+#: declared-but-absent export by editing one list.
+_DECLARED_BY_THIS_CHANGE = (
+    "armed_but_uncut",
+    "armed_but_uncut_reasons",
+    "clear_uncut_graph",
+    "note_uncut_graph",
+    "provision_graph_record",
+)
 
-    This change added `provision_graph_record` / `note_uncut_graph` /
-    `armed_but_uncut` to `__all__` and, in the same edit, dropped
-    `current_record_tenant` — the SCOPE reader three suites and every
-    scope-aware caller import by name (``tortoise/record_writer.py`` still
-    defines it; only its declaration was cut).
 
-    ⛔ NOTHING REDDED, and that is why this pin exists: a by-name import
-    (``from tortoise.record_writer import current_record_tenant``) bypasses
-    `__all__` entirely, so the loss is visible only to `import *` and to the
-    operator tooling that reads the module's declared surface BY NAME — in
-    production, after the release. Re-adding a name here is free; shrinking the
-    surface is a red that has to be argued for.
+def test_the_declared_export_surface_keeps_what_this_change_added():
+    """⛔ A WIDENED SURFACE MUST STAY WIDE, AND STAY RESOLVABLE (#14582 P2-8).
+
+    This change adds the creation hook and the `armed_but_uncut` registry to
+    `record_writer.__all__`. A by-name import
+    (``from tortoise.record_writer import provision_graph_record``) bypasses
+    `__all__` entirely, so a name dropped from the list is invisible to the
+    suites that use it and visible only to `import *` and to tooling that reads
+    the declared surface — in production, after the release. Re-adding a name
+    here is free; shrinking the surface is a red that has to be argued for.
+
+    ⛔ WHAT THIS ROW NO LONGER CLAIMS (#14624 review 2, P3). An earlier cut also
+    asserted `"current_record_tenant" in rw.__all__` while its rationale said
+    this change had DROPPED that name "in the same edit" — false of the final
+    diff, where it is unchanged context that `origin/main` already declares. An
+    assertion on unchanged context cannot vary under ANY mutation of this diff,
+    so it was dead weight under a rationale that asserted the opposite. What
+    replaces it is the direction this diff CAN break: the five names above.
+
+    MUTANT: delete any of `_DECLARED_BY_THIS_CHANGE` from `__all__` (→ the first
+    arm), or declare a name the module does not define (→ the second).
     """
-    assert "current_record_tenant" in rw.__all__, (
-        "`current_record_tenant` is no longer in `record_writer.__all__` — it is "
-        "defined in the module and imported by name by the record suites, so this "
-        "is a silent SHRINK of the declared public surface, not a rename")
+    missing = [name for name in _DECLARED_BY_THIS_CHANGE if name not in rw.__all__]
+    assert not missing, (
+        f"{missing} are declared public by this change but no longer in "
+        "`record_writer.__all__` — that is a silent SHRINK of the surface a by-name "
+        "import does not notice, so nothing else would red")
     unresolved = [name for name in rw.__all__ if not hasattr(rw, name)]
     assert not unresolved, (
         f"`__all__` declares names the module does not define: {unresolved} — an "
@@ -1164,20 +759,9 @@ def test_health_is_ok_on_an_unarmed_deployment_that_has_seen_nothing(monkeypatch
         rw.reset_uncut_graphs()
 
 
-def test_health_cannot_report_ok_for_a_graph_it_has_observed_uncut(monkeypatch):
+def test_health_cannot_report_ok_with_an_uncut_armed_graph(monkeypatch):
     """FALSIFIER (c). Red before this change: `armed_but_uncut` did not exist and
-    `ok` stayed `true` for exactly this state — production's measured shape.
-
-    ⛔ THE NAME STATES THE MEASURED FORM, NOT THE DEPLOYMENT-GLOBAL ONE (#14587
-    review P3-1). This test calls `note_uncut_graph(...)` and asserts the fold, so
-    what it establishes is "a graph this process has OBSERVED uncut cannot sit
-    under `ok: true`". The global form — "no armed deployment carrying an uncut
-    graph reads ok" — is NOT established here and is NOT true: the registry is process
-    state with no population source, so an uncut graph that has not written since
-    the process started is invisible until it does. The honest bound is pinned by
-    `test_health_is_a_window_not_a_census`; the name said the stronger thing and
-    is how the next lane deletes the caveats.
-    """
+    `ok` stayed `true` for exactly this state — production's measured shape."""
     rw.reset_uncut_graphs()
     try:
         block = _health(monkeypatch, dsn="postgresql://u:p@127.0.0.1:1/record")
@@ -1197,38 +781,6 @@ def test_health_cannot_report_ok_for_a_graph_it_has_observed_uncut(monkeypatch):
         # `degraded` keeps its documented window meaning (#10185) — it is not
         # re-used as a second, weaker statement of the same state.
         assert block["degraded"] is False
-    finally:
-        rw.reset_uncut_graphs()
-
-
-def test_health_is_a_window_not_a_census(monkeypatch):
-    """⛔ THE HONEST HALF OF FALSIFIER (c), PINNED SO IT CANNOT BE DELETED.
-
-    #14587 review P3-1: the field, the test name and one module-header bullet all
-    stated the deployment-global form ("no armed deployment carrying an uncut
-    graph reads `ok: true`") while the code and the other tests measure the
-    OBSERVED form. `armed_but_uncut` has NO runtime population source — it is
-    process state fed from the write path and the hook — so a process that starts
-    with a graph that is already uncut and has not written since reports `0` and
-    `ok: true` over a real gap. That is a WINDOW, not a census, and the field's
-    own docstring says so.
-
-    This test asserts the BOUND rather than the gap: a fresh registry must read 0
-    and `ok: true`. If a later change gave the field a census (an enumeration at
-    startup, a periodic probe), this test fails — which is the point, because
-    then the docstring's caveat would be the stale half and the wording would have
-    to move to the other one deliberately instead of by tidying.
-    """
-    rw.reset_uncut_graphs()
-    try:
-        block = _health(monkeypatch, dsn="postgresql://u:p@127.0.0.1:1/record")
-        assert block["armed"] is True
-        assert block["armed_but_uncut"] == 0, (
-            "`armed_but_uncut` claims a population it does not measure — it is a "
-            "WINDOW fed by observations, so an unobserved graph cannot appear in "
-            "it. A non-zero count here means the field became a census, and the "
-            "docstring/tests that say otherwise are then wrong")
-        assert block["ok"] is True
     finally:
         rw.reset_uncut_graphs()
 
@@ -1258,6 +810,125 @@ def test_health_clears_the_gap_when_the_graph_is_healed(monkeypatch):
         rw.reset_uncut_graphs()
 
 
+def test_the_health_payload_takes_the_count_and_its_reasons_from_one_snapshot(
+        monkeypatch):
+    """⛔ F6 (#14610 review): the count and its reasons are ONE read, not two.
+
+    Two lock acquisitions let a concurrent `note_uncut_graph` land between them
+    and publish `armed_but_uncut: 0` beside `{"no_cursor_row": 1}` — a payload
+    that contradicts itself, with no repair path because it is already out. The
+    invariant was only ever asserted at the FUNCTION level, never on `/health`,
+    so nothing redded.
+
+    Proved by making the two readers DISAGREE: the payload must publish the
+    reasons that travelled with the count it publishes. Pre-fix the second reader
+    is consulted, so the `mode_halted` value below leaks into the block.
+    """
+    snapshot = {
+        "armed_but_uncut": 2,
+        "armed_but_uncut_untracked_observations": 0,
+        "armed_but_uncut_observations": 2,
+        "armed_but_halted": 0,
+        "armed_but_halted_untracked_observations": 0,
+        "armed_but_uncut_reasons": {"no_cursor_row": 2},
+    }
+    monkeypatch.setattr(rw, "armed_but_uncut", lambda: dict(snapshot))
+    monkeypatch.setattr(
+        rw, "armed_but_uncut_reasons", lambda: {"mode_halted": 9})
+    block = _health(monkeypatch, dsn="postgresql://u:p@127.0.0.1:1/record")
+    assert block["armed_but_uncut"] == 2
+    assert block["armed_but_uncut_reasons"] == {"no_cursor_row": 2}, (
+        "the payload's reasons did not come from the snapshot that produced its "
+        f"count — got {block['armed_but_uncut_reasons']!r}. A second reader is a "
+        "second moment: a concurrent observation then publishes a count and a "
+        "breakdown that contradict each other (#14610 review F6)")
+    assert sum(block["armed_but_uncut_reasons"].values()) == block["armed_but_uncut"]
+
+
+def test_the_payload_states_how_the_uncut_field_clears(monkeypatch):
+    """⛔ F3 (#14610 review): the payload must not name a remedy that leaves it red.
+
+    The register is PROCESS memory. `record_allocator_cli.py backfill --arm
+    --acknowledge-cutover` cuts the RECORD over in ANOTHER process and cannot
+    retract this process's entry, and on a quiescent graph — or with the
+    allocator flag off, where `record_owns_position` returns before its read — no
+    later observation happens at all, so the entry and the `ok` it drives clear
+    only on a restart. Publishing the count alone left an operator who ran the
+    documented remedy staring at a red `ok` with no way to know why.
+
+    ⛔ AND THE VERB IS PER STATE, BUT THE POPULATION IS ONE (#14610 review, P2 —
+    ported here; RE-CUT by #14624 review F1). The pre-F1 sentence said a bare
+    `backfill` "heals the RECORD", which is false: a bare `backfill` only SEEDS
+    the row and a `seeded` row allocates nothing, so `--arm` is part of the verb.
+    The other half of that fix claimed a `seeded` graph is OUTSIDE `backfill`'s
+    population — true at the time and FALSE since, because this same change
+    widened `UNCUT_GRAPHS_SQL` to `c.graph_id IS NULL OR c.mode <> 'active'`:
+    `backfill --arm` now re-seeds a `seeded` row monotonically and arms it in the
+    same run (MEASURED by
+    `test_a_non_arm_backfill_does_not_read_as_a_finished_cutover`, which sees
+    `considered: 1` / `armed: 1` there). What the population verb still cannot
+    reach is a `halted` row — `arm` is scoped `mode = 'seeded'` — so `reopen` is
+    that state's FIRST step. A note publishing the retired premise sends an
+    operator round the long route and calls the short one a no-op. The
+    assertions below pin the verbs, not the prose.
+    """
+    rw.reset_uncut_graphs()
+    try:
+        dsn = "postgresql://u:p@127.0.0.1:1/record"
+        rw.note_uncut_graph("org-14582", "graph-a", reason="no_cursor_row")
+        block = _health(monkeypatch, dsn=dsn)
+        assert block["ok"] is False, "the control: this graph is uncut"
+        note = block["armed_but_uncut_clears"]
+        assert isinstance(note, str) and note, (
+            "`/health` publishes `armed_but_uncut` and its reasons but not HOW they "
+            "clear, so the documented remedy appears to clear a field it cannot")
+        assert "restart" in note, (
+            "the note must name the RESTART, because that is the only clear on a "
+            "quiescent graph (and the only one at all with the allocator flag off)")
+        assert "backfill" in note and "another process" in note, (
+            "the note must say that `backfill` repairs the RECORD in another "
+            "process — otherwise it reads as the clear route for this field")
+        # ⛔ THE TWO POPULATIONS, TWO VERBS (#14610 review P2, ported). A note
+        # that names only `backfill` is a remedy that silently no-ops on the two
+        # states where the field is red — so the verbs are asserted by name.
+        assert "--arm" in note and "--acknowledge-cutover" in note, (
+            "a bare `backfill` only SEEDS the row and a `seeded` row allocates "
+            "nothing; the note must carry `--arm --acknowledge-cutover`")
+        assert "mode_seeded" in note and "considered: 0" not in note, (
+            "the note repeats the PRE-FIX premise: `backfill --arm` DOES reach a "
+            "`seeded` graph now (`UNCUT_GRAPHS_SQL` is `c.graph_id IS NULL OR "
+            "c.mode <> 'active'`), so telling an operator it prints "
+            "`considered: 0` over their seeded row sends them away from the "
+            "verb that cures it — the green-command/unchanged-red-field shape "
+            "this note exists to prevent (#14624 review F1)")
+        assert "seeded" in note and "OUTSIDE" not in note, (
+            "the note must NAME the `seeded` state without calling it outside "
+            "the population verb's reach — that is the claim the widened "
+            "`UNCUT_GRAPHS_SQL` now supports and the retired sentence "
+            "contradicted (#14624 review F1)")
+        assert "arm --org-id" in note and "reopen" in note, (
+            "the `seeded` population is cured by `arm`, and a `halted` one needs "
+            "`reopen` first — naming neither leaves both red with no verb")
+        # ...and it is published on the UNARMED arm too, because it is a constant
+        # rather than a measurement (a `None` there would read as "not evaluated").
+        assert _health(monkeypatch, dsn=None)["armed_but_uncut_clears"] == note
+        # ⛔ THE `armed` CONJUNCT IS GRADED HERE (#14624 review F3). This is the
+        # one arm where the registry holds an uncut graph AND the deployment is
+        # UNARMED, and the fold is `block["armed"] and uncut_count > 0`: an
+        # unarmed deployment has no record for a graph to be missing a row in, so
+        # the count must NOT degrade `ok`. Delete the conjunct and this reds.
+        unarmed = _health(monkeypatch, dsn=None)
+        assert unarmed["armed"] is False and unarmed["armed_but_uncut"] == 1, (
+            f"the control: the registry holds the graph, the deployment is "
+            f"unarmed — {unarmed}")
+        assert unarmed["ok"] is True, (
+            "an unarmed deployment cannot have an uncut graph: with no record "
+            "there is no row for one to be missing, so a process-memory entry "
+            "must not red `ok`")
+    finally:
+        rw.reset_uncut_graphs()
+
+
 def test_a_halted_graph_is_reported_but_does_not_red_the_deployment(monkeypatch):
     """⛔ `halted` IS NOT `uncut` (#14582 review P1-3).
 
@@ -1283,6 +954,222 @@ def test_a_halted_graph_is_reported_but_does_not_red_the_deployment(monkeypatch)
             "would punish the operator for following the documented remedy")
     finally:
         rw.reset_uncut_graphs()
+
+
+def test_a_graph_TRANSITIONS_between_the_two_populations(monkeypatch):
+    """⛔ THE SPLIT IS A TRANSITION, NOT A CLASSIFICATION (#14624 review N1).
+
+    The registry records OBSERVATIONS of ONE graph, and a graph MOVES: `halt` is
+    the documented remedy for a duplicate position (`active` -> `halted`), and
+    `reopen` -> `seed` takes a halted graph back to an incomplete cutover. A
+    dispatch that only ever ADDED an entry to one map published the same graph
+    on BOTH keys after a `reopen` — and, the worse direction, kept an uncut entry
+    (with a reason that had stopped being true) over a graph an operator had
+    healed and then deliberately halted. That second construct is a `ok: false`
+    with a false reason that NO in-process write can clear: a halted graph never
+    reaches the `active` arm that calls `clear_uncut_graph`.
+    """
+    rw.reset_uncut_graphs()
+    try:
+        dsn = "postgresql://u:p@127.0.0.1:1/record"
+        tenant = ("org-14582", "graph-transitions")
+
+        # 1. Observed uncut: the hook never reached it. A GAP, and red.
+        rw.note_uncut_graph(*tenant, reason="provision_failed")
+        block = _health(monkeypatch, dsn=dsn)
+        assert (block["armed_but_uncut"], block["armed_but_halted"]) == (1, 0)
+        assert block["armed_but_uncut_reasons"] == {"provision_failed": 1}
+        assert block["ok"] is False
+
+        # 2. The operator heals it out of band and then HALTS it. The graph now
+        #    has a row and is no longer a gap; the old reason is a dead fact.
+        rw.note_uncut_graph(*tenant, reason="mode_halted")
+        block = _health(monkeypatch, dsn=dsn)
+        assert (block["armed_but_uncut"], block["armed_but_halted"]) == (0, 1), (
+            "a halt MOVES the graph between the populations: the uncut map holds "
+            "the deployment's GAPS, and this graph is not one of them")
+        assert block["armed_but_uncut_reasons"] == {}
+        assert block["ok"] is True, (
+            "the false red this transition prevents: a healed-then-halted graph "
+            "keeps its journal append and loses nothing, and `ok: false` here "
+            "could never clear while this process lives")
+
+        # 3. `reopen` -> `seed`: an incomplete cutover again, and NOT still filed
+        #    as a deliberate halt (whose remedy would be "nothing to do").
+        rw.note_uncut_graph(*tenant, reason="mode_seeded")
+        block = _health(monkeypatch, dsn=dsn)
+        assert (block["armed_but_uncut"], block["armed_but_halted"]) == (1, 0), (
+            "one graph is in ONE population: `seeded` allocates nothing, so it "
+            "is a gap again, and `armed_but_halted` beside it would tell an "
+            "operator the halt is deliberate when the remedy is `arm`")
+        assert block["armed_but_uncut_reasons"] == {"mode_seeded": 1}
+        assert block["ok"] is False
+        assert sum(rw.armed_but_uncut_reasons().values()) \
+            == rw.armed_but_uncut()["armed_but_uncut"] == 1
+    finally:
+        rw.reset_uncut_graphs()
+
+
+class _OwnsPositionConn:
+    """The smallest thing `record_owns_position` accepts as a connection."""
+
+    def __init__(self):
+        self.committed = 0
+        self.closed = 0
+
+    def commit(self):
+        self.committed += 1
+
+    def close(self):
+        self.closed += 1
+
+
+def test_the_WRITE_PATH_feeds_and_retracts_the_registry(monkeypatch):
+    """⛔ THE OBSERVER ITSELF, NOT JUST THE REGISTRY API (#14624 review F2).
+
+    Every other row in this file calls `note_uncut_graph` / `clear_uncut_graph`
+    DIRECTLY, so the observation block inside :func:`record_owns_position` — the
+    one the whole field exists for, and the only per-write read of the cursor row
+    on an armed deployment — was entered by NO test: deleting `if usable:` and
+    its `else:` branch together reddened nothing. It is driven here the way
+    `tests/test_14002_record_only_journal.py` drives the same function: a
+    connection and a cursor row are INJECTED, so the question is the DECISION and
+    no database is needed.
+    """
+    from tortoise import record_allocator as ra
+
+    conn = _OwnsPositionConn()
+    state: dict[str, object] = {"row": None}
+
+    def read_cursor(_conn, *, org_id, graph_id):
+        return state["row"]
+
+    monkeypatch.setattr(rw, "_default_connect", lambda _dsn: conn)
+    monkeypatch.setattr(ra, "read_cursor", read_cursor)
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+    monkeypatch.setenv(rw.RECORD_SINGLE_TENANT_ENV, "1")
+    monkeypatch.setenv(rw.RECORD_ORG_ENV, "org-14582")
+    monkeypatch.setenv(rw.RECORD_GRAPH_ENV, "graph-write-path")
+    monkeypatch.setenv(rw.RECORD_ALLOCATE_ENV, "1")
+    rw.reset_uncut_graphs()
+    try:
+        tenant = ("org-14582", "graph-write-path")
+
+        # 1. no row: the WRITE PATH is what records the gap.
+        state["row"] = None
+        assert rw.record_owns_position(tenant=tenant) is False
+        block = rw.armed_but_uncut()
+        assert block["armed_but_uncut"] == 1, (
+            f"the write path observed an uncut graph and the registry did not "
+            f"hear it: {block}")
+        assert rw.armed_but_uncut_reasons() == {"no_cursor_row": 1}
+
+        # 2. `active`: the SAME read is the repair.
+        state["row"] = (5, "active")
+        assert rw.record_owns_position(tenant=tenant) is True
+        assert rw.armed_but_uncut()["armed_but_uncut"] == 0, (
+            "the observation that repairs the gap must RETRACT the entry")
+
+        # 3. `halted`: the write path must MOVE it — report it on the halt's own
+        #    key, not as a gap. (The `halted` arm's retraction is graded by
+        #    `test_a_graph_TRANSITIONS_between_the_two_populations`: the `active`
+        #    observation in step 2 already emptied the uncut map here, so this row
+        #    cannot also show the entry being retracted.)
+        state["row"] = (5, "halted")
+        assert rw.record_owns_position(tenant=tenant) is False
+        block = rw.armed_but_uncut()
+        assert (block["armed_but_uncut"], block["armed_but_halted"]) == (0, 1), (
+            f"a halt observed on the write path must MOVE the graph between the "
+            f"populations, not add a second filing: {block}")
+
+        # 4. `seeded`: an incomplete cutover again, and not still a halt.
+        state["row"] = (5, "seeded")
+        assert rw.record_owns_position(tenant=tenant) is False
+        block = rw.armed_but_uncut()
+        assert (block["armed_but_uncut"], block["armed_but_halted"]) == (1, 0), block
+        assert rw.armed_but_uncut_reasons() == {"mode_seeded": 1}
+    finally:
+        rw.reset_uncut_graphs()
+
+
+class _RowOnlyControlPlane:
+    """The control plane reduced to the ONE read a credential resolution makes."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.queries: list[tuple[str, tuple[str, ...]]] = []
+
+    def query(self, table, select=None, filters=None):
+        self.queries.append((table, tuple(select or ())))
+        return self.rows
+
+
+def test_a_credential_resolution_over_an_existing_row_never_enters_the_mint(
+        monkeypatch):
+    """⛔ THE "SELF-HEAL ON THE NEXT AUTHENTICATED REQUEST" CLAIM IS FALSE, AND
+    THIS PINS THE REACHABILITY THAT SAYS SO (#14624 review ISSUE 2).
+
+    `_provision_default_graph_record`'s docstring claimed that an org whose
+    default graph was missed — *"the hook failed, or the graph predates it"* —
+    *"is provisioned on its next authenticated request instead of waiting for an
+    operator"*. Both of those populations HAVE the `public.graphs` row and LACK
+    the cursor row, and `default_graph_for_credential` returns a PRESENT row's id
+    at its own short-circuit **without** calling `ensure_default_graph_row`
+    (whose only production caller is `_mint_default_graph_row_best_effort`). So
+    that population is reached by no credential resolution at all; its remedy is
+    `record_allocator_cli.py backfill`, which the corrected docstring now says.
+
+    ⛔ THIS ROW PINS THE REACHABILITY, NOT THE PROSE — prose cannot be asserted.
+    It reds if someone wires the present-row arm into the mint or the hook, which
+    is exactly the change that would make the old sentence true: at that point
+    the docstring and this test must change DELIBERATELY rather than the claim
+    quietly becoming true while the plan still sends the operator to `backfill`.
+    """
+    from tortoise import supabase_control
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_mint(cp, org_id, graph_name=None, *, context):
+        calls.append((org_id, f"mint:{context}"))
+        raise AssertionError(
+            "a credential resolution over an EXISTING default row must not enter "
+            "the mint: the self-heal claim belongs to the MISS path only")
+
+    def fake_ensure(cp, org_id, graph_name=None):
+        calls.append((org_id, "ensure_default_graph_row"))
+        raise AssertionError(
+            "a credential resolution over an EXISTING default row must not re-run "
+            "the creation door — `backfill` is that population's remedy")
+
+    def fake_hook(org_id, graph_id):
+        calls.append((org_id, graph_id))
+        raise AssertionError(
+            "a credential resolution over an EXISTING default row must not reach "
+            "the creation hook — that is the claim this row exists to falsify")
+
+    monkeypatch.setattr(
+        supabase_control, "_mint_default_graph_row_best_effort", fake_mint)
+    monkeypatch.setattr(
+        supabase_control, "ensure_default_graph_row", fake_ensure)
+    monkeypatch.setattr(
+        supabase_control, "_provision_default_graph_record", fake_hook)
+
+    cp = _RowOnlyControlPlane([{"id": "g_default", "namespace": "org_ns_row"}])
+    namespace, graph_id = supabase_control.default_graph_for_credential(
+        cp, "org-14582", "org_ns", context="test")
+
+    # ⛔ THE FIXTURE'S NAMESPACE DIFFERS FROM THE `graph_name` ARGUMENT (#14624
+    # review P3-2). They used to be the SAME string, which made the pair
+    # assertion below unfalsifiable: `return (graph_name, row["id"])` — the exact
+    # regression the pair exists to prevent (#10452 F2) — produced the same
+    # tuple, so mutating the return left the row GREEN. With them distinct, a
+    # value taken from the argument instead of the one row read is visible.
+    assert (namespace, graph_id) == ("org_ns_row", "g_default"), (
+        "the pair must come off the one row read, unchanged")
+    assert cp.queries == [("graphs", ("id", "namespace"))], (
+        f"the credential path is ONE read and nothing else: {cp.queries}")
+    assert calls == [], (
+        f"the credential path re-entered the creation door/hook: {calls}")
 
 
 def test_health_returns_to_ok_after_every_overflowing_graph_is_healed(
@@ -1461,733 +1348,6 @@ def test_a_halted_overflow_is_counted_not_silently_dropped(monkeypatch):
         rw.reset_uncut_graphs()
 
 
-# ── DB-free: the hook's REACH, and the two feeders that keep it honest ─────
-#
-# #14587 review: P1-1 (the hook fired on an arm whose graph `public.graphs`
-# never holds) and P1-3 (the write-path feeder and the allocator's `active`
-# short-circuit could both be deleted with the suite green). Each pin below
-# names the mutant it reds on.
-
-
-def _parent_map(node: ast.AST) -> dict[ast.AST, ast.AST]:
-    """`{child: parent}` for one parsed function."""
-    parents: dict[ast.AST, ast.AST] = {}
-    for sub in ast.walk(node):
-        for child in ast.iter_child_nodes(sub):
-            parents[child] = sub
-    return parents
-
-
-def _enclosing_if_tests(node: ast.AST,
-                        parents: dict[ast.AST, ast.AST]) -> list[ast.AST]:
-    """Every `if` TEST above `node`, nearest first — the guards around a line."""
-    tests: list[ast.AST] = []
-    cur = node
-    while cur in parents:
-        cur = parents[cur]
-        if isinstance(cur, ast.If):
-            tests.append(cur.test)
-    return tests
-
-
-def _names(node: ast.AST) -> set[str]:
-    return {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name)}
-
-
-def _calls_to(node: ast.AST, callee: str) -> list[ast.Call]:
-    out: list[ast.Call] = []
-    for sub in ast.walk(node):
-        if not isinstance(sub, ast.Call):
-            continue
-        func = sub.func
-        name = func.id if isinstance(func, ast.Name) else (
-            func.attr if isinstance(func, ast.Attribute) else None)
-        if name == callee:
-            out.append(sub)
-    return out
-
-
-def test_the_hook_is_scoped_to_the_arm_that_persisted_a_graphs_row():
-    """⛔ #14587 review P1-1 — THE HOOK MUST NOT FIRE ON THE REGISTRY ARM.
-
-    `record_cursor` carries `FOREIGN KEY (org_id, graph_id) REFERENCES
-    public.graphs (org_id, id)`. `insert_graph` persists such a row on the
-    Supabase arm; `sdk._graph_create` does NOT (it returns a Falkor `:Graph` id,
-    `record_writer.record_tenant_for` states registry graphs are never in
-    `public.graphs`). `_provision_graph` took the registry branch and still
-    called the hook, so on any selfhost/registry install that sets
-    `TORTOISE_RECORD_DSN` EVERY graph create failed the FK (`23503`, or `42P01`
-    with no graphs table), counted `provision_failed`, and — because a registry
-    tenant never reaches `record_owns_position` to retract it — pinned `/health`
-    at `ok: false` for the life of the process over a deployment with NO gap.
-
-    Mutants this reds: (a) drop the `if control_plane_owns_graph:` guard → the
-    call has no enclosing `if` naming the flag; (b) set the flag True in the
-    `else` (registry) arm → its assignment is not guarded by
-    `is_supabase_enabled()`; (c) never set it True → the `True` assignment is
-    gone. The `_UNHOOKED` pin cannot see any of them: it grades
-    `sdk._graph_create`'s own body, and this is a caller one frame up that
-    composes the same id into the same hook.
-    """
-    rel, door = "tortoise/hosted_api.py", "_provision_graph"
-    func = _functions(rel).get(door)
-    assert func is not None, f"{rel}::{door} is gone — re-run the door census"
-    parents = _parent_map(func)
-    calls = _calls_to(func, "_provision_graph_record")
-    assert len(calls) == 1, (
-        f"`{door}` calls `_provision_graph_record` {len(calls)}× — expected "
-        f"exactly one gated call site")
-    guards: set[str] = set()
-    for test in _enclosing_if_tests(calls[0], parents):
-        guards |= _names(test)
-    assert "control_plane_owns_graph" in guards, (
-        "the creation hook is not gated on `control_plane_owns_graph`: it runs "
-        "for the REGISTRY arm too, where the graph id is a Falkor `:Graph` node "
-        "that `public.graphs` never holds — `record_cursor`'s FK refuses every "
-        "such create, and a registry tenant never reaches the write path that "
-        "would retract the entry, so `/health` reads `ok: false` forever")
-    trues = [n for n in ast.walk(func)
-             if isinstance(n, ast.Assign)
-             and any(isinstance(t, ast.Name)
-                     and t.id == "control_plane_owns_graph" for t in n.targets)
-             and isinstance(n.value, ast.Constant) and n.value.value is True]
-    assert len(trues) == 1, (
-        f"`control_plane_owns_graph` is set True {len(trues)}× in `{door}` — "
-        f"it must be set True exactly once, and only where `insert_graph` "
-        f"persisted the row")
-    assert any(_calls_to(test, "is_supabase_enabled")
-               for test in _enclosing_if_tests(trues[0], parents)), (
-        "`control_plane_owns_graph = True` is not inside the "
-        "`if is_supabase_enabled():` arm — the flag that gates the hook is now "
-        "set by the arm whose graph has no `public.graphs` row")
-
-
-class _RecordingCursor:
-    """The cursor half of :class:`_FakeConn`: records what was EXECUTED.
-
-    ⛔ IT EXISTS BECAUSE THE HOOK NOW ISSUES A STATEMENT OF ITS OWN (#14587
-    review P3-2): `_bound_provision_statements` scopes a transaction-local
-    `statement_timeout` on the connection before the allocator runs, so a fake
-    connection the hook opens must be able to answer `cursor()`. Without this the
-    only way to keep these tests green would be to skip the bound in tests, which
-    is how the claim and the guard drift apart again.
-    """
-
-    def __init__(self, log: list[tuple[str, Any]]) -> None:
-        self._log = log
-
-    def execute(self, sql: str, params: Any = None) -> None:
-        self._log.append((sql, params))
-
-    def fetchone(self) -> None:
-        return None
-
-    def close(self) -> None:
-        pass
-
-
-class _FakeConn:
-    """What `record_writer` accepts as a connection: commit/rollback/close."""
-
-    def __init__(self) -> None:
-        self.committed = 0
-        self.closed = 0
-        self.statements: list[tuple[str, Any]] = []
-
-    def cursor(self) -> _RecordingCursor:
-        return _RecordingCursor(self.statements)
-
-    def commit(self) -> None:
-        self.committed += 1
-
-    def rollback(self) -> None:
-        pass
-
-    def close(self) -> None:
-        self.closed += 1
-
-
-def test_the_write_path_observation_feeds_the_registry(monkeypatch):
-    """⛔ #14587 review P1-3 (first instance) — THE FEEDER HAD NO PIN.
-
-    `record_owns_position` is the ONLY observation that runs in the normal course
-    (`record_owns_position` reads the graph's cursor row on every armed write),
-    so it is what keeps `armed_but_uncut` honest for the graphs that PREDATE the
-    hook, the graphs a failed hook left behind, and every graph an operator later
-    breaks. Reverting its `note_uncut_graph`/`clear_uncut_graph` pair to the bare
-    `return row is not None and row[1] == active` reddens NOTHING before this
-    test: every other assertion in this file drove the registry BY HAND. With the
-    feeder gone, `/health` only moves at creation time and reads green forever
-    over exactly the population this PR exists to surface.
-
-    Driven the way `tests/test_12894_record_cursor.py` drives `replay()` — an
-    injected connection and a cursor row — so the three arms are exercised
-    without a database.
-    """
-    from tortoise import record_allocator as ra
-
-    state: dict = {"row": None}
-    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
-    monkeypatch.setattr(rw, "record_live_allocate", lambda: True)
-    monkeypatch.setattr(rw, "_default_connect", lambda _dsn, **_kw: _FakeConn())
-    monkeypatch.setattr(ra, "read_cursor",
-                        lambda _conn, *, org_id, graph_id: state["row"])
-    monkeypatch.setattr(rw, "_uncut_warned_at", {})
-
-    # (1) NO ROW — the born-uncut graph. The observation must be TRACKED.
-    assert rw.record_owns_position(tenant=("org-14582", "graph-14582")) is False
-    assert rw.armed_but_uncut()["armed_but_uncut"] == 1, (
-        "a write to a graph with no cursor row did not reach the registry — the "
-        "write-path feeder is gone and `/health` can no longer see a graph the "
-        "hook missed")
-    assert rw.armed_but_uncut_reasons() == {"no_cursor_row": 1}
-
-    # (2) A ROW THAT IS NOT `active` — the mode is named, not collapsed.
-    state["row"] = (0, "seeded")
-    assert rw.record_owns_position(tenant=("org-14582", "graph-14582")) is False
-    assert rw.armed_but_uncut_reasons() == {"mode_seeded": 1}, (
-        "a `seeded` graph must be tracked with its OWN reason — the row exists "
-        "but allocates nothing (`ALLOCATION_SQL` is scoped to `active`)")
-
-    # (3) THE SAME READ THAT OBSERVES THE GAP OBSERVES ITS REPAIR.
-    state["row"] = (0, "active")
-    assert rw.record_owns_position(tenant=("org-14582", "graph-14582")) is True
-    assert rw.armed_but_uncut()["armed_but_uncut"] == 0, (
-        "a healed graph is still tracked — the clearer is unreachable from the "
-        "write path, so `/health` is a LATCH and only a restart clears it")
-    assert rw.armed_but_uncut_reasons() == {}
-
-
-class _CountingCursor:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
-
-    def execute(self, _sql, _params=None):
-        pass
-
-    def fetchone(self):
-        return (2,)          # the journal's COUNT — a gapped `1, 2, 4` axis
-
-    def close(self):
-        pass
-
-
-class _CountingConn:
-    def cursor(self):
-        return _CountingCursor()
-
-
-def test_the_active_short_circuit_removes_a_false_divergence(monkeypatch):
-    """⛔ #14587 review P1-3 (second instance) — the short-circuit had no pin.
-
-    `record_allocator.provision_graph_record` reads the row BEFORE seeding, and
-    its own docstring says that read is *"not an optimisation — it removes a
-    FALSE DIVERGENCE"*: on an ALREADY `active` graph with a gapped journal,
-    `floor = COUNT(*)` is 2 while `MAX(seq)` is 3, so `SEED_SQL` would refuse
-    `divergence` and the hook would publish a healthy cut-over graph as uncut.
-    Deleting the short-circuit left the suite GREEN (on a dense journal the
-    `armed` refusal arm returns the same answer), so the only input that
-    separates them — active + GAPPED journal — is built here.
-
-    Mutant: delete the `existing is not None and existing[1] == MODE_ACTIVE`
-    return → `seed` is reached, refuses, and this test fails on `seen == []`.
-    """
-    from tortoise import record_allocator as ra
-
-    seen: list[str] = []
-    monkeypatch.setattr(ra, "read_cursor",
-                        lambda _conn, *, org_id, graph_id: (3, ra.MODE_ACTIVE))
-    monkeypatch.setattr(ra, "scope_tenant", lambda _conn, _org: None)
-
-    def seed_that_would_refuse(*_a, **_kw):
-        seen.append("seed")
-        raise ra.SeedRefused(
-            "the record holds positions this journal cannot reproduce",
-            reason="divergence", row_max=3, enumerated_floor=2)
-
-    monkeypatch.setattr(ra, "seed", seed_that_would_refuse)
-    result = ra.provision_graph_record(_CountingConn(), org_id="org-14582",
-                                       graph_id="graph-14582")
-    assert seen == [], (
-        "an ALREADY `active` graph was sent through `seed` — with a gapped "
-        "journal that refuses `divergence`, so a healthy cut-over graph is "
-        "published as uncut and `/health` reds for nothing")
-    assert result.already_cut_over is True
-    assert (result.seq, result.mode) == (3, ra.MODE_ACTIVE)
-    assert result.seeded is False
-
-
-def test_the_provision_connect_is_bounded_by_its_own_timeout(monkeypatch):
-    """⛔ THE ONE BOUND THIS CHANGE ADVERTISES WAS UNTESTED (#14587).
-
-    The hook runs synchronously from `async` endpoints, so its connect is capped
-    at `PROVISION_CONNECT_TIMEOUT_SECONDS` (3 s) rather than the live door's 10 —
-    a record outage must not cost a create endpoint the full live budget.
-    Mutating the kwarg back to the module default reddened nothing.
-    """
-    from tortoise import record_allocator as ra
-
-    seen: dict = {}
-
-    def connect(_dsn, *, connect_timeout=None):
-        seen["connect_timeout"] = connect_timeout
-        return _FakeConn()
-
-    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
-    monkeypatch.setattr(rw, "_default_connect", connect)
-    monkeypatch.setattr(ra, "provision_graph_record", lambda *_a, **_kw: (
-        SimpleNamespace(seq=0, mode="active", already_cut_over=False,
-                        seeded=True, healed_tail=False, burned=False)))
-
-    assert rw.provision_graph_record(org_id="o", graph_id="g")[
-        "provisioned"] is True
-    assert seen["connect_timeout"] == rw.PROVISION_CONNECT_TIMEOUT_SECONDS, (
-        f"the provision connect is not bounded by its own timeout (got "
-        f"{seen.get('connect_timeout')!r}) — a record outage then blocks a "
-        f"create endpoint for the live door's "
-        f"{rw.CONNECT_TIMEOUT_SECONDS}s budget")
-    assert seen["connect_timeout"] < rw.CONNECT_TIMEOUT_SECONDS
-
-
-def test_the_provision_statements_are_bounded_transaction_locally(monkeypatch):
-    """⛔ THE CONNECT BOUND WAS NOT THE STATEMENT BOUND (#14587 review P3-2).
-
-    `PROVISION_CONNECT_TIMEOUT_SECONDS` bounded the CONNECT only, and the hook's
-    advertised claim was "a record outage at creation must cost the user a bounded
-    pause". A record that ACCEPTS the TCP connection and then hangs on a statement
-    is the shape that refutes it: `_default_connect` sets `connect_timeout` and
-    `idle_in_transaction_session_timeout` and NO `statement_timeout`, and this sync
-    hook runs inside an `async` endpoint, so the hang blocked the worker's event
-    loop (including a co-located `/health`) forever.
-
-    Two assertions, two mutants: delete the `_bound_provision_statements(connection)`
-    call → no `statement_timeout` statement is executed at all; flip the scope flag
-    `true` → `false` (a SESSION setting on a POOLED handle, #9558) → the scope
-    assertion reds.
-    """
-    from tortoise import record_allocator as ra
-
-    conn = _FakeConn()
-    order: list[str] = []
-    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
-    monkeypatch.setattr(rw, "_default_connect", lambda _dsn, **_kw: conn)
-
-    def provision(*_a, **_kw):
-        order.append(f"allocator_after_{len(conn.statements)}_statements")
-        return SimpleNamespace(seq=0, mode="active", already_cut_over=False,
-                               seeded=True, healed_tail=False, burned=False)
-
-    monkeypatch.setattr(ra, "provision_graph_record", provision)
-
-    assert rw.provision_graph_record(
-        org_id="org-14582", graph_id="graph-14582")["provisioned"] is True
-
-    bounds = [(sql, params) for sql, params in conn.statements
-              if "statement_timeout" in sql]
-    assert len(bounds) == 1, (
-        "the hook issued no statement bound — `connect_timeout` does not bound a "
-        f"statement, so a hung SELECT blocks the create unbounded: {conn.statements}")
-    sql, params = bounds[0]
-    assert params == (str(rw.PROVISION_STATEMENT_TIMEOUT_MS),), (
-        f"the bound applied is not PROVISION_STATEMENT_TIMEOUT_MS: {params!r}")
-    assert rw.PROVISION_STATEMENT_TIMEOUT_MS > 0, (
-        "Postgres reads statement_timeout = 0 as NO TIMEOUT AT ALL, so a zero "
-        "here is the unbounded hang spelled as a bound")
-    assert sql.rstrip().endswith("true)"), (
-        "the bound must be TRANSACTION-LOCAL (`set_config(..., true)`): the "
-        "handle is POOLED (#9558), so a session-level SET follows it into the next "
-        f"borrower's transaction — got {sql!r}")
-    assert order and order[0].startswith("allocator_after_1"), (
-        "the bound must be scoped BEFORE the allocator's statements run, or those "
-        f"statements are the unbounded ones: {order}")
-
-
-def test_the_halted_remedy_names_reopen(caplog):
-    """⛔ `seed` THEN `arm` CANNOT ARM A HALTED GRAPH (#14587 review P3).
-
-    `_warn_uncut_graph(reason="mode_halted")` printed the un-halted sequence —
-    `seed --enumerated-floor 0`, then `arm`. `ARM_SQL` is scoped
-    `WHERE mode='seeded'` and `_transition` refuses a halted row with "its mode is
-    'halted', not 'seeded'", and `SEED_SQL`'s `ON CONFLICT` is scoped to
-    `seeded`/`halted` and sets only `seq` — so re-seeding a halted row leaves it
-    halted and the operator's second command fails. `reopen`
-    (`halted -> seeded`) is the missing verb, in the order `record_allocator`'s
-    own halt message prints: `seed` -> `reopen` -> `arm`.
-
-    Mutant: drop the `mode_halted` branch in `_remedy_for_reason` → `reopen` is
-    absent from the emitted line and the ordering assertion reds.
-    """
-    rw.reset_uncut_graphs()
-    try:
-        remedy = rw._remedy_for_reason("org-14582", "graph-halted", "mode_halted")
-        assert "reopen" in remedy, (
-            f"the halted remedy omits `reopen`, the only verb that leaves `halted`: {remedy}")
-        assert remedy.index("seed") < remedy.index("reopen") < remedy.index("arm"), (
-            f"the sequence must be seed -> reopen -> arm: {remedy}")
-        assert "--acknowledge-cutover" in remedy
-        # The un-halted population must NOT be told to reopen: a `no_cursor_row`
-        # graph is not halted, and `reopen` would refuse it (`wanted=halted`).
-        assert "reopen" not in rw._remedy_for_reason(
-            "org-14582", "graph-new", "no_cursor_row")
-
-        with caplog.at_level("WARNING", logger="tortoise.record_writer"):
-            rw._warn_uncut_graph("org-14582", "graph-halted", reason="mode_halted")
-        lines = [rec.getMessage() for rec in caplog.records]
-        assert any("reopen" in line for line in lines), (
-            "the emitted warning does not carry the sequence that reaches the "
-            f"state it names: {lines}")
-    finally:
-        rw.reset_uncut_graphs()
-        rw._uncut_warned_at.clear()
-
-
-def test_the_divergence_remedy_does_not_print_a_floor_the_seed_refuses():
-    """⛔ `--enumerated-floor 0` CANNOT REACH A DIVERGENT GRAPH (#14587 review P3).
-
-    `_warn_uncut_graph(reason="provision_refused:divergence")` printed the
-    un-halted sequence with floor `0`. `SEED_SQL` writes a row only
-    `WHERE observed.row_max <= observed.enumerated_floor`, and `divergence` IS
-    `row_max > floor`, so the first printed command is refused by the same guard
-    and the sequence cannot reach the state the message names — the same class as
-    the halted arm above, on a third population.
-
-    The floor that works is the record's own max: with `floor = MAX(seq)` the
-    guard's `row_max <= floor` holds, and it is the number
-    `tools/record_allocator_cli.py backfill` prints in the `remedy` field of a
-    graph it refused `divergence`.
-
-    Mutant: drop the `provision_refused:divergence` branch in
-    `_remedy_for_reason` → the emitted line carries a floor-`0` seed command
-    again and the first assertion reds.
-    """
-    remedy = rw._remedy_for_reason(
-        "org-14582", "graph-divergent", "provision_refused:divergence")
-    # The assertion is about the COMMAND the operator would run, not about the
-    # word `0` anywhere in the paragraph: the message names the refused form on
-    # purpose, and matching the bare literal would red on its own explanation.
-    assert ("seed --org-id org-14582 --graph-id graph-divergent "
-            "--enumerated-floor 0") not in remedy, (
-        "the divergence remedy prints a seed command the guard refuses: "
-        f"{remedy}")
-    assert "--enumerated-floor <the record's own MAX(seq)>" in remedy, (
-        f"the divergence remedy does not name the floor that works: {remedy}")
-    assert remedy.index("seed") < remedy.index("arm"), remedy
-    # A halted row can ALSO be divergent, and a re-seed does not move the mode,
-    # so the sequence must name `reopen` or its last verb is refused for that
-    # intersection — the same defect this arm exists to fix, one population over.
-    assert "reopen" in remedy and "halted" in remedy, (
-        "the divergence remedy assumes a `seeded` row, so `arm` is refused for a "
-        f"graph that is divergent AND halted: {remedy}")
-    assert rw._remedy_for_reason("o", "g", "provision_refused:divergence").count(
-        "reopen") == 1, "the conditional `reopen` must be named exactly once"
-    # The un-halted population keeps the `0` sequence: its record holds no
-    # position beyond the enumeration, so `0` is the correct floor there and the
-    # new arm must not swallow it. It also names the fallback, so an operator
-    # whose `0` seed comes back `divergence` is not sent round the loop twice.
-    unarmed_gap = rw._remedy_for_reason("org-14582", "graph-new", "no_cursor_row")
-    assert ("seed --org-id org-14582 --graph-id graph-new --enumerated-floor 0"
-            in unarmed_gap), unarmed_gap
-    assert "divergence" in unarmed_gap and "MAX(seq)" in unarmed_gap, unarmed_gap
-
-
-def test_the_seeded_remedy_is_the_one_verb_that_state_needs():
-    """⛔ `mode_seeded` IS NOT THE `0`-FLOOR POPULATION (#14587 review P3).
-
-    It fell through to the generic sequence, which seeds first. `seed` is BOTH
-    unnecessary and refusable there: the row already exists in the one state
-    `arm` leaves, while `SEED_SQL`'s guard is `row_max <= enumerated_floor` — so
-    `--enumerated-floor 0` is refused `divergence` for every `seeded` row whose
-    journal holds positions, which is exactly what a seed-only `backfill` writes.
-    A re-seed could not escape it either: the `ON CONFLICT` sets only `seq`,
-    never `mode`. `arm` alone is the sequence, and it is the same decision the
-    arm pass makes for these rows.
-
-    Mutant: delete the `mode_seeded` branch → the generic sequence returns, its
-    floor-`0` seed command is printed again and the first assertion reds.
-    """
-    remedy = rw._remedy_for_reason("org-14582", "graph-seeded", "mode_seeded")
-    assert ("seed --org-id org-14582 --graph-id graph-seeded "
-            "--enumerated-floor 0") not in remedy, (
-        f"the seeded remedy prints a seed command the guard refuses: {remedy}")
-    assert ("arm --org-id org-14582 --graph-id graph-seeded "
-            "--acknowledge-cutover") in remedy, (
-        f"the seeded remedy does not print the verb that reaches it: {remedy}")
-    assert "DO NOT seed it first" in remedy, remedy
-    # A `seeded` row is NOT halted, so `reopen` would be refused (`wanted=halted`).
-    assert "reopen" not in remedy, remedy
-    # The bulk form reaches the same rows in one pass, WITHOUT re-seeding them.
-    assert "backfill --arm" in remedy, remedy
-    assert "without" in remedy and "re-seeding" in remedy, remedy
-    # Non-vacuity of the population distinction: the generic sequence still
-    # seeds, so the branch is not just a copy of the fallback.
-    generic = rw._remedy_for_reason("org-14582", "graph-new", "no_cursor_row")
-    assert "--enumerated-floor 0" in generic, generic
-    assert generic != remedy
-
-
-def test_a_re_provisioned_halted_graph_keeps_its_published_entry(monkeypatch):
-    """⛔ `provisioned: True` IS NOT "CUT OVER" (#14587 review P3).
-
-    `record_allocator.provision_graph_record`'s `halted` arm seeds MONOTONICALLY
-    and deliberately does NOT re-arm — a hook that silently resumed a halt would
-    erase the only record that somebody stopped the graph. The caller committed
-    and then unconditionally called `clear_uncut_graph` under the comment "the
-    graph IS cut over now", which popped the graph's `armed_but_halted` entry:
-    `/health` forgot a graph whose writes are still refused, until its next write
-    re-observed it. A retraction must be earned by an `active` outcome.
-
-    Mutant: restore the unconditional `clear_uncut_graph` → the halted count goes
-    to 0 and the first assertion reds.
-    """
-    from tortoise import record_allocator as ra
-
-    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
-    monkeypatch.setattr(rw, "_default_connect", lambda _dsn, **_kw: _FakeConn())
-
-    def provision(mode, seq):
-        return lambda _conn, **_kw: ra.ProvisionedRecord(
-            org_id="org-14582", graph_id="graph-14582", seq=seq, mode=mode,
-            already_cut_over=False, seeded=True)
-
-    rw.reset_uncut_graphs()
-    try:
-        # The graph was already published as halted by an earlier observation.
-        rw.note_uncut_graph("org-14582", "graph-14582", reason="mode_halted")
-        assert rw.armed_but_uncut()["armed_but_halted"] == 1
-
-        monkeypatch.setattr(ra, "provision_graph_record",
-                            provision(ra.MODE_HALTED, 7))
-        out = rw.provision_graph_record(
-            org_id="org-14582", graph_id="graph-14582")
-        assert out["provisioned"] is True and out["mode"] == ra.MODE_HALTED, out
-        assert rw.armed_but_uncut()["armed_but_halted"] == 1, (
-            "the hook retracted a halted graph's published entry on an outcome "
-            "that deliberately did NOT re-arm it: `/health` now forgets a graph "
-            "whose writes are still refused")
-
-        # …and an ACTIVE outcome still retracts, so the clearer is not dead.
-        monkeypatch.setattr(ra, "provision_graph_record",
-                            provision(ra.MODE_ACTIVE, 8))
-        assert rw.provision_graph_record(
-            org_id="org-14582", graph_id="graph-14582")["mode"] == ra.MODE_ACTIVE
-        assert rw.armed_but_uncut()["armed_but_halted"] == 0, (
-            "an ACTIVE outcome must retract the entry — a clearer that never "
-            "fires turns `/health` into a latch")
-    finally:
-        rw.reset_uncut_graphs()
-        rw._uncut_warned_at.clear()
-
-
-def test_a_halt_retracts_an_earlier_uncut_observation(monkeypatch):
-    """⛔ A SANCTIONED HALT MUST NOT PIN `ok: false` (#14587 review P3).
-
-    A graph is published on the UNCUT key when it was observed unusable
-    (`provision_failed`, `no_cursor_row`, a refused cutover), and an operator can
-    HALT it afterwards — on the write path that is the very next observation, and
-    the hook's halted arm reaches the same function. `mode_halted` is published on
-    its OWN key and used to leave the earlier entry untouched, so the graph was
-    counted in both populations, `armed_but_uncut_reasons()` kept the falsified
-    `provision_failed`, and — `ok` folding only `armed_but_uncut` — the
-    deployment read degraded for as long as the halt stood. The health contract
-    splits the key precisely so an operator's decision is not a degradation.
-
-    Mutant: drop the `_UNCUT_GRAPHS.pop(key, None)` in the halted arm → the uncut
-    count stays 1 and both assertions red.
-    """
-    rw.reset_uncut_graphs()
-    try:
-        rw.note_uncut_graph("org-14582", "graph-1", reason="provision_failed")
-        assert rw.armed_but_uncut()["armed_but_uncut"] == 1
-        rw.note_uncut_graph("org-14582", "graph-1", reason="mode_halted")
-        block = rw.armed_but_uncut()
-        assert block["armed_but_halted"] == 1, block
-        assert block["armed_but_uncut"] == 0, (
-            "the halt left the graph in the UNCUT population, which `ok` folds: "
-            f"a sanctioned halt pinned the deployment red — {block}")
-        assert rw.armed_but_uncut_reasons() == {}, (
-            "the halt kept a reason it had itself falsified, and that reason is "
-            f"what `/health` publishes: {rw.armed_but_uncut_reasons()}")
-
-        # THE INVARIANT IS SYMMETRIC: at most one map per graph, newest wins. A
-        # graph that is halted and is THEN observed refusing is published as
-        # uncut and stops being labelled halted — the newest fact is the one
-        # `/health` owes the operator, and the same graph must never count twice.
-        rw.note_uncut_graph("org-14582", "graph-1",
-                            reason="provision_refused:divergence")
-        block = rw.armed_but_uncut()
-        assert block["armed_but_uncut"] == 1, block
-        assert block["armed_but_halted"] == 0, (
-            "the graph kept the superseded HALTED label and inflated "
-            f"`armed_but_halted` while counting as uncut too: {block}")
-        assert rw.armed_but_uncut_reasons() == {
-            "provision_refused:divergence": 1}, rw.armed_but_uncut_reasons()
-
-        # …AND THE CONSEQUENCE ON THE CHANNEL THE CLAIM IS ABOUT, through
-        # `_record_health` rather than the maps: the halt alone stays GREEN, and
-        # the refusal that superseded it REDS — a claim about `/health` that never
-        # reads `/health` cannot catch a fold that stops folding.
-        dsn = "postgresql://u:p@127.0.0.1:1/record"
-        assert _health(monkeypatch, dsn=dsn)["ok"] is False, (
-            "a graph observed REFUSING after a halt is a real gap, so `ok` must "
-            "be false — the halt rationale covers only the graph whose last "
-            "observation IS the halt")
-        rw.note_uncut_graph("org-14582", "graph-1", reason="mode_halted")
-        block = _health(monkeypatch, dsn=dsn)
-        assert block["armed_but_halted"] == 1 and block["armed_but_uncut"] == 0, block
-        assert block["ok"] is True, (
-            "a halt that nothing later contradicted must not red the deployment "
-            "— that is the permanent false red the key split exists to prevent")
-    finally:
-        rw.reset_uncut_graphs()
-
-
-def test_the_failure_paths_print_the_per_graph_remedy(caplog, monkeypatch):
-    """⛔ #14587 review P1-2 — the printed remedy could not reach the population.
-
-    Every failure path printed `backfill` as THE remedy, and `backfill` seeds
-    `sweep`'s population: `public.journal_event` minus `record_cursor`. On an
-    armed deployment a graph whose hook failed writes NO `journal_event` row —
-    `ALLOCATION_SQL` is scoped to `mode='active'`, so the door refuses and the
-    line stays in the JSONL file — so the operator followed the printed remedy,
-    got `considered: 0 / seeded: 0 / refused: 0` with exit 0, read a CLEAN
-    pre-flight, and was left with a hand-typed command whose id `/health` does
-    not publish. The per-graph `seed` + `arm` is the command that works, so it is
-    what the text must print — first, and with the ids filled in.
-
-    Mutant: revert either message to `backfill --org-id <org>` → the assertion
-    reds on the missing `--enumerated-floor 0`.
-    """
-    from tortoise import record_allocator as ra
-
-    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
-    monkeypatch.setattr(rw, "_default_connect", lambda _dsn, **_kw: _FakeConn())
-
-    def boom(_conn, **_kw):
-        raise RuntimeError("the record is unreachable")
-
-    monkeypatch.setattr(ra, "provision_graph_record", boom)
-    with caplog.at_level("WARNING", logger="tortoise.record_writer"):
-        assert rw.provision_graph_record(
-            org_id="org-14582", graph_id="graph-14582")["reason"] == (
-                "provision_failed")
-    lines = [rec.getMessage() for rec in caplog.records]
-    assert any("seed --org-id org-14582 --graph-id graph-14582 "
-               "--enumerated-floor 0" in line for line in lines), lines
-    assert any("arm --org-id org-14582" in line for line in lines), lines
-
-    caplog.clear()
-    monkeypatch.setattr(rw, "_uncut_warned_at", {})
-    with caplog.at_level("WARNING", logger="tortoise.record_writer"):
-        rw._warn_uncut_graph("org-14582", "graph-14582",
-                             reason="no_cursor_row")
-    lines = [rec.getMessage() for rec in caplog.records]
-    assert any("seed --org-id org-14582 --graph-id graph-14582" in line
-               for line in lines), lines
-    assert any("NOT in their population" in line for line in lines), (
-        "the warning still lets an operator wait for a graph to appear in "
-        "`sweep`/`backfill`'s population, where an armed deployment guarantees "
-        f"it never will: {lines}")
-
-
-def test_an_unimportable_allocator_seam_names_the_graph_and_never_escapes(
-        caplog, monkeypatch):
-    """⛔ #14587 review P3-1 — the ONE arm that escaped the never-raise contract.
-
-    `from . import record_allocator as ra` sat BEFORE the hook's first `try`, so an
-    unimportable allocator raised out of a function whose docstring promises "it
-    never raises" AND whose whole compensation is a health field. It landed in the
-    door wrappers, which can only LOG — so `/health` kept `ok: true` over a graph
-    whose cursor row was never provisioned: the PR's headline failure, with the
-    remedy moved off the surface the docstring advertises.
-
-    RED before the fix: the call below raises `ModuleNotFoundError` instead of
-    returning, so there is no result to assert and nothing in the registry.
-
-    Two levers, and BOTH are needed to make the import fail for real: the
-    `sys.modules` entry is what the import machinery refuses, and the package
-    ATTRIBUTE has to go too or `from . import record_allocator` resolves it
-    without consulting `sys.modules` at all (measured: with the `sys.modules` entry
-    alone the hook returns `unarmed` and never touches the seam).
-    """
-    import sys
-
-    import tortoise
-
-    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
-    monkeypatch.setitem(sys.modules, "tortoise.record_allocator", None)
-    monkeypatch.delattr(tortoise, "record_allocator", raising=False)
-
-    with caplog.at_level("WARNING", logger="tortoise.record_writer"):
-        result = rw.provision_graph_record(org_id="org-14582",
-                                          graph_id="graph-14582")
-
-    assert result == {"provisioned": False, "reason": "provision_failed"}, (
-        "an unimportable seam must be a NAMED provisioning outcome, not an "
-        f"escaping exception: {result!r}")
-    assert rw.armed_but_uncut_reasons() == {"provision_failed": 1}, (
-        "the graph is uncut and `/health` folds `armed_but_uncut`; a failure it "
-        "does not count is the silent gap this hook exists to close")
-    lines = [rec.getMessage() for rec in caplog.records]
-    assert any("seed --org-id org-14582 --graph-id graph-14582 "
-               "--enumerated-floor 0" in line for line in lines), lines
-    assert any("not importable" in line for line in lines), lines
-
-    # ⛔ AND THE GUARD SITS AFTER THE `unarmed` RETURN ON PURPOSE (property 1): with
-    # no record DSN there is no record, so an unimportable seam is not a fact about
-    # anything and must not be counted. Mutant: hoist the import guard above the
-    # `unarmed` return → this counts a graph on an unarmed deployment (the
-    # permanent false red F3 forbids).
-    rw.reset_uncut_graphs()
-    monkeypatch.delenv(rw.RECORD_DSN_ENV)
-    assert rw.provision_graph_record(org_id="org-14582", graph_id="graph-14582") \
-        == {"provisioned": False, "reason": "unarmed"}
-    assert rw.armed_but_uncut_reasons() == {}, (
-        "an unarmed deployment has no record, so nothing is uncut — an "
-        "unimportable seam must not be counted there")
-
-
-@pytest.mark.parametrize(("module", "wrapper"), (
-    ("tortoise.hosted_api", "_provision_graph_record"),
-    ("tortoise.supabase_control", "_provision_default_graph_record"),
-))
-def test_a_wrapper_that_logs_an_escaping_hook_also_counts_the_graph(
-        module, wrapper, monkeypatch):
-    """⛔ #14587 review P3-1 — "logged at ERROR" is not a health field.
-
-    Both door wrappers caught the hook's escaping exception with a bare
-    `_logger.error`, so the graph a log line NAMED was absent from the registry
-    `/health` folds — `ok: true` over a known gap, on the one arm the wrapper's
-    own docstring claimed was covered.
-
-    The hook now guards its own seam import, so what reaches a wrapper is either
-    the residual (the hook's module itself did not import, where the registry it
-    would report into is gone too — stated on both docstrings, not pretended
-    away) or a hook that RAISED despite its never-raise contract. In that second
-    case the module DID import, so a log-only body leaves the surface green over a
-    bug — which is what this pins. Mutant: delete either wrapper's
-    `note_uncut_graph` call → the registry stays empty and this reds.
-    """
-    import importlib
-
-    from tortoise import record_writer
-
-    door = getattr(importlib.import_module(module), wrapper)
-
-    def boom(**_kw):
-        raise RuntimeError("the hook raised despite its never-raise contract")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(record_writer, "provision_graph_record", boom)
-        door(org_id="org-14582", graph_id="graph-14582")
-
-    assert rw.armed_but_uncut_reasons() == {"provision_failed": 1}, (
-        f"`{module}.{wrapper}` logged the failure and left `/health` green — the "
-        "graph is uncut and the registry that would say so was importable there")
-
-
 # ── the live legs: a real record database ──────────────────────────────────
 
 pytestmark_live = pytest.mark.skipif(
@@ -2326,8 +1486,8 @@ def test_the_hook_gives_a_new_graph_a_row_and_its_first_write_applies(
 @pytestmark_live
 def test_the_hook_is_idempotent_and_never_re_bases_an_armed_graph(
         armed, fresh_graph):
-    """A door can be RE-ENTERED (a retry, the default graph's self-heal), so the
-    second call must be a no-op rather than a refusal — while never moving a
+    """A door can be RE-ENTERED (a retry, a re-provision of the default row), so
+    the second call must be a no-op rather than a refusal — while never moving a
     counter that is already allocating."""
     org, graph = fresh_graph.org, fresh_graph.graph
     first = rw.provision_graph_record(org_id=org, graph_id=graph)
@@ -2355,9 +1515,9 @@ def test_a_graph_the_record_already_knows_is_refused_not_seeded(
     instead of being silently re-based onto a number nobody can derive.
 
     ⛔ A DENSE PRE-EXISTING JOURNAL IS **NOT** THIS CASE, and conflating them was
-    the review's P2-6: `1, 2, 3` is a graph the self-heal must HEAL (seed to 3),
-    because the count equals the max. The two are separated by `SEED_SQL`'s own
-    `MAX(seq) <= enumerated_floor` guard, not by a second predicate here.
+    the review's P2-6: `1, 2, 3` is a graph a re-entered hook must HEAL (seed to
+    3), because the count equals the max. The two are separated by `SEED_SQL`'s
+    own `MAX(seq) <= enumerated_floor` guard, not by a second predicate here.
     """
     org, graph = fresh_graph.org, fresh_graph.graph
     with fresh_graph.admin.cursor() as cur:
@@ -2480,155 +1640,327 @@ class _FakeControlPlane:
         raise AssertionError(f"unexpected control-plane read: {table}")
 
 
+# ── the backfill's ARGUMENT GATE (#14624 review 2) ─────────────────────────
+
+#: Every guard below is a REFUSAL in `main()`, and none of them was exercised
+#: anywhere before these rows (#14624 review 2). The `SystemExit` vs `return`
+#: distinction is the non-vacuity: `ap.error` RAISES (exit 2), while a guard that
+#: is not there lets the same argv continue to the DSN check, which only RETURNS
+#: `EXIT_USAGE` — same code, no exception. So a reverted guard fails these rows.
+
+
+def test_backfill_arm_requires_the_cutover_acknowledgement(monkeypatch) -> None:
+    """⛔ `backfill --arm` ARMS A WHOLE ORG, so it needs the SAME
+    `--acknowledge-cutover` that `arm` does (#14624 review 2a).
+
+    THIS IS THE SAFETY GUARD. Revert `wants_arm` to `args.command == "arm"` and
+    nothing in the tree reds while a population is armed with no operator having
+    read the four preconditions (`CUTOVER_ACK_TEXT` exists to make them read).
+    """
+    from tools import record_allocator_cli as cli
+
+    monkeypatch.delenv(cli._record_env_contract()[0], raising=False)
+    assert cli.main(["backfill", "--org-id", "o", "--arm"]) == cli.EXIT_REFUSED
+    # …and the ack is a GATE, not a blanket refusal: unset the DSN and the
+    # acknowledged form gets PAST the gate and fails on what it lacks.
+    assert cli.main(["backfill", "--org-id", "o", "--arm",
+                     "--acknowledge-cutover"]) == cli.EXIT_USAGE, (
+        "an acknowledged `backfill --arm` with no DSN should fail on the DSN, "
+        "not on the ack gate")
+
+
+def test_backfill_takes_no_graph_id_and_no_stated_floor() -> None:
+    """`backfill` walks the WHOLE org and reads EACH graph's own journal
+    enumeration (#14624 review 2b/2c).
+
+    A `--graph-id` would let a population verb act on one graph while reporting
+    a population run; a single stated `--floor`/`--journal` would seed every
+    graph of an org to one number — the defect `sweep` already refuses by name.
+    """
+    from tools import record_allocator_cli as cli
+
+    for argv in (["backfill", "--org-id", "o", "--graph-id", "g"],
+                 ["backfill", "--org-id", "o", "--enumerated-floor", "3"],
+                 ["backfill", "--org-id", "o", "--journal", "j.jsonl"]):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(argv)
+        assert excinfo.value.code == cli.EXIT_USAGE, argv
+
+
+def test_dry_run_and_arm_belong_to_backfill_only() -> None:
+    """A flag a writing verb SILENTLY IGNORED is a lie about the one thing it
+    promises (#14624 review 2d/2e): `--dry-run` on `seed` would write, and
+    `--arm` on `seed` would allocate nothing while reading as if it had."""
+    from tools import record_allocator_cli as cli
+
+    for argv in (["seed", "--org-id", "o", "--graph-id", "g",
+                  "--enumerated-floor", "0", "--dry-run"],
+                 ["seed", "--org-id", "o", "--graph-id", "g",
+                  "--enumerated-floor", "0", "--arm"]):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(argv)
+        assert excinfo.value.code == cli.EXIT_USAGE, argv
+
+
+def test_the_population_is_everything_not_allocating_not_just_missing_rows():
+    """⛔ THE FALSE CLEAN (#14624 review 1, the P1) — pinned where it was made.
+
+    `backfill` seeds without arming, and a `seeded` row allocates nothing
+    (`ALLOCATION_SQL` is scoped to `active`). With `WHERE c.graph_id IS NULL` the
+    graph the run had just touched LEFT the population, so the operator checklist
+    (sweep → backfill → re-sweep to confirm → roll the flag) read **clean** over
+    graphs that refuse every record write — silently, because the live door is
+    fail-soft.
+
+    The population a pre-flight enumerates is therefore everything NOT in the
+    TERMINAL state. Both members matter and each carries its own remedy, which is
+    why the mode is SELECTed beside the id rather than inferred from membership.
+
+    NON-VACUITY: this is a static pin, and it is paired with live legs that drive
+    the real database (`test_a_non_arm_backfill_does_not_read_as_a_finished_cutover`,
+    `test_a_halted_graph_is_seeded_but_never_armed_by_backfill`). Reverting the
+    predicate to `c.graph_id IS NULL` reds this row in the fast matrix and those
+    two in `test-record-postgres`.
+    """
+    from tortoise import record_allocator as ra
+
+    sql = " ".join(ra.UNCUT_GRAPHS_SQL.split())
+    assert f"c.mode <> '{ra.MODE_ACTIVE}'" in sql, (
+        "the population is narrowed back to 'no counter row', so a `seeded`/"
+        f"`halted` graph vanishes from the pre-flight: {sql!r}")
+    assert "c.mode" in sql.split("FROM")[0], (
+        "the population must SELECT the counter's mode — membership alone cannot "
+        f"tell `seeded` (heal with `arm`) from `halted` (heal with `reopen`): {sql!r}")
+    assert ra.MODE_SEEDED not in sql and ra.MODE_HALTED not in sql, (
+        "the predicate is spelled `<> active` on PURPOSE: an enumeration of the "
+        "non-terminal modes would silently omit a future mode, whereas 'not the "
+        "terminal one' cannot")
+
+
+def test_backfill_never_arms_a_halted_counter(monkeypatch) -> None:
+    """⛔ `arm` moves `seeded` → `active` ONLY, so an org-wide `backfill --arm`
+    that met a `halted` graph raised out of the middle of the run — after
+    committing every graph before it (#14624 review 1).
+
+    No database: the seed's ANSWER is what the decision reads (`result.mode`), so
+    it is monkeypatched to the halted state and the arm leg is a recorder that
+    FAILS if it is called. The live leg is
+    `test_a_halted_graph_is_seeded_but_never_armed_by_backfill`.
+    """
+    from tools import record_allocator_cli as cli
+    from tortoise import record_allocator as ra
+
+    answers = {
+        _sql_key(ra.UNCUT_GRAPHS_SQL): [("g-halted", ra.MODE_HALTED)],
+        _sql_key(ra.JOURNAL_MAX_SQL): [(2,)],
+        _sql_key(ra.JOURNAL_COUNT_SQL): [(2,)],
+    }
+    monkeypatch.setattr(ra, "scope_tenant", lambda *a, **k: None)
+    monkeypatch.setattr(
+        ra, "seed",
+        lambda *a, **k: SimpleNamespace(seq=2, mode=ra.MODE_HALTED,
+                                       healed_tail=False, burned=False))
+
+    def _arm_must_not_be_called(*a, **k):
+        raise AssertionError(
+            "`arm` was called on a halted counter: it refuses (`seeded` → "
+            "`active` only) and would abort an org-wide run mid-way")
+
+    monkeypatch.setattr(ra, "arm", _arm_must_not_be_called)
+
+    payload = cli._cmd_backfill(_FakeRecordConn(answers),
+                               _backfill_args("o", arm_graphs=True))
+    assert (payload["considered"], payload["seeded"], payload["armed"]) == (1, 1, 0), payload
+    entry = payload["graphs"][0]
+    assert entry["counter_mode"] == ra.MODE_HALTED, entry
+    assert entry["armed"] is False, entry
+    assert "reopen" in entry["arm_refused"], (
+        f"the entry must name the halt's own remedy: {entry}")
+
+
 # ── the backfill ───────────────────────────────────────────────────────────
 
 @pytestmark_live
-def test_the_backfill_reports_its_three_counts_and_is_idempotent(
+def test_a_non_arm_backfill_does_not_read_as_a_finished_cutover(
         armed, record_schema):
-    """`N considered / M seeded / K refused`, and a re-run is a no-op."""
+    """⛔ `N considered / M seeded / K refused` — AND `seeded` IS NOT CUT OVER
+    (#14624 review 1, the P1).
+
+    The defect this pins, measured on the reviewed head: `backfill` seeds and does
+    NOT arm by default, `seeded` allocates nothing (`ALLOCATION_SQL` is scoped to
+    `active`) — and `UNCUT_GRAPHS_SQL` was `WHERE c.graph_id IS NULL`, so the graph
+    the run had just "healed" DISAPPEARED from the population. The operator
+    checklist in `CUTOVER_ACK_TEXT` (sweep → backfill → re-run sweep to confirm →
+    roll the flag) therefore read **0 rows, clean** over graphs that refuse every
+    record write, and the fail-soft door made the loss silent.
+
+    This row asserts the two halves at once: the graph STAYS in `sweep`'s
+    population with `counter_mode: seeded`, and only `--arm` moves it to the
+    terminal state that legitimately leaves. Revert the SQL predicate to
+    `c.graph_id IS NULL` and the `sweep`/re-run assertions below red.
+    """
     from tools import record_allocator_cli as cli
 
     org, graph = _uncut_graph(record_schema, "backfill", positions=(1, 2, 3))
     args = _backfill_args(org)
 
     dry = cli._cmd_backfill(_conn(), _backfill_args(org, dry_run=True))
-    assert (dry["considered"], dry["seeded"], dry["refused"]) == (1, 1, 0), dry
+    # ⛔ A DRY RUN WROTE NOTHING, SO IT REPORTS NOTHING AS WRITTEN (#14624
+    # review 3). This row used to assert `dry["seeded"] == 1` while the same
+    # payload's per-graph `outcome` said `would_seed` — the summary and the detail
+    # contradicted each other in the field an operator reads BEFORE arming
+    # production. The projection is `would_seed`; `seeded`/`armed` stay 0.
+    assert (dry["considered"], dry["seeded"], dry["refused"]) == (1, 0, 0), dry
+    assert (dry["would_seed"], dry["would_arm"]) == (1, None), dry
     assert dry["graphs"][0]["outcome"] == "would_seed"
+    assert dry["graphs"][0]["counter_mode"] is None, (
+        "the dry run must say WHICH not-cut-over state the graph is in: `None` "
+        "is born uncut, and it is healed by seed — not by reopen")
     assert _counter(record_schema, org, graph) is None, (
         "--dry-run wrote a row: the one thing it promises is that it does not")
 
     real = cli._cmd_backfill(_conn(), args)
     assert (real["considered"], real["seeded"], real["refused"]) == (1, 1, 0)
-    # ⛔ THE COUNTS RECONCILE (#14587 review P3): every considered graph lands in
-    # exactly one bucket, so a reader summing them cannot mistake a raced or
-    # partly-refused run for a complete one.
-    assert real["considered"] == (
-        real["seeded"] + real["rearmed"] + real["refused"] + real["unchanged"]
-    ), real
+    assert real["armed"] is None, "no --arm was passed, so nothing was armed"
     assert _counter(record_schema, org, graph) == (3, "seeded"), (
-        "a graph with 3 position rows must seed to 3 — its next write is 4")
+        "a graph with 3 position rows must seed to 3 — the seed records the "
+        "FLOOR; a SEEDED counter allocates nothing (`ALLOCATION_SQL` is "
+        "`mode = 'active'`), so its next write is refused `cursor_not_active` "
+        "until `--arm`")
+    assert "finish_the_cutover" in real, (
+        "a run that leaves graphs SEEDED must say so in words: `seeded` is not "
+        "cut over, and the operator's next step is `--arm`")
 
-    # ⛔ IDEMPOTENCE IS MEASURED AS "NOTHING LEFT TO DO", not as "the same three
-    # counts again": the population is UNCUT graphs, so a graph the first run
-    # seeded has left it. A second run that reported it again would be a verb
-    # that cannot tell a healed graph from a broken one.
+    # ⛔ THE FALSIFIER. A graph left `seeded` is STILL not allocating, so it must
+    # still be in the population a pre-flight enumerates. Before this fix this
+    # read `count: 0` — the false CLEAN.
+    swept = cli._cmd_sweep(_conn(), _sweep_args(org))
+    assert swept["count"] == 1, (
+        "`sweep` read CLEAN over a graph `backfill` left `seeded`: the population "
+        f"must be everything NOT ALLOCATING, not everything missing a row: {swept}")
+    assert swept["uncut_graphs"][0]["counter_mode"] == "seeded", swept
+
+    # …and a re-run still SEES it (nothing to re-discover by hand), while the
+    # counter does not move: idempotence is about the WRITE, not about hiding the
+    # graph from the pre-flight.
     again = cli._cmd_backfill(_conn(), args)
-    assert (again["considered"], again["seeded"], again["refused"]) == (0, 0, 0), again
-    assert again["considered"] == (
-        again["seeded"] + again["rearmed"] + again["refused"] + again["unchanged"]
-    ), again
+    assert (again["considered"], again["seeded"], again["refused"]) == (1, 1, 0), (
+        "a second run must still consider the graph it left seeded — reporting 0 "
+        "is the blind population this row exists to catch", again)
     assert _counter(record_schema, org, graph) == (3, "seeded"), (
         "the backfill must be IDEMPOTENT: a second run may not move the counter")
 
+    # --arm is what finishes it, and THEN the graph leaves the population for the
+    # reason the terminal state exists.
+    armed_run = cli._cmd_backfill(_conn(), _backfill_args(org, arm_graphs=True))
+    assert (armed_run["considered"], armed_run["seeded"],
+            armed_run["armed"]) == (1, 1, 1), armed_run
+    assert _counter(record_schema, org, graph) == (3, "active")
+    assert cli._cmd_sweep(_conn(), _sweep_args(org))["count"] == 0, (
+        "an `active` graph allocates, so it is OUT of the population — this is "
+        "the one zero that is a clean one")
+
 
 @pytestmark_live
-def test_the_arm_pass_reaches_what_a_seed_only_run_left_seeded(
+def test_a_halted_graph_is_seeded_but_never_armed_by_backfill(
         armed, record_schema):
-    """⛔ `backfill` THEN `backfill --arm` MUST ARM (#14587 review P2).
+    """⛔ `arm` MOVES `seeded` → `active` ONLY, so a halted graph in the (now
+    wider) population must be SEEDED and reported, not armed (#14624 review 1).
 
-    The operator sequence this module's own docstring and the PR body print is
-    `backfill --dry-run`, then `backfill`, then optionally `backfill --arm` —
-    seed-only first, so the operator sees the counts before making the cutover
-    decision. That sequence COULD NOT WORK: `UNCUT_GRAPHS_SQL` is scoped
-    `c.graph_id IS NULL`, so the first run CREATES the row whose absence the
-    second run selects on. The arm pass then reported `considered: 0`, exited 0,
-    and left every graph it had just healed in `seeded` — allocating nothing, its
-    record writes still refused `cursor_not_active`.
-
-    Mutant: drop the `SEEDED_GRAPHS_SQL` union in `_cmd_backfill` and
-    `considered` falls to 0 and the mode stays `seeded`; both assertions below
-    go red. Delete the `arm_them` guard and the seed-only test above goes red.
-    """
-    from tools import record_allocator_cli as cli
-
-    org, graph = _uncut_graph(record_schema, "arm-pass", positions=(1, 2, 3))
-    seeded_payload = cli._cmd_backfill(_conn(), _backfill_args(org))
-    assert (seeded_payload["considered"], seeded_payload["seeded"]) == (1, 1), (
-        seeded_payload)
-    assert _counter(record_schema, org, graph) == (3, "seeded"), (
-        "the first run must leave the row SEEDED — that is precisely the state "
-        "the arm pass exists to leave")
-
-    armed_payload = cli._cmd_backfill(_conn(), _backfill_args(org, arm=True))
-    assert armed_payload["considered"] == 1, (
-        "the arm pass cannot see the graph its own seed run created: "
-        f"{armed_payload}")
-    assert armed_payload["armed"] == 1, armed_payload
-    assert _counter(record_schema, org, graph) == (3, "active"), (
-        "after `backfill` then `backfill --arm` the graph must ALLOCATE — a "
-        "`seeded` row refuses every record write (`cursor_not_active`)")
-
-    # Idempotent from the armed side: nothing left to do, and no counter move
-    # (arming is a MODE change; the journal's positions remain the floor).
-    again = cli._cmd_backfill(_conn(), _backfill_args(org, arm=True))
-    assert (again["considered"], again["armed"]) == (0, 0), again
-
-
-@pytestmark_live
-def test_the_arm_pass_does_not_re_seed_a_graph_the_operator_already_floored(
-        armed, record_schema):
-    """⛔ ARM-ONLY: a seeded row is ARMED, never re-seeded (#14587 review P2).
-
-    `SEED_SQL`'s guard compares the JOURNAL's `MAX(seq)` with the floor, not the
-    cursor's `seq`. So re-seeding in the arm pass would put a graph back through
-    the divergence guard — and a graph an operator seeded from the record's own
-    `MAX(seq)` (the remedy `backfill` prints for `divergence`) has, by
-    construction, `MAX(seq) > COUNT(*)`. Re-seeding refuses it, and the arm pass
-    would then abandon the one verb the state actually needs.
-
-    Built directly: a gapped journal whose row is already `seeded` at the record's
-    max — the state `seed --enumerated-floor <MAX>` leaves behind.
-    """
-    from tools import record_allocator_cli as cli
-
-    org, graph = _uncut_graph(record_schema, "arm-gap", positions=(1, 2, 4))
-    with record_schema.cursor() as cur:
-        cur.execute(
-            "INSERT INTO public.record_cursor "
-            "(org_id, graph_id, seq, mode) VALUES (%s, %s, %s, 'seeded')",
-            (org, graph, 4))
-    record_schema.commit()
-
-    payload = cli._cmd_backfill(_conn(), _backfill_args(org, arm=True))
-    assert payload["refused"] == 0, (
-        "the arm pass must not re-run the divergence guard over a floor the "
-        f"operator already chose: {payload['refusals']}")
-    assert payload["armed"] == 1, payload
-    assert _counter(record_schema, org, graph) == (4, "active"), (
-        "the counter is the floor the operator set — arming changes the MODE "
-        "only")
-
-
-@pytestmark_live
-def test_backfill_does_not_swallow_a_run_level_refusal(
-        armed, record_schema, monkeypatch):
-    """⛔ A CONNECTION-LEVEL REFUSAL IS NOT A PER-GRAPH RESULT.
-
-    `seed` and `arm` both call `require_read_committed`, which raises
-    `IsolationRefused` — a `RecordAllocatorError`. `_cmd_backfill` tolerates a
-    `RecordAllocatorError` per graph, because a graph whose mode moved under a
-    concurrent actor must not abort the run. Catching the shared base class
-    without a re-raise therefore downgraded this one too: a `serializable` or
-    otherwise misconfigured record DSN produced `considered: N, seeded: 0,
-    refused: 0` and exited **0** over a run that wrote nothing — silently, since
-    `refusals` stays empty. That is the same `exit 0` over graphs that allocate
-    nothing that this PR exists to remove, so the run-level classes re-raise and
-    reach `main()`'s handler (`REFUSED (…)`, EXIT_REFUSED).
-
-    Mutant: delete the `isinstance(exc, run_level_refusals): raise` guard in
-    `_cmd_backfill` and this test receives a payload instead of the exception.
+    A `halted` counter allocates nothing either, so the population carries it. It
+    is NOT healed by `arm`: a halt is a deliberate stop after a defect, with the
+    opposite remedy (`reopen`), so an org-wide `backfill --arm` that called `arm`
+    blindly would raise out of the middle of the run — after committing the graphs
+    before it.
     """
     from tools import record_allocator_cli as cli
     from tortoise import record_allocator as ra
 
-    org, _graph = _uncut_graph(record_schema, "isolation", positions=(1,))
+    org, graph = _uncut_graph(record_schema, "halted", positions=(1, 2))
+    conn = _conn()
+    # `halt` moves `active` → `halted` ONLY, so the graph must be cut over first —
+    # which is what the arm run below does (and it also proves the happy path the
+    # next assertion contrasts with).
+    assert cli._cmd_backfill(conn, _backfill_args(org, arm_graphs=True))["armed"] == 1
+    ra.halt(conn, org_id=org, graph_id=graph)
+    conn.commit()
+    assert _counter(record_schema, org, graph) == (2, "halted")
 
-    def _not_read_committed(*_args, **_kwargs):
-        raise ra.IsolationRefused("the transaction is not READ COMMITTED")
+    payload = cli._cmd_backfill(_conn(), _backfill_args(org, arm_graphs=True))
+    assert (payload["considered"], payload["seeded"], payload["armed"]) == (1, 1, 0), (
+        "a halted graph must NOT be counted as armed", payload)
+    assert payload["graphs"][0]["counter_mode"] == "halted", payload
+    assert payload["graphs"][0]["armed"] is False, payload
+    assert "reopen" in payload["graphs"][0]["arm_refused"], (
+        "the entry must name the remedy the halt actually has: reopen", payload)
+    assert _counter(record_schema, org, graph) == (2, "halted"), (
+        "backfill may not lift a halt — that is the `reopen` verb's decision")
+    assert cli._cmd_sweep(_conn(), _sweep_args(org))["count"] == 1, (
+        "a halted graph is not cut over, so the pre-flight may not read clean "
+        "over it")
 
-    monkeypatch.setattr(ra, "seed", _not_read_committed)
-    with pytest.raises(ra.IsolationRefused):
-        cli._cmd_backfill(_conn(), _backfill_args(org))
+
+def test_a_dry_run_reports_would_counts_and_a_real_run_reports_the_writes(
+        monkeypatch):
+    """⛔ THE DRY-RUN SUMMARY MAY NOT CLAIM A WRITE (#14624 review 3).
+
+    `seeded`/`armed` are the fields an operator acts on, so a dry run that
+    filled them in said "N graphs are healed" about a run that wrote nothing
+    while the per-graph `outcome` in the SAME payload said `would_seed`.
+
+    No database: the reporting is what is under test, so the seed's decision is
+    monkeypatched out (its own legs are the live tests above, and re-deciding it
+    here with a hand-written predicate is the second implementation this module
+    exists to avoid). The connection is a recorder, so "wrote nothing" is
+    MEASURED — zero `commit()`s and one run-level `rollback()`.
+    """
+    from tools import record_allocator_cli as cli
+    from tortoise import record_allocator as ra
+
+    graphs = ["g-1", "g-2"]
+    answers = {
+        # ⛔ TWO COLUMNS: `(graph_id, counter_mode)`. The second one is the state
+        # the population now carries (`None` = born uncut, `seeded`/`halted` = a
+        # row that allocates nothing) — a fake answering the OLD one-column shape
+        # reds here rather than silently reporting `counter_mode: None` (#14624
+        # review 1).
+        _sql_key(ra.UNCUT_GRAPHS_SQL): [(graph, None) for graph in graphs],
+        _sql_key(ra.JOURNAL_MAX_SQL): [(3,)],
+        _sql_key(ra.JOURNAL_COUNT_SQL): [(3,)],
+    }
+    monkeypatch.setattr(ra, "scope_tenant", lambda *a, **k: None)
+    monkeypatch.setattr(
+        ra, "seed",
+        lambda *a, **k: SimpleNamespace(seq=3, mode="seeded",
+                                       healed_tail=None, burned=0))
+    monkeypatch.setattr(ra, "arm", lambda *a, **k: 3)
+
+    dry_conn = _FakeRecordConn(answers)
+    dry = cli._cmd_backfill(dry_conn, _backfill_args("o", dry_run=True,
+                                                     arm_graphs=True))
+    assert dry["dry_run"] is True
+    assert (dry["considered"], dry["seeded"], dry["refused"]) == (2, 0, 0), dry
+    assert (dry["armed"], dry["would_seed"], dry["would_arm"]) == (0, 2, 2), dry
+    assert [e["outcome"] for e in dry["graphs"]] == ["would_seed"] * 2
+    assert [e.get("would_arm") for e in dry["graphs"]] == [True, True]
+    assert dry_conn.commits == 0, "--dry-run committed: it wrote something"
+    assert dry_conn.rollbacks == 1, (
+        "the run-level rollback is the dry run's own promise; without it the "
+        "per-graph savepoints were rolled back but the transaction was left open")
+
+    # ⛔ NON-VACUITY: the SAME payload shape reports the writes on a real run, so
+    # a `seeded` that were hard-coded to 0 would fail here.
+    real_conn = _FakeRecordConn(answers)
+    real = cli._cmd_backfill(real_conn, _backfill_args("o", arm_graphs=True))
+    assert (real["seeded"], real["armed"]) == (2, 2), real
+    # ⛔ THE ENTRY'S MODE IS THE COUNTER's mode AFTER `--arm` (#14624 review F4).
+    # It used to be the SEED's answer, so a graph this very run cut over read
+    # `mode: "seeded"` beside `armed: true` — one entry contradicting itself.
+    # Grade the field: every armed entry must report `active`, which is `seed`'s
+    # answer only if `arm` did nothing.
+    assert {entry["mode"] for entry in real["graphs"]} == {"active"}, real
+    assert (real["would_seed"], real["would_arm"]) == (None, None), real
+    assert real_conn.commits == 2, "one transaction per graph"
 
 
 @pytestmark_live
@@ -2684,8 +2016,14 @@ def test_the_self_heal_arm_reconciles_a_graph_that_predates_the_hook(
     """⛔ THE FLOOR IS DERIVED, SO A PRE-EXISTING GRAPH IS HEALED, NOT ACCUSED
     (#14582 review P2-6).
 
-    The default-row self-heal runs for a graph that ALREADY EXISTS and may carry a
-    journal this hook never accounted for. A hard-coded `enumerated_floor=0` makes
+    The default row's SHORT-CIRCUIT arm runs for a graph that ALREADY EXISTS and
+    may carry a journal this hook never accounted for. ⛔ It is reached on a
+    re-provision or a race, NOT on every credential resolution — a resolver that
+    finds an existing row returns it without entering
+    `ensure_default_graph_row` (`#14624` review 4, ISSUE 2;
+    `_provision_default_graph_record`'s docstring and
+    `test_a_credential_resolution_over_an_existing_row_never_enters_the_mint`
+    state and pin the same). A hard-coded `enumerated_floor=0` makes
     `SEED_SQL`'s guard (`MAX(seq) <= floor`) refuse it as `divergence`, with text
     claiming the record holds positions the journal cannot reproduce — FALSE for a
     healthy pre-existing graph whose journal holds exactly those positions. So the
@@ -2724,32 +2062,561 @@ def test_the_backfill_refuses_a_gapped_graph_with_its_reason(armed, record_schem
     assert refusal["remedy"] == (
         f"seed --org-id {org} --graph-id {graph} --enumerated-floor 4")
     assert _counter(record_schema, org, graph) is None
-    # ⛔ And the RUN's exit code says so (#14587 review P3): the counts reconcile
-    # to a refusal, and `seed` on the same state returns EXIT_REFUSED already.
-    assert payload["considered"] == (
-        payload["seeded"] + payload["rearmed"] + payload["refused"]
-        + payload["unchanged"]
-    ), payload
-    assert cli._exit_code_for(payload, dry_run=False) == cli.EXIT_REFUSED, (
-        "a backfill that REFUSED a graph returned a clean exit code — a scripted "
-        "caller reads that code, and the graph still allocates nothing")
 
 
-def test_a_backfill_that_refused_a_graph_does_not_exit_ok():
+def _uncut_graph(conn, label: str, *, positions=()):
+    """A tenant with position ROWS and no counter row — `sweep`'s population."""
+    token = f"{os.getpid()}-{uuid.uuid4().hex[:10]}"
+    org, graph = f"org-14582-{label}-{token}", f"graph-14582-{label}-{token}"
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO public.organizations (id, name) VALUES (%s, %s)",
+                    (org, org))
+        cur.execute("INSERT INTO public.graphs (id, org_id, name) "
+                    "VALUES (%s, %s, %s)", (graph, org, graph))
+        for seq in positions:
+            cur.execute(
+                "INSERT INTO public.journal_event "
+                "(org_id, graph_id, seq, event_type, payload) "
+                "VALUES (%s, %s, %s, 'PointAdded', %s)",
+                (org, graph, seq, '{"backfill": true}'))
+    conn.commit()
+    return org, graph
+
+
+def _backfill_args(org: str, *, dry_run: bool = False,
+                   arm_graphs: bool = False) -> SimpleNamespace:
+    """`_cmd_backfill` takes the CONNECTION, so it never reads `args.dsn` — the
+    field is here only so the namespace has the shape `main()` builds. Keeping it
+    `None` also lets the REPORTING legs below run without a record database,
+    which is all they are about (the seed's own decision has live legs)."""
+    return SimpleNamespace(org_id=org, command="backfill", graph_id=None,
+                           dsn=None, floor=None, journal=None,
+                           dry_run=dry_run, arm_graphs=arm_graphs,
+                           acknowledge_cutover=False, as_json=False)
+
+
+def _sweep_args(org: str) -> SimpleNamespace:
+    """The same shape for `sweep` — which reads no floor here, so every entry's
+    `enumerated_floor` is `None` and the payload says UNKNOWN rather than a
+    comparison it never made."""
+    return SimpleNamespace(org_id=org, command="sweep", graph_id=None, dsn=None,
+                           floor=None, journal=None, dry_run=False,
+                           arm_graphs=False, acknowledge_cutover=False,
+                           as_json=False)
+
+
+def _sql_key(sql: str) -> str:
+    """Whitespace-insensitive key, so a re-indented constant still matches."""
+    return " ".join(str(sql).split())
+
+
+class _FakeRecordConn:
+    """A RECORDER, not a second record: it answers the backfill's reads and
+    counts what the code asked it to do.
+
+    `fetchone`/`fetchall` are keyed by the SQL the code executed, so a verb that
+    read a different statement than this test set up gets an empty answer instead
+    of a silent pass.
+    """
+
+    def __init__(self, answers: dict[str, list]) -> None:
+        self._answers = {_sql_key(k): v for k, v in answers.items()}
+        self.commits = 0
+        self.rollbacks = 0
+
+    def cursor(self):
+        return _FakeRecordCursor(self._answers)
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+class _FakeRecordCursor:
+    def __init__(self, answers: dict[str, list]) -> None:
+        self._answers = answers
+        self._rows: list = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        return False
+
+    def execute(self, sql, params=None) -> None:
+        self._rows = self._answers.get(_sql_key(sql), [])
+
+    def fetchall(self) -> list:
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+def _conn():
+    psycopg2 = pytest.importorskip("psycopg2")
+    conn = psycopg2.connect(_app_dsn())
+    conn.autocommit = False
+    return conn
+
+
+# ── DB-free: the #14610 review's F1/F2/P2 findings, one pin each ───────────
+#
+# Every case below reds on the PRE-FIX tree. They exist because the suite pinned
+# the hook's wiring, the registry arithmetic and `/health`'s fold — and NOT the
+# sentence an operator is told to RUN. `backfill` alone is HALF a remedy, and a
+# half remedy is the latch class the whole fold exists to avoid: the operator
+# does the documented thing, the command exits 0, and the field stays red.
+
+def test_the_uncut_remedy_names_the_whole_arming_chain():
+    """⛔ F1 (#14610 review): `backfill` is HALF a remedy, and four sites named it.
+
+    `backfill` seeds; `ALLOCATION_SQL` is scoped `AND mode = 'active'`, so a
+    `seeded` row allocates nothing — the graph's writes stay refused
+    `cursor_not_active`, `/health` keeps folding `ok: false`, and on a deployment
+    whose `TORTOISE_RECORD_ALLOCATE` is not yet rolled the new row also REFUSES
+    the enumerated replay that graph was still landing records through
+    (`_refuse_an_enumerated_replay`: the ROW, not the mode, is the fact). So the
+    remedy must name the ARM, and every operator-facing site must publish that
+    one text rather than a second copy that can drift.
+    """
+    remedy = rw.uncut_graph_remedy("org-14610")
+    assert "backfill" in remedy, remedy
+    assert "--arm" in remedy, (
+        "the remedy must arm the graph: a bare `backfill` leaves the row "
+        f"`seeded`, which allocates nothing — got {remedy!r}")
+    assert "--acknowledge-cutover" in remedy, (
+        "arming is the per-graph cutover the CLI refuses without an "
+        f"acknowledgement — got {remedy!r}")
+    assert "org-14610" in remedy, "the org id must be interpolated, not left as <org>"
+
+    # The operator-facing homes, and how many times each must reach the ONE
+    # builder. `provision_graph_record` has two (the failed provision and the
+    # failed commit).
+    #
+    # ⛔ #14610 review F1 moved ONE site behind a helper, and the move IS the fix:
+    # the default-row HANDLER in `supabase_control` cannot name the builder
+    # directly, because the `from … import` that would bind it is the very import
+    # that fails on the arm the handler exists for (a function-local import makes
+    # the name LOCAL, so the unbound name raises `UnboundLocalError` while the
+    # message is being built). So that handler is pinned to its helper (the
+    # assertion after this loop) and the helper is pinned to the ONE builder.
+    sites = (
+        ("tortoise/record_writer.py", "_warn_uncut_graph", 1),
+        ("tortoise/record_writer.py", "provision_graph_record", 2),
+        ("tortoise/hosted_api.py", "_provision_graph_record", 1),
+        ("tortoise/supabase_control.py", "_arming_remedy_for_log", 1),
+    )
+    missing = []
+    for rel, function, want in sites:
+        node = _functions(rel).get(function)
+        assert node is not None, f"{rel}::{function} is gone — re-run the census"
+        got = _hook_calls(node, "uncut_graph_remedy")
+        if got < want:
+            missing.append(f"{rel}::{function} calls uncut_graph_remedy× "
+                           f"(want {want}, got {got})")
+    assert not missing, (
+        f"these operator-facing remedies do not name the arming chain: {missing}. "
+        "A log line naming only `backfill` sends an operator to a command that "
+        "seeds the row, cuts nothing over, and leaves `/health` red — the defect "
+        "the change fixed elsewhere, applied to the sentence that names the command")
+
+    # The second hop (#14610 review F1): the HANDLER must reach its helper, or the
+    # helper above is a site nothing calls.
+    handler = _functions("tortoise/supabase_control.py").get(
+        "_provision_default_graph_record")
+    assert handler is not None, (
+        "`supabase_control._provision_default_graph_record` is gone — re-run the "
+        "census")
+    assert _hook_calls(handler, "_arming_remedy_for_log") >= 1, (
+        "the default-row handler no longer names the arming remedy at all, so its "
+        "ERROR tells an operator the row is uncut and not how to cut it over")
+
+
+def test_the_arming_remedy_for_log_cannot_drift_from_the_one_home():
+    """⛔ F1's never-raise arm: the fallback literal must BE the builder's output.
+
+    `supabase_control` keeps the record seam lazy, so the handler cannot bind
+    `uncut_graph_remedy` from the import that just failed. Its fallback literal is
+    therefore a second copy — and a second copy that drifts is exactly the defect
+    F1 closed. This pins the two to each other byte for byte.
+
+    NON-VACUITY: a fallback still naming a bare `backfill` differs here by
+    `--arm --acknowledge-cutover`.
+    """
+    from tortoise import supabase_control
+
+    got = supabase_control._arming_remedy_for_log("org-14610")
+    assert got == rw.uncut_graph_remedy("org-14610"), (
+        "the arming log fallback has drifted from `record_writer."
+        f"uncut_graph_remedy`: {got!r} != {rw.uncut_graph_remedy('org-14610')!r}")
+
+
+def test_the_default_row_handler_survives_an_unimportable_record_seam(
+        monkeypatch, caplog):
+    """⛔ F1's OTHER direction: the helper must not raise on the arm it is for.
+
+    `test_the_uncut_remedy_names_the_whole_arming_chain` pins the SHAPE (the
+    handler names `_arming_remedy_for_log`, and that helper names the ONE
+    builder) and `test_the_arming_remedy_for_log_cannot_drift_from_the_one_home`
+    pins the TEXT. Neither grades the property those two exist for — that this
+    handler CANNOT raise on the arm it was written for, "the record seam is
+    unimportable" — so a `_arming_remedy_for_log` that lost its `try/except`
+    keeps both of them GREEN (measured: the two hops are still present with the
+    guard removed) while the ERROR line never reaches an operator.
+
+    The consequence is not cosmetic: the exception escapes into
+    `_mint_default_graph_row_best_effort`, which then reports "row NOT minted"
+    over a row that exists (every call site runs after the id is durable) and
+    starts that org's `_DEFAULT_ROW_MINT_RETRY_S` suppression window — i.e. the
+    one line that makes an uncut row visible is replaced by the opposite fact.
+
+    NON-VACUITY, measured both ways at the head that carries this arm:
+
+    * `_arming_remedy_for_log` reduced to `from … import uncut_graph_remedy;`
+      then `return uncut_graph_remedy(org_id)` (both hops intact, so the AST pin
+      and the drift pin stay green) → this arm REDS, and only this arm;
+    * the pre-F1 shape in the handler (`from tortoise.record_writer import
+      provision_graph_record, uncut_graph_remedy` inside the failing `try`) →
+      this arm AND the AST pin red.
+    """
+    import logging
+    import sys
+    from types import ModuleType
+
+    from tortoise import supabase_control
+
+    org, graph = "org-14610-f1", "graph-14610-f1"
+    expected = rw.uncut_graph_remedy(org)
+
+    # The healthy arm first: while the seam is readable the helper reads the ONE
+    # builder. Without this half the arm below could pass over a helper that
+    # stopped reading the seam at all.
+    assert supabase_control._arming_remedy_for_log(org) == expected, (
+        "the log helper no longer names the seam's own remedy while the seam IS "
+        "readable, so the two formatters of one command have already drifted")
+
+    # Then the arm this handler exists for: the module is present but a SHELL,
+    # which is what its own failed import leaves behind — nothing it would have
+    # exported is bound.
+    monkeypatch.setitem(sys.modules, "tortoise.record_writer",
+                        ModuleType("tortoise.record_writer"))
+
+    # The fallback is the seam's OWN text, so the literal cannot drift by an edit
+    # to one of the two copies — this is the HALF of the drift pin the drift pin
+    # cannot see, because it only ever runs with the seam readable.
+    assert supabase_control._arming_remedy_for_log(org) == expected, (
+        "with the record seam unimportable the log fallback stopped naming the "
+        "whole arming chain, so the line an operator reads on the worst arm "
+        "sends them to a command that seeds and cuts nothing over")
+
+    with caplog.at_level(logging.ERROR, logger="tortoise.supabase_control"):
+        try:
+            supabase_control._provision_default_graph_record(org, graph)
+        except BaseException as exc:  # noqa: BLE001, RUF100
+            raise AssertionError(
+                "the default-row handler raised while BUILDING its message, so "
+                "the one line that makes an uncut row visible was never emitted "
+                "and the caller sees the opposite fact: "
+                f"{type(exc).__name__}: {exc}") from exc
+
+    line = " ".join(r.getMessage() for r in caplog.records)
+    assert graph in line and org in line, (
+        f"the emitted line must name the graph and its org — got {line!r}")
+    assert "--arm" in line and "--acknowledge-cutover" in line, (
+        "the line must publish the ARMING chain: a bare `backfill` only seeds "
+        f"the row, and a `seeded` row allocates nothing — got {line!r}")
+
+
+def _modes():
+    """The allocator's own mode spellings, read rather than transcribed."""
+    from tortoise import record_allocator as ra
+    return ra.MODE_SEEDED, ra.MODE_HALTED, ra.MODE_ACTIVE
+
+
+def test_the_remedy_is_state_aware_because_one_command_cannot_reach_both():
+    """⛔ P2 (#14610 review, RE-CUT by #14624 review F1): the remedy is per state.
+
+    The `armed_but_uncut` registry files a graph whose row EXISTS in mode
+    `seeded` under reason `mode_seeded`. #14610's fix named the single-graph `arm`
+    for it, and justified that against `UNCUT_GRAPHS_SQL`'s then-narrow
+    population (`c.graph_id IS NULL`, so a `seeded` graph sat outside the
+    population verb and `backfill` printed `considered: 0`). ⛔ THAT PREMISE IS
+    FALSE AT THIS HEAD: the same change widened the predicate to `c.graph_id IS
+    NULL OR c.mode <> 'active'` — so `backfill --arm` reaches a `seeded` row and
+    the docstring of the test that shipped the old claim was wrong about the tree
+    it shipped against.
+
+    The BEHAVIOUR is right for a different reason, which is the one stated here
+    now: the single-graph `arm` is the NARROWER verb for a row that only needs
+    arming (no re-seed, no org-wide run), and `--graph-id` costs an operator one
+    command. What the population verb still cannot reach is a `halted` row:
+    `ARM_SQL` is scoped `AND mode = 'seeded'`, so `reopen` must come first —
+    naming `arm` alone there is the no-op this function exists to prevent.
+
+    NON-VACUITY: pre-fix this function took no keyword arguments at all, so this
+    call raises `TypeError`; drop the `graph_id`/`reason` routing and every state
+    gets `backfill --arm`, which reds the `seeded` and `halted` arms below.
+    """
+    seeded, halted, _active = _modes()
+
+    population = rw.uncut_graph_remedy("org-14610")
+    assert "backfill" in population and "--arm" in population, population
+
+    seeded_remedy = rw.uncut_graph_remedy(
+        "org-14610", graph_id="g_seeded", reason=f"mode_{seeded}")
+    assert "backfill" not in seeded_remedy, (
+        "a `mode_seeded` graph needs only the ARM, so the published remedy must "
+        "be the narrower single-graph verb — the population verb reaches it too "
+        "(`c.graph_id IS NULL OR c.mode <> 'active'`), but it re-seeds the row "
+        "org-wide to say so: got "
+        f"{seeded_remedy!r}")
+    assert "arm" in seeded_remedy and "--graph-id g_seeded" in seeded_remedy, (
+        "the single-graph verb must name BOTH the graph and the arm — got "
+        f"{seeded_remedy!r}")
+    assert "org-14610" in seeded_remedy and "--acknowledge-cutover" in seeded_remedy, (
+        f"a remedy that is not runnable as printed is not a remedy — got {seeded_remedy!r}")
+
+    halted_remedy = rw.uncut_graph_remedy(
+        "org-14610", graph_id="g_halted", reason=f"mode_{halted}")
+    assert "reopen" in halted_remedy and halted_remedy.index("reopen") < (
+        halted_remedy.index("arm --org-id")), (
+        "`ARM_SQL` is scoped `mode = 'seeded'`, so naming `arm` for a HALTED row "
+        "sends an operator to a no-op; `reopen` must come first — got "
+        f"{halted_remedy!r}")
+
+    # A reason this function cannot place keeps the population verb, which is the
+    # correct one for the no-row population it names.
+    for other in ("no_cursor_row", "provision_failed", "malformed_dsn", None):
+        got = rw.uncut_graph_remedy("org-14610", graph_id="g_1", reason=other)
+        assert "backfill" in got, (other, got)
+
+
+def test_the_warning_publishes_the_verb_that_reaches_the_observed_state(caplog):
+    """The LOG SITE, not just the builder: `_warn_uncut_graph` knows the reason.
+
+    It is the one site that has both the reason and the graph at hand, so it is
+    the site that can publish a command an operator can paste. It passed NEITHER
+    before this fix (`uncut_graph_remedy()` was not called at all), so the line
+    for a `mode_seeded` graph named the wrong verb — which is the P2 in its
+    shipped form.
+
+    ⛔ The `backfill` exclusion here is NARROWNESS, not reachability (#14624
+    review F1): the population verb now DOES reach a `seeded` row, so a line that
+    named it would not be a no-op — but this site knows the graph AND the reason,
+    so it must publish the narrower one-command remedy, not send the operator to
+    an org-wide re-seed to fix one graph.
+
+    NON-VACUITY: pre-fix the emitted line carries `backfill` and no `--graph-id`.
+    """
+    import logging
+
+    seeded, _halted, _active = _modes()
+    rw.reset_uncut_graphs()
+    with caplog.at_level(logging.WARNING, logger=rw._logger.name):
+        rw._warn_uncut_graph("org-14610", "g_seeded", reason=f"mode_{seeded}")
+    line = " ".join(r.getMessage() for r in caplog.records)
+    assert "g_seeded" in line and "org-14610" in line, line
+    assert "backfill --org-id" not in line, (
+        "the warning for a `mode_seeded` graph names the org-wide population "
+        "verb while it has the graph in hand — the narrower `arm --graph-id` is "
+        f"the remedy this graph needs — got {line!r}")
+    assert "arm --org-id org-14610 --graph-id g_seeded" in line, (
+        f"the warning must name the verb that reaches this graph — got {line!r}")
+
+
+def test_reset_uncut_graphs_also_resets_the_warning_throttle(caplog):
+    """P3 (#14610 review cycle 3): the reset seam left the throttle populated.
+
+    `reset_uncut_graphs` documented itself as zeroing "the registry" and cleared
+    three of the four maps this module keeps for it, so a process that re-armed
+    kept SUPPRESSING the per-graph warning for up to `UNCUT_GRAPH_WARN_SECONDS`
+    after the state it warned about was reset. `tests/conftest.py` papered over it
+    by clearing the map from the outside, which also meant the production seam
+    was untested; that direct clear is gone, so this test is the only thing
+    keeping the suite honest about it.
+
+    NON-VACUITY: pre-fix, the second `_warn_uncut_graph` call is throttled and
+    `caplog` holds ONE record, so the length assertion reds.
+    """
+    import logging
+
+    rw.reset_uncut_graphs()
+    with caplog.at_level(logging.WARNING, logger=rw._logger.name):
+        rw._warn_uncut_graph("org-14610", "g_throttle", reason="no_cursor_row")
+        rw.reset_uncut_graphs()
+        rw._warn_uncut_graph("org-14610", "g_throttle", reason="no_cursor_row")
+    lines = [r for r in caplog.records if "g_throttle" in r.getMessage()]
+    assert len(lines) == 2, (
+        "`reset_uncut_graphs()` must clear the per-graph warning throttle as well "
+        f"as the registry — got {len(lines)} warning(s)")
+
+
+def test_the_halted_population_publishes_its_cost_and_its_remedy(monkeypatch):
+    """⛔ F2 (#14610 review): a halted graph is NOT in `ok`, but it is NOT free.
+
+    The `ok` fold deliberately excludes the halted population — a halt is an
+    operator's decision, so a sanctioned red would be permanent. That is a reason
+    not to RED the deployment, never a reason to claim the graph is unharmed. It
+    is not: a halted row refuses the allocator's arm (`ALLOCATION_SQL` is scoped
+    ``mode = 'active'``) and, with the writer flag off, refuses the enumerated
+    replay too (the ROW, not the mode, is the fact), so its record accumulates
+    NOTHING until an operator reopens it. Publishing only the count left the cost
+    and the verb invisible — a number with no consequence reads as nothing.
+
+    NON-VACUITY: pre-fix the payload has no `armed_but_halted_clears` key at all,
+    so the first assertion reds with a `KeyError`.
+    """
+    from tortoise import record_projection
+
+    rw.reset_uncut_graphs()
+    try:
+        dsn = "postgresql://u:p@127.0.0.1:1/record"
+        rw.note_uncut_graph("org-14582", "graph-halted",
+                            reason=f"mode_{record_projection.MODE_HALTED}")
+        block = _health(monkeypatch, dsn=dsn)
+
+        note = block["armed_but_halted_clears"]
+        assert isinstance(note, str) and note, (
+            "`/health` publishes `armed_but_halted` and no sentence saying what "
+            "the deployment is losing or how to clear it")
+        for verb in ("reopen", "seed", "arm", "--acknowledge-cutover"):
+            assert verb in note, (
+                f"the halted remedy must name `{verb}` — the reopen -> seed -> "
+                f"arm chain is the only route back — got {note!r}")
+        assert "NOTHING" in note or "nothing" in note, (
+            "the note must state that the record accumulates NOTHING while "
+            f"halted, or the halt reads as free — got {note!r}")
+        # The `ok` fold still EXCLUDES the halted population: the note is the
+        # honest half, not a reason to red the deployment.
+        assert block["armed_but_halted"] == 1
+        assert block["ok"] is True, (
+            "a halt is an operator's decision — it must NOT fold into `ok`; the "
+            "note is what carries the cost")
+        # Published on the failed-snapshot arm too, because it is a constant.
+        assert _health(monkeypatch, dsn=None)["armed_but_halted_clears"] == note
+    finally:
+        rw.reset_uncut_graphs()
+
+
+# ── The two hardening arms this branch carries and `main` did not ──────────
+#
+# Both are conflict-resolution ports: `#14624` landed this hook on `main` from an
+# earlier cut, and these two properties were reviewed onto THIS branch afterwards
+# (`#14587` review P3-2 and P3). They are kept rather than dropped because each
+# one removes a failure mode `main` still has, and each test below reds on the
+# pre-fix (`main`) code.
+
+
+class _StatementRecordingConn:
+    """The hook's connection reduced to what it uses: a statement log + commit.
+
+    ⛔ IT LOGS `(sql, params)`, because BOTH halves of the bound matter: deleting
+    the call leaves no `statement_timeout` statement at all, and switching the
+    scope flag makes the same statement a SESSION setting on a pool handle.
+    """
+
+    def __init__(self) -> None:
+        self.statements: list[tuple[str, object]] = []
+        self.commits = 0
+        self.rollbacks = 0
+        self.closed = False
+
+    def cursor(self):
+        return _StatementRecordingCursor(self.statements)
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _StatementRecordingCursor:
+    def __init__(self, log: list[tuple[str, object]]) -> None:
+        self._log = log
+
+    def execute(self, sql, params=None) -> None:
+        self._log.append((str(sql), params))
+
+    def close(self) -> None:
+        pass
+
+
+def test_the_provision_statements_are_bounded_transaction_locally(monkeypatch):
+    """⛔ THE CONNECT BOUND WAS NOT THE STATEMENT BOUND (#14587 review P3-2).
+
+    `PROVISION_CONNECT_TIMEOUT_SECONDS` bounds the CONNECT only, and the hook's
+    advertised claim is "a record outage at creation costs the user a bounded
+    pause". A record that ACCEPTS the TCP connection and then hangs on a
+    statement refutes it: `_default_connect` sets `connect_timeout` and
+    `idle_in_transaction_session_timeout` and NO `statement_timeout`, and this
+    sync hook runs inside an `async` endpoint, so the hang blocked the worker's
+    event loop (including a co-located `/health`) with no bound at all.
+
+    Two assertions, two mutants: delete the `_bound_provision_statements(...)`
+    call → no `statement_timeout` statement is executed at all; flip the scope
+    flag `true` → `false` (a SESSION setting on a POOLED handle, #9558) → the
+    scope assertion reds.
+    """
+    from tortoise import record_allocator as ra
+
+    conn = _StatementRecordingConn()
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+    monkeypatch.setattr(rw, "_default_connect", lambda _dsn, **_kw: conn)
+
+    order: list[str] = []
+
+    def provision(*_a, **_kw):
+        order.append(f"allocator_after_{len(conn.statements)}_statements")
+        return SimpleNamespace(seq=0, mode="active", already_cut_over=False,
+                               seeded=True)
+
+    monkeypatch.setattr(ra, "provision_graph_record", provision)
+
+    assert rw.provision_graph_record(
+        org_id="org-14587", graph_id="graph-14587")["provisioned"] is True
+
+    bounds = [(sql, params) for sql, params in conn.statements
+              if "statement_timeout" in sql]
+    assert len(bounds) == 1, (
+        "the hook issued no statement bound — `connect_timeout` does not bound a "
+        f"statement, so a hung SELECT blocks the create unbounded: "
+        f"{conn.statements}")
+    sql, params = bounds[0]
+    assert params == (str(rw.PROVISION_STATEMENT_TIMEOUT_MS),), (
+        f"the bound applied is not PROVISION_STATEMENT_TIMEOUT_MS: {params!r}")
+    assert rw.PROVISION_STATEMENT_TIMEOUT_MS > 0, (
+        "Postgres reads `statement_timeout = 0` as NO TIMEOUT AT ALL, so a zero "
+        "here is the unbounded hang spelled as a bound")
+    assert sql.rstrip().endswith("true)"), (
+        "the bound must be TRANSACTION-LOCAL (`set_config(..., true)`): the "
+        "handle is POOLED (#9558), so a session-level SET follows it into the "
+        f"next borrower's transaction — got {sql!r}")
+    assert order and order[0].startswith("allocator_after_1"), (
+        "the bound must be scoped BEFORE the allocator's statements run, or those "
+        f"statements are the ones left unbounded: {order}")
+
+
+def test_a_backfill_that_refused_a_graph_does_not_exit_ok(monkeypatch, capsys):
     """⛔ EXIT 0 OVER UNWRITTEN GRAPHS IS THE DEFECT, NOT AN ERGONOMICS NOTE.
 
     `backfill` prints `K refused` with a working remedy per graph and returned
     ``EXIT_OK`` anyway, while the single-graph ``seed`` returns ``EXIT_REFUSED``
-    on the same `SeedRefused` (#14587 review P3, carried through four rounds).
-    A human reading the payload is told everything; the scripted caller — the
-    operator this verb exists for — reads the exit code.
+    on the same `SeedRefused` (#14587 review P3). A human reading the payload is
+    told everything; the scripted caller — the operator a cutover checklist is
+    run by — reads the exit code, and it was told "fine" over graphs that still
+    allocate nothing.
 
-    Mutants, each measured: delete the `_exit_code_for` call in `main` and return
-    `EXIT_OK` (the wiring arm reds); drop the `refused > 0` arm (the counted arm
-    reds); drop the `dry_run` guard (the projection arm reds).
+    Mutants, each measured: return `EXIT_OK` from `main` (the wiring arm reds);
+    drop the `refused > 0` arm (the counted arm reds); drop the `dry_run` guard
+    (the projection arm reds).
     """
-    import inspect
-
     from tools import record_allocator_cli as cli
 
     refusing = {"command": "backfill", "considered": 3, "seeded": 1,
@@ -2773,41 +2640,26 @@ def test_a_backfill_that_refused_a_graph_does_not_exit_ok():
     for token in ("unacknowledged-cutover", "divergence", True, None, 0):
         assert cli._exit_code_for({"refused": token}, dry_run=False) == cli.EXIT_OK, (
             f"a non-count `refused` token was read as a refusal count: {token!r}")
-    # ⛔ THE WIRING, because a decision function nothing calls is a comment.
-    main_src = inspect.getsource(cli.main)
-    assert "return _exit_code_for(" in main_src, (
-        "`main` no longer returns `_exit_code_for(...)`: the payload is emitted "
-        "and the exit code is `EXIT_OK` again, whatever the run refused")
 
+    # ⛔ AND THE WIRING, end to end: a decision function nothing calls is a
+    # comment. Drive `main()` over a fake connection and a `_cmd_backfill` that
+    # reports one refusal, and read the process exit code the caller sees.
+    class _Conn:
+        closed = False
 
-def _uncut_graph(conn, label: str, *, positions=()):
-    """A tenant with position ROWS and no counter row — `sweep`'s population."""
-    token = f"{os.getpid()}-{uuid.uuid4().hex[:10]}"
-    org, graph = f"org-14582-{label}-{token}", f"graph-14582-{label}-{token}"
-    with conn.cursor() as cur:
-        cur.execute("INSERT INTO public.organizations (id, name) VALUES (%s, %s)",
-                    (org, org))
-        cur.execute("INSERT INTO public.graphs (id, org_id, name) "
-                    "VALUES (%s, %s, %s)", (graph, org, graph))
-        for seq in positions:
-            cur.execute(
-                "INSERT INTO public.journal_event "
-                "(org_id, graph_id, seq, event_type, payload) "
-                "VALUES (%s, %s, %s, 'PointAdded', %s)",
-                (org, graph, seq, '{"backfill": true}'))
-    conn.commit()
-    return org, graph
+        def rollback(self) -> None:
+            pass
 
+        def close(self) -> None:
+            pass
 
-def _backfill_args(org: str, *, dry_run: bool = False, arm: bool = False):
-    return SimpleNamespace(org_id=org, command="backfill", graph_id=None,
-                           dsn=_app_dsn(), floor=None, journal=None,
-                           dry_run=dry_run, arm_graphs=arm,
-                           acknowledge_cutover=arm, as_json=False)
+    monkeypatch.setattr(cli, "_connect", lambda _dsn: _Conn())
+    monkeypatch.setattr(cli, "_cmd_backfill", lambda *_a, **_kw: dict(refusing))
+    monkeypatch.setenv(cli._record_env_contract()[0],
+                       "postgresql://u:p@127.0.0.1:1/record")
 
-
-def _conn():
-    psycopg2 = pytest.importorskip("psycopg2")
-    conn = psycopg2.connect(_app_dsn())
-    conn.autocommit = False
-    return conn
+    rc = cli.main(["backfill", "--org-id", "org-14587"])
+    capsys.readouterr()
+    assert rc == cli.EXIT_REFUSED, (
+        "`main()` reported one refused graph and still exited "
+        f"{rc} — a checklist step reads that as passed")

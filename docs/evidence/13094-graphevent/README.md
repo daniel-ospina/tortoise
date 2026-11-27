@@ -55,24 +55,26 @@ naming it (that scan's text occurs four times in `hosted_backup.py`; the two row
 | 12 | `_refresh_first_seq` | `event_store.py:1104` | aggregate `min` inside an RMW on the **sibling** label | maintenance |
 | 13 | `webhook_delivery._head_seq` fallback | `webhook_delivery.py:1049` | aggregate `max` | maintenance |
 | 14 | backup footprint | `hosted_backup.py:892` | aggregate `max, min` | maintenance |
-| 15 | whole-graph scan (restore's dirty-target pre-check) | `hosted_backup.py:1333` | a label-agnostic read of the target graph | maintenance |
-| 16 | whole-graph scan (restore's node-count verification) | `hosted_backup.py:1534` | a label-agnostic read of the graph | maintenance |
+| 15 | whole-graph scan (restore's dirty-target pre-check) | `hosted_backup.py:1382` | a label-agnostic read of the target graph | maintenance |
+| 16 | whole-graph scan (restore's node-count verification) | `hosted_backup.py:1583` | a label-agnostic read of the graph | maintenance |
 
 ⚠️ **Rows 15–16 are re-derived by CONTENT here, not by shifting the census's addresses.** As merged,
 `#13083` cited `:1182`/`:1383` for them; that row has since been re-cut to this head's
-`:1333`/`:1534`, which is where these rows point. No single delta gets from the pin to them, because
-`hosted_backup.py`'s drift accumulates in **three offset steps** — the two `+2`
-import lines land after the pin's `:58` and `:59`, then `+60` after `:1035` (`@@ -1035,0 +1038,60 @@`)
-and `+89` after `:1175` (`@@ -1175,0 +1238,89 @@`) — i.e.
-cumulative `+2` / `+62` / `+151`, and the flat `+134` an earlier draft applied lands at
-`:1316`/`:1517`, which are NOT the statements (`:1316` is `retired_vectors += 1`).
+`:1382`/`:1583`, which is where these rows point. The addresses are MEASURED at this head, not
+shifted: `hosted_backup.py`'s drift above them accumulates in **four offset steps** — the two `+2`
+import lines land after the pin's `:58` and `:59`, then `+60` after `:1035` (`@@ -1035,0 +1038,60 @@`),
+`+89` after `:1175` (`@@ -1175,0 +1238,89 @@`), and `+49` from `#14596` (three hunks between `:1044`
+and `:1122`, all inside `_require_served_restore_labels`/`_restore_retires_vector`) — i.e.
+cumulative `+2` / `+62` / `+151` / `+200`. The flat `+134` an earlier draft applied lands at
+`:1316`/`:1517`, which are NOT the statements — the pair has to be re-read at the head it is quoted
+at, not derived from a delta.
 
 **Verdict: `record_only`-shaped.** Not one reader needs a graph capability — no traversal, no adjacency
 walk, no fulltext query, no EP walk, no vector query. Every one is a key lookup, an ordered range scan,
 an aggregate, a predicate delete, or the schema those depend on; those are SQL shapes paying RAM prices.
 The **serving** row is exactly one statement *in this table* — so a re-home re-points one censused read
 and not a family of them. ⚠️ That is a fact about the TABLE, not about the tree: the export endpoint's
-own whole-graph scan (`hosted_api.py:37214`) is a serving reader under this census's own class rule and
+own whole-graph scan (`hosted_api.py:37258`) is a serving reader under this census's own class rule and
 is deliberately **not censused** (`#14204`; the exclusion is stated in §7 step 4 and in the restore row's
 own `why`), so a re-point driven by this census alone would leave the export endpoint reading the old
 home. A re-home must re-point it too.
@@ -85,14 +87,14 @@ home. A re-home must re-point it too.
   one file holds the same statement twice. ⛔ **Where that is a proof and where it is not**: the
   `event_store.py` dedupe pair is the ONLY two occurrences of its text in that file, so deleting one reds
   the census; the two `hosted_backup.py` restore-side scans share their text with four occurrences in
-  that file (one more live read at `:3603`, plus a docstring mention at `:3442`), so those rows pin the
+  that file (one more live read at `:3652`, plus a docstring mention at `:3491`), so those rows pin the
   EXACT count — deleting any of the four reds (`occurrences`), which a `min_occurrences` floor did not
   do: measured, deleting BOTH censused sites left 2 and stayed green. What the pin still cannot do is
   say WHICH occurrence a row addresses — the `line` is that address and nothing grades it. ⚠️ Both of
   those rows are in `restore_graph`; **the export side is not censused at all** — the paged dump's node
   statement is `_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`) and the export endpoint's own
-  whole-graph scan is `hosted_api.py:37214` (`_export_graph_snapshot`; the `:GraphEvent` branch is
-  `:37244` and the append `:37252`), and no row carries either (`#14204`).
+  whole-graph scan is `hosted_api.py:37258` (`_export_graph_snapshot`; the `:GraphEvent` branch is
+  `:37288` and the append `:37296`), and no row carries either (`#14204`).
 * `…::test_the_census_covers_the_labels_schema_as_well_as_its_readers` — the three DDL rows exist and are
   `maintenance`; an earlier cut of this census omitted them, which is how a re-home ships a store with no
   indexes.
@@ -376,7 +378,7 @@ this record — and the graded figures below are re-derived by `--refresh` rathe
 sentence. The one figure here that NO `--refresh` row and no test grades is the `27` itself, which is
 why it names the PRs it comes from instead of standing alone. Each block carries a
 count this PR re-derived
-(`7` distinct cite targets above the pivot from `484` in all, over `207` citing files —
+(`7` distinct cite targets above the pivot from `485` in all, over `207` citing files —
 `uv run python tools/hosted_api_cite_census.py --json` prints every one of those three, and
 `--check` grades the two note blocks against the same measurement, so none of them is a hand
 count), not a
@@ -416,9 +418,9 @@ remaining scope** (its comment 7065026251), in the order the constraints force:
    already used for vectors: a gate that is **measured, never asserted**).
 4. **Re-point the four maintenance readers** that reach the label directly rather than through
    `read_after`: `_head_seq`'s fallback (`webhook_delivery.py:1049`), the backup footprint
-   (`hosted_backup.py:892`), and the two restore-side scans (`:1333`/`:1534`). ⚠️ Neither is an
+   (`hosted_backup.py:892`), and the two restore-side scans (`:1382`/`:1583`). ⚠️ Neither is an
    export scan — both are in `restore_graph`, and the export side is NOT censused at all
-   (`hosted_backup.py:454` and `hosted_api.py:37214`, #14204), so a re-point driven by this census
+   (`hosted_backup.py:454` and `hosted_api.py:37258`, #14204), so a re-point driven by this census
    alone would leave the export endpoint reading the old home.
 5. **Prove it on a scratch tenant** with the `superset` verb before and after, and only then strip.
 6. **Falsifiers, stated up front:** (a) with the record short of the graph, the cutover REFUSES and

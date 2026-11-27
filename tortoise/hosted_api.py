@@ -221,7 +221,7 @@ from tortoise.record_projection import NARRATIVE_RECORD_TYPE
 # hardcoded copy would drift in the one direction that matters — a renamed token
 # would route a NON-DURABLE journal into the durable branch and downgrade the
 # "stored NOWHERE" ERROR to a WARNING.
-from tortoise.record_writer import NON_DURABLE_JOURNAL_REFUSAL
+from tortoise.record_writer import NON_DURABLE_JOURNAL_REFUSAL, uncut_graph_remedy
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.retrieval_metering import (  # #4489: pure-ASGI retrieval-work flusher
     RetrievalMeteringMiddleware as _RetrievalMeteringMiddleware,
@@ -8490,6 +8490,58 @@ def _backup_watcher_health() -> dict:
         }
 
 
+#: HOW `record.armed_but_uncut` CAN BE RETRACTED, published BESIDE it (#14610
+#: review F3). The register is PROCESS MEMORY fed from this process's own
+#: observations, so ⛔ an OUT-OF-PROCESS repair cannot retract an entry:
+#: `record_allocator_cli.py backfill --arm --acknowledge-cutover` cuts the RECORD
+#: over (a bare `backfill` only SEEDS the row, and a `seeded` row allocates
+#: nothing — #14610 review F1), while the entry clears on that graph's next ARMED
+#: write to THIS process, a successful provision, or a restart. A QUIESCENT graph
+#: never gets that later write, and with the allocator flag OFF
+#: `record_owns_position` returns before its read at all — so there the entry, and
+#: the `ok` it drives, clear ONLY on a restart. Publishing the count without that
+#: sentence names a remedy that leaves the field red: the latch class the fold
+#: exists to avoid. `ok` is therefore a statement about THIS PROCESS, not about
+#: the deployment's population (which is a `sweep` query).
+_UNCUT_CLEARS_NOTE = (
+    "a restart, or an observation of that graph by THIS process (an armed write "
+    "with TORTOISE_RECORD_ALLOCATE on, or a successful provision). "
+    "⛔ ONE POPULATION, THREE STATES (#14610 P2; re-cut by #14624 F1): `record_allocator_cli.py "
+    "backfill --org-id <org> --arm --acknowledge-cutover` reaches BOTH a graph with NO cursor "
+    "row AND one whose row exists in mode `seeded` (`reason: mode_seeded`) — the population is "
+    "everything NOT ALLOCATING, so a `seeded` row is re-seeded monotonically and then armed in "
+    "that same run (a bare `backfill` only seeds the ROW, and a `seeded` row allocates nothing). "
+    "It CANNOT lift a `halted` one: `arm` moves `seeded` → `active` ONLY, so "
+    "`record_allocator_cli.py reopen --org-id <org> --graph-id <graph>` comes FIRST, then "
+    "`backfill --arm` — or the single-graph `arm --org-id <org> --graph-id <graph> "
+    "--acknowledge-cutover`, the narrower verb for a `seeded` row. Either runs in another "
+    "process, so on a quiescent graph — or with the allocator flag off — this process's entry, "
+    "and `ok`, clear only on restart"
+)
+
+#: ⛔ WHAT A `halted` GRAPH IS ACTUALLY LOSING, published BESIDE
+#: `record.armed_but_halted` (#14610 review F2). The `ok` fold deliberately does
+#: NOT include the halted population — a halt is an OPERATOR's decision and a
+#: sanctioned red would be permanent — but that is a reason not to RED the
+#: deployment, never a reason to claim the graph is unharmed. It is not: a halted
+#: row refuses the allocator's arm (`ALLOCATION_SQL` is scoped `mode = 'active'`)
+#: and, with the writer flag off, refuses the enumerated replay too (the row, not
+#: the mode, is the fact), so its record accumulates NOTHING until an operator
+#: reopens it. Publishing the count WITHOUT that sentence leaves an operator
+#: reading a number whose cost is invisible — the asymmetric half of the same
+#: latch class `_UNCUT_CLEARS_NOTE` exists for.
+_HALTED_CLEARS_NOTE = (
+    "an OPERATOR's stop: a halted graph's record writes are REFUSED until "
+    "`record_allocator_cli.py reopen --org-id <org> --graph-id <graph>` -> "
+    "`seed --org-id <org> --graph-id <graph> --journal <path>` -> `arm "
+    "--org-id <org> --graph-id <graph> --acknowledge-cutover`. It is published "
+    "BESIDE `armed_but_halted` and deliberately NOT folded into `ok`: a halt is "
+    "an operator's decision, so a sanctioned red would be permanent — but the "
+    "record accumulates NOTHING for that graph until the reopen, so a deployment "
+    "carrying a halted graph is losing that graph's record rows silently"
+)
+
+
 def _record_health() -> dict:
     """#9548: is the Postgres record ARMED on THIS deployment? — for /health.
 
@@ -8606,8 +8658,11 @@ def _record_health() -> dict:
         serves several.
 
     ``ok`` is False when the value was SET and refused, when the counters could
-    not be read, when the tenancy resolution could not be read, and when the
-    record is REFUSING writes RIGHT NOW (``degraded``, #10185/#10620) — a
+    not be read, when the tenancy resolution could not be read, when an ARMED
+    deployment reports an UNCUT graph (``record.armed_but_uncut`` > 0, #14582 —
+    every record that graph writes is refused while the fail-soft write path
+    reports success, so nothing else reds), and when the record is REFUSING
+    writes RIGHT NOW (``degraded``, #10185/#10620) — a
     monitoring surface that cannot read its own state must not report healthy,
     and one that reads "rows are being dropped" and still says ``ok`` is worse
     than one that cannot read at all. All of them fold into ``status`` (the
@@ -8665,6 +8720,13 @@ def _record_health() -> dict:
                 "armed_but_halted": None,
                 "armed_but_halted_untracked_observations": None,
                 "armed_but_uncut_reasons": None,
+                # #14610 review F3: present even here, because it is a CONSTANT
+                # rather than a measurement — the clear route does not depend on
+                # the snapshot that failed.
+                "armed_but_uncut_clears": _UNCUT_CLEARS_NOTE,
+                # #14610 review F2: a constant too, so the halted population's
+                # cost and cure are published on the failed-snapshot arm as well.
+                "armed_but_halted_clears": _HALTED_CLEARS_NOTE,
                 # Present-and-null for the same reason (#12943): a missing key
                 # must not read as "the cache is fine".
                 "cache_leg_failures": None,
@@ -8732,6 +8794,18 @@ def _record_health() -> dict:
         "armed_but_halted": None,
         "armed_but_halted_untracked_observations": None,
         "armed_but_uncut_reasons": None,
+        # ⛔ HOW TO CLEAR IT, BESIDE THE COUNT (#14610 review F3). A constant, so
+        # it is published on every arm including the failed-snapshot one: the
+        # field it describes is process memory, and an operator who runs the
+        # documented `backfill` must be told that this process's entry stays red
+        # until it observes the graph again or restarts.
+        "armed_but_uncut_clears": _UNCUT_CLEARS_NOTE,
+        # ⛔ THE HALTED POPULATION IS NOT IN `ok`, BUT IT IS NOT HARMLESS EITHER
+        # (#14610 review F2). Publishing only the count let a deployment carry
+        # halted graphs — each LOSING its record rows — while the payload read as
+        # a ratio with no consequence and no verb. A constant, so it is published
+        # on every arm.
+        "armed_but_halted_clears": _HALTED_CLEARS_NOTE,
         # ⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW (#10185/#10620). ``None``
         # is "not evaluated" (the counter snapshot could not be read); ``False``
         # is "no armed write was refused inside the window"; ``True`` is "rows
@@ -8808,7 +8882,12 @@ def _record_health() -> dict:
         # deployment's population is not COUNTED here (that is a query, and
         # `record_allocator_cli.py sweep` is the verb that runs it).
         uncut = record_writer.armed_but_uncut()
-        uncut_reasons = record_writer.armed_but_uncut_reasons()
+        # ⛔ NOT a second reader (#14610 review F6): the reasons travel INSIDE
+        # `armed_but_uncut()`'s single lock acquisition, because two acquisitions
+        # let a concurrent `note_uncut_graph` publish `armed_but_uncut: 0` beside
+        # `{"no_cursor_row": 1}` — a self-contradicting payload with no repair
+        # path, the exact contradiction the derived reasons key exists to remove.
+        uncut_reasons = uncut["armed_but_uncut_reasons"]
     except Exception as exc:  # liveness must answer, always
         block["counters_error"] = str(exc)[:200]
         block["ok"] = False
@@ -8976,14 +9055,6 @@ def _record_health() -> dict:
     # permanently, and a halt does not clear on its own, so that red would be
     # indistinguishable from a real one. It is still PUBLISHED, on its own key.
     #
-    # ⛔ AND THE TWO MAPS ARE MUTUALLY EXCLUSIVE PER GRAPH, NEWEST WINS (#14587
-    # review P3): a `halted` row CAN appear in `armed_but_uncut` — when the graph
-    # is observed REFUSING after the halt (`provision_failed`, a
-    # `provision_refused:*`), the halt label is retracted and the graph is
-    # published here, so this fold reds `ok`. That is the point: a refusal is a
-    # "something is wrong" fact, not a "somebody stopped it" fact, and the halt
-    # rationale above covers only the graph whose last observation IS the halt.
-    #
     # ⛔ WHAT IS FOLDED MUST BE RETRACTABLE PER ITEM (#14587 review P1). `ok`
     # therefore follows ONLY `armed_but_uncut` — the tracked map, which every
     # repair retracts graph by graph (`clear_uncut_graph`). It must NOT sum the
@@ -9002,10 +9073,7 @@ def _record_health() -> dict:
     # So the overflow counters are published BESIDE this fold, never in it, for
     # the one thing they can honestly say: that `armed_but_uncut` is a LOWER
     # BOUND. `armed_but_uncut_observations` is the lifetime total on the same
-    # footing. ⛔ `sweep` / `backfill` is NOT a census of it (#14587 review P1-2):
-    # both read `journal_event`, and a graph whose record writes are refused has
-    # no row there. The per-graph remedy is `seed --graph-id …
-    # --enumerated-floor 0` + `arm`.
+    # footing. The authoritative population is a QUERY (`sweep` / `backfill`).
     uncut_count = block.get("armed_but_uncut")
     if block["armed"] and isinstance(uncut_count, int) and uncut_count > 0:
         block["ok"] = False
@@ -9361,8 +9429,11 @@ async def health():
     the process can resolve) and the same class as ``backup_watcher`` (a
     durability seam whose "off" state must be distinguishable from "on"). See
     ``_record_health``; it collects no I/O, and only a REFUSED DSN, an unread
-    counter snapshot, an unread tenancy resolution, or an armed write REFUSED
-    inside ``RECORD_REFUSAL_WINDOW_SECONDS`` (``record.refusing`` feeding
+    counter snapshot, an unread tenancy resolution, a NON-ZERO
+    ``record.armed_but_uncut`` on an ARMED deployment (#14582: that graph's
+    record leg allocates nothing while the write path reports success), or an
+    armed write REFUSED inside ``RECORD_REFUSAL_WINDOW_SECONDS``
+    (``record.refusing`` feeding
     ``record.degraded``, #10185/#10620 — the record is dropping rows RIGHT NOW)
     degrades ``status``. A NON-ZERO ``record_write_failures`` whose last refusal
     is older than that window does NOT: the counters are cumulative since
@@ -32182,45 +32253,26 @@ def _provision_graph_record(org_id: str, graph_id: str) -> None:
     `tortoise.record_writer.provision_graph_record` is the hook; this wrapper
     exists for ONE reason: the import itself can fail (a partially-shipped
     install, an import-time error in the seam's dependencies) and a graph
-    creation must not fail for it.
-
-    ⛔ WHAT REACHES THIS ARM, stated exactly (#14587 review P3-1). The hook's OWN
-    seam import (`record_allocator`) is guarded INSIDE the hook, so an
-    unimportable allocator is counted and reported on `/health` THERE, not here.
-    This arm is the residual: the hook's own module could not be imported
-    (`from tortoise.record_writer import provision_graph_record`). The registry
-    `/health` folds lives in that same module, so in the RESIDUAL case nothing
-    here can write a health field — the ERROR below is the only channel, and it
-    names the graph as UNCUT and the verb that heals it. The arm is ALSO reached
-    when the hook RAISES despite its never-raise contract, and then the module
-    IS imported: the body records the graph in that registry, so the health
-    surface cannot go silent over a bug in the hook (see the note below).
+    creation must not fail for it. ⛔ A failed import is NOT silent — it is
+    logged at ERROR naming the graph as UNCUT and the verb that heals it, which
+    is the same failure class the hook's own best-effort arm reports on
+    `/health`.
 
     ⛔ THE HOOK IS BEST-EFFORT AND THAT IS A DECISION, not an oversight. It is
     called AFTER every rollback arm of the mint (see the call site), so nothing
     here can undo a graph; and a record outage must not 500 a user's graph
     creation when the record itself is optional and `write_live_record` is
     fail-soft by contract. What is NOT acceptable is silence, and that is what
-    `/health`'s `record.armed_but_uncut` and the per-graph `seed` + `arm` remedy
-    are for. (The atomic form the plan asked for — §A7.8 item 8's
+    `/health`'s `record.armed_but_uncut` + :func:`record_writer.uncut_graph_remedy`
+    are for. ⛔ The two are DIFFERENT repairs and the operator needs both halves:
+    the arming verb heals the RECORD in its own process, while `/health`'s entry is
+    process memory and clears on that graph's next armed write here or on a
+    restart (published as `record.armed_but_uncut_clears`, #14610 review F3).
+    ⛔ AND IT IS NOT A BARE `backfill` (#14610 review F1): that only SEEDS the
+    row, and a `seeded` row allocates nothing — the remedy must name the ARM.
+    (The atomic form the plan asked for — §A7.8 item 8's
     one-transaction RPC — is not buildable from here: the record's app role has
     no grant on `public.graphs`. Tracked against #14582.)
-
-    ⛔ IT IS CALLED FOR THE SUPABASE ARM ONLY, and that is `control_plane_owns_graph`
-    at the call site rather than a judgement here. `record_cursor` carries
-    `FOREIGN KEY (org_id, graph_id) REFERENCES public.graphs (org_id, id)`, so a
-    cursor row may exist ONLY for an id some control plane actually inserted —
-    which is exactly what `insert_graph` did on the Supabase arm, and exactly
-    what the registry arm does NOT do (`sdk._graph_create` returns a Falkor
-    `:Graph` id; `record_writer.record_tenant_for` states that registry graphs are
-    never inserted into `public.graphs`). Calling this for the registry arm was
-    the #14587 review's P1-1: every registry create would fail the FK (`23503`, or
-    `42P01` with no graphs table), count `provision_failed`, and — because a
-    registry tenant never reaches `record_owns_position` to retract it — pin
-    `/health` at `ok: false` for the life of the process over a deployment with no
-    gap. That is the permanent false red F3 forbids, so the call site is GATED on
-    the arm that persisted the row and pinned by
-    `test_the_hook_is_scoped_to_the_arm_that_persisted_a_graphs_row`.
     """
     try:
         from tortoise.record_writer import provision_graph_record
@@ -32229,27 +32281,14 @@ def _provision_graph_record(org_id: str, graph_id: str) -> None:
     except Exception:
         _logger.error(
             "graph %s (%s) was created but its record cursor could NOT be "
-            "provisioned (the seam could not be imported, or the hook "
-            "raised) — every record this "
-            "graph writes is refused until it is seeded: run "
-            "`uv run python tools/record_allocator_cli.py seed --org-id %s "
-            "--graph-id %s --enumerated-floor 0` then `arm --org-id %s "
-            "--graph-id %s --acknowledge-cutover` (a graph with existing record "
-            "rows is REFUSED `divergence` rather than seeded, so the floor is "
-            "never silently wrong: if `seed` does refuse it, re-run with the "
-            "RECORD's own `MAX(seq)` as `--enumerated-floor`)",
-            graph_id, org_id, org_id, graph_id, org_id, graph_id,
-            exc_info=True)
-        with contextlib.suppress(Exception):
-            # ⛔ A LOG LINE IS NOT A HEALTH FIELD (#14587 review P3-1): name the
-            # graph in the registry `/health` folds, so the arm that used to be
-            # logged-only is a COUNTED gap when — as in the raise case — the
-            # module that owns that registry did import. Suppressed because the
-            # OTHER way in here is that it did not, and the docstring states that
-            # residual rather than pretending this call can fix it.
-            from tortoise.record_writer import note_uncut_graph
-
-            note_uncut_graph(org_id, graph_id, reason="provision_failed")
+            "provisioned (the record seam is unimportable, or the provision "
+            "itself failed) — every record this graph writes is refused until "
+            "its row is ARMED: %s",
+            # `uncut_graph_remedy` is bound at MODULE level, so the handler
+            # cannot hit the `UnboundLocalError` that a function-local import
+            # would raise here (the LOCAL `provision_graph_record` above is
+            # exactly the import that fails on the arm this handler exists for).
+            graph_id, org_id, uncut_graph_remedy(org_id), exc_info=True)
 
 
 async def _graph_quota_gate(org: dict) -> None:
@@ -32331,11 +32370,6 @@ def _provision_graph(org: dict, name: str,
     graph = None
     minted = None
     applied_packs = None
-    #: ⛔ DID THIS MINT PERSIST A `public.graphs` ROW? Only the Supabase arm does
-    #: (`insert_graph` below), and only a persisted row may own a `record_cursor`
-    #: row — the FK has no other arm. See the hook's call site and
-    #: `_provision_graph_record`'s docstring (#14587 review P1-1).
-    control_plane_owns_graph = False
     try:
         # Graph write (both modes). Supabase: graphs row via the seam
         # (C1 deferred the INSERT; C2 owns it). Registry: _graph_create
@@ -32345,7 +32379,13 @@ def _provision_graph(org: dict, name: str,
             insert_graph,
             is_supabase_enabled,
         )
-        if is_supabase_enabled():
+        # ⛔ THE ARM DECISION IS BOUND ONCE, and the hook below is gated on THIS
+        # name rather than re-reading the flag (#14610 review F2): the arm that
+        # minted this graph is the only thing that says whether the record can
+        # file it, and a second `is_supabase_enabled()` read would be a second
+        # question at a different moment.
+        control_plane_arm = is_supabase_enabled()
+        if control_plane_arm:
             cp = get_control_plane()
             gid = f"g_{_short_id()}"
             ns = f"org_{org['id']}_{gid}"
@@ -32358,9 +32398,6 @@ def _provision_graph(org: dict, name: str,
             graph = {"id": gid, "name": name, "kind": "custom",
                      "namespace": ns, "status": "active",
                      "created_at": now}
-            # The row is REACHABLE from the record's role by foreign key — the
-            # only thing that makes a `record_cursor` row legal.
-            control_plane_owns_graph = True
         else:
             g = sdk._graph_create(org["id"], name, kind="custom")
             graph = {"id": g["graph_id"], "name": name, "kind": "custom",
@@ -32435,13 +32472,20 @@ def _provision_graph(org: dict, name: str,
         # alias), which is why the hook is here and not at either endpoint: a
         # per-endpoint call site is how the NEXT create path ships without one.
         #
-        # ⛔ THE SUPABASE ARM ONLY, and the gate is the fact that decided the arm
-        # (`control_plane_owns_graph`, set where `insert_graph` persisted the row).
-        # The registry arm's `:Graph` node is NOT a `public.graphs` row, and
-        # `record_cursor`'s FK references that table — so hooking it would fail
-        # every registry create and pin `/health` red forever over a deployment
-        # with no gap (#14587 review P1-1; `sdk._graph_create` is left unhooked
-        # for the same reason, one frame down).
+        # It provisions the CONTROL-PLANE arm ONLY (#14610 review F2), and that
+        # gate is the whole point: on Supabase, `insert_graph` persisted this id
+        # above, so `record_cursor`'s `(org_id, graph_id) REFERENCES
+        # public.graphs` can hold its row. The registry arm below creates its
+        # graph through `sdk._graph_create`, which never inserts into
+        # `public.graphs` (the invariant `record_writer.current_record_tenant`
+        # states) — so the hook there would fail on EVERY create (FK 23503), the
+        # writer would report `provision_failed`, and `/health` would fold it into
+        # `ok: false` permanently for a deployment with no repairable gap. That is
+        # the false red `sdk._graph_create` is deliberately left unhooked to
+        # avoid (#14582 F3); taking this hook on BOTH arms re-opened it through
+        # the other door. A selfhost deployment that arms the record with no
+        # control plane is out of this hook's reach BY CONSTRUCTION — and it must
+        # not be published as a gap, because no in-band action could close it.
         #
         # The FLOOR is DERIVED by the hook from the record's own journal
         # enumeration (never assumed `0`), and `SEED_SQL`'s guard REFUSES rather
@@ -32455,7 +32499,7 @@ def _provision_graph(org: dict, name: str,
         # endpoint the full live-path budget. Moving the whole mint off the loop is
         # the larger fix and is NOT taken here: it would change the locking story of
         # a 55-line flow this PR otherwise does not touch.
-        if control_plane_owns_graph:
+        if control_plane_arm:
             _provision_graph_record(org["id"], graph["id"])
         result = {
             "graph": {
@@ -55279,7 +55323,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 207 tracked files (484 distinct
+# ABSOLUTE line number from 207 tracked files (485 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

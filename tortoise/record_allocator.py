@@ -193,7 +193,8 @@ class ProvisionedRecord:
     seq: int
     mode: str
     #: The row was ALREADY `active`: this call wrote nothing. The door may be
-    #: re-entered (a retry, a self-heal) and must not be punished for it.
+    #: re-entered (a retry, a re-provision of the default row) and must not be
+    #: punished for it.
     already_cut_over: bool
     #: This call wrote the seed (fresh row, or a monotone re-seed).
     seeded: bool
@@ -290,56 +291,49 @@ JOURNAL_COUNT_SQL = (
     "WHERE org_id = %s AND graph_id = %s"
 )
 
-#: Graphs this ORG that the RECORD has seen writing, and that have NO counter
-#: row — i.e. "born uncut", the state `#13043` review P1-1 named. The creation
-#: hook that PREVENTS it is :func:`provision_graph_record` (`#14582`, the plan's
-#: `§A7.8` item 8); this query is the RECONCILIATION path for the graphs it did
-#: not reach — the ones created before it landed, and the ones whose hook failed
-#: best-effort (a record outage at creation must not fail a user's graph, so that
-#: case is reported on `/health` as `armed_but_uncut` and healed by
+#: Graphs this ORG that the RECORD has seen writing, and that are **NOT
+#: ALLOCATING** — a population with TWO members, both of which allocate nothing:
+#: no counter row at all ("born uncut", the state `#13043` review P1-1 named),
+#: and a counter row in a NON-TERMINAL mode (`seeded`, `halted`). The creation
+#: hook that PREVENTS the first is :func:`provision_graph_record` (`#14582`, the
+#: plan's `§A7.8` item 8); this query is the RECONCILIATION path for the graphs
+#: it did not reach — the ones created before it landed, and the ones whose hook
+#: failed best-effort (a record outage at creation must not fail a user's graph,
+#: so that case is reported on `/health` as `armed_but_uncut` and healed by
 #: `tools/record_allocator_cli.py backfill`).
+#:
+#: ⛔ THE SECOND MEMBER IS NOT OPTIONAL, AND LEAVING IT OUT WAS A MEASURED FALSE
+#: CLEAN (#14624 review 1, P1). `backfill` SEEDS and does not arm by default, and
+#: `seeded` allocates nothing (`ALLOCATION_SQL` is scoped to `active`), so an
+#: operator following the checklist in `CUTOVER_ACK_TEXT` — `sweep` → `backfill`
+#: → re-run `sweep` to confirm → roll the flag — read **0 rows, "clean"** over
+#: graphs this very verb had left refusing every record write, then rolled a
+#: global flag over them. `write_live_record` is fail-soft, so the loss was
+#: silent. The population a pre-flight enumerates is therefore **everything not
+#: in the terminal state**, never "everything missing a row": a `seeded` graph
+#: STAYS in this population until it is `active`.
+#:
+#: ⛔ and `halted` belongs in it too: it allocates nothing either (it is the state
+#: a defect leaves a graph in), so a `sweep` that omitted it would answer "none"
+#: over a stopped graph. Its REMEDY is different (`reopen` before `arm`), which is
+#: why the mode travels with the graph id instead of being inferred from
+#: membership — see :func:`tortoise.record_allocator.MODE_SEEDED`'s and
+#: `MODE_HALTED`'s opposite remedies in :func:`_transition`.
 #:
 #: ⛔ IT READS `journal_event`, NOT `public.graphs`, and the reason is a GRANT,
 #: not a preference: `tortoise_record_app` has no privilege on `public.graphs`
 #: (the tenancy migration grants the record tables and nothing else), so a sweep
 #: over `graphs` would fail `InsufficientPrivilege` on exactly the role the CLI
-#: must connect as. The consequence is stated rather than hidden, and it is
-#: WIDER than "a graph that has never been written is invisible here":
-#: ⛔ ON AN ARMED DEPLOYMENT THE FIRST WRITE DOES **NOT** MAKE A BORN-UNCUT GRAPH
-#: APPEAR (#14587 review P1-2). `ALLOCATION_SQL` is scoped to `mode='active'`, so
-#: the door refuses and NO `journal_event` row is ever written for that graph —
-#: it stays invisible here however many times it writes (its JSONL line still
-#: exists; only the record's copy is missing). So this population is NOT "the
-#: born-uncut graphs": it is the graphs the record has SEEN writing. The
-#: per-graph `record_allocator_cli.py seed --graph-id … --enumerated-floor 0` +
-#: `arm` is the command that reaches the rest.
+#: must connect as. The consequence is stated rather than hidden: a graph that
+#: has NEVER been written is invisible here — and it has also lost nothing yet,
+#: so the first write is the point at which this becomes actionable (and, for a
+#: born-uncut graph, the point at which its first line's row is lost).
 UNCUT_GRAPHS_SQL = (
-    "SELECT DISTINCT j.graph_id FROM public.journal_event j "
+    "SELECT DISTINCT j.graph_id, c.mode FROM public.journal_event j "
     f"LEFT JOIN public.{RECORD_CURSOR_TABLE} c "
     "       ON c.org_id = j.org_id AND c.graph_id = j.graph_id "
-    "WHERE j.org_id = %s AND c.graph_id IS NULL ORDER BY j.graph_id"
-)
-
-#: Graphs this ORG that already HAVE a counter row in :data:`MODE_SEEDED` — i.e.
-#: seeded, and therefore allocating NOTHING until an operator arms them.
-#:
-#: ⛔ ITS OWN QUERY, AND ITS OWN POPULATION (#14587 review P2). `backfill --arm`
-#: used :data:`UNCUT_GRAPHS_SQL` alone, which is scoped `c.graph_id IS NULL` — so
-#: the operator sequence this module documents and the PR body prints
-#: (`backfill`, then `backfill --arm`) could not work: the first run CREATES the
-#: cursor row, which removes every graph it healed from the second run's
-#: population, so the arm pass reported `considered: 0` / exit 0 over graphs that
-#: still allocated nothing. A seeded row is the ONE state the arm pass exists to
-#: fix, and it was the one state the pass could not see.
-#:
-#: It reads `record_cursor`, not `journal_event`: the row IS the state being
-#: selected on, and it filters `org_id` explicitly, so the tenancy GUC is not
-#: what makes the read correct (it is still scoped by the caller, as every other
-#: statement here is).
-SEEDED_GRAPHS_SQL = (
-    f"SELECT c.graph_id FROM public.{RECORD_CURSOR_TABLE} c "
-    f"WHERE c.org_id = %s AND c.mode = '{MODE_SEEDED}' "
-    "ORDER BY c.graph_id"
+    f"WHERE j.org_id = %s AND (c.graph_id IS NULL OR c.mode <> '{MODE_ACTIVE}') "
+    "ORDER BY j.graph_id"
 )
 
 ARM_SQL = (
@@ -589,8 +583,8 @@ def provision_graph_record(conn: Any, *, org_id: str, graph_id: str,
       it is :data:`JOURNAL_COUNT_SQL` for this graph, which is the seed's own
       quantity ("how many positions already exist"), read in the same
       tenant-scoped transaction. A door must not have to know it: a brand-new
-      graph enumerates 0, and a graph that PREDATES the hook (the default row's
-      credential self-heal, a graph whose hook failed) enumerates N — and a
+      graph enumerates 0, and a graph that PREDATES the hook (a re-provision of
+      the default row, or a graph whose hook failed) enumerates N — and a
       hard-coded `0` would refuse that second population as `divergence` with
       text that is false ("the record claims positions this journal cannot
       reproduce") when the journal holds exactly those positions. Deriving it is
@@ -614,7 +608,7 @@ def provision_graph_record(conn: Any, *, org_id: str, graph_id: str,
     (the guard's own condition), so on a graph that is ALREADY `active` and has
     position rows, a `floor = 0` call reports `reason="divergence"` — a healthy
     cut-over graph accused of holding unreproducible positions. A re-entered hook
-    (a retry, the default row's credential self-heal) would then publish a
+    (a retry, a re-provision of the default row) would then publish a
     healthy graph as uncut and red `/health` for nothing. So the `active` case is
     decided by the ROW, before any seed runs.
 
@@ -631,23 +625,7 @@ def provision_graph_record(conn: Any, *, org_id: str, graph_id: str,
             mode=existing[1], already_cut_over=True, seeded=False)
     floor = enumerated_floor
     if floor is None:
-        # ⛔ DERIVED, IN THIS TRANSACTION, FROM THE **RECORD'S** OWN ENUMERATION —
-        # and not from the JSONL journal's line count, which is the coordinate
-        # :func:`seed`'s parameter is NAMED for (#14587 P3-5). The two agree
-        # only while the record is the authority on this graph: a graph the
-        # record has never seen writing has ZERO position rows, so the derived
-        # value is 0 whatever its JSONL journal holds — which is exactly the
-        # number the per-graph remedy prints (`seed --graph-id …
-        # --enumerated-floor 0`), because the record's positions begin at the
-        # NEXT allocation, not at the journal's history. Where the two can
-        # disagree on the record's own axis, `SEED_SQL`'s
-        # `MAX(seq) <= enumerated_floor` guard refuses (`divergence`) instead of
-        # seeding a number nobody measured — a gap makes COUNT(*) < MAX(seq), so
-        # a count-derived floor refuses a gapped graph rather than renumbering
-        # it (the distinction `JOURNAL_COUNT_SQL`'s own docstring spells out).
-        # ⛔ The BORN-UNCUT shape has no DB leg here (measured: the legs
-        # populate `public.journal_event` directly), so this paragraph is the
-        # record of that gap rather than a claim a test pins.
+        # ⛔ DERIVED, IN THIS TRANSACTION, FROM THE RECORD'S OWN ENUMERATION.
         # `scope_tenant` is transaction-local, so the count is read under the
         # tenant this connection is already bound to — or, on a connection that
         # has not been scoped yet, under no tenant at all, in which case RLS
@@ -666,8 +644,8 @@ def provision_graph_record(conn: Any, *, org_id: str, graph_id: str,
         if exc.reason != "armed":
             raise
         # The row is already `active`: the graph IS cut over, and a re-entered
-        # hook (a retry after a partial commit, the credential self-heal on the
-        # default row) is a no-op rather than a refusal.
+        # hook (a retry after a partial commit, a re-provision of the default
+        # row) is a no-op rather than a refusal.
         existing = read_cursor(conn, org_id=org_id, graph_id=graph_id)
         if existing is None:  # pragma: no cover - `armed` implies the row exists
             raise

@@ -59,7 +59,6 @@ and production.
 """
 from __future__ import annotations
 
-import contextlib
 import itertools
 import logging
 import math
@@ -4316,79 +4315,96 @@ def insert_graph(cp, row: dict) -> None:
     cp.query("graphs", method="POST", json_body=row)
 
 
+def _arming_remedy_for_log(org_id: str) -> str:
+    """The arming remedy, for a log line that must NEVER raise (#14610 review F1).
+
+    The ONE home of the command text is
+    :func:`tortoise.record_writer.uncut_graph_remedy`, and this module keeps the
+    record seam LAZY on purpose — so that name cannot be bound by the ``try``
+    whose failure is being reported: a ``from X import Y`` inside a function makes
+    ``Y`` LOCAL, and when ``X`` is the thing that failed to import, ``Y`` is
+    unbound and the handler raises ``UnboundLocalError`` while BUILDING its
+    message. That is the ONE failure this handler exists for, so the fallback
+    below is the difference between a loud uncut row and an exception that
+    :func:`_mint_default_graph_row_best_effort` swallows into a false "row NOT
+    minted" (and a suppression window for the org).
+
+    ⛔ The literal is duplicated only where the seam cannot be read AT ALL, and
+    the duplication cannot drift: `tests/test_14582_creation_hook.py` asserts it
+    is byte-for-byte :func:`record_writer.uncut_graph_remedy`'s own output.
+    """
+    try:
+        from tortoise.record_writer import uncut_graph_remedy
+
+        return uncut_graph_remedy(org_id)
+    except Exception:  # noqa: BLE001, RUF100
+        return (f"`tools/record_allocator_cli.py backfill --org-id {org_id} --arm "
+                f"--acknowledge-cutover`")
+
+
 def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
     """#14582 — the CREATION HOOK for the org's `kind='default'` graph row.
 
     Called at every arm of :func:`ensure_default_graph_row` that yields a row id:
     the active-row short-circuit, the mint, and the convergent adopt. ⛔ ALL
     THREE, deliberately — the short-circuit is not just an optimisation here: a
-    re-entered provisioning call must not publish a healthy pre-existing graph as
-    uncut. `provision_graph_record` is idempotent (`active` ⇒ no-op), so the
-    repeat costs one scoped read.
+    (re-)provision of an org whose default row already exists is the path that
+    re-runs this hook over a row it did not mint. `provision_graph_record` is
+    idempotent (`active` ⇒ no-op), so the repeat costs one scoped read.
 
-    ⛔ AND AT EVERY ARM OF THE TWO FUNCTIONS THAT MINT THE SAME ROW *WITHOUT*
-    :func:`ensure_default_graph_row`: :func:`set_graph_name` and
-    :func:`set_graph_recording` each POST a `kind='default'` row when the org has
-    none, and each hooks its mint and its convergent-adopt arm (#14587 review
-    P2). ⛔ Both were MISSING until that review, and nothing could see it: the
-    census that found the other doors searched `tortoise/` for NAMES
-    (`create_graph`, `ensure_default_graph_row`, `insert_graph`, …), and these
-    mint through an inline `cp.query("graphs", method="POST", …)` that no name
-    search matches. The structural pin that replaces the name search — every
-    `graphs` INSERT in `tortoise/**`, by AST, with each site declared hooked or
-    residual — is
-    `tests/test_14582_creation_hook.py::test_every_graph_minting_site_is_declared`,
-    so a NEW minting arm reds instead of re-opening this gap. ⚠️ An
-    ALREADY-EXISTING row is still not healed here: a rename/override on a row
-    that exists takes the PATCH arm, and the population minted before this
-    cutover is the one the operator verb heals (`record_allocator_cli.py seed` +
-    `arm` per graph) or the graph's own next write observes.
+    ⛔ AND TWO MORE DOORS MINT THIS SAME ROW ON DEMAND, so they call this hook
+    too: :func:`set_graph_name` and :func:`set_graph_recording` create a
+    `kind='default'` row when the org has none (a rename or a recording toggle is
+    a plausible FIRST write), and neither is reachable from
+    :func:`ensure_default_graph_row`. Their PATCH arms do NOT call it — a row
+    that already exists is `backfill`/`sweep`'s population (see the scope note
+    below).
 
-    ⛔ THE SHORT-CIRCUIT IS **NOT** A REQUEST-PATH SELF-HEAL, and until the #14587
-    review's P2-1 this docstring sold it as one. The reach, stated exactly:
-    :func:`default_graph_for_credential` returns BEFORE the mint whenever the
-    graphs row EXISTS, and :func:`ensure_default_graph_row` is reached only
-    through :func:`_mint_default_graph_row_best_effort` — on a read MISS, or from
-    the two provisioning wrappers (:func:`provision_org`,
-    :func:`provision_org_with_token`). A default graph that exists with no cursor
-    row is a read HIT: no mint, no call here, no heal on any request. So this arm
-    reconciles a **RE-PROVISIONED** org and the convergent-mint race (a concurrent
-    mint's row appeared after this call's read), not "the graph predates the
-    hook". The pre-existing population is healed by the operator verb
-    (`record_allocator_cli.py seed` + `arm` for that graph) or on its next write,
-    which ``record_writer.record_owns_position`` observes — a different component,
-    on a different path.
+    ⛔ AND IT IS **NOT** A SELF-HEAL FOR A PRE-EXISTING GRAPH (#14624 review
+    ISSUE 2; an earlier revision of this docstring claimed it was, and that
+    sentence is the one a maintainer reads when deciding whether the
+    pre-existing population needs `backfill` at all). The reachability, read off
+    the tree: :func:`ensure_default_graph_row`'s only production caller is
+    :func:`_mint_default_graph_row_best_effort`, and the credential resolvers'
+    one home :func:`default_graph_for_credential` returns a PRESENT row's id at
+    its own short-circuit **without** calling the mint. So an org whose default
+    graph was missed — the hook failed, or the graph predates it; both have the
+    ROW and lack the cursor row — is **not** reached here by its next
+    authenticated request. Its remedy is `tools/record_allocator_cli.py
+    backfill --arm --acknowledge-cutover` (or `sweep`), which is what that CLI's
+    own cutover text says and what `/health`'s `record.armed_but_uncut` entry
+    names — ⛔ NOT a bare `backfill`, which only SEEDS the row and (a `seeded` row
+    allocating nothing) leaves the graph red (#14610 review F1). The population this
+    arm DOES cover is a re-provision (every provisioning wrapper —
+    :func:`provision_org`, :func:`provision_org_with_token`, agent signup, the
+    onboarding sub-org and the checkout replay — calls
+    :func:`_mint_default_graph_row_best_effort`) and the race in
+    which the row appears after the credential path's miss read.
 
-    ⛔ IT HEALS THE PRE-EXISTING GRAPH TOO, and that is why the floor is not this
-    caller's business: `default_graph_id_for_credential` only reaches the mint
-    arm when `default_graph_row_for` found no row, but the SHORT-CIRCUIT arm runs
-    for a graph that already exists and may carry a journal this hook never
+    ⛔ WHEN IT DOES RUN OVER A PRE-EXISTING GRAPH — the re-provision and the race
+    above — the floor is not this caller's business: the SHORT-CIRCUIT arm can
+    select a graph that already exists and may carry a journal this hook never
     accounted for. The hook derives its floor from
     `record_allocator.JOURNAL_COUNT_SQL` in the same tenant-scoped transaction, so
     a graph with journal lines `1..N` seeds to `N` — the count is how many
     positions already exist. A hard-coded `0` here would refuse exactly the
-    population this arm exists to heal (`SeedRefused(reason="divergence")`, with
-    text claiming the record holds positions the journal cannot reproduce, which
-    is false for a healthy pre-existing graph).
+    pre-existing population this arm can select (`SeedRefused(reason="divergence")`,
+    with text claiming the record holds positions the journal cannot reproduce,
+    which is false for a healthy pre-existing graph).
 
     ⛔ BEST-EFFORT, and this one is not even a choice: this function's caller
     (`_mint_default_graph_row_best_effort`) exists because `#10025` F1 forbids
     failing the caller — the provisioning RPC's own data-plane graph is already
     committed, and an agent-signup's plaintext key exists only in the response a
     raise would replace with a 500. So a record fault here is LOGGED and made
-    VISIBLE (`/health` `record.armed_but_uncut`), never raised — and the remedy
-    it prints is the PER-GRAPH `seed` + `arm`, not `backfill`, which cannot
-    reach a graph the record has never seen write (#14587 review P1-2).
-
-    ⛔ "VISIBLE" IS THE REGISTRY CALL BELOW, not the ERROR line beside it
-    (#14587 review P3-1): the hook's own seam import (`record_allocator`) is
-    guarded INSIDE the hook, so an unimportable allocator is reported on
-    `/health` there. THIS arm is the residual — the hook's module itself did not
-    import, in which case the registry it would report into is gone too and the
-    ERROR is the only channel — OR the hook RAISED despite its never-raise
-    contract, in which case the module DID import and the call below counts the
-    graph instead of leaving `/health` green over it.
+    VISIBLE (`/health` `record.armed_but_uncut`, and the arming remedy), never
+    raised.
     """
+    # ⛔ THE HANDLER CANNOT NAME A BINDING THIS `try` ESTABLISHES (#14610 review
+    # F1): the import below is the thing that fails on the arm this handler exists
+    # for, so the remedy text comes from `_arming_remedy_for_log`, which re-reads
+    # the seam and falls back to a pinned literal. Both names used by the handler
+    # are defined before it.
     try:
         from tortoise.record_writer import provision_graph_record
 
@@ -4396,27 +4412,10 @@ def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
     except Exception:
         _logger.error(
             "the default graph row %s (%s) exists but its record cursor could "
-            "NOT be provisioned (the seam could not be imported, or the hook "
-            "raised) — every "
-            "record this org writes is refused until it is seeded. Remedy, PER "
-            "GRAPH: `uv run python tools/record_allocator_cli.py seed "
-            "--org-id %s --graph-id %s --enumerated-floor 0`, then `arm "
-            "--org-id %s --graph-id %s --acknowledge-cutover` (`backfill` "
-            "cannot reach a graph the record has never seen write; if `seed` "
-            "refuses `divergence`, re-run with the RECORD's own `MAX(seq)` as "
-            "`--enumerated-floor`)",
-            graph_id, org_id, org_id, graph_id, org_id, graph_id,
-            exc_info=True)
-        with contextlib.suppress(Exception):
-            # ⛔ A LOG LINE IS NOT A HEALTH FIELD (#14587 review P3-1): record the
-            # graph in the registry `/health` folds, so this arm is a COUNTED gap
-            # whenever the module that owns that registry imported (the hook
-            # RAISED despite its never-raise contract). Suppressed for the other
-            # way in — the hook's own module not importing at all — which is the
-            # residual no call from here can report into.
-            from tortoise.record_writer import note_uncut_graph
-
-            note_uncut_graph(org_id, graph_id, reason="provision_failed")
+            "NOT be provisioned (the record seam is unimportable, or the "
+            "provision itself failed) — every record this org writes is refused "
+            "until its row is ARMED: run %s",
+            graph_id, org_id, _arming_remedy_for_log(org_id), exc_info=True)
 
 
 def ensure_default_graph_row(cp, org_id: str,
@@ -4502,19 +4501,15 @@ def ensure_default_graph_row(cp, org_id: str,
         # IS an active row, while any OTHER value leaves the org unnamed, which
         # is exactly how the migration's `status = 'active'` guard reads it.
         if (row.get("status") or "active") == "active" and row.get("id"):
-            # #14582: the RE-PROVISION arm, and NOT a request-path self-heal — the
-            # claim this comment used to make was retracted by the #14587 review
-            # (P2-1) in `_provision_default_graph_record`'s docstring, ~130 lines
-            # above, and is not restated here as true. This arm runs only for a
-            # caller that REACHES this function for a row that already exists
-            # (`provision_org` / `provision_org_with_token`, or the convergent
-            # mint race), and a default graph that exists with no cursor row is a
-            # READ HIT on the credential path — `default_graph_for_credential`
-            # returns before the mint — so no credential resolution lands here for
-            # it. The pre-existing population is healed by the operator verb
-            # (`record_allocator_cli.py seed` + `arm`, per graph) or on the graph's
-            # next write, which `record_writer.record_owns_position` observes.
-            # Idempotent when the cursor is already `active`.
+            # #14582: the short-circuit arm — a PRESENT default row returns here
+            # without re-running the creation door, because the credential
+            # resolvers reach this function only on their MISS path (see the
+            # docstring: a graph that predates the hook is NOT healed by its next
+            # authenticated request, and `record_allocator_cli.py backfill` is its
+            # remedy). The hook call below therefore fires on the two routes the
+            # docstring names — a re-provision of the default row, and the race in
+            # which the row appears after the credential path's miss read — and it
+            # is idempotent when the record is already `active`.
             _provision_default_graph_record(org_id, row["id"])
             return row["id"]
     if cp.query("graphs", select=["id"],
@@ -5009,25 +5004,22 @@ def set_graph_name(cp, org_id: str, graph_id: str, name: str) -> bool:
                          ("org_id", "eq", org_id)],
                 json_body={"name": name},
             )
-            # #14582: the CONVERGENT-ADOPT arm mints no row of its own — it
-            # adopts the winner's — so the hook runs for the id that actually
-            # became durable, not the one this call invented (same discipline as
-            # `ensure_default_graph_row`'s adopt arm). `provision_graph_record`
-            # is idempotent on an `active` graph, so a winner that already
-            # provisioned costs one scoped read.
-            _provision_default_graph_record(org_id, rows[0]["id"])
             return True
         raise
-    # #14582 — THIS ARM MINTS A `public.graphs` ROW, SO IT OWNS PROVISIONING.
-    # The #14587 review (P2) found this arm and `set_graph_recording`'s mint arm
-    # creating a default graph with no `record_cursor` row: the minted row is a
-    # read HIT on every later credential path, so `ensure_default_graph_row` —
-    # and its hook — is never reached for that org, and the graph's record writes
-    # are refused `cursor_not_active` for ever while `write_live_record`
-    # (fail-soft by contract) reports success. Reachable from
-    # `PATCH /v1/graphs/{id}` with the `default` sentinel. Best-effort and
-    # never-raising, per the recorded #14582 decision (`OVERRIDES:` plan §A7.8
-    # item 8's fail-hard) — a rename must not fail because the record is down.
+    # ⛔ THE MINT IS A CREATION DOOR, SO IT CALLS THE HOOK (#14624 review — the
+    # finding carried from #14610). Reaching here means the POST above CREATED a
+    # `kind='default'` graphs row; without this call that row is born UNCUT —
+    # `write_live_record` is fail-soft by contract, so every record the graph
+    # writes is refused `cursor_not_active` while nothing reds, and the loss only
+    # surfaces at a rebuild. A rename is a plausible FIRST write for an org (the
+    # default row is created on demand here), so this is a real door, not a
+    # corner.
+    #
+    # ⛔ ONLY THE MINTING ARM. The two PATCH arms above write to a row that
+    # already existed; a graph whose default row exists and lacks a cursor row is
+    # `backfill`/`sweep`'s population, deliberately OUTSIDE the hook's scope
+    # (`docs/plans/2026-11-15-issue-12894-storage-shape.md` §A8.3.13's scope
+    # note), and `_provision_default_graph_record` states the same split.
     _provision_default_graph_record(org_id, gid)
     return True
 
@@ -5120,20 +5112,18 @@ def set_graph_recording(cp, org_id: str, graph_id: str,
                          ("org_id", "eq", org_id)],
                 json_body={"recording": value},
             )
-            # #14582: the CONVERGENT-ADOPT arm adopts the winner's row, so the
-            # hook runs for the id that became durable (mirror of
-            # `set_graph_name`'s adopt arm).
-            _provision_default_graph_record(org_id, rows[0]["id"])
             return True
         raise
-    # #14582 — THIS ARM MINTS A `public.graphs` ROW, SO IT OWNS PROVISIONING.
-    # The #14587 review (P2): without this call the row is a read HIT on every
-    # later credential path, `ensure_default_graph_row`'s hook is never reached,
-    # and this graph's record writes are refused `cursor_not_active` for ever —
-    # silently, because `write_live_record` is fail-soft by contract. Reachable
-    # from the recording override endpoint. Best-effort, never-raising (the
-    # recorded #14582 `OVERRIDES:` decision): the override still succeeds when
-    # the record is unreachable, and `/health` names the uncut graph instead.
+    # ⛔ THE MINT IS A CREATION DOOR, SO IT CALLS THE HOOK (#14624 review — the
+    # finding carried from #14610). Same defect as `set_graph_name`'s mint arm,
+    # same consequence: the `kind='default'` row this POST just created is born
+    # UNCUT, so `write_live_record` (fail-soft) refuses every record for it while
+    # reporting success and `/health` stays green until a rebuild finds nothing.
+    # A `set_graph_recording` on a pristine org is a ONE-CLICK first write, which
+    # is why this path, not just the provisioning RPC, needed the hook.
+    #
+    # ⛔ ONLY THE MINTING ARM — the PATCH arms above write to a pre-existing row,
+    # which is `backfill`/`sweep`'s population (§A8.3.13's scope note).
     _provision_default_graph_record(org_id, gid)
     return True
 
