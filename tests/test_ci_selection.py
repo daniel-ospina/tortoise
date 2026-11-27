@@ -12916,14 +12916,27 @@ _COMPLETENESS_CLAIM_RE = re.compile(
     # exhausted." shipped GREEN over EVERY arm in the family (0/8 red) — the
     # enumerate-the-spelling class this file's own comments name (`#14730`). A completeness frame
     # is a SUPERLATIVE PREDICATED OF THE LIST, so the additions below read the PREDICATION
-    # (`complete list`, `<list> … is complete`, `every … row file`) rather than the bare word.
+    # (`<copula> a complete list`, `<list> … is complete`, `every … row file`) rather than the bare
+    # word.
     # ⛔ THE BARE WORD IS NOT READ, AND THE REASON IS MEASURED — a first cut that read any
     # `complete*`/`exhaust*`/`every … row*` FALSE-BLOCKED THE LIVE BLOCK, and assertion 1 reads the
     # WHOLE header, not `_row_enumeration`: `NO NUMERAL AND NO EXHAUSTIVE ENUMERATION` (this block's
     # own rule, twice) and the TRUE "Every row item above is therefore spelled with its path beside
     # it" both matched. Predication is what separates them. Verified both ways on the live header:
     # no match; on each of the four escapes below and on the block's retired wording: a match.
-    r"|\bcomplete\s+(?:list|enumeration|set)\b"
+    # ⛔ AND THE ADJECTIVE MUST BE PREDICATED BY A COPULA, not stood beside the noun: a first cut
+    # spelled this alternative `\bcomplete\s+(?:list|enumeration|set)\b`, which FALSE-BLOCKED the
+    # block's own prohibition idiom — "⛔ NO COMPLETE LIST OF ROWS IS CLAIMED HERE." and
+    # "Never call this a complete list: a sweep adds a row." both RED, and the failure message told
+    # the maintainer the block FRAMES its enumeration as complete, the opposite of what those
+    # sentences say. A CLAIM has a copula (`that is a complete list`); a PROHIBITION does not. The
+    # inverse fixtures below pin that.
+    r"|(?:that|this|it)\s+(?:is|was)\s+a\s+complete\s+(?:list|enumeration|set)\b"
+    # ⛔ …OR IT NAMES THE UNIVERSAL IT CLAIMS (`complete list of every row`), which is the copula-less
+    # spelling a fold writes. It must anchor on `of every|all`: `NO COMPLETE LIST OF ROWS IS CLAIMED
+    # HERE.` and `never call this a complete list: …` both carry `complete list` and neither is a
+    # claim, so the article alone cannot separate them.
+    r"|\bcomplete\s+(?:list|enumeration|set)\s+of\s+(?:every|all)\b"
     r"|\b(?:list|enumeration|set)\b(?:\W+\w+){0,4}?\W+(?:is|are|remains)\W+(?:now\s+)?"
     r"(?:complete|exhaust(?:ive|ed))\b"
     r"|\bevery\s+(?:named\s+)?row(?:s|ed)\s+(?:file|entry)\b",
@@ -13007,6 +13020,23 @@ def test_the_fast_shards_header_block_does_not_claim_its_row_list_is_complete():
             "the completeness-frame pattern misses a live frame spelled "
             f"{escape!r} — it is matching this block's own retraction wording rather than the "
             "CLAIM, so a frame using any other spelling ships GREEN)"
+        )
+    # ⛔ EVERY WIDENING IS PAIRED WITH ITS INVERSE — the rule the sibling arms here use, and this
+    # inverse was MEASURED as a real false block, not added for symmetry: the first cut's
+    # `\bcomplete\s+(?:list|enumeration|set)\b` RED on the block's own prohibition idiom, and
+    # `NO NUMERAL AND NO EXHAUSTIVE ENUMERATION` is that same idiom two lines from the frame. All
+    # four below are TRUE statements, so a RED here is a false block on correct prose.
+    for prohibition in (
+        "A ROW is an entry in `durations` — ⛔ NO COMPLETE LIST OF ROWS IS CLAIMED HERE.",
+        "A ROW is an entry in `durations` — never call this a complete list: a sweep adds a row.",
+        "A ROW is an entry in `durations` — ⛔ NO NUMERAL AND NO EXHAUSTIVE ENUMERATION here either.",
+        "A ROW is an entry in `durations` — every row item above is spelled with its path beside it.",
+    ):
+        assert _COMPLETENESS_CLAIM_RE.search(_unquoted_block(prohibition)) is None, (
+            "the completeness-frame pattern FALSE-BLOCKS true prohibition prose "
+            f"{prohibition!r} — the RED would tell a maintainer the block FRAMES its enumeration as "
+            "complete, which is the opposite of what that sentence says, and push the repair onto "
+            "the prohibition instead of the claim"
         )
     # …and a QUOTED record of a retired frame is NOT a live claim: a guard that reds on its own
     # retraction would force the block's history out of the file.
