@@ -1934,11 +1934,17 @@ def test_the_over_typed_table_matches_the_paragraph_that_describes_it():
     no artifact behind it until `claim_layer.bands` existed.
     ⛔ THAT BAND BLOCK WAS GRADING THE REVIEW LOG, and it now lives in
     `test_the_CLAIM_layer_and_A2_figures_are_the_artifacts` (#14723, fix lane at
-    `4944c705`): the sentences it searched for existed ONLY in §8.19's own log, so a
+    `4944c705`): the sentences it searched for existed ONLY in §8's review log (§8.2 at that
+    head — not in §3/A4, the section they are a claim about), so a
     whole-document `flat` pin was satisfied by the log that records it, and this
     arm — named "matches the paragraph that describes it" — graded a subject its
-    docstring never named. Measured: stripping `### 8.1`..`### 8.18` left this arm
-    the only red in the file. The histogram is a §3/A4 claim and is graded there.
+    docstring never named. Measured AT `4944c705`: stripping every `### 8.x` round
+    section left this arm the only red in the file. At later heads the same sweep
+    reds `test_no_FIGURE_in_the_two_documents_is_free` instead, because the log
+    itself then quotes the range's numbers — so the reproducible statement of this
+    closure is the stronger one: replacing the WHOLE log with a digit-free marker
+    leaves `102 passed`, i.e. no arm depends on it at all. The histogram is a §3/A4
+    claim and is graded there.
     """
     a4 = _score()["A4_no_invention"]
     untraceable = {u["name"]: u["kind"] for u in a4["untraceable_entities"]}
@@ -3645,9 +3651,12 @@ def test_the_CLAIM_layer_and_A2_figures_are_the_artifacts():
     # measured): `**11 fall below 0.5**`, `**12** at `< 0.6`, `<invented> of those are
     # unsupported by any corpus turn` and the `11 / 1 / 27` triple existed ONLY in
     # §8's narrative, never in §3/A4, so the arm that carried them read `flat` (the
-    # document) and was satisfied by the log that RECORDS them. Measured three ways:
-    # each figure mutated in the LOG reddened that arm; no body copy existed to
-    # mutate; and stripping `### 8.1`..`### 8.18` left it the only red in the file.
+    # document) and was satisfied by the log that RECORDS them. Measured three ways at
+    # `4944c705`: each figure mutated in the LOG reddened that arm; no body copy existed to
+    # mutate; and stripping every `### 8.x` round section left it the only red in the file.
+    # (At later heads that sweep reds `test_no_FIGURE_in_the_two_documents_is_free`
+    # instead, because the log then quotes the section range's own numbers — the
+    # head-independent statement is the digit-free-marker sweep, which leaves 102 passed.)
     # The histogram is a claim about `claim_layer`, so §3/A4 states it and it is
     # graded in that paragraph — never in the document that logs its review.
     bands = claim["bands"]

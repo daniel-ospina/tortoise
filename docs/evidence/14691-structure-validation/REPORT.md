@@ -1052,19 +1052,26 @@ stay as history; they are no longer load-bearing.
 
 ### 8.20 The seventeenth round — the citation bound's END, and the prose that outlived the code
 
-The round-16 review's headline was that bounding a wider citation's START left its END free:
-`62739-99999` opens exactly on the artifact's start and pads 37,241 lines, and the suite stayed
+The round-16 review's headline was that bounding a wider citation's START left its END free: a
+range opening exactly on the artifact's start and padding its END by 37,241 lines left the suite
 at `102 passed`. Shape 3 now pins the END (`hi - other_hi == 0`) while keeping the 20-line START
-allowance the one honest wider span needs (18); measured at this head, `:62739-99999` reds and
-`:533-559` still passes.
+allowance the one honest wider span needs (18); measured at that head, the end-padded form applied
+to the D6 evidence cell reds the citation arm and the honest `:533-559` still passes.
 
-The same round found three descriptions that had outlived the code they describe — the
-`_prose_tokens()` docstring still naming the deleted `## 8.`..`## 9.` bound, §8.17's citation
-bullet still calling the relation "containment" (the relation round 15 measured as insufficient),
-and a paragraph whose deletion took the §8 exclusion's *reason* with it, leaving a justification
-the next lane could only "fix" by un-excluding a log full of historical mutants. All three were
-the arm's own subject: a rule a reader cannot reconstruct from the text is a rule the next lane
-will undo.
+The same round found three descriptions that had outlived the code they describe, and the fix for
+each is the subject of this arm rather than a tidy-up:
+
+- the `_prose_tokens()` docstring named the bound as `### 8.1`..`### 8.18`, a NUMBER, while the
+  code excludes `### 8.1` up to `## 9.` — so every round that appends a section silently widens
+  the exclusion and makes the stated population false. It now names the HEADING RANGE, and the
+  superseded `## 8.` state survives only as a rejected past.
+- §8.17's citation bullet named **no number** for the START allowance at all, so a lane
+  reconstructing the rule from the prose could read the live `_CITATION_WIDEN_BOUND` as dead code
+  and delete it — which reds the one honest wider citation. It now states 20 against the honest
+  18, and the classes refused beyond it.
+- a paragraph deleted in round 16 took the §8 exclusion's *reason* with it, leaving a
+  justification the next lane could only "fix" by un-excluding a log full of historical mutants.
+  The reason is restored beside the code that needs it.
 
 ### 8.21 What the fix lane verified at `2cd46746e1b1`, and the one claim it reddened
 
