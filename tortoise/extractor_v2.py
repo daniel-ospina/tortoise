@@ -12435,7 +12435,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         try:
             from tortoise.search_engine import _created_sort_key
             return _created_sort_key(value)
-        except Exception:  # noqa: BLE001 — ordering must not raise here
+        except Exception:  # ordering must not raise here
             return (1, str(value or ""))
 
     def _prior_start(prior_id: str, prior_row: dict | None) -> str:
