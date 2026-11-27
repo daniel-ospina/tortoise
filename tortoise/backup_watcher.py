@@ -279,7 +279,8 @@ def compute_status(
     condition                   per-org class              per-graph class
     ==========================  =========================  ================
     degraded, CACHED reading    ``stale`` (the age is an   ``stale``
-      (listing silent)          UPPER BOUND; OPENS)        (opens STALE)
+      over threshold (the       UPPER BOUND; OPENS)        (opens STALE)
+      listing did not answer)
     degraded, cache MISS        ``stale`` (cache-miss;      ``stale``
       (no cached reading)       no age claim, no open)     (opens STALE —
                                                            the #9937 residual
