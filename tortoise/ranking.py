@@ -912,7 +912,7 @@ def _successor_depths(succ_of: list[str | None],
             seen_at = on_path.get(i)
             if seen_at is not None:
                 members = path[seen_at:]
-                in_cycle.update(members)     # the cycle itself: unresolvable
+                in_cycle |= set(members)     # the cycle itself: unresolvable
                 for j in members:
                     resolved[j] = True       # depth stays 0 ⇒ never moved
                 path = path[:seen_at]

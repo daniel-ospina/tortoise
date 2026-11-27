@@ -188,7 +188,7 @@ available on this box) so the graph-backed cases are INCLUDED, which is the comp
 ```text
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_14721_superseded_never_outranks.py \
     -q -p no:cacheprovider
-    → 12 passed
+    → 14 passed            (round 3 added the 3-cycle and cycle-feeder rows; was 12)
 
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_relationships_bounded.py \
     -q -p no:cacheprovider
@@ -254,14 +254,42 @@ Every one was re-verified against the code before being applied; the disposition
 | B5 | the census doc-vs-tree pins were not regenerated, so all 126 downstream pins drifted by the diff's own `+116` lines | `test_13098_cypher_inventory.py` red: `126 row(s) differ` | **obsolete, on main's authority** — `origin/main` `ff10fb328891` (#14625) stopped committing the rendered doc: the pins live in `CYPHER-INVENTORY.src.md` and the `.md` is `--render`'s gitignored output. The regeneration was correct under the old rule and is now unnecessary; the merge takes main's deletion. `test_13098_cypher_inventory.py` → 128 passed, 15 skipped on this head |
 | B6 | `surface-guard` red: the untyped-receiver ratchet rose by one on `row.update(extra)` | `tools/sdk_privatise.py --check` → `ROSE by 1` | **fixed** — the helper spreads `**extra` into the dict literal instead; the two test files' raw-write helpers were consolidated so the count is now 1 FEWER than the baseline |
 | C1 | the ordering pass was `O(n⁴)`: up to `n·(n-1)` passes, each re-indexing with `ids.count(rid)`; 10.2 s at 160 rows, 146 s at 320, against #3834's 10 s wait bound — and in the cycle shape it paid that and returned the input order | measured on the previous shape: 160-link chain 4.2 s (review: 67 s at 320) | **fixed** — chain-DEPTH placement: one `O(n)` walk computes each row's distance to a terminal successor, then one placement per row (`O(n²)` overall). 300-row chain: 0.018 s. A cycle is now STATED and left alone instead of burning a budget |
-| C2 | the id-injectivity test exercised only EMPTY ids, so it could not fail for the SHARED-id class its docstring names | ran the ungated map (`if rid`) against the test rows: `A, pt_s, A` | **fixed** — a shared non-empty id case added (reds on the ungated map) |
+| C2 | the id-injectivity test exercised only EMPTY ids, so it could not fail for the SHARED-id class its docstring names | ran the ungated map (`if rid`) against the test rows: `A, pt_s, A` — ⛔ **FALSIFIED in round 3** at the shipped depth-placement shape (§5.4 C2): the mutant returns the SAME contents, so the test this round added was vacuous | **fixed in round 3** — the row now asserts ORDER and reds on the ungated map (§5.4); as shipped in this round it asserted a `sorted(...)` multiset, which accepts any permutation |
 | C3 | (same as F3) | — | **fixed** |
 | C4 | the self-supersede guard was unasserted and load-bearing: without it the move pops the row and then looks for the id it just removed | reproduced: `StopIteration` on the old shape, `ValueError` on the depth placement | **fixed** — a self-naming row case added |
 
 All four new behavioural assertions were then proven NON-VACUOUS by re-running them against the
 mutant that reverts the behaviour: the label emission deleted (test reds), `page_limit=limit`
-deleted (test reds), the shared-id gate removed (contents become `A, pt_s, A`), the self-supersede
-guard removed (`ValueError`). The cost test's non-vacuity is the previous shape's own measurement.
+deleted (test reds), the self-supersede guard removed (`ValueError`). The cost test's non-vacuity is
+the previous shape's own measurement.
+
+⛔ **The fourth parenthetical this paragraph used to carry — "the shared-id gate removed (contents
+become `A, pt_s, A`)" — was WRONG, and round 3 measured it.** `pop` + `insert` of one object cannot
+change the multiset, so no mutation of the move can lose or duplicate a row; what the ungated map
+does is move the WRONG row. See §5.4 C2 for the measured output and the corrected claim.
+
+## 5.4 Third review round — what it found, and what was fixed
+
+A third fresh-context reviewer, at `5177bf89`, raised one P2 and four P3s. Every one was verified
+against the code before being applied; two are corrected claims rather than code (the PR body).
+
+| # | finding (severity) | verification at this head | disposition |
+|---|---|---|---|
+| P2 | `test_rows_sharing_one_non_empty_id_are_never_dropped_or_duplicated` was VACUOUS for the gate it names, and its non-vacuity claim was false | ran the shipped function and the `if rid` mutant over the test's own rows: HEAD `['pt_s','A','B']`, mutant `['pt_s','A','B']` — identical; `len` and `sorted(...)` pass on both | **fixed** — the row shape now puts the `superseded_by` carrier ABOVE its successor, the only shape the pass can act on; HEAD `[A, B, pt_s]` vs mutant `[B, pt_s, A]`. Docstring corrected: the mutant moves the innocent `A` and leaves `B` above its successor — it does NOT lose or duplicate a row, which `pop`+`insert` cannot do |
+| P3 | `test_two_unidentifiable_rows_are_never_reordered_by_each_other` promised "never reordered" but asserted only the count and the multiset | same measurement (both are invariant under the move); dropping the `rid not in where` guard changes the output only on a shape where an unaddressable row sits ABOVE its successor | **fixed** — the row now asserts the exact order, and it reds on that mutant (measured: `[no id at all, empty id, no id but superseded, pt_s]` → `[empty id, no id but superseded, pt_s, no id at all]` — the pass relocates the innocent bystander by `list.index("")`) |
+| P3 | the cycle contract was STATED and not implemented: the docstring says cycle members keep their positions, the code placed them like any other row | measured: a 3-cycle `x→y, y→z, z→x` came back `x, z, y` — moved, two of three edges still inverted. The 2-cycle row cannot see it: its two placements cancel | **fixed** — `_successor_depths` returns the cycle membership beside the depths and the placement pass skips those rows, so the contract holds for a cycle of ANY length. Two rows added: the 3-cycle (reds on the old placement) and a chain that FEEDS a cycle (a control against skipping everything downstream of one) |
+| P3 | the PR body's mechanism paragraph said "immediately after" and "bounded by `len(rows)`" — both contradicted by its own §5 and by the shipped chain-depth placement | read the body against `ranking.py` | **fixed** — the body now states below-not-adjacent and the one-walk depth placement |
+| P3 | the PR body quoted `tests/test_13098_cypher_inventory.py 77 passed, 14 skipped`; this report records `128 passed, 15 skipped` at the same head | re-ran it at this head: `128 passed, 15 skipped in 139.33s` — the body's figure is from a different run | **fixed** — the body quotes this run, and the whole block now cites §5.1/§6 instead of carrying a second copy of the counts |
+
+The three code/test findings were proven non-vacuous by re-running each against the mutant that
+reverts it, with the shipped file restored after every run:
+
+```text
+M-cycle    (cycle members placed again)    -> test_a_longer_cycle_is_left_alone_too   RED
+M-noaddr   (`rid not in where` dropped)    -> both id rows                            RED
+M-idmap    (`counts[rid] == 1` dropped)    -> test_rows_sharing_one_non_empty_id…    RED
+M-overskip (feeders into a cycle dropped)  -> test_a_row_feeding_a_cycle…            RED
+```
 
 ## 6. Proof the tests fail on the pre-fix code
 
@@ -274,28 +302,33 @@ FAILED test_14721_superseded_never_outranks.py::test_a_supersession_chain_resolv
 FAILED test_14721_superseded_never_outranks.py::test_a_four_link_chain_resolves_too
 FAILED test_14721_superseded_never_outranks.py::test_a_successor_beyond_the_page_does_not_drag_the_pair_out_of_it
 FAILED test_14721_superseded_never_outranks.py::test_the_order_is_deterministic_for_rows_that_are_not_in_violation
+FAILED test_14721_superseded_never_outranks.py::test_a_row_feeding_a_cycle_is_still_held_below_it
 FAILED test_14721_superseded_never_outranks.py::test_a_large_pool_resolves_within_the_wait_bound
-7 failed, 5 passed
+8 failed, 6 passed
 ```
 
-The five that pass pre-fix are deliberate **negative controls and regression pins**, and every one
+The six that pass pre-fix are deliberate **negative controls and regression pins**, and every one
 is supposed to:
 
 * `test_a_superseded_claim_whose_successor_is_absent_keeps_its_rank` — with no successor in the
   result set there is nothing to outrank, so no reordering may happen before *or* after.
 * `test_two_unidentifiable_rows_are_never_reordered_by_each_other` and
   `test_rows_sharing_one_non_empty_id_are_never_dropped_or_duplicated` — a pre-fix ranker imposes
-  no order at all, so it trivially cannot lose a row. They exist to pin the *fix* from regressing
-  into the non-injective-id defect, not to demonstrate the fix. The shared-id case was verified
-  against the UNGATED map instead (`if rid`): contents come out `A, pt_s, A` — one row lost, one
-  duplicated.
-* `test_a_row_that_names_itself_as_its_successor_keeps_its_rank` and
-  `test_a_cycle_keeps_its_rows_in_place` — the pre-fix ranker leaves both shapes alone because it
-  has no constraint at all. Their mutants are the ones that matter: dropping the self-supersede
-  guard raises (`StopIteration` on the old shape, `ValueError` here), which propagates out of
-  `rerank` and fails the whole state read.
+  no order at all, so it leaves these rows exactly where the score put them, which is what the
+  fix must also do. They exist to pin the *fix* from regressing into the non-injective-id defect,
+  not to demonstrate the fix, and their mutants are the guards themselves: dropping
+  `counts[rid] == 1` outputs `[B, pt_s, A]` where this asserts `[A, B, pt_s]`, and dropping
+  `rid not in where` relocates the innocent id-less row (both measured, §5.4). ⛔ Earlier revisions
+  of this bullet claimed the mutant produced `A, pt_s, A` — one row lost, one duplicated. That is
+  impossible under `pop` + `insert` of one object and was measured FALSE; do not restore it.
+* `test_a_row_that_names_itself_as_its_successor_keeps_its_rank`,
+  `test_a_cycle_keeps_its_rows_in_place` and `test_a_longer_cycle_is_left_alone_too` — the pre-fix
+  ranker leaves both shapes alone because it has no constraint at all. Their mutants are the ones
+  that matter: dropping the self-supersede guard raises (`StopIteration` on the old shape,
+  `ValueError` here), which propagates out of `rerank` and fails the whole state read; and placing
+  cycle members again returns `x, z, y` for the 3-cycle (measured, §5.4).
 
-A suite where all twelve failed pre-fix would be evidence of a blanket penalty rather than the
+A suite where all fourteen failed pre-fix would be evidence of a blanket penalty rather than the
 pairwise rule.
 
 ## 7. Findings this lane did NOT fix (recorded, not widened)
