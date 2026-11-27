@@ -4864,7 +4864,9 @@ def write_live_record(record: Mapping[str, Any], *,
                 "failed re-fails until its own cause (its data or a constraint) "
                 "is fixed; a STORE/CONFIG refusal (the tenant scope, a role that "
                 "bypasses RLS, the cutover guard's own read) re-raises until "
-                "the DSN or the role is fixed, on any replay; "
+                "the DSN or the role is fixed; the tenant scope and the role "
+                "are asked on every replay, the cutover guard only on one that "
+                "carries a position; "
                 "and an ENUMERATED replay is refused when this graph "
                 "has a `record_cursor` row (cut over) — the remedy is then the "
                 "one that refusal names for the row's MODE, not a chain that "
@@ -4983,14 +4985,31 @@ def write_live_record(record: Mapping[str, Any], *,
                 # unconditionally, before the guards, on both arms, and
                 # `IsolationRefused` is raised on THIS arm by construction
                 # (`require_read_committed` is gated on `allocate`,
-                # `record_projection.py:9092`) — which is also why the clause
+                # `record_projection.py:9093`) — which is also why the clause
                 # qualifies WHICH replays re-raise rather than saying "any":
-                # a non-allocating replay is never asked the isolation question.
+                # a non-allocating REPLAY is not asked the isolation question.
+                # ⛔ BUT "ONLY AN ALLOCATING WRITE IS ASKED IT" WAS FALSE, and
+                # the sentence named the verbs that falsify it (round-34 P3 /
+                # delta review P3, measured 2026-11-27 on `pgvector/pg16` at
+                # REPEATABLE READ): the guard is asked UNCONDITIONALLY by the
+                # allocator's own entry points — `seed()`
+                # (`record_allocator.py:486`), `_transition()` i.e.
+                # `arm`/`halt`/`reopen` (`:690`) and `execute_allocation()`
+                # (`:816`) — while just ONE call site is gated (`allocate`,
+                # `record_projection.py:9093`). This sentence tells a
+                # `seeded`/`halted` operator to run `re-seed` then `arm`, so the
+                # unscoped universal sent a REPEATABLE-READ operator to two
+                # verbs that refuse with the SAME `IsolationRefused`. Measured:
+                # `seed()` -> `IsolationRefused`, `arm()` -> `IsolationRefused`.
+                # The quantifier is therefore scoped to REPLAYS and the verb
+                # exception is named, so the claim matches its population.
                 "STORE/CONFIG refusal (the tenant scope, a role that bypasses "
                 "RLS, a transaction isolation this arm refuses) re-raises "
-                "until the DSN or the role is fixed; only an ALLOCATING write "
-                "is asked the isolation question, so a non-allocating replay "
-                "is not refused by it"
+                "until the DSN or the role is fixed; only a REPLAY that "
+                "allocates is asked the isolation question, so a "
+                "non-allocating replay is not refused by it — `seed`/`arm`/"
+                "`reopen` ask it unconditionally, so they refuse identically "
+                "at REPEATABLE READ"
             )
         _logger.warning(
             "the record write did not happen (write_failed) — %s; %s: "

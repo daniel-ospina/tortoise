@@ -3268,10 +3268,17 @@ def test_the_write_path_vocabulary_does_not_call_a_statement_failure_an_outage()
     # the RECORDED text it claims to be, so a needle edit that invalidates the
     # table reddens this leg instead of leaving a false claim for the next
     # reviewer to trust.
-    assert _write_failed_bullet_reds(bullet) == [], (
-        "the assertion loop above and `_write_failed_bullet_reds` disagree — "
-        "they read `_WRITE_FAILED_NEEDLES`, so this can only mean a needle "
-        "was made unreadable; fix the list, not this call")
+    #
+    # ⛔ A `_write_failed_bullet_reds(bullet) == []` ASSERTION STOOD HERE AND IT
+    # COULD NEVER FAIL (delta review P3 / mutation pass F2, agent-infra#3442
+    # rule 3). The helper scores the SAME `_WRITE_FAILED_NEEDLES` against the
+    # SAME `bullet` with the SAME `in` predicate as the loop immediately above,
+    # so once that loop passes the returned list is necessarily empty — measured:
+    # dropping a needle reds the loop, never this call, and its own message
+    # conceded it ("this can only mean a needle was made unreadable"). It was
+    # dead weight that read as coverage, so it is DELETED rather than reworded;
+    # the loop is the assertion, and the historical bullets below are what make
+    # the table itself fail when a needle moves.
     assert _write_failed_bullet_reds(PREDECESSOR_WRITE_FAILED_BULLET) == [3, 4], (
         "the predecessor bullet no longer reddens the THIRD and FOURTH "
         "assertions — re-measure the table in this docstring rather than "

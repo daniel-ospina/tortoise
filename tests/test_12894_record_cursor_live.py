@@ -1262,7 +1262,7 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
             assert "with NO `record_cursor` row a plain replay writes unchanged" in text, (
                 "the NO-ROW half is the one a plain replay heals; steering it to "
                 f"an allocating replay is refused there: {text[-400:]!r}")
-            assert "replay(allocate=True)" in text, (
+            assert "with mode='active' an ALLOCATING replay" in text, (
                 "the ACTIVE half still needs the allocating form — a plain "
                 f"replay is refused on a cut-over graph: {text[-400:]!r}")
             assert "`seeded`/`halted` row takes re-seed" in text, (
@@ -1373,10 +1373,31 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
                 "isolation member — `IsolationRefused` is raised on this arm "
                 "by construction (`require_read_committed` is gated on "
                 f"`allocate`): {text[-400:]!r}")
-            assert "only an ALLOCATING write is asked the isolation question" in text, (
+            assert "only a REPLAY that allocates is asked the isolation question" in text, (
                 "the isolation clause lost its replay scope — `on any replay` "
                 "would tell a REPEATABLE-READ operator that a non-allocating "
                 f"replay re-raises, and it does not: {text[-400:]!r}")
+            # ⛔ AND THE VERB EXCEPTION IS NAMED (delta review P3, measured).
+            # The universal was false for the allocator's own entry points —
+            # `seed()`/`_transition()`(arm,halt,reopen)/`execute_allocation()`
+            # call `require_read_committed` UNCONDITIONALLY
+            # (`record_allocator.py:486,690,816`) while only the projection call
+            # site is gated on `allocate` — and THIS sentence sends a
+            # seeded/halted operator to `re-seed` then `arm`. Pinned in both
+            # directions: the exception is present, and the bare universal
+            # cannot come back.
+            for verb in ("`seed`/`arm`/`reopen`",
+                         "they refuse identically at REPEATABLE READ"):
+                assert verb in text, (
+                    "the isolation clause must name the allocator verbs that "
+                    "are asked the question UNCONDITIONALLY — a REPEATABLE-READ "
+                    "operator is sent to `seed`+`arm` by this very sentence, "
+                    f"and both refuse: {verb!r} absent from {text[-400:]!r}")
+            assert "only an ALLOCATING write is asked" not in text, (
+                "the scoped universal is back — `seed`, `arm`/`halt`/`reopen` "
+                "and `execute_allocation` are ALL asked the isolation "
+                "question, so 'only an allocating write is asked it' is false "
+                f"for the verbs this sentence names: {text[-400:]!r}")
             assert "on any replay" not in text, (
                 "the unqualified `on any replay` quantifier is back — it is "
                 "false for the isolation member, which is asked only on an "
@@ -1417,6 +1438,24 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
                 "the enumerated arm (`allocate=False`) is where "
                 "`_refuse_an_enumerated_replay` actually runs, so its example "
                 f"belongs in this sentence: {text[-400:]!r}")
+            # ⛔ AND ITS QUANTIFIER IS SCOPED TOO (delta review P3). This arm's
+            # copy said the whole clause re-raises `, on any replay;` — but the
+            # cutover guard is gated `position and not allocate and records`
+            # (`record_projection.py:9105`) and its own docstring says
+            # `position=False` never reaches it (`:8337-8338`), while
+            # `position=False` is a real mode (`record_writer.py:4332-4335` takes
+            # it whenever a durable journal cannot prove the position). So the
+            # blanket was over-broad for the one example this arm keeps; the
+            # tenant scope and the role really ARE asked on every replay. Pinned
+            # in both directions so neither the scope nor the example is lost.
+            assert "the cutover guard only on one that carries a position" in text, (
+                "the enumerated arm's store/CONFIG clause lost the scope on the "
+                "cutover guard — `position=False` never reaches "
+                f"`_refuse_an_enumerated_replay`: {text[-400:]!r}")
+            assert "asked on every replay" in text, (
+                "scoping the cutover guard must not take the `scope_connection` "
+                "causes with it — the tenant GUC and the role gate run "
+                f"unconditionally: {text[-400:]!r}")
     monkeypatch.delenv(rw.RECORD_ALLOCATE_ENV, raising=False)
 
 
