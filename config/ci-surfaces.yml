@@ -57,20 +57,32 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `ff10fb328891` folded in — the verb packs
-# the pool into two bins: nine shards at 827.8 s (a, b, e, f, g, h, i, j, k) and two at 827.7 s
-# (c, d), so `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST
-# shard's) — and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
-# (1680 / 827.8 = 2.0295) on every one of the eleven shards, so the two agree by construction
-# rather than by a hand re-read.
-# ⛔ THE POOL DELTA IS RE-COUNTED ON THE RESOLVED TREE, not carried: `fast_pool()` holds **1342**
-# files at this head against **1341** on `origin/main` `ff10fb328891`, both counted by loading each
-# tree's OWN manifest (`git show origin/main:config/ci-surfaces.yml`) through `fast_pool()` — and
-# the set difference is exactly ONE entry: `tests/test_14582_creation_hook.py` (`core`, flat 2.0 s),
-# this PR's own (#14582) suite. `main` carries nothing this tree lacks, and every other row the
-# emission names — `#14726`'s `tests/test_own_site_fragment_targets.py` included — landed on
-# `main` BEFORE this fold, so counting one of them as this PR's would contradict the 1342 − 1341 = 1
-# the two readings give.
+# reader of the prose can see. On THIS tree — `origin/main` `e2a9c695ad` folded in, plus THIS lane's
+# own row (`tests/test_14691_structure_evidence.py`, `core`, at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`) — the verb packs seven shards at 828.0 s (a, f, g, h, i, j, k) and four at
+# 827.9 s (b, c, d, e), so `ceil(828.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is
+# the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
+# `watchdog_headroom: 2.03` (1680 / 828.0 = 2.0290) on every one of the eleven shards, so the two
+# agree by construction rather than by a hand re-read.
+# ⛔ #14723 RE-DERIVED THIS SENTENCE, and names the move rather than leaving it unattributed: this
+# lane registers one `core` row at the flat 2.0 s, which puts ONE more file in `fast_pool()` and
+# re-packs the bins — `main` at this base splits nine and two, and this tree splits seven and four,
+# while the MINUTE (28 m) and the headroom (2.03) are the same on BOTH sides. That is why the
+# PARTITION is stated and not only the minute: an arithmetic check on `28 m` cannot see a carried
+# figure, and a reader comparing only minutes would call this move cosmetic.
+# ⛔ THE POOL DELTA IS RE-COUNTED ON THE RESOLVED TREE AND STATED AS THE OPERATION — never carried,
+# and never as a pair of counts: `set(fast_pool(head)) - set(fast_pool(main))` returns exactly ONE
+# entry, `tests/test_14691_structure_evidence.py` (`core`, flat 2.0 s), the row this lane registers,
+# and the reverse difference is empty — measured by loading each tree's OWN manifest
+# (`git show origin/main:config/ci-surfaces.yml`) through `fast_pool()`.
+# ⛔ No pool SIZE is restated here, and the reason is a recorded ruling rather than a preference
+# (#14691 review, round 15, finding 4): the repo's own doctrine is at `tests/test_ci_selection.py`
+# — "a pool size is a measurement with several independent reasons to move, so restating it is the
+# decay this docstring warns about; the derivation pointer is the durable form". Any test file
+# landing on `main` moves a count with nothing to red it, so the set difference is the durable
+# form and a count is not. ⛔ Every OTHER row this tree carries is `main`'s at this head, so
+# reading one of them as this lane's delta would attribute a partition move to a row that did not
+# cause it.
 # The name lists are what the guard COMPARES against the live emission
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), and
 # `test_the_fast_shards_header_block_states_no_span_twice` pins that this header states ONE
@@ -100,117 +112,6 @@ version: 1
 # side is picked: both are DELETED and the paragraph above is a fresh re-derivation with
 # `--emit-push-matrix` on this merged tree. Each earlier fold's figures live on the commit that
 # measured them (`git log`), which is where a spliced copy belongs.
-# reader of the prose can see. On THIS tree — `origin/main` merged in, plus THIS lane's own row
-# (`tests/test_14691_structure_evidence.py`, `core`, at the flat 2.0 s `DEFAULT_FAST_WEIGHT`),
-# PLUS every row `main` carries at this base — the verb packs nine shards
-# at 827.4 s (a, c, d, e, f, h, i, j, k) and two at 827.5 s (b, g), so `ceil(827.5/60 x 2)` = 28 m
-# governs (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.5 = 2.0302), so the two agree
-# by construction rather than by a hand re-read.
-# ⛔ #14723 RE-DERIVED THIS SENTENCE, and names its own cause rather than leaving the move
-# unattributed: this PR registers `tests/test_14691_structure_evidence.py` on `core` at the flat
-# 2.0 s, which puts one more file in `fast_pool()` and re-packed two bins ACROSS a minute boundary
-# — the reading on this tree was 827.2 s / 827.3 s before that row and is 827.4 s / 827.5 s after
-# it (the graded clause above carries the CURRENT name lists; the earlier split is not restated
-# with one, because a second name list here is a figure the clause parser cannot read and this
-# guard reds on exactly that). The MINUTE did not move (28 m before and after, 2.03
-# headroom before and after), which is exactly why this paragraph states the PARTITION and not just
-# the minute: an arithmetic check on `28 m` cannot see a carried figure, and the two-second row is
-# a real one that a reader comparing only minutes would call cosmetic.
-# reader of the prose can see. On THIS tree — `origin/main` `f2d4f2408cf5` folded in, plus THIS
-# reader of the prose can see. On THIS tree — `origin/main` `a0cea31078` folded in, plus THIS
-# reader of the prose can see. On THIS tree — `origin/main` `a0be10ac456b` folded in, plus THIS
-# reader of the prose can see. On THIS tree — the `#14645` fold (`a0be10ac456b`) merged in, plus THIS
-# lane's own row (`tests/test_14691_structure_evidence.py`, `core`, at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) — the verb packs nine shards at 827.8 s (a, b, e, f, g, h, i, j, k) and
-# two at 827.7 s (c, d), so `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is
-# the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.03` (1680 / 827.8 = 2.0295), so the two agree by construction rather than
-# by a hand re-read.
-# reader of the prose can see. On THIS tree — the `#14645` fold (`a0be10ac456b`) and the `#14694`
-# fold (`8fd022fdd1c5`) merged in, plus THIS lane's own row (`tests/test_14691_structure_evidence.py`,
-# `core`, at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) — the verb packs nine shards at 827.8 s (a, b, e,
-# f, g, h, i, j, k) and two at 827.7 s (c, d), so `ceil(827.8/60 x 2)` = 28 m governs (a shard's
-# job-level wall clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28`
-# with `watchdog_headroom: 2.03` (1680 / 827.8 = 2.0295), so the two agree by construction rather
-# than by a hand re-read.
-# reader of the prose can see. On THIS tree — the `#14645` fold (`a0be10ac456b`), the `#14694` fold
-# (`8fd022fdd1c5`) and the `#14741` fold (`0204a219aa90`) merged in, plus THIS lane's own row
-# (`tests/test_14691_structure_evidence.py`, `core`, at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) — the
-# verb packs nine shards at 827.8 s (a, b, e, f, g, h, i, j, k) and two at 827.7 s (c, d), so
-# `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
-# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.8 =
-# 2.0295), so the two agree by construction rather than by a hand re-read.
-# ⛔ THE PARTITION is stated here, not only the minute, because at this base the move is INVISIBLE
-# to arithmetic: each folded `origin/main` (`a0be10ac456b`, then `8fd022fdd1c5`, then `0204a219aa90`)
-# re-derived to all ELEVEN shards at one figure, and this tree splits them NINE and TWO, while the
-# minute is 28 m and the headroom 2.03 on BOTH sides — so a check that read only `28 m` would call
-# the move cosmetic and let a figure nobody emits stand.
-# ⛔ The parent's split is described here by COUNT and by direction on purpose: restating either
-# side as a shard-figure sentence would put a SECOND partition in a block whose guard reads ONE (the
-# `_EMISSION_UNREAD_SENTENCE_RE` arm reds a figure spelled where the clause parser cannot read it),
-# and the seconds each parent packed are already on the commits that measured them — this block's
-# standing rule is that the direction is kept and the figures are re-derived, never carried.
-# ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
-# own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
-# figures stay on the commit that measured them. ⛔ THE POOL SIZES ARE NOT RESTATED HERE, and the
-# reason is a recorded ruling, not a preference (#14691 review, round 15, finding 4): the repo's own
-# doctrine is at `tests/test_ci_selection.py:319-341` — "a pool size is a measurement with several
-# independent reasons to move, so restating it is the decay this docstring warns about; the
-# derivation pointer is the durable form" — which is why the `1109`/`1111` figures were REMOVED from
-# this block rather than corrected a third time. `1342`/`1341` were the same mistake: any test file
-# landing on `main`, or any pause for an unclassified sibling, moves the count with nothing to red it
-# (measured: mutating `1342` to `1343` leaves the whole suite green). The durable statement of the
-# delta is the OPERATION, and it is the one kept: `set(fast_pool(head)) - set(fast_pool(main))`
-# returns exactly one row — `tests/test_14691_structure_evidence.py`, the row registered by the
-# commit that added the T6 bundle's falsifiers — and the reverse difference is empty. Run it on one
-# manifest per side; do not read a count out of this sentence.
-# ⛔ An earlier revision of this paragraph named a row that was NOT this lane's —
-# `tests/test_13450_ep_position_axis_participation.py` — and at THIS base that file is `main`'s (it
-# landed with its own fold, and `fast_pool(main)` contains it), so reading it as this lane's delta
-# attributes a partition move to a row that had already merged.
-# ⛔ Every OTHER row this tree carries is `main`'s at this head, NOT this lane's (`#14597`'s
-# expansion-fusion row, `#14548`'s residue RATCHET — `tests/test_sdk_privatise_sweep.py` — `#14607`'s
-# `tests/test_mcp_selfcheck.py`, `#14700`'s capture-refusal suite, and the rest): each landed before
-# this fold, and reading one of them as this lane's delta would attribute a partition move to a row
-# that did not cause it. ⛔ The weight quantifier here is about the ROWS NAMED, and both earlier
-# spellings of it were FALSE: a `core`-wide "the one" (the surface carries many rows off 2.0), and
-# the first repair of it, "the one row THESE FOLDS ADDED" (the rows THIS LANE's folds added are ALL
-# at the flat 2.0 s, so a statement about them cannot pick out a 28.0 s row). Only this sentence's
-# own rows can, and `tests/test_sdk_privatise_sweep.py` is the 28.0 s one among them. Both are
-# corrected here (#14691 review 9th cycle P3). The name lists above are what the guard COMPARES
-# against the live emission (`test_the_fast_shards_header_block_states_the_measured_emission`), so
-# they are a graded claim about THIS head — a fold re-derives them with the verb, it never carries
-# them. ⛔ EVERY BASE SHA ABOVE IS A HISTORICAL FACT ABOUT A FOLD, never a present-tense claim
-# that "the base IS this" — because NOTHING grades a base token: the two header arms read the shard
-# FIGURES only, while the pool counts beside them are prose. It has rotted that way THREE times:
-# between the review and the merge (the reviewed head stated `a0cea31078` in the present tense, and
-# the `#14645` fold then landed `a0be10ac456b` on top); when the `#14694` fold landed on the
-# correction that had named the `#14645` tree as "the newest"; and again when the `#14741` fold
-# (`0204a219aa90`) landed on the correction that had named `8fd022fdd1c5` as "the newest" — each a
-# sentence that was FALSE at its own head with nothing to red it.
-# A past tense cannot rot in that way — "that fold merged `a0be10ac456b`" stays true of this head
-# for good, and the next fold brings its own — so no lane owes the BASE token a re-derivation.
-# ⛔ THAT IS NOT A LICENCE TO SKIP THE OTHERS: the shard names, the seconds, the minute and the
-# headroom beside it are GRADED (both header arms read them), and every fold must still re-derive
-# those with the verb. The next lane owes the FIGURES a re-derivation and the base only its own
-# history. What the block describes is unchanged: one row, this lane's own.
-# ⛔ THIS BLOCK ARRIVES SPLICED, REPEATEDLY, and that is mechanical rather than mysterious:
-# `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
-# derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. It has now
-# happened at the `origin/main` `4b2fba3e8a` merge (two copies, disagreeing on 826.7/826.6 against
-# 826.9/826.8), on the `#14700` lane's rebase onto `c1c8df1a3817` (two copies, both stating that
-# fold's earlier partition and a `1339` pool), on this lane's earlier rebase onto `f2d4f2408cf5`
-# (two copies, neither describing that tree), and AGAIN on the rebase onto `a0cea31078` measured
-# here, which produced THREE: `main`'s own, this lane's previous one, and an older derivation of
-# this lane's that split NINE and TWO at a base long since folded in (it names
-# `tests/test_14691_structure_evidence.py` as this lane's row, correctly — the row this lane's delta
-# is NOT is named elsewhere, above). ⛔ A clean rebase is NOT evidence that this block is correct:
-# `git rebase` reports SUCCESS and writes NO conflict marker here, because the driver applies both
-# hunks — run the verb and the two header guards after every fold, not the git exit code. Neither
-# side is ever picked and no copy is re-pointed: every spliced passage is DELETED and the paragraph
-# above is a fresh re-derivation with `--emit-push-matrix` on this merged tree. Each earlier fold's
-# figures live on the commit that measured them (`git log`), which is where a spliced copy belongs.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
