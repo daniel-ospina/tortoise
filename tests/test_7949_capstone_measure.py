@@ -12468,8 +12468,9 @@ _MEMBERSHIP_CMD_RE = re.compile(
     # ⛔ A SENTENCE-SCALE WINDOW, AND PINNED (#14587 review cycle 2, P2/P3 — MEASURED). The
     # window was 60 and then 120; neither is a bound anything graded, and at both widths a
     # verdict stated further from its command was invisible. Measured with a shape-based
-    # detector: the D5 row's own sentence put `prints NOTHING` ~230 characters after the
-    # closing backtick, and BOTH 60 and 120 read it as `([], [])` while 400 reads it. It is 400
+    # detector: the D5 row's own sentence put `prints NOTHING` 188 characters after the
+    # closing backtick (measured at `3ac0b4b1f2`), and BOTH 60 and 120 read it as `([], [])`
+    # while 400 reads it. It is 400
     # because that is past the longest in-scope tail at this head, and because the arm below
     # now carries a fixture whose verdict starts beyond 200 — so a silent revert re-opens a red
     # rather than a hole.
@@ -12663,8 +12664,9 @@ def test_the_membership_detectors_fire_on_the_sentences_that_actually_shipped():
         f"graded by nothing — negative={negative5}")
     # ⛔ AND THE WINDOW IS PINNED, because a window nothing grades is a window that silently
     # reverts (#14587 review cycle 2, P3): this fixture puts the verdict past character 200 —
-    # the distance the D5 row's own sentence actually used — so shrinking the window back to
-    # 60 or 120 REDS here instead of quietly re-opening the hole.
+    # FARTHER than the 188 the D5 row's own sentence used (measured at `3ac0b4b1f2`), so a
+    # window narrowed to 200 reds here too, and shrinking it back to 60 or 120 REDS rather
+    # than quietly re-opening the hole.
     far_verdict = (
         "`git diff --numstat origin/main...HEAD -- "
         "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` is the command, and "
@@ -12674,8 +12676,8 @@ def test_the_membership_detectors_fire_on_the_sentences_that_actually_shipped():
         "and the remedy is the command itself")
     gap = far_verdict.index("prints NOTHING") - far_verdict.index("`", 1)
     assert gap > 200, (
-        "fixture rot: this fixture exists to put the verdict past character 200 — the distance "
-        f"the D5 row's own sentence used — and the verdict sits only {gap} characters after the "
+        "fixture rot: this fixture exists to put the verdict past character 200 — FARTHER than "
+        f"the 188 the D5 row's own sentence used — and the verdict sits only {gap} characters after the "
         "command, so it would no longer grade the window it was written for")
     negative6, _ = _membership_claims(far_verdict)
     assert negative6, (
