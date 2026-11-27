@@ -7309,8 +7309,9 @@ _ARM_PREFIX_KEYS = ("TORTOISE_VET", "TORTOISE_VALUE_GATE",
 #: ⛔ A STATED NUMBER BELONGS TO ONE CLAUSE, NOT TO A ROW (#14774 review P2,
 #: MEASURED). `_residual_region` is right for the REOPENING scan ("a reopening is
 #: a reopening wherever in the row it is written") and wrong for a FIGURE: the row
-#: is 58,448 chars and clause (b2) is ~2,050 of them, so perturbing (b2)'s
-#: `44/90 = 48.9%` → `49.9%` while appending the correct string as prose anywhere
+#: is tens of thousands of characters and clause (b2) is a few thousand of
+#: them, so perturbing (b2)'s `44/90 = 48.9%` → `49.9%` while appending the
+#: correct string as prose anywhere
 #: ELSE in the row kept `in <flattened>` GREEN — the same fail-open one bound
 #: further in, arriving by the route this file already records for the reopening
 #: scan (`[:1200]` → the `(d)` block → the marker → the row, `#11223`). Each figure
@@ -7593,11 +7594,16 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     #    P1 then P2, both MEASURED). Two fail-opens, one bound further in each
     #    time: `<the whole registry's flattened text>` satisfied a figure assertion
     #    from ANY other mechanism's prose, and `<the whole row>` still satisfied it
-    #    from prose anywhere in those 58,448 chars — perturbing (b2)'s figure and
-    #    appending the correct string elsewhere IN THE ROW stayed GREEN. A stated
-    #    number belongs to ONE clause, so the assertion reads that clause (2,046
-    #    chars at this head) and requires the string to appear EXACTLY ONCE in it,
-    #    which also refuses an in-clause decoy.
+    #    from prose anywhere in those tens of thousands of characters — perturbing
+    #    (b2)'s figure and appending the correct string elsewhere IN THE ROW stayed
+    #    GREEN. A stated number belongs to ONE clause, so the assertion reads that
+    #    clause alone and requires the string to appear EXACTLY ONCE in it, which
+    #    also refuses an in-clause decoy. ⚠️ The two lengths are deliberately NOT
+    #    restated here: they grew with every fix cycle (this comment carried
+    #    `58,448` / `~2,046` while the live values were `60,350` / `3,455`), and a
+    #    figure in a comment that nothing derives is the exact class this PR
+    #    removes — the row's own numbers go stale silently when the prose above
+    #    them is reworded.
     registry_text = (pathlib.Path(__file__).resolve().parent.parent
                      / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
     flattened = " ".join(_b2_region(_residual_region(registry_text)).split())
