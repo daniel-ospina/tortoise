@@ -130,7 +130,7 @@ version: 1
 # at this head" the earlier wording carried was false on the face of this diff.
 # ⛔ Not claiming "and every one is `core`": registration status is a THIS-HEAD fact, and `#14544`
 # is the proof it moves (the sentence below records that file leaving `core`) — which is why the
-# registrations this derivation STATES are GRADED rather than trusted:
+# surfaces it STATES are GRADED rather than trusted:
 # `test_the_derivation_surface_claims_are_graded_against_the_manifest` asserts the surface set
 # this derivation STATES, file for file, and REDs if a stated registration moves in EITHER
 # direction. ⛔ THE POPULATION IS HAND-MAINTAINED, declared rather than implied: the arm holds the

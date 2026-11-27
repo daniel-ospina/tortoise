@@ -10347,8 +10347,9 @@ def test_the_derivation_surface_claims_are_graded_against_the_manifest():
     justification did not hold for the files this derivation actually names.
 
     `#14544` is the proof the fact MOVES — `e66997b81e` took `test_dod_5090_probe.py` out of
-    `core` — so a fold that drops `onboarding` below would leave the block silently false. The
-    values are TRUE at this head; what was missing is the arm that notices when they stop being.
+    `core` — so a fold that drops `onboarding` below would have left the block silently false.
+    The values are TRUE at this head; what was missing was the arm that notices when they stop
+    being.
 
     ⛔ THE WHOLE SURFACE SET IS GRADED, not membership alone: the block's parenthetical describes
     WHICH surfaces each file is on, so a file that GAINS one it does not name is equally a
