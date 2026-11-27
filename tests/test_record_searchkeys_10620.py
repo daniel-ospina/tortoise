@@ -2293,6 +2293,19 @@ def test_the_divergence_arm_prescribes_no_journal_repair_on_the_record_only_arm(
         f"and must replace it with the repair that CAN run here: {message}"
     )
 
+    # ⛔ THE REFUSAL IS CONDITIONED ON DISAGREEMENT, not on the act of passing:
+    # the guard is `allocated_first != seq` (`record_writer.py:4425`), so a direct
+    # caller that supplies the allocator's own next number APPLIES. "passing one
+    # again refuses" was a universal this arm's own guard falsifies, so the advice
+    # has to name the disagreement instead.
+    assert "passing one again refuses" not in message, (
+        "this arm fires only when the two numbers disagree, so do not claim "
+        f"that any supplied position refuses: {message}"
+    )
+    assert "a position that DISAGREES with the allocator's refuses" in message, (
+        f"and must state the condition the guard actually applies: {message}"
+    )
+
     # DISCRIMINATING: on the journaled arm the line EXISTS, so the enumerated
     # repair path is right there and must still be printed.
     monkeypatch.setenv("TORTOISE_RECORD_ALLOCATE", "1")

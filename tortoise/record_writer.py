@@ -4552,8 +4552,8 @@ def write_live_record(record: Mapping[str, Any], *,
                         "dead ends here. The allocation was rolled BACK, so "
                         "nothing was burned or renumbered. Re-emit the record "
                         "with NO caller-supplied position: on a cut-over graph "
-                        "the allocator numbers it, and passing one again "
-                        "refuses this same way. record=%s %s",
+                        "the allocator numbers it, and a position that DISAGREES "
+                        "with the allocator's refuses this same way. record=%s %s",
                         seq, allocated_first, record.get("type"),
                         _record_identity(record),
                     )
