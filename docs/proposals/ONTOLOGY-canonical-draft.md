@@ -66,7 +66,7 @@ Two further defaults this draft had to take, stated because they are not free:
 
 | # | Default | Consequence if wrong |
 |---|---------|----------------------|
-| **D-4** | **Version bumps to `v3.39`** and the changelog carries one entry per approved batch. | If the owner prefers a single `v3.39` entry for all six batches, the changelog extract is re-cut as one entry — no model text changes. |
+| **D-4** | **Version bumps to `v3.39`**, and the changelog carries **one entry per model change** — the shipped extract is a single `v3.39` entry carrying one `### Batch N` subsection per batch. | If the batches are approved separately rather than together, each partial approval is its own model change and gets its own entry (`v3.39`, `v3.40`, …) — no model text changes, only the entry split. |
 | **D-5** | **A rule stays even when the sentence carrying it is nearly all implementation detail.** The rule is restated in canonical prose and the detail moves. Only a sentence with *no* rule in it moves whole. | The alternative — moving whole sentences whenever they look technical — is how rules get lost. Every irreversible call of this kind is listed in that section's *Moved whole* row, so it can be reversed individually. |
 | **D-6** | **Bare dates are OUT of scope.** This change removes `#NNNN` references and the clauses that report build status or provenance; it does **not** remove a year/month/day that *names a model state* (e.g. "state-centric alignment (2026-08-12)"). | Stated because the owner's instruction named "issue numbers and changelog" — a date sweep is a larger change with a much larger diff, and is **not** in this proposal. Widen it and batch 2–6 double in size; say so and it gets its own batch. |
 
