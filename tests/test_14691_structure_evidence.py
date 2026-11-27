@@ -1938,13 +1938,13 @@ def test_the_over_typed_table_matches_the_paragraph_that_describes_it():
     head — not in §3/A4, the section they are a claim about), so a
     whole-document `flat` pin was satisfied by the log that records it, and this
     arm — named "matches the paragraph that describes it" — graded a subject its
-    docstring never named. Measured AT `4944c705`: stripping every `### 8.x` round
-    section left this arm the only red in the file. At later heads the same sweep
-    reds `test_no_FIGURE_in_the_two_documents_is_free` instead, because the log
-    itself then quotes the range's numbers — so the reproducible statement of this
-    closure is the stronger one: replacing the WHOLE log with a digit-free marker
-    leaves `102 passed`, i.e. no arm depends on it at all. The histogram is a §3/A4
-    claim and is graded there.
+    docstring never named. Measured AT `4944c705` (`### 8.1`..`### 8.18` was then
+    the whole log): stripping every `### 8.x` round section left this arm the only
+    red in the file. That number belongs to THAT head — re-run at `05b3d7c0` the
+    same sweep leaves `102 passed`, because this arm no longer reads the log at all,
+    and the head-independent statement is therefore the stronger one: replacing the
+    WHOLE log with a digit-free marker leaves `102 passed`, i.e. no arm depends on
+    it. The histogram is a §3/A4 claim and is graded there.
     """
     a4 = _score()["A4_no_invention"]
     untraceable = {u["name"]: u["kind"] for u in a4["untraceable_entities"]}
@@ -3653,10 +3653,11 @@ def test_the_CLAIM_layer_and_A2_figures_are_the_artifacts():
     # §8's narrative, never in §3/A4, so the arm that carried them read `flat` (the
     # document) and was satisfied by the log that RECORDS them. Measured three ways at
     # `4944c705`: each figure mutated in the LOG reddened that arm; no body copy existed to
-    # mutate; and stripping every `### 8.x` round section left it the only red in the file.
-    # (At later heads that sweep reds `test_no_FIGURE_in_the_two_documents_is_free`
-    # instead, because the log then quotes the section range's own numbers — the
-    # head-independent statement is the digit-free-marker sweep, which leaves 102 passed.)
+    # mutate; and stripping every `### 8.x` round section left it the only red in the file
+    # (at that head `### 8.1`..`### 8.18` WAS the whole log). That red belongs to `4944c705`:
+    # re-run at `05b3d7c0` the same sweep leaves 102 passed, because this arm no longer reads
+    # the log — the head-independent statement is the digit-free-marker sweep, which also
+    # leaves 102 passed, i.e. no arm depends on the log.
     # The histogram is a claim about `claim_layer`, so §3/A4 states it and it is
     # graded in that paragraph — never in the document that logs its review.
     bands = claim["bands"]

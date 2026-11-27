@@ -1061,7 +1061,8 @@ to the D6 evidence cell reds the citation arm and the honest `:533-559` still pa
 The same round found three descriptions that had outlived the code they describe, and the fix for
 each is the subject of this arm rather than a tidy-up:
 
-- the `_prose_tokens()` docstring named the bound as `### 8.1`..`### 8.18`, a NUMBER, while the
+- the comment above `_prose_tokens()`'s exclusion regex named the bound as `### 8.1`..`### 8.18`,
+  a NUMBER, while the
   code excludes `### 8.1` up to `## 9.` — so every round that appends a section silently widens
   the exclusion and makes the stated population false. It now names the HEADING RANGE, and the
   superseded `## 8.` state survives only as a rejected past.
