@@ -4321,6 +4321,18 @@ def test_an_empty_sweep_says_it_read_nothing_not_that_the_arm_did_not_run(capsys
     "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 are measured in other PRs.",
     "Closes #13036\n\nV1, V2, V3, V4, V5, V6 are covered by other PRs.",
     "Closes #13036\n\nAll six rows V1, V2, V3, V4, V5, V6 are proved in the predecessor PR.",
+    # ⛔ THE SPELLINGS THE SUITE NEVER CARRIED (review round 12): the ordinary English forms of the
+    # disclosure the docstring writes as `V1, V3–V6 remain unmeasured`, none of which any earlier fixture
+    # used — which is how twelve rounds each found "the next spelling". The claim ends at `;`, so a
+    # `;`-separated disclosure is not the closing verb's object either.
+    "Closes #13036\n\nRows V1, V2, V3, V4, V5, V6 remain to be proved.",
+    "Closes #13036\n\nNone of the rows V1, V2, V3, V4, V5, V6 has been proved yet.",
+    "Closes #13036\n\nNothing about rows V1, V2, V3, V4, V5, V6 is proved by this PR.",
+    "Closes #13036\n\nRows V1, V2, V3, V4, V5, V6 are to be measured.",
+    "Closes #13036\n\nWhether rows V1, V2, V3, V4, V5, V6 are proved is unknown.",
+    "Closes #13036; V1, V2, V3, V4, V5, V6 remain to be proved.",
+    "Closes #13036; V1, V2, V3, V4, V5, V6 are the remaining work.",
+    "Closes #13036; all six rows V1, V2, V3, V4, V5, V6 come in later PRs.",
 ])
 def test_a_disclosed_partial_close_never_reads_as_a_pass(body):
     """The three shapes a lane actually writes — a TODO list, a NEGATION of the close, a row table.

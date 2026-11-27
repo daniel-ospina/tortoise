@@ -1573,7 +1573,9 @@ _DISCLAIMER_RE = re.compile(
     r"|not\s+complete|incomplete|remain\w*\s+(?:open|unmeasured|unproved|unclaimed|deferred|out)"
     r"|(?:stays?|left|still)\s+open|not\s+finished|unfinished|unstarted|not\s+yet|yet\s+to"
     r"|still\s+being|in\s+progress|\bopen\b"
-    r"|pending|\btodos?\b|outstanding|queued|backlog"
+    r"|pending|\btodos?\b|outstanding|queued|backlog|remaining|\byet\b|unknown|whether"
+    r"|remain\w*\s+to\s+be|to\s+be\s+(?:proved|measured|done|closed|verified|satisfied)"
+    r"|none\s+of\s+the\s+rows?|nothing\s+about|outside\s+this\s+pr|come[sn]?\s+in\s+later"
     r"|follow[\s-]?ups?|deferred|out\s+of\s+scope|excluded|except|apart\s+from|other\s+than",
     re.IGNORECASE)
 
@@ -1749,11 +1751,19 @@ def _closing_line_claim(pr_body: str, issue: int,
             clause = line[a:b]
             if ref.search(clause) and _CLOSING_WORD_RE.search(clause):
                 # THE CLOSING VERB AND ITS ATTACHED QUALIFIER are the structural positive marker:
-                # `Closes #N (row V2 only)` claims V2 because that parenthetical is the verb's object,
-                # not because any word in it was recognised.
+                # `Closes #N (row V2 only)` claims V2 because that PARENTHETICAL is the verb's object.
+                # ⛔ ATTACHMENT IS `(`, NOT POSITION (review round 12): promoting whatever clause came
+                # next made a `;`-separated disclosure the verb's object, so
+                # `Closes #N; V1 … V6 remain to be proved` claimed all six and reported `clean`. A
+                # `;` or a sentence break ENDS the claim; only a bracket opens a qualifier.
                 claimable.add(i)
                 if i + 1 < len(spans):
-                    claimable.add(i + 1)
+                    # …and the qualifier must be ATTACHED by a bracket or a spaced dash — the two
+                    # separators that introduce the verb's object. `;` and a sentence break END the
+                    # claim, and a second sentence is emphatically not its object.
+                    sep = line[spans[i][1]:spans[i + 1][0]].strip()
+                    if sep == "(" or sep in {"—", "–"} or "(" in sep:
+                        claimable.add(i + 1)
             # ⛔ A SIBLING CLAUSE MAY ONLY NARROW, NEVER ADD (review round 11). Promoting a sibling
             # that carries a completion verb made a DISCLOSURE a claim — `(row V2 only); V1 … V6
             # landed in later PRs` read `clean` on a one-row close, and six one-word variants of the
@@ -1764,7 +1774,11 @@ def _closing_line_claim(pr_body: str, issue: int,
             # fallback, where there is no closing verb to attach to.
         chars = list(line)
         for i, (a, b) in enumerate(spans):
-            if _DISCLAIMER_RE.search(line[a:b]):
+            # ⛔ THE SAME PREDICATE ON BOTH PATHS (review round 12): a clause that points at other work
+            # is a mention on the closing line exactly as it is in the body, so `_ELSEWHERE_RE` is
+            # consulted here too — `… all six rows V1 … V6 come in later PRs` was a CLAIM one line up
+            # from where the same sentence was a mention.
+            if _DISCLAIMER_RE.search(line[a:b]) or _ELSEWHERE_RE.search(line[a:b]):
                 disclaimed = True
                 claimable.discard(i)
             # ⛔ BLANK EVERY CLAUSE THAT IS NOT CLAIMABLE — NOT JUST THE RECOGNISED DISCLAIMERS
@@ -2262,9 +2276,11 @@ def main(argv: list[str] | None = None) -> int:
     # ⛔ NO `--wip`-ON-A-NON-ISSUE-ARM GUARD HERE (review round 11, F3): the one that stood on this
     # line could not fire. `wip` is non-None only for `--issue`/`--issue-body-file` (the mode refusals
     # above reject every other mode first), and on those modes `--arm pr-*` is already refused by the
-    # arm/mode check above, while `--arm all` sets `run_arm_issue`. A probe of 6 modes × 5 arms ×
-    # {--wip} emitted its message in 0 of 60 combinations: an enforcer whose condition can never hold
-    # while it appears to protect something. The refusals that DO fire are the mode and arm/mode ones.
+    # arm/mode check above. A probe of 6 modes × 5 arms × {--wip} emitted its message in 0 of 60
+    # combinations: an enforcer whose condition can never hold while it appears to protect something.
+    # There is no issue-side SELECTOR to guard: the issue branches call `classify_issue`
+    # unconditionally, which is correct while there is exactly one issue-side arm. The refusals that
+    # DO fire are the mode and arm/mode ones.
 
     findings: list[Finding] = []
     measured_rows: list[dict] = []
