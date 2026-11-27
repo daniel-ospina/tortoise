@@ -1399,14 +1399,40 @@ def _citation_key(citation: str) -> tuple[str, int, int]:
 
 
 #: How far a wider citation may reach BACK before the artifact's own start. The only honest
-#: wider span in either document is `entity_reads.py:533-559` against the artifact's
-#: `:551-559` — widened by 18 lines — so this bound sits comfortably above it and far below
-#: any range that begins in unrelated code.
+#: wider span in either document reaches back a FIXED number of lines and ends exactly on the
+#: artifact's end. ⛔ That figure is stated ONCE, in `_cites_a_site_in`'s docstring, where it is
+#: DERIVED from the documents and graded — do not restate it here: the copy that lived here
+#: named a literal site and was graded by nothing (measured: pointed at unrelated code,
+#: `103 passed`), so this bound sits comfortably above the derived slack and far below any
+#: range that begins in unrelated code.
 #: ⛔ STATE EVERY VECTOR HERE AS AN OFFSET, never as a literal line number: the artifact's site
 #: moves whenever a product file is rebased (+23 lines in `sdk.py` on the `#14582` fold alone,
 #: which silently falsified every vector in this docstring once — round 21), and a literal is
 #: a claim that expires with somebody else's commit.
 _CITATION_WIDEN_BOUND = 20
+
+
+def _bound_comment() -> str:
+    """The `#:` block that documents `_CITATION_WIDEN_BOUND`, read from THIS file's source.
+
+    A `#:` comment is invisible to `inspect`/`__doc__`, which is how the literal line range it
+    used to carry survived three rounds of prose fixes while the docstring beside it was being
+    corrected (#14723, round 24). Read the source so the block can be graded like any other
+    prose that restates a figure.
+    """
+    source = Path(__file__).read_text(encoding="utf-8").splitlines()
+    index = next((i for i, line in enumerate(source)
+                  if re.match(r"^_CITATION_WIDEN_BOUND = ", line)), None)
+    assert index is not None, (
+        "no `_CITATION_WIDEN_BOUND = ...` assignment in this file — the block this arm grades "
+        "is gone, so the arm would grade nothing")
+    block: list[str] = []
+    for line in reversed(source[:index]):
+        if not line.startswith("#:"):
+            break
+        block.append(line)
+    assert block, "the `#:` block above `_CITATION_WIDEN_BOUND` is empty; nothing to grade"
+    return "\n".join(reversed(block))
 
 
 def _cites_a_site_in(cited: tuple[str, int, int], sites) -> bool:
@@ -1698,15 +1724,52 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
     for k in range(1, span + 4):
         table[f"start offset {k} inside a span-{span} site, end exact"] = (
             (name, lo + k, hi), k == span)
-    # ⛔ …and the predicate's docstring must name no artifact by LINE RANGE. A literal site
+    # ⛔ …and NEITHER home of the rule may name an artifact by LINE RANGE. A literal site
     # expired twice here (round 21, and the +23-line hook that also widened the span), so a
-    # literal — qualified or bare — is the defect the offset rule exists to remove. Grade it.
-    literal = re.search(r"(?:[A-Za-z0-9_/.]+\.py)?:\d+(?:-\d+)?",
-                        _cites_a_site_in.__doc__ or "")
-    assert literal is None, (
-        f"`_cites_a_site_in`'s docstring cites {literal.group(0) if literal else ''} by line "
-        "range — state the vector as an offset from the span; a literal site expires with a "
-        "rebase, and one already made this sentence false once")
+    # literal — qualified or bare — is the defect the offset rule exists to remove. Grade it in
+    # BOTH places the rule is described: the predicate's own docstring, and the `#:` block above
+    # `_CITATION_WIDEN_BOUND` (measured at this head: that block's literal could be pointed at
+    # unrelated code — `entity_reads.py:500-559` — and all `103 passed`, because the guard read
+    # only `__doc__`).
+    for home, prose in (("`_cites_a_site_in`'s docstring", _cites_a_site_in.__doc__ or ""),
+                        ("the `#:` block above `_CITATION_WIDEN_BOUND`", _bound_comment())):
+        literal = re.search(r"(?:[A-Za-z0-9_/.]+\.py)?:\d+(?:-\d+)?", prose)
+        assert literal is None, (
+            f"{home} cites {literal.group(0) if literal else ''} by line range — state the "
+            "vector as an offset from the span; a literal site expires with a rebase, and one "
+            "already made this sentence false once")
+    # ⛔ AND THE TWO FIGURES THIS PROSE STATES ARE DERIVED, not restated (#14723, round 24).
+    # Measured at this head, each applied alone and restored byte-for-byte: the docstring's
+    # honest-wider-span slack 18 -> 17 and `_CITATION_WIDEN_BOUND` 20 -> 19 both left
+    # **103 passed**, while the sentences stating them became false. The allowance's VALUE is
+    # only bounded to 19-or-20 by the 19/21 rows, so the prose's own "is 20" was free.
+    doc_cited = {_citation_key(c)
+                 for c in _CITATION_RE.findall(_report() + "\n" + _verification())}
+    doc_cited = {k for k in doc_cited if k[0] != "VERIFICATION-independent.md"}
+    # the honest wider spans are the document citations the artifacts do NOT carry verbatim but
+    # which pass shape 3: they reach back from an artifact's start and end exactly on its end.
+    wider = {art[1] - cited[1]
+             for cited in doc_cited - artifacts
+             for art in artifacts
+             if art[0] == cited[0] and art[2] == cited[2] and cited[1] < art[1]}
+    stated_wider = re.search(r"start slack (\d+),\s+end exact",
+                             _cites_a_site_in.__doc__ or "")
+    assert stated_wider, (
+        "`_cites_a_site_in`'s docstring no longer states the honest wider span as "
+        "\"start slack <n>, end exact\"; the figure below is graded by being stated once")
+    assert wider == {int(stated_wider.group(1))}, (
+        f"the documents' honest wider span(s) reach back {sorted(wider)} line(s), while the "
+        f"docstring states {stated_wider.group(1)} — a restated figure that nothing derived, "
+        "which is how this sentence went false the first time")
+    allowance = re.search(r"START allowance is (\d+)", _cites_a_site_in.__doc__ or "")
+    assert allowance, (
+        "`_cites_a_site_in`'s docstring no longer states the START allowance as "
+        "\"The START allowance is <n>\"; the constant's value below is graded against it")
+    assert int(allowance.group(1)) == _CITATION_WIDEN_BOUND, (
+        f"the docstring states a START allowance of {allowance.group(1)} while "
+        f"`_CITATION_WIDEN_BOUND` is {_CITATION_WIDEN_BOUND} — the 19/21 rows admit either 19 "
+        "or 20, so without this the prose's own figure is graded by nothing (measured: 20 -> 19 "
+        "left 103 passed)")
     wrong = {shape: got for shape, (cited, expected) in table.items()
              if (got := _cites_a_site_in(cited, one)) is not expected}
     assert not wrong, (

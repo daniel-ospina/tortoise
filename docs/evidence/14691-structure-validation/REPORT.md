@@ -1117,6 +1117,37 @@ it cannot rot again as rounds are added. No assertion changed: this is a descrip
 code already implements, and it is graded the only way a description can be — by a reader being able
 to reconstruct the rule from it.
 
+### 8.22 Round 24 — the guard's own two figures, derived rather than restated
+
+The round-23 rows carry the prose's `19` and `21` as literals, which bounds the START allowance to
+19 or 20 — but the sentences that state it say **20** (this predicate's docstring, and §8.20's
+`20-line START allowance`), and nothing graded that. Measured at `77ba9891d656`, each mutant applied
+alone and the file restored byte-for-byte (`sha256sum` compared): `_CITATION_WIDEN_BOUND = 19` left
+**103 passed**, and the docstring's honest-wider-span slack `18` → `17` also left **103 passed**,
+while both sentences became false at the tree they describe.
+
+The same pass found the class's last literal in the block that forbids it: the `#:` comment above
+`_CITATION_WIDEN_BOUND` says "STATE EVERY VECTOR HERE AS AN OFFSET, never as a literal line
+number" and then named `entity_reads.py:533-559` against the artifact's `:551-559`. Pointing that
+literal at unrelated code (`:500-559`) left **103 passed**, because the round-22 guard reads
+`_cites_a_site_in.__doc__` and a `#:` comment is invisible to `__doc__`.
+
+So both figures are now DERIVED rather than reworded a fourth time:
+
+- the honest wider span's slack is derived from the two documents against the artifacts — a
+  document citation the artifacts do not carry verbatim, reaching back from an artifact's start and
+  ending exactly on its end — and the docstring's stated `start slack <n>, end exact` must equal it;
+- the stated START allowance must equal `_CITATION_WIDEN_BOUND`, so `20` cannot remain prose while
+  the constant moves to 19;
+- the "no literal line range" guard now covers BOTH homes of the rule — the predicate's docstring
+  and the `#:` block, read from this file's source — and the block states no figure of its own.
+
+Mutants, each applied alone: bound `20` → `19` RED · `20` → `30` RED · slack `18` → `17` RED ·
+a literal re-added to the `#:` block RED · a start INSIDE the range admitted RED · control
+**103 passed**. Every red is exactly
+`test_the_citation_shape_table_is_the_predicate_the_docstring_states`. Nothing else changed: no
+artifact, pin, row or predicate moved.
+
 ---
 
 ## 9. Mandate-preflight disclosure
