@@ -11199,8 +11199,16 @@ def _h_14544_exempt_negated(text: str) -> bool:
 
 #: ⛔ A NEGATED PREDICATE NOMINATIVE — `A REGISTRATION IS NOT A ROW` — is not an exemption claim
 #: about a row, so it is masked before the scan.
+#: ⛔ AND IT MUST END ITS CLAUSE (#14623, measured). Matching on syntax alone cannot tell the thesis
+#: (`IS NOT A ROW`, full stop) from a row that is the SUBJECT of a negated predicate whose predicate
+#: follows (`the row is not a row the ratchet exempts` — TRUE prose: the row is NOT exempt). Masking
+#: the second deletes its negation and leaves `exempts` to match affirmatively, which was a FALSE
+#: BLOCK. The lookahead requires the predicate nominative to be complete, so only the thesis is
+#: masked. ⛔ And the contraction alternative closes on `n` inside `isn't`, where there is no `\b` —
+#: so it could never fire, and it is written as `can`-style free text instead of pretending.
 _H_14544_NOT_A_ROW_RE = re.compile(
-    r"\b(?:not|n['\u2019]?t|never)\s+(?:a|the|any|either|one)?\s+row\b", re.IGNORECASE)
+    r"\b(?:not|never)\s+(?:a|the|any|either|one)?\s+row\b(?=\s*(?:[,;:.!?)\]]|$))",
+    re.IGNORECASE)
 
 
 def _h_14544_first_unnegated(pattern: re.Pattern[str],
@@ -11268,11 +11276,28 @@ def _h_14544_row_exempted(sentence: str, previous: str = "") -> str | None:
     # carries the negation FORWARD, it does not undo it. The window around the marker cannot see a
     # negation belonging to the clause before, so the antecedent is checked explicitly. ⛔ Anaphoric
     # branches ONLY: a coordination carries its own subject AND its own polarity.
+    # ⛔ AND THE POLARITY IS READ ON THE ANTECEDENT'S OWN `exempt` — never sentence-wide (round 35,
+    # MEASURED; two lanes reached this defect independently and this is the reconciled form). Both
+    # failures are the SAME root: `search()` over the whole antecedent tolerates the marker whenever
+    # ANY negation appears anywhere in it, and every sentence of the graded block carries one for
+    # reasons that have nothing to do with the exemption (`cannot move a bin`, `does NOT exclude`,
+    # `not restated`, `no-per-file-weight`). Measured GREEN through `_h_14544_banned_claim` with that
+    # test in place — the retired claim, laundered by the block's own vocabulary:
+    #
+    #     The REGISTRATION is exempt from being a packing cause, and dropping that REGISTRATION
+    #     cannot move a bin. So is the row.            (and `the same goes`, `likewise`, `so too`)
+    #     The REGISTRATION alone is exempt, and it does not gate anything, and so is the row.
+    #     Dropping that REGISTRATION cannot move a bin, and the REGISTRATION is exempt. So too the row.
+    #
+    # So the negation that matters is the one in the SAME CLAUSE as the antecedent's `exempt`, and
+    # `_h_14544_exempt_negated` grades exactly that. ⛔ ONE THING ALMOST DROPPED AND DELIBERATELY NOT:
+    # `previous` stays in the antecedent. Dropping it (a candidate fix) also closes the folds above,
+    # but it refuses the one-sentence-apart form of this arm's own TRUE fixture — `The row is not
+    # exempt. So is the weight of the row.` states the same true thing as `The row is not exempt, and
+    # so is the weight of the row.`, which the FALSE-prose list beside the arm requires to stay GREEN.
+    # Scoping fixes the laundering; dropping the sentence would have bought it with a false block.
     if anaphoric and not _h_14544_negated(masked, m):
         antecedent = (previous + " " + masked[:m.start()]) if previous else masked[:m.start()]
-        # ⛔ LOCALLY, on the antecedent's own `exempt` — never `search()` over the whole antecedent
-        # (round 35): the block's own sentences carry `cannot` / `No …` for unrelated reasons, so
-        # the sentence-wide test turned every anaphoric marker after the exemption GREEN.
         if _h_14544_exempt_negated(antecedent):
             return None
     context = previous + " " + sentence if previous and anaphoric else sentence
@@ -11542,6 +11567,36 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
         f"({_H_14544_WEIGHT_FIGURE_RE.search(paragraph).group(0)!r}) — the no-per-file-weight rule "
         "above binds it, and the figure belongs on the row in `durations`, where it is graded "
         "against the map rather than against prose")
+    # ⛔ (a) MASKING and (c) THE 12-CHARACTER WINDOW, pinned through the whole checker because both
+    # are block-shaped properties, not phrase-shaped ones. Each was removable with the arm GREEN
+    # before these pins: the mask (`_H_14544_NOT_A_ROW_RE`) had NO fixture containing `not a row`,
+    # and setting `_H_14544_NEGATION_WINDOW_BEFORE` back to 30 left the arm passing.
+    assert _h_14544_banned_claim(
+        "⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted.") is None, (
+        "the block's own thesis — `A REGISTRATION IS NOT A ROW` — is a negated predicate nominative, "
+        "not an exemption claim, and must stay GREEN")
+    assert _h_14544_banned_claim(
+        "⛔ A REGISTRATION IS NOT A ROW, and this sentence is GRADED rather than trusted, and the row "
+        "is exempt too.") is not None, (
+        "the negated predicate nominative MASKED the claim that followed it: a tolerated match "
+        "swallows every candidate inside its own span, so the trailing clause shipped CLEAN")
+    assert _h_14544_banned_claim(
+        "The `durations` row is not a row the ratchet exempts.") is None, (
+        "the mask deleted the negation of a `not … row that …` FALSE BLOCK — the row there is the "
+        "SUBJECT of a negated predicate, not a predicate nominative, and the sentence is TRUE prose")
+    assert _h_14544_banned_claim(
+        "A gate that is red where it lands and absent where it gates is not a gate, and the row is "
+        "exempt too.") is not None, (
+        "a negation belonging to a DIFFERENT noun phrase, 18 characters before the claim, licensed "
+        "it — this is what narrowed `_H_14544_NEGATION_WINDOW_BEFORE` from 30 to 12")
+    assert _h_14544_banned_claim(
+        "The REGISTRATION alone is exempt, and dropping it cannot move a bin. So is the row.") is not None, (
+        "a negation in the PRECEDING sentence licensed the anaphoric marker: every sentence of the "
+        "graded paragraph contains one, so carrying it inverted the guard")
+    assert _h_14544_banned_claim(
+        "The REGISTRATION alone is exempt, and it does not gate anything, and so is the row.") is not None, (
+        "a negation in the same sentence but on a DIFFERENT verb (`does not gate`) licensed the "
+        "marker — the negation must sit beside the `exempt` it negates")
     assert _H_14544_INVERTED_RE.search(header) is None, (
         "the block states a required claim the OTHER way round — “both halves [are] exempt” or "
         f"“this paragraph DOES exclude”: {_H_14544_INVERTED_RE.search(header).group(0)!r}. Keeping "
@@ -11572,6 +11627,10 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             "The row is exempt",
             "The REGISTRATION half is exempt, and the row is too",
             "The REGISTRATION is exempt; the row is likewise exempt",
+            # ⛔ (d) AUX IS DERIVED FROM COPULA. Restoring the pre-delta hand-written list — the one
+            # without `seemed` / `appeared` — left the arm GREEN until this pin existed.
+            "The REGISTRATION is exempt, and so seemed the row",
+            "The REGISTRATION is exempt, and so appeared the row",
             "The REGISTRATION alone is exempt; the row's weight is exempt too",
             # ⛔ RULE 1 (round 29, P1): an ADVERB between copula and `exempt` is not a membership
             # test. Each of these was GREEN end-to-end when the run was a six-item list.
@@ -11666,6 +11725,11 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
             # no carve-out at all — `no`, `nothing`, `from nothing` were all REFUSED as TRUE prose,
             # including the paragraph's own thesis restated negatively.
             "The row is NOT exempt.",
+            # ⛔ (b) `cannot` IS A NEGATION and this block's own word. Removing `|cannot` from
+            # `_H_14544_NEGATION_RE` turned both of these into false blocks and NOTHING in the arm
+            # noticed until they were pinned here.
+            "The row cannot be exempt.",
+            "The `durations` row cannot be exempt from being a packing cause.",
             "The row is not exempt from being a packing cause.",
             "No `durations` row is exempt from being a packing cause.",
             "No row is exempt.",
@@ -11757,14 +11821,21 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
                              ("The REGISTRATION is exempt", "Likewise the weight of the row."),
                              ("The REGISTRATION is exempt", "Likewise, the weight of the row."),
                              ("The REGISTRATION is exempt", "The row is too."),
+                             # ⛔ (e) `anaph_as_well` and (f) `anaph_too_weight`: each was removable
+                             # with the arm GREEN because neither appeared here. `anaph_too_weight`
+                             # had ZERO coverage — the earlier `anaph_too` alternative shadows it for
+                             # `So too the weight of the row.`, so ONLY the `its weight` form reaches
+                             # it, and only this pin exercises that form.
+                             ("The REGISTRATION is exempt", "The row as well."),
+                             ("The REGISTRATION is exempt", "The row included."),
+                             ("The REGISTRATION is exempt", "So too its weight."),
                              # ⛔ AND AN UNRELATED NEGATION IN THE ANTECEDENT MUST NOT TOLERATE THEM
-                             # (#14623 round 35, P1). The block's own sentences carry `cannot` /
-                             # `no` for reasons that have nothing to do with the exemption, and
-                             # every anaphoric marker after such a sentence shipped GREEN — the
-                             # same sentence-wide-negation defect Rule 2 forbids, reproduced in the
-                             # polarity path. Each of these is a fold the paragraph's own history
-                             # produces (merge the exemption with the `cannot` thesis, restate the
-                             # claim one sentence later).
+                             # (#14623 round 35, P1 — the same P1 the reconciled polarity hunk above
+                             # states). The block's own sentences carry `cannot` / `no` for reasons
+                             # that have nothing to do with the exemption, and every anaphoric marker
+                             # after such a sentence shipped GREEN. Each is a fold this paragraph's
+                             # history produces: splice the exemption into the `cannot` thesis, then
+                             # restate the claim one sentence later.
                              ("The REGISTRATION is exempt from being a packing cause, and dropping "
                               "that REGISTRATION cannot move a bin", "So is the row."),
                              ("The REGISTRATION is exempt from being a packing cause, and dropping "
@@ -11790,7 +11861,15 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
                              ("No `durations` row is exempt, and no bin moves",
                               "So is the weight of the row."),
                              ("The REGISTRATION is exempt from nothing, and no bin moves",
-                              "So is the row.")):
+                              "So is the row."),
+                             # ⛔ AND ACROSS THE SENTENCE BOUNDARY, which is the shape a candidate fix
+                             # would have refused: dropping `previous` from the polarity check closes
+                             # the folds above, but it also refuses this — the one-sentence-apart form
+                             # of this arm's own TRUE fixture, which states the identical true thing
+                             # about a negated exemption. Rule 4 lets an anaphoric marker READ the
+                             # previous sentence's `exempt`; the polarity must travel with that read.
+                             ("The row is not exempt.", "So is the weight of the row."),
+                             ("No `durations` row is exempt.", "So is its weight.")):
         assert _h_14544_row_exempted(implied, carried) is None, (
             f"{implied!r} inherits a NEGATED exemption from {carried!r}, so it is TRUE prose and "
             "must stay tolerated — the scoped polarity check must still reach a negation the "
