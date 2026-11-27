@@ -1905,31 +1905,67 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
     # byte-for-byte (`sha256sum` compared): the docstring's ```1` through `span - 1` ``` ->
     # ``span - 2`` left all **103 passed**, and so did the same edit in this arm's own docstring,
     # while the sentence claimed the offset the predicate refuses for that same site is admitted.
-    # It is not a figure to restate: it is the MAXIMUM of the inside offsets the emitted rows
-    # REFUSE, so it is derived from `table` on the same principle as the extent above.
+    # It is not a figure to restate: it is the boundary the PREDICATE draws, so it is graded
+    # against the predicate's own answers on those same offsets.
     stated_inside = re.search(
         r"start offsets `(\d+)` through `span\s*-\s*(\d+)` inside return False", doc_all)
     assert stated_inside, (
         "`_cites_a_site_in`'s docstring no longer states the refused inside starts as "
         "\"start offsets `<n>` through `span - <n>` inside return False\" — that boundary is "
-        "graded against the rows the sweep emits, so it may not be dropped silently")
-    row = {k: table.get(start_key.format(k=k, span=span)) for k in start_sweep}
-    inner_refused = sorted(k for k in start_sweep
-                           if k < span and row[k] is not None and row[k][1] is False)
+        "graded against the predicate's own answers, so it may not be dropped silently")
+    # ⛔ AND THE REFUSAL SET IS READ FROM THE PREDICATE, never from the table's DECLARATION
+    # (#14723, round 32). Round 31 read `row[k][1]` — the value `start_sweep` DECLARES
+    # (`k == span`) — which is never replaced by the predicate's answer, so the contiguity
+    # assertion below was a tautology (declaring `k == span` admits exactly `1..span - 1` out,
+    # whatever the rule does) and the docstring's figure was pinned against a second copy of
+    # itself rather than against the rule. Measured at the round-31 head, the predicate widened
+    # to admit start offset `1` inside (`lo <= other_lo` -> `<= other_lo + 1`) left every
+    # round-31 assertion GREEN: only the table check at the END of this arm fired, and it names
+    # the table, not the boundary. The answers are taken here, so the same mutant reds HERE, and
+    # an offset the predicate ADMITS inside is named as admitted rather than filtered out of a
+    # refusal list that was computed from a declaration.
+    refused_live = {k: not _cites_a_site_in(cited, one)
+                    for k, (cited, _declared) in start_sweep.items()}
+    inner_refused = sorted(k for k in start_sweep if k < span and refused_live[k])
+    inner_admitted = sorted(k for k in start_sweep if k < span and not refused_live[k])
     assert inner_refused, (
-        "the start sweep refuses no inside offset at all on a span-{span} site, so the "
+        f"the start sweep refuses no inside offset at all on a span-{span} site, so the "
         "docstring's refused-inside range has nothing to be graded against")
+    assert not inner_admitted, (
+        f"`_cites_a_site_in` ADMITS start offset(s) {inner_admitted} strictly inside a "
+        f"span-{span} site while its own docstring states that every offset "
+        f"{stated_inside.group(1)}..span - {stated_inside.group(2)} is refused — the predicate "
+        "draws the boundary one line away from the one it states")
     assert (int(stated_inside.group(1)),
             span - int(stated_inside.group(2))) == (min(inner_refused), max(inner_refused)), (
         f"`_cites_a_site_in`'s docstring refuses inside starts "
         f"{stated_inside.group(1)}..span - {stated_inside.group(2)} on a span-{span} site, "
-        f"while the rows the sweep emits refuse {min(inner_refused)}..{max(inner_refused)} — "
+        f"while the predicate refuses {min(inner_refused)}..{max(inner_refused)} — "
         f"an offset the predicate refuses is stated as admitted, and nothing past this sentence "
         f"would red (measured: `span - 1` -> `span - 2` left 103 passed)")
     assert inner_refused == list(range(1, span)), (
         f"the start sweep's refused inside offsets are {inner_refused} while the stated rule "
         f"refuses every offset strictly inside a span-{span} site, i.e. 1..{span - 1} — a hole "
         f"in the middle leaves an offset graded by nothing")
+    # ⛔ AND THIS ARM'S OWN DOCSTRING MAY NOT RESTATE THE BOUNDARY EITHER (#14723, round 32).
+    # Round 31 stated that copy as a deliberate residual ("arm commentary, not the rule's
+    # normative home") — but it is the figure that tells a reader of this arm which boundary is
+    # graded, and round 27 refused the same carve-out for the figures IT was about ("EVERY other
+    # copy of those two figures must be the same figures"). It is not free: measured at the
+    # round-31 head, this docstring's `1..span - 1` -> `1..span - 2`, applied alone and the file
+    # restored byte-for-byte (`sha256sum` compared), left all **103 passed** while the sentence
+    # claimed an inside start the predicate refuses is admitted.
+    arm_doc = test_the_citation_shape_table_is_the_predicate_the_docstring_states.__doc__ or ""
+    arm_inside = re.search(r"`1\.\.span\s*-\s*(\d+)`\s*\n?\s*refused and `span` admitted",
+                           arm_doc)
+    assert arm_inside, (
+        "this arm's docstring no longer restates the refused-inside range as "
+        "\"`1..span - <n>` refused and `span` admitted\" — that figure is graded against the "
+        "predicate here, so it may not be dropped or reworded away silently")
+    assert span - int(arm_inside.group(1)) == max(inner_refused), (
+        f"this arm's docstring refuses inside starts 1..span - {arm_inside.group(1)} while the "
+        f"predicate refuses 1..{max(inner_refused)} on a span-{span} site — the arm documents a "
+        f"boundary one line away from the one it grades")
     assert re.search(r"every end offset `1\.\.span` past the artifact's end", doc_all), (
         "`_cites_a_site_in`'s docstring no longer names the end sweep as \"every end offset "
         "`1..span` past the artifact's end\" — its extent is graded against that sentence")

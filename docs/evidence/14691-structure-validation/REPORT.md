@@ -1278,11 +1278,13 @@ This is the class round 27 named (*"a figure is graded when a DERIVATION checks 
 its copies happens to be asserted"*), one level across from where rounds 28–30 were looking: those
 went after the sweep's far end, this is its near boundary.
 
-**Fix (derived from the refusing ROWS, both ends).** The docstring's refused inside range is parsed
-as two figures and compared against the offsets the emitted rows actually refuse:
-`(stated_lo, span - stated_hi) == (min(refused), max(refused))`, and the refused set must be the
-contiguous `1..span - 1` — so an interior hole (a row that admits an offset the rule refuses)
-reds as well as a wrong boundary. A missing sentence reds rather than silently grading nothing.
+**Fix (the figure is parsed, and the set it is compared against is DERIVED).** The docstring's
+refused inside range is parsed as two figures and compared against a refusal set the arm computes
+from the sweep rows: `(stated_lo, span - stated_hi) == (min(refused), max(refused))`, and the
+refused set must be the contiguous `1..span - 1`, so an interior hole reds as well as a wrong
+boundary. A missing sentence reds rather than silently grading nothing. ⛔ **Round 32 below corrects
+what round 31 actually derived that set from** — the value `start_sweep` DECLARES, not the
+predicate's answers — and closes the copy of the figure this section left as a residual.
 
 Mutants, each applied alone at this head, file restored byte-for-byte: docstring `span - 1` →
 `span - 2` RED · `` `1` `` → `` `2` `` RED · the sentence deleted RED · the sweep admitting `k == 5`
@@ -1293,9 +1295,40 @@ RED · docstring start extent `+ 3` → `+ 2` RED · §8.23's extent → `1..spa
 `test_the_citation_shape_table_is_the_predicate_the_docstring_states`. No artifact, pin, row or
 predicate changed; no new test file, so no `config/ci-surfaces.yml` row is needed.
 
-Stated residual: the arm's OWN function docstring (not `_cites_a_site_in`'s) carries a second copy
-of the same figure and stays free — it is arm commentary, not the rule's normative home, and
-whether an arm's prose is graded is a separate question from whether the RULE it documents is.
+Stated residual at this round: the arm's OWN function docstring (not `_cites_a_site_in`'s) carries a
+second copy of the same figure, and round 31 left it free on the argument that it is arm commentary
+rather than the rule's normative home. Round 32 measures that copy and closes it too.
+
+### 8.28 Round 32 — round 31's derivation read the table's DECLARATION, not the predicate
+
+Round 31's three mutants red — re-measured here, each applied alone with the file restored
+byte-for-byte (`sha256sum` compared). What did not hold is the *derivation* it claims. The refusal
+set was built as `row[k][1] is False`, where `row` is read out of `table` — and `table`'s values are
+the `k == span` expectation `start_sweep` **declares**, never replaced by the predicate's answers.
+So the contiguity assertion was a tautology (declaring `k == span` emits exactly `1..span - 1`,
+whatever the rule does), and the docstring's figure was pinned against a second copy of itself
+rather than against the rule — the class round 27 named.
+
+Measured at the round-31 head, the predicate widened to ADMIT start offset `1` inside
+(`lo <= other_lo` → `<= other_lo + 1`), applied alone and restored byte-for-byte: the round-31
+assertions all stayed GREEN and only the table check at the END of the arm fired, naming the table
+rather than the boundary it had just mis-derived.
+
+**Fix (the refusal set is the predicate's own answers).** `refused_live` calls `_cites_a_site_in`
+on each swept citation, so the min/max comparison and the contiguity check both grade the boundary
+the predicate actually draws, and an offset it ADMITS strictly inside is now named as admitted
+(`inner_admitted`) instead of being filtered out of a list computed from a declaration. Mutants,
+each applied alone, file restored byte-for-byte: the predicate admitting start offset `1` inside
+RED on the new limb · docstring `span - 1` → `span - 2` RED · `` `1` `` → `` `2` `` RED · the
+sentence deleted RED · control **103 passed**.
+
+That residual copy is closed in the same round: this arm's own docstring states the boundary as
+*"`1..span - 1` refused and `span` admitted"*, and it is now compared against the same derived
+maximum. Measured at the round-31 head, that copy's `1..span - 1` → `1..span - 2` left all
+**103 passed** while the sentence claimed an inside start the predicate refuses is admitted; with
+the arm in place the same mutant reds with *"this arm's docstring refuses inside starts
+1..span - 2 while the predicate refuses 1..19 on a span-20 site"*. No artifact, pin, row or
+predicate changed; no new test file, so no `config/ci-surfaces.yml` row is needed.
 
 ---
 
