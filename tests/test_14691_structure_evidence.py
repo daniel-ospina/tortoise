@@ -1396,7 +1396,11 @@ def _citation_key(citation: str) -> tuple[str, int, int]:
 #: How far a wider citation may reach BACK before the artifact's own start. The only honest
 #: wider span in either document is `entity_reads.py:533-559` against the artifact's
 #: `:551-559` — widened by 18 lines — so this bound sits comfortably above it and far below
-#: the padding attack `sdk.py:61000-62758` (a 1,739-line reach onto the pinned site).
+#: any range that begins in unrelated code.
+#: ⛔ STATE EVERY VECTOR HERE AS AN OFFSET, never as a literal line number: the artifact's site
+#: moves whenever a product file is rebased (+23 lines in `sdk.py` on the `#14582` fold alone,
+#: which silently falsified every vector in this docstring once — round 21), and a literal is
+#: a claim that expires with somebody else's commit.
 _CITATION_WIDEN_BOUND = 20
 
 
@@ -1406,27 +1410,30 @@ def _cites_a_site_in(cited: tuple[str, int, int], sites) -> bool:
     Three shapes are honest, and nothing else is (#14691 review, round 15, finding 5):
 
     1. **The same range.**
-    2. **One line inside** the artifact's range — `sdk.py:62739` against `:62739-62758`.
+    2. **One line inside** the artifact's range — `lo == hi` and `other_lo <= lo <= other_hi`.
     3. **A wider range that BEGINS at or just before the artifact's start** — the prose quotes
        a span plus its call site (`entity_reads.py:533-559` against `:551-559`).
 
-    ⛔ CONTAINMENT IN EITHER DIRECTION WAS NOT ENOUGH, measured: it admitted
-    `sdk.py:61000-62758` and `sdk.py:1-99999` — each BEGINS where the refused mutant
-    `61000-61019` begins and pads its END onto the pinned site. Equality alone would red on
-    the two honest shapes above, and OVERLAP would accept `:172-179` -> `:166-173`, so the
+    ⛔ CONTAINMENT IN EITHER DIRECTION WAS NOT ENOUGH, measured: it admitted a range that BEGINS
+    exactly where a refused mutant begins and pads its END onto the pinned site (any such range
+    contains the site, and the site contains it). Equality alone would red on the two honest
+    shapes above, and OVERLAP would accept a MOVED range (`:172-179` -> `:166-173`), so the
     three shapes are enumerated rather than approximated.
 
     ⛔ AND BOUNDING THE START ALONE WAS STILL NOT ENOUGH (#14691 review, round 16, finding 1):
-    with only `other_lo - lo <= _CITATION_WIDEN_BOUND`, the same padding attack survived from
-    the OTHER side — `sdk.py:62739-99999` opens exactly on the artifact's start and pads the
-    END by 37,241 lines, which left `102 passed` (measured). So shape 3 widens the START by
-    at most `_CITATION_WIDEN_BOUND` lines and the END by NOTHING (`hi - other_hi == 0`). That is
+    with only the start bound, the same padding attack survived from the OTHER side — a range
+    that opens exactly on the artifact's start and pads its END by tens of thousands of lines
+    into the same file left `102 passed` (measured). So shape 3 admits a citation that begins
+    anywhere from `_CITATION_WIDEN_BOUND` lines BEFORE the artifact's start to anywhere INSIDE
+    it, and requires it to end at EXACTLY the artifact's end (`hi - other_hi == 0`). That is
     what the one honest wider span in the two documents actually does — `entity_reads.py:533-559`
     against the artifact's `:551-559` is slack 18 at the start and 0 at the end (measured) — so
     the honest shape stays green, and an end-padded citation cannot pass at ANY start offset.
-    ⛔ The START allowance is 20, not 0, and it is LIVE: `sdk.py:62739-62758` -> `62720-62758`
-    (19 lines of start slack) is GREEN and `62718-62758` (21) is RED (measured, round 17). Do
-    not "tidy" `_CITATION_WIDEN_BOUND` away — the honest D1 citation above needs 18 of it.
+    ⛔ The START allowance is 20, not 0, and it is LIVE — measured as OFFSETS from the artifact's
+    start, which is the only form that survives a rebase: a range beginning **19 lines before**
+    it is GREEN, **21 lines before** is RED (round 17; re-measured at round 21 after the
+    `#14582` fold moved the site by +23 lines). Do not "tidy" `_CITATION_WIDEN_BOUND` away —
+    the honest D1 citation above needs 18 of it.
     """
     name, lo, hi = cited
     for other_name, other_lo, other_hi in sites:
