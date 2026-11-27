@@ -63,8 +63,9 @@ version: 1
 # `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
 # the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
 # (1680 / 827.8 = 2.0295), so the two agree by construction rather than by a hand re-read. The
-# partition moved by 0.1 s and the watchdog did NOT: that is the measured case this guard exists for —
-# a minute-only re-read would have called the carried sentence correct.
+# SLOWEST shard moved by 0.2 s (827.6 → 827.8; the two lightest by 0.1 s) and the watchdog did NOT:
+# that is the measured case this guard exists for — a minute-only re-read would have called the
+# carried sentence correct, and the 0.2 s is the figure the watchdog's `ceil` actually reads.
 # ⛔ THAT PAIR IS THIS TREE'S ALONE, and the move is measurable: `fast_pool()` holds 1342 entries
 # here, read by loading this tree's OWN manifest through the verb; `origin/main`'s manifest, loaded
 # the same way at this head, differs by exactly TWO entries and both are named here rather than
