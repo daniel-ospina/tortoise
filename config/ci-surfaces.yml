@@ -342,9 +342,13 @@ version: 1
 # every fold, and the quantifier matters: `union` fires on a CONFLICTING hunk, so a fold with this
 # block changed on ONE side applies that one derivation and cannot splice it. The copies
 # disagree on the FIGURES, and every base this lane has folded emits a DIFFERENT partition —
-# measured by loading each base's OWN manifest through `fast_pool()` and `push_legs()`:
-# `c1c8df1a3817` packs 1339 files to 827.2/827.3 s, `f2d4f2408cf5` packs 1340 to 827.4/827.5 s,
-# and the `a0cea31078`…`0204a219aa90` line packs 1341 to 827.6 s on all eleven. So no carried copy
+# measured by loading each base's OWN manifest through `fast_pool()` and `push_legs()` — and the
+# figures that measurement yields are NOT stated here, on purpose (#14587 review cycle 13, P2: this
+# sentence carried one pool count per base, in the verb `packs`, which the graded guard cannot read —
+# the same unfenced-census class cycle 12 removed two sentences above). What is stated is the durable
+# fact: each base emits a DIFFERENT partition from the two around it — the
+# `a0cea31078`…`0204a219aa90` line differs from both bases before it, and those two differ from each
+# other — so no carried copy
 # can be right about the tree being folded, which is why neither side is picked: both are DELETED
 # and the re-derivation above is computed with `--emit-push-matrix` on the merged tree. Each
 # earlier fold's figures live on the commit that measured them (`git log`), which is where a
