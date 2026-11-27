@@ -3917,8 +3917,12 @@ def test_row_ids_reads_the_BODY_only_never_a_comment():
 
 
 def test_row_ids_ignores_a_fenced_example_and_a_bare_number_heading():
+    # ⛔ `# V9` PINS THE DECLARED QUANTIFIER, not just the id shape (review: non-blocking observation).
+    # `#` alone is a TITLE and is not a row declaration, so `ROW_HEADING_RE`'s `#{2,4}` is part of the
+    # rule — but with no h1 in this fixture, widening it to `#{1,4}` reddened nothing. A document title
+    # that happens to start with a row-shaped token is the ordinary case an issue body has.
     body = ("## R1 — real\n## R2 — real\n\n```\n## R3 — an example of the layout\n```\n"
-            "## 1. Introduction\n## V2\n")
+            "## 1. Introduction\n# V9 — the issue's own title\n## V2\n")
     assert L.row_ids([body]) == ["R1", "R2", "V2"]
 
 
