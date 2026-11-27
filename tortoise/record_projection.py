@@ -3933,16 +3933,16 @@ def _record_column_value(table: str, column: str, value: Any, *,
     ⚠️ THAT SECOND ARM MIRRORS THE LIVE DOOR — not the graph's `PointRevised` REPLAY
     fold, which differs here for a PRE-EXISTING reason (`#2946`/`#2795`: that fold is an
     explicit allow-list — annotator dims, `BELIEF_PROPS`, `tags`, validity, provenance,
-    embedding text — carrying NO generic props, so replaying a `PointRevised` keeps an
-    old `quote` a live update had cleared; for a prop the fold never carries, a replay
-    leaves the old value while the record CLEARS it). Measured 2026-11-26:
-    `_update_point(pid, quote={...})` leaves no `quote`; `proj.apply(PointRevised
-    {quote: {...}})` leaves the previous one intact. ⛔ `search_keys` is NOT that case:
-    the fold RE-DERIVES it from content (#10203, `identifier_tokens_enabled()` ON by
-    default), so a record-sourced NULL and a replayed alias differ by that derivation,
-    not by a missing prop. So the two stores disagree — pre-existing WITHOUT this arm,
-    and `#2946`'s question. This arm guarantees the narrower thing: the record holds
-    what the write that produced it left behind.
+    embedding text — carrying NO generic props). Measured 2026-11-26: the live
+    `_update_point(pid, quote={...})` leaves no `quote`, while replaying
+    `PointRevised{quote: ...}` leaves the previous one intact. ⛔ `search_keys` is NOT
+    simply that case: when the revision carries `new_content` the fold RE-DERIVES it
+    (#10203, `identifier_tokens_enabled()` ON by default), so a record-sourced NULL and
+    a replayed alias differ by that derivation. But a `search_keys`-only revision
+    carries no content, so there the fold keeps the old alias and this IS the
+    missing-prop case. So the two stores disagree — pre-existing WITHOUT this arm, and
+    `#2946`'s question. This arm guarantees the narrower thing: the record holds what
+    the write that produced it left behind.
     """
     if table == "point" and column in _POINT_FLATTEN_COLUMNS and isinstance(
             value, Mapping):
@@ -4006,20 +4006,20 @@ def _record_column_value(table: str, column: str, value: Any, *,
         # never serialized (no second representation, #10620). What changed is
         # only the FATE of the rest of the row.
         _LOGGER.warning(
-            "record column %s (point.%s): the value arrived as a %s, which no "
+            "record column point.%s %s: the value arrived as a %s, which no "
             "property can hold. The graph's %s, and the column is %s — never "
             "serialized into a text column as a second representation (#10620) "
             "and never a reason to drop the rest of the row (#11783). Fix the "
             "PRODUCER if this value is meant to persist.",
-            "CLEARED" if patch else "omitted",
-            column, type(value).__name__,
+            column, "CLEARED" if patch else "omitted",
+            type(value).__name__,
             ("`SET n += $props` cannot carry it, so the transport degrades it to "
              "null and a null in a map-merge REMOVES the property")
             if patch else
             ("fold SKIPS it (`_is_persistable_prop_value` refuses a Mapping, so "
              "`SET n += $props` never carries the key), leaving any previous "
              "value alone"),
-            "cleared to match" if patch else "left as it was",
+            "follows the node" if patch else "left as it was",
         )
         return None if patch else _OMIT
     if table == "point" and column in _POINT_FLATTEN_COLUMNS and isinstance(
