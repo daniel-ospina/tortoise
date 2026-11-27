@@ -4683,9 +4683,12 @@ def write_live_record(record: Mapping[str, Any], *,
             # NEITHER store and has no position row to re-refuse. Saying it
             # anyway sends the operator to a repair path with no line to replay,
             # which is the exact misdirection splitting this token out of
-            # `write_failed` exists to end. The pre-existing `write_failed` arm
-            # below carries the unqualified claim; this new arm must not add a
-            # fourth copy of it.
+            # `write_failed` exists to end. ⛔ EVERY arm that names the
+            # journal's PROVENANCE branches on this flag — the ALLOCATOR arm
+            # above (`allocator_journal_clause`), the generic `write_failed` arm
+            # below, and this one — so it is the FLAG, not the arm, that selects
+            # the sentence; an unqualified copy left behind in any of them is the
+            # defect this note exists to stop.
             journal_clause = (
                 "the record reached NEITHER store (the caller did not append: "
                 "this graph was cut over, so the journal holds no line); "
