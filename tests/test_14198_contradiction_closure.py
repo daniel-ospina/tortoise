@@ -233,14 +233,21 @@ def make_graph(tmp_path, monkeypatch):
     from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
     from tortoise.sdk import TortoiseSDK
 
-    made = []
+    made: list = []
 
     def _make(relationship: str, coverage: str = "partial", **shape):
         monkeypatch.setattr(
             "tortoise.extractor_v2.search_graph",
             lambda sdk, embed_list, story, **kw: _fake_search(
                 sdk, embed_list, story, coverage=coverage, **kw))
-        sdk = TortoiseSDK(str(tmp_path / f"t14198-{relationship}-{coverage}.db"))
+        # ⛔ A UNIQUE FILE PER CALL. Keyed on (relationship, coverage) alone, a
+        # test that builds TWO graphs with the same pair — e.g. two world-time
+        # shapes of the same declaration — silently opened the SAME database for
+        # both, so the second run's prior set contained the first run's points
+        # and the case under test was not the case that ran.
+        made_n = len(made)
+        sdk = TortoiseSDK(
+            str(tmp_path / f"t14198-{relationship}-{coverage}-{made_n}.db"))
         made.append(sdk)
         stats = ingest_haystack_v2(sdk, _question(),
                                    model=_model(relationship, **shape))
@@ -407,6 +414,60 @@ def test_an_event_side_is_dropped_not_recorded_as_a_supersession(make_graph):
         "the run must not claim a closure the consumer refused")
 
 
+def test_a_world_time_ordering_is_decided_on_instants_not_date_prefixes(make_graph):
+    """The ORDER must be the one the write path REFUSES on.
+
+    REDS PRE-FIX (review of #14794, P2, measured): the gate compared the first
+    ten characters of the two `when` values, while `sdk._supersede_window_end`
+    decides the #4021 inverted window on INSTANTS
+    (`search_engine._created_sort_key`) — and the gate DECLINES a backfill (this
+    channel cannot express `superseded = <a claim this capture has not written
+    yet>`), so a mis-ordered pair lands on the wrong SIDE of that decision:
+
+    * CROSS-OFFSET — `cert 2026-03-06T01:00:00Z` (arrived first) vs
+      `audit 2026-03-05T23:00:00-05:00` (= 04:00Z on 03-06): the date prefixes
+      compare BACKWARDS, so the arm saw a BACKFILL and DECLINED a closure the
+      instants say is perfectly ordinary (the newer fact arrived later, which is
+      the direction this channel carries). Pre-fix: `0` supersessions; the
+      contradiction survives as two live truths.
+    * SAME DAY, world time says the ARRIVING claim is the older fact
+      (`cert 18:00Z` then `audit 09:00Z`): the date prefixes TIE, so the arm took
+      the ARRIVAL branch and emitted `superseded=cert, supersedes_by=audit`.
+      The consumer refused the inverted window (#4021) — leaving both claims
+      live WHILE the same receipt warned that the interval "is recorded as a
+      supersession". That false claim is the class this arm exists to remove;
+      the decline names it instead.
+
+    So the two shapes pin opposite halves of one measure, and each reds under
+    the date-prefix implementation.
+    """
+    # cross-offset: the date prefixes invert what the instants say
+    sdk, stats = make_graph("nand", cert_when="2026-03-06T01:00:00Z",
+                            audit_when="2026-03-05T23:00:00-05:00")
+    assert stats["supersessions_written"] == 1, (
+        "an offset must not flip the direction the instants agree on — this is "
+        "an ordinary closure, not a backfill")
+    ended = [r for r in _scan(sdk, include_terminal=True)
+             if r["id"] == _pid(CERT)]
+    assert ended and ended[0]["status"] in ("outdated", "superseded")
+    assert _pid(AUDIT) in {r["id"] for r in _scan(sdk)}
+
+    # same day: the arriving claim IS the older fact in world time → declined,
+    # and the receipt must not claim otherwise
+    sdk2, stats2 = make_graph("nand", cert_when="2026-03-05T18:00:00Z",
+                              audit_when="2026-03-05T09:00:00Z")
+    assert stats2["supersessions_written"] == 0, (
+        "a backfill is decided by INSTANTS; the channel cannot express it")
+    live = {r["id"] for r in _scan(sdk2)}
+    assert _pid(CERT) in live and _pid(AUDIT) in live, (
+        "neither interval may be closed when the direction is declined")
+    sample = " ".join(stats2["warnings"]["sample"])
+    assert "not closed (#14198)" in sample, (
+        "the decline must be named, with the two world times")
+    assert "recorded as a supersession" not in sample, (
+        "the run must not claim a closure it did not write")
+
+
 # ── negatives: nothing is invented ───────────────────────────────────────────
 def test_declared_support_across_captures_closes_nothing(make_graph):
     """Over-fire negative: the SAME two documents, with the model declaring
@@ -511,6 +572,19 @@ def test_the_closure_does_not_depend_on_which_lookup_arm_ran(make_graph):
     hist = sdk.get_historical_knowledge(_pid(AUDIT), "2026-02-20")
     assert hist["found"] is True
     assert hist["valid_point"]["id"] == _pid(CERT)
+
+    # ⛔ ONE PAYLOAD, BOTH ARMS: the resolved route must not ALSO leave the
+    # declared NAND in the graph. Nothing held that invariant before —
+    # replacing the wiring route's `continue` with a fall-through kept every
+    # other case green — so the one claim the report makes about "the same
+    # payload" was graded by no assertion (review of #14794).
+    edges = sdk._get_proj().g.query(
+        "MATCH (a)-[r:IMPL|NAND]->(b) WHERE a.id IN $ids AND b.id IN $ids "
+        "RETURN count(r)",
+        params={"ids": [_pid(CERT), _pid(AUDIT)]}).result_set
+    assert edges[0][0] == 0, (
+        "the closure IS the representation — the declared NAND between the two "
+        "rivals must not also be emitted on the resolved route")
 
 
 # ── guards found in review, pinned as pure-function shapes ───────────────────

@@ -7810,8 +7810,10 @@ surfaces:
   # `manifest drift: ['test_14198_contradiction_closure.py']`, which reds the
   # REQUIRED `manifest-integrity` leg, and `select()` never emits the file for
   # a diff — so the regression the PR fixes could return with no red. Hermetic:
-  # a fake model and the eval ingest path on a throwaway embedded graph
-  # (redirected to the lane server under `TORTOISE_DB_URI`), no network.
+  # a fake model and the eval ingest path on a throwaway EMBEDDED graph — the
+  # fixture passes an explicit `db_path`, which wins over `TORTOISE_DB_URI`
+  # (#139), so the file needs the `TORTOISE_TEST_CARVE_OUT=1` lane and is not
+  # redirected to a live server; no network.
   - test_14198_contradiction_closure.py
   # #10311: the S2/S4 prompt BODIES frame session text as untrusted DATA — the
   # clause, the body-derived boundary, and the parsing contract that must not

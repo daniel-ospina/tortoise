@@ -78,7 +78,11 @@ lookup quality. The NAND is not also emitted because `_supersede_point`
 re-points (and, for a self-edge, deletes) the incident `IMPL|NAND` rows when it
 terminalises the predecessor: emitting it would declare an edge the commit
 immediately removes, and would hand that door a repoint it can refuse. The
-`CORRECTS` edge is the representation.
+`CORRECTS` edge is the representation. That invariant is graded at the
+representation, not at the payload: `test_the_closure_does_not_depend_on_which_
+lookup_arm_ran` asserts **no** `IMPL|NAND` survives between the two rivals on
+the resolved route — which is the shape a reader can observe, and the one a
+future edit that stopped the consumer from removing the edge would break.
 
 **Three gates on the closure, each pinned by a test that reds when removed.**
 The shapes below are not hypothetical — each one was measured against a corpus
@@ -98,17 +102,23 @@ or a contract this PR already names:
    (`_assert_lifecycle_guard`). Emitting the record would lose the closure
    *and* claim it was recorded; an event side now falls through to the drop
    warning, which is the truth.
-3. **WORLD TIME, not arrival order.** #14198's recorded decision is *"Facts
-   are compared on world-time dates, not arrival order"*, and it is what
-   Zep/Graphiti do (the edge with the earlier `valid_at` is the one retired).
-   Capture membership alone emitted an **inverted window** for a BACKFILL — a
-   later capture carrying an earlier world date — which `_supersede_point`
-   refuses (#4021), so the fold failed and both claims stayed live: the #14198
-   defect arriving through the backfill door. The pair is now ordered by the
-   claims' own window starts, falling back to arrival order only when either
-   start is unknown or unparseable (the prior set IS what existed before this
-   capture, so that is the honest fallback; equality keeps it too, since a
-   zero-length predecessor window is legal).
+3. **WORLD TIME, not arrival order — on the CONSUMER'S OWN MEASURE.** #14198's
+   recorded decision is *"Facts are compared on world-time dates, not arrival
+   order"*, and it is what Zep/Graphiti do (the edge with the earlier `valid_at`
+   is the one retired). Capture membership alone emitted an **inverted window**
+   for a BACKFILL — a later capture carrying an earlier world date — which
+   `_supersede_point` refuses (#4021), so the fold failed and both claims
+   stayed live: the #14198 defect arriving through the backfill door.
+   ⛔ And a DATE-PREFIX order is not enough: the write path refuses on INSTANTS
+   (`sdk._supersede_window_end` → `search_engine._created_sort_key`), so a
+   same-day pair (`18:00Z` vs `09:00Z`) TIES on the date and a cross-offset pair
+   (`2026-03-05T23:00:00-05:00` = 04:00Z on 03-06 vs `2026-03-06T01:00:00Z`)
+   compares BACKWARDS — either way the producer emitted the window the consumer
+   then refused, leaving both claims live. The arm now uses the same
+   `_created_sort_key` instants, falling back to arrival order only when either
+   start names no instant (the prior set IS what existed before this capture, so
+   that is the honest fallback; equality keeps it too, since a zero-length
+   predecessor window is legal).
 
 No new node kind, no new relation vocabulary, no MCP/SDK surface change.
 
@@ -136,6 +146,8 @@ $ python docs/evidence/14592-operating-model-validation/replay_14198.py \
 # new claim (this capture) : pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5
 # older claim (prior)      : pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078
 
+```text
+$ PYTHONPATH=<worktree at 875abfd> python docs/evidence/14592-operating-model-validation/replay_14198.py
 supersessions recorded      : 0
 supersessions naming the pair: 0
 
@@ -144,6 +156,16 @@ warnings naming the pair:
 
 VERDICT: the cross-document contradiction is NOT RECORDED
 ```
+
+On the fixed tree, labelled `before`, the same command refuses rather than
+mislabelling an `after` run (measured, verbatim):
+
+```text
+$ python docs/evidence/14592-operating-model-validation/replay_14198.py --arm before
+replay REFUSED: --arm before names an arm the imported module is not (the cross-capture arm is present in …/tortoise/extractor_v2.py) — point PYTHONPATH at the tree you mean instead of relabelling it
+```
+
+The AFTER side, verbatim:
 
 ```text
 $ python docs/evidence/14592-operating-model-validation/replay_14198.py --arm after
@@ -156,7 +178,7 @@ $ python docs/evidence/14592-operating-model-validation/replay_14198.py --arm af
 
 supersessions recorded      : 1
 supersessions naming the pair: 1
-  superseded=pt_fc8b3e47…  supersedes_by=pt_9af28546…
+  superseded=pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078  supersedes_by=pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5
   evidence="declared NAND contradiction across captures — the older claim's interval is closed (retained, never deleted)"
 
 warnings naming the pair:
@@ -184,7 +206,9 @@ hold is not a closure. The shipped number still requires a fresh-graph
 re-ingest (the 5-document run in #14198's owner comment, reading doc-05's
 `supersessions`), and this file is not a substitute for it. It also cannot
 exercise gate 3: the receipt's point rows carry no `when`, so the replay takes
-the arrival-order fallback (the backfill test covers the other branch).
+the arrival-order fallback (the instant/precision cases are covered by
+`test_a_backfill_closes_the_claim_world_time_says_is_older` and
+`test_a_world_time_ordering_is_decided_on_instants_not_date_prefixes`).
 
 ## 4. Compose with retrieval — what a reader sees now
 
@@ -210,6 +234,7 @@ the *surviving* claims to rank first) is neither implemented nor needed here.
 | **positive** | the declared cross-capture `NAND` writes 1 supersession; older claim retained, `valid_to=2026-03-05`, `expired_at` stamped, `valid_from` kept; newer interval open; `get_historical_knowledge` returns the old claim through `CORRECTS` | ❌ `assert 0 == 1` | ✅ |
 | **positive (other lookup arm)** | the same declaration on a `resolved` lookup closes the same interval (pre-fix this arm wrote the NAND and closed nothing) | ❌ `assert 0 == 1` | ✅ |
 | **positive (other emission order)** | the SAME declaration with the older claim emitted first closes the same claim (`src`-keyed arm: `assert 0 == 1`) | ❌ | ✅ |
+| **positive (instant precision)** | the DIRECTION is decided on `_created_sort_key` instants, not on the date prefix: a cross-offset pair whose date prefixes invert (`2026-03-06T01:00:00Z` vs `2026-03-05T23:00:00-05:00` = 04:00Z) closes (it is an ordinary arrival order), and a same-day pair whose instants make the arriving claim the OLDER fact is DECLINED with a named warning instead of emitting a refused window while claiming a closure | ❌ | ✅ |
 | **negative (backfill)** | a later capture carrying an EARLIER world date **DECLINES and says so**. World time says the prior is the newer fact, and this channel cannot express that direction: the record's `superseded` side must already be a graph id (`commit_ops.remap_supersession_point_refs` remaps only `supersedes_by`, deliberately — the `pt_` prefix is the lane discriminator), so a payload id there is skipped FAIL-OPEN and both claims stay live while the warning claimed a closure. The declared edge is kept; no interval is closed | ✅ | ✅ |
 | **positive (read)** | a current-scope query for the old claim's own wording no longer answers with it; the terminal scope still does | ❌ | ✅ |
 | **negative (support)** | the *same* two documents with the model declaring `IMPL` (support) close **nothing**; the older claim keeps its open interval and stays current | ✅ | ✅ |
@@ -219,14 +244,17 @@ the *surviving* claims to rank first) is neither implemented nor needed here.
 | **negative (undeclared)** | a corpus that reverses itself in **wording** but declares no edge gains no contradiction. ⛔ A PIN, not coverage: no mutation of the arm can red it (the `none` shape emits no operator at all) | ✅ | ✅ |
 
 Suite: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_14198_contradiction_closure.py -q`
-→ **11 passed**, 6 of them RED on the base commit (FIVE positives — cross-capture,
-other lookup arm, other emission order, the read/composition case, and the
-backfill-decline's warning — plus the second-refuter negative). The emission-order, backfill and event-side cases were
-each measured RED under the mutation that reverts their gate — the `src`-only
-guard, the arrival-order direction, and the missing point-only guard — and the
+→ **12 passed**, 7 of them RED on the base commit (six positives — cross-capture,
+other lookup arm, other emission order, the read/composition case, the
+backfill-decline's warning, and instant precision — plus the second-refuter
+negative). The emission-order, backfill and event-side cases were each measured
+RED under the mutation that reverts their gate — the `src`-only guard, the
+arrival-order direction, and the missing point-only guard — and the
 minted-successor and second-refuter shapes were produced by review, measured
 against the arm, and pinned as pure-function tests (`execute_embed` needs no
-graph).
+graph). The instant-precision case was measured RED under the mutation that puts
+the date-prefix comparison back — in BOTH directions, which is why it asserts
+one closure and one decline.
 
 Regression surface run alongside, all green: `test_extractor_v2`,
 `test_consolidation_4way`, `test_never_across_fold_5080`, `test_10997_i3_partial_run`,
@@ -253,7 +281,13 @@ Regression surface run alongside, all green: `test_extractor_v2`,
    change does not need it — the closure is decided from the S3 prior set /
    the fold's own graph id, both of which the run already has — but a
    *different* endpoint whose identity lookup is partial is still held with no
-   store. That is a separate repair.
+   store. That is a separate repair. ⚠️ One measured consequence for the
+   CENSUS: when the arm fires on a held endpoint the run still reports the
+   `#10997` HELD line *and* the closure line, so `stats["held"]` counts an
+   endpoint whose edge was consumed as a closure — the held count can
+   overcount by one per closed contradiction. Inert while the store is `None`
+   (nothing is persisted to drain); it becomes a double-record only if a store
+   is supplied.
 4. **The `partial` lookup still costs recall.** In the corpus run 11 of 25
    doc-05 candidates went unchecked. When the older endpoint is *not* in the S3
    prior set, this change correctly fails open (a warning, no closure) — a
@@ -275,7 +309,11 @@ Regression surface run alongside, all green: `test_extractor_v2`,
    capture membership — the pre-fix order. For a backfill whose dates are
    unknown this means it does NOT decline (the dates are absent) and the
    consumer refuses the inverted window with its own warning and skip. Stated
-   rather than hidden: the decline is only as good as the dates.
+   rather than hidden: the decline is only as good as the dates. (A TIE is NOT
+   this case: two parseable instants that compare equal are a zero-length
+   predecessor window, which `_supersede_point` accepts, so a same-day pair is
+   ordered by its instants and closes — the date-prefix implementation treated
+   it as unknown instead.)
 7. **Provenance in the declined direction is not touched** — because nothing is
    folded there. `_supersede_point`'s edge transfer (which moves
    `extractedFrom` and the other structural edges to the successor) therefore

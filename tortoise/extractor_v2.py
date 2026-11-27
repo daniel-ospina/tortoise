@@ -12423,6 +12423,21 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     #: attack from the graph with nothing said (review of #14794).
     _closed_prior_ids: set[str] = set()
 
+    def _instant_key(value: str) -> tuple:
+        """The ORDER the write path itself uses (``search_engine._created_sort_key``).
+
+        Imported lazily and degrading to the unparseable bucket: this helper
+        exists to AGREE with `sdk._supersede_window_end`, and an import that
+        failed would otherwise turn an ordering question into a raise. A
+        ``(1, …)`` bucket means "no instant", which the caller reads as "fall
+        back to arrival order" — the same answer an unparseable value gets.
+        """
+        try:
+            from tortoise.search_engine import _created_sort_key
+            return _created_sort_key(value)
+        except Exception:  # noqa: BLE001 — ordering must not raise here
+            return (1, str(value or ""))
+
     def _prior_start(prior_id: str, prior_row: dict | None) -> str:
         """The prior claim's world-time window start, '' when unknown.
 
@@ -12492,8 +12507,22 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         _closed_prior_ids.add(older_id)
         new_when = str(_capture_point_when.get(new_id) or "")
         older_when = _prior_start(older_id, older_row)
-        if (_valid_iso_date(new_when) and _valid_iso_date(older_when)
-                and new_when[:10] < older_when[:10]):
+        # ⛔ THE SAME MEASURE THE WRITE PATH REFUSES ON (review of #14794, P2).
+        # The DATE-PREFIX comparison this gate first used disagreed with
+        # `sdk._supersede_window_end`, which decides the #4021 inverted window on
+        # INSTANTS (`search_engine._created_sort_key`): a same-day pair
+        # (`18:00Z` vs `09:00Z`) TIES on the date, and a cross-offset pair
+        # (`2026-03-05T23:00:00-05:00` = 04:00Z on 03-06 vs
+        # `2026-03-06T01:00:00Z`) compares BACKWARDS. Both errors land on THIS
+        # gate, and it is now the gate that DECLINES: a date-prefix tie sent a
+        # genuine backfill down the arrival branch, which emitted a record whose
+        # successor start precedes its predecessor — refused by the consumer,
+        # both claims live, warning claiming closure; and a date-prefix
+        # inversion DECLINED a closure that was perfectly carryable. Ordering on
+        # the consumer's own instants removes both.
+        k_new = _instant_key(new_when)
+        k_old = _instant_key(older_when)
+        if k_new[0] == 0 and k_old[0] == 0 and k_new < k_old:
             # BACKFILL, and this channel CANNOT express it (#14198 review 2).
             # World time says the PRIOR is the newer fact, so the closure would
             # have to read `superseded = <this capture's claim>, supersedes_by =
@@ -12516,7 +12545,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             warnings.append(
                 "NAND contradiction ACROSS CAPTURES not closed (#14198): world "
                 f"time says the prior point {older_id[:20]!r} is the NEWER fact "
-                f"({older_when[:10]!r} vs this capture's {new_when[:10]!r}), and "
+                f"({older_when!r} vs this capture's {new_when!r}), and "
                 "the point-supersede channel cannot express that direction — "
                 "`superseded` must already be a graph id, so this capture's "
                 "claim cannot be the closed side. The declared edge is kept as "
