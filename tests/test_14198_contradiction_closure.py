@@ -393,7 +393,10 @@ def test_a_backfill_declines_in_the_payload_and_names_the_reason():
 def test_an_event_side_is_dropped_not_recorded_as_a_supersession(make_graph):
     """A NAND whose emitted side is an Event closes nothing — and says so.
 
-    REDS PRE-FIX (review F5, measured): `_resolve` returns `event_ids` as
+    PINS the guard; passes on the base commit too — no mutation of this arm can
+    red it (see REPORT §5, "negative (event side)"). Found RED in an earlier cut
+    of the arm, which had no point-only gate (review F5, measured):
+    `_resolve` returns `event_ids` as
     readily as `point_ids`, the arm accepted the event id as the successor, and
     the consumer then dispatched on the `pt_` prefix of the OLD id and refused
     the event SUCCESSOR (`_assert_lifecycle_guard(target)`). Net effect: the
@@ -654,8 +657,9 @@ def test_a_second_refuter_keeps_its_edge():
 
     `apply_supersessions` treats a terminal target as an idempotent no-op and
     skips it SILENTLY, so suppressing BOTH operators erased the second attack
-    from the graph with nothing said (measured pre-fix: `supersessions: 2`,
-    `supersessions_written: 1`, `operators: 0`, one NAND edge nowhere).
+    from the graph with nothing said. Measured on the cut that had the closure
+    but not the budget (`26b12fe`): `supersessions: 2`,
+    `supersessions_written: 1`, `operators: 0`, one NAND edge nowhere.
     """
     second = "ColdPath does not hold a validated certificate for our routes"
     out, payload = _shape_run({
@@ -674,3 +678,144 @@ def test_a_second_refuter_keeps_its_edge():
         "the second refuter must keep its NAND — the payload cannot skip it "
         "silently the way the consumer would")
     assert str(ops[0]["src"]) == _pid(second)
+
+
+def test_a_declined_backfill_does_not_block_a_closable_refuter():
+    """A DECLINE must not spend the one-closure-per-prior budget (#14198 r3).
+
+    ⛔ MEASURED DEFECT: `_closed_prior_ids.add` ran BEFORE the backfill test, so
+    a declined pair marked the prior as already closed. A LATER refuter of the
+    same prior with a forward world date then returned at the membership guard —
+    no record, and NO WARNING — while the only line in the payload about that
+    prior was the decline's, which asserts the prior is the NEWER fact. That is
+    false for the refuter it silently skipped, and the #14198 defect (two live
+    truths) survived in a shape where the pass had everything it needed.
+
+    The budget is spent by a record that is actually WRITTEN, and by nothing
+    else, so the forward refuter closes and the declined one keeps its edge.
+    """
+    later = "ColdPath's certificate was revoked in the March audit"
+    out, payload = _shape_run({
+        "entities": [], "events": [],
+        "points": [_statement(AUDIT, when="2026-02-03"),      # backfill
+                   _statement(later, when="2026-05-01")],     # forward
+        "operators": [
+            {"op_type": "NAND", "src": AUDIT, "dst": CERT},
+            {"op_type": "NAND", "src": later, "dst": CERT},
+        ],
+    }, _RESOLVED, prior_when="2026-04-01")  # the PRIOR is the newer fact
+    records = out.get("supersessions") or []
+    assert len(records) == 1, (
+        "the declined backfill must not consume the closure — the forward "
+        f"refuter can close this prior; got {records}")
+    assert records[0]["superseded"] == PRIOR_ID
+    assert records[0]["supersedes_by"] == _pid(later), (
+        "the closure must come from the refuter that CAN express it")
+    # The DECLINED edge survives — declining a closure is never dropping
+    # evidence. The CLOSING one does not: its operator is suppressed by design,
+    # because `_supersede_point` re-points/deletes the incident NAND when it
+    # terminalises the predecessor, so the CORRECTS record is the representation.
+    ops = {str(o.get("src")) for o in payload.get("operators") or []}
+    assert _pid(AUDIT) in ops, (
+        "the declined backfill's edge must be kept — it is the only record of "
+        "that refutation")
+    assert _pid(later) not in ops, (
+        "the closing refuter's edge is replaced by the CORRECTS record")
+
+
+def test_the_backfill_decline_is_instant_granular_not_day_granular():
+    """The decline and the consumer must agree on the SAME measure.
+
+    ⛔ MEASURED (review of #14794, P1): the gate first compared `when[:10]`
+    (DATE PREFIXES) while `sdk._supersede_window_end` refuses on INSTANTS
+    (`search_engine._created_sort_key`). A same-day inversion therefore TIES on
+    the date, takes the emitting branch, and the consumer refuses it (#4021) —
+    both claims live WHILE the payload warns the interval was closed, which is
+    the false-success class this whole arm exists to remove. A cross-offset pair
+    fails the other way, declining a closure the instants say is carryable.
+    """
+    # SAME DAY, two hours apart, the later one already in the graph: a backfill.
+    out, _payload = _shape_run({
+        "entities": [], "events": [],
+        "points": [_statement(AUDIT, when="2026-03-05T08:00:00")],
+        "operators": [{"op_type": "NAND", "src": AUDIT, "dst": CERT}],
+    }, _RESOLVED, prior_when="2026-03-05T10:00:00")
+    assert out.get("supersessions") == [], (
+        "a same-day inversion must be DECLINED, not emitted for the consumer "
+        "to refuse while the payload reports a closure")
+    assert any("not closed" in w for w in out.get("warnings") or []), (
+        "the decline must be stated, not inferred from an absent record")
+
+    # CROSS-OFFSET, the ordinary direction once the offsets are applied:
+    # prior 2026-03-06T01:00:00Z, this capture 2026-03-05T23:00:00-05:00
+    # (= 04:00Z on 03-06) — the date prefixes invert, the instants do not.
+    out, _payload = _shape_run({
+        "entities": [], "events": [],
+        "points": [_statement(AUDIT, when="2026-03-05T23:00:00-05:00")],
+        "operators": [{"op_type": "NAND", "src": AUDIT, "dst": CERT}],
+    }, _RESOLVED, prior_when="2026-03-06T01:00:00Z")
+    assert len(out.get("supersessions") or []) == 1, (
+        "a cross-offset pair whose INSTANTS are in the ordinary direction must "
+        "close — declining it on the date prefix loses a carryable closure")
+
+
+def test_the_decline_does_not_promise_an_edge_it_cannot_keep():
+    """The decline's warning must not assert retention it cannot guarantee.
+
+    `_close_prior_contradiction` returns to a caller that EITHER wires the edge
+    (the older side resolved) OR drops it (the `partial` lookup — the #14592
+    receipt's own recorded state). The warning first said "the declared edge is
+    kept as it was", which is false on the drop route: measured, that payload
+    carries the decline sentence AND `operator dropped: src/dst did not resolve`
+    with `operators: []`.
+    """
+    for coverage, label, wires in ((_PARTIAL, "partial", False),
+                                   (_RESOLVED, "resolved", True)):
+        out, payload = _shape_run({
+            "entities": [], "events": [],
+            "points": [_statement(AUDIT, when="2026-02-03")],
+            "operators": [{"op_type": "NAND", "src": AUDIT, "dst": CERT}],
+        }, coverage, prior_when="2026-04-01")
+        assert out.get("supersessions") == []
+        said = [w for w in out.get("warnings") or [] if "not closed" in w]
+        assert said, f"[{label}] the decline must be stated"
+        assert "kept as it was" not in said[0], (
+            f"[{label}] the warning must not promise retention — on the "
+            "partial route the edge is dropped, and saying otherwise puts two "
+            "contradictory lines in one receipt")
+        has_op = bool(payload.get("operators"))
+        assert has_op is wires, (
+            f"[{label}] the decline routes through to the ordinary handling — "
+            f"edge wired={wires}, got {has_op}")
+
+
+def test_an_id_less_prior_row_can_never_be_the_superseded_side():
+    """`not in this capture` is NOT `a prior graph id` (review of #14794, P2).
+
+    Consolidation step 1 folds onto a CONTENT-ADDRESSED payload id when a prior
+    row carries no `id` (it iterates the prior rows with no id filter, while the
+    UPDATE loop below skips id-less priors — the ladder is asymmetric). The
+    wiring route treated "the id is not one this capture emitted" as proof that
+    the older side is in the graph, so that fallback id could land on
+    `superseded`, where `commit_ops.remap_supersession_point_refs` will not
+    remap it and `apply_supersessions` skips the record FAIL-OPEN — both claims
+    live, warning claiming a closure. The module already names this id class:
+    it "names NO graph point — never emit a record onto it".
+    """
+    prior = {"content": CERT, "kind": "statement", "when": "2026-02-03"}  # no id
+    out = None
+    from tortoise.extractor_v2 import execute_embed
+
+    search = {"points": [prior], "query_coverage": _RESOLVED}
+    out = execute_embed({
+        "entities": [], "events": [],
+        "points": [_statement(AUDIT)],
+        "operators": [{"op_type": "NAND", "src": AUDIT, "dst": CERT}],
+    }, search, session_id="shape", session_date="2026-03-05")
+    written = {str(p.get("id")) for p in (out.get("payload") or {}).get("points") or []}
+    for rec in out.get("supersessions") or []:
+        assert str(rec["superseded"]) in written or rec["superseded"] in {
+            str(r.get("id")) for r in search["points"] if r.get("id")}, (
+            "the superseded side must name a node the graph HAS — got "
+            f"{rec['superseded']!r}, which this payload never writes and the "
+            "prior set never names")

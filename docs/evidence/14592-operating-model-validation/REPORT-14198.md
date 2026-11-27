@@ -236,7 +236,11 @@ the *surviving* claims to rank first) is neither implemented nor needed here.
 | **positive (other lookup arm)** | the same declaration on a `resolved` lookup closes the same interval (pre-fix this arm wrote the NAND and closed nothing) | ❌ `assert 0 == 1` | ✅ |
 | **positive (other emission order)** | the SAME declaration with the older claim emitted first closes the same claim (`src`-keyed arm: `assert 0 == 1`) | ❌ | ✅ |
 | **positive (instant precision)** | the DIRECTION is decided on `_created_sort_key` instants, not on the date prefix: a cross-offset pair whose date prefixes invert (`2026-03-06T01:00:00Z` vs `2026-03-05T23:00:00-05:00` = 04:00Z) closes (it is an ordinary arrival order), and a same-day pair whose instants make the arriving claim the OLDER fact is DECLINED with a named warning instead of emitting a refused window while claiming a closure | ❌ | ✅ |
-| **negative (backfill)** | a later capture carrying an EARLIER world date **DECLINES and says so**. World time says the prior is the newer fact, and this channel cannot express that direction: the record's `superseded` side must already be a graph id (`commit_ops.remap_supersession_point_refs` remaps only `supersedes_by`, deliberately — the `pt_` prefix is the lane discriminator), so a payload id there is skipped FAIL-OPEN and both claims stay live while the warning claimed a closure. The declared edge is kept; no interval is closed | ✅ | ✅ |
+| **negative (backfill, record)** | a later capture carrying an EARLIER world date records **nothing** — world time says the prior is the newer fact, and this channel cannot express that direction: the record's `superseded` side must already be a graph id (`commit_ops.remap_supersession_point_refs` remaps only `supersedes_by`, deliberately — the `pt_` prefix is the lane discriminator), so a payload id there is skipped FAIL-OPEN. ⚠️ The GRAPH-level half of this row passes on the base commit (on base nothing is recorded either, for a different reason) — it is a pin against the mutation that puts the inverted window back | ✅ (pin) | ✅ |
+| **negative (backfill, says so)** | …and the payload NAMES the decline, with both world instants, instead of emitting a record the consumer will skip while the warning claims a closure — RED on base (`assert [{'superseded': …}] == []`) | ❌ | ✅ |
+| **negative (backfill does not block a refuter)** | a DECLINED pair must not spend the one-closure-per-prior budget: a later refuter of the same prior with a forward world date still closes it, and the declined pair keeps its edge — pre-fix `_closed_prior_ids.add` ran before the decline, so the forward refuter returned with no record AND no warning while the only line about that prior asserted it was the newer fact | ❌ | ✅ |
+| **negative (decline claims no retention)** | the decline's warning does not promise an edge it cannot keep: on the `partial` route the payload drops the operand and says so, on the `resolved` route it wires it — asserted on both routes, because the first wording ("the declared edge is kept as it was") was false on the route the corpus itself ran | ❌ | ✅ |
+| **negative (id-less prior row)** | the `superseded` side must name a row the PRIOR SET names, not merely "an id this capture did not emit": consolidation falls back to a content-addressed payload id when a prior row carries no `id`, and that id would be skipped FAIL-OPEN on the graph while the warning claimed a closure | ✅ (pin) | ✅ |
 | **positive (read)** | a current-scope query for the old claim's own wording no longer answers with it; the terminal scope still does | ❌ | ✅ |
 | **negative (support)** | the *same* two documents with the model declaring `IMPL` (support) close **nothing**; the older claim keeps its open interval and stays current | ✅ | ✅ |
 | **negative (event side)** | a NAND whose emitted side is an Event closes nothing AND does not claim it did (no `recorded as a supersession` warning). ⚠️ It passes on the base commit too — it pins the guard against the MUTATION that reverts it, and is labelled a pin, not coverage | ✅ | ✅ |
@@ -245,10 +249,12 @@ the *surviving* claims to rank first) is neither implemented nor needed here.
 | **negative (undeclared)** | a corpus that reverses itself in **wording** but declares no edge gains no contradiction. ⛔ A PIN, not coverage: no mutation of the arm can red it (the `none` shape emits no operator at all) | ✅ | ✅ |
 
 Suite: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_14198_contradiction_closure.py -q`
-→ **12 passed**, 7 of them RED on the base commit (six positives — cross-capture,
-other lookup arm, other emission order, the read/composition case, the
-backfill-decline's warning, and instant precision — plus the second-refuter
-negative). The emission-order, backfill and event-side cases were each measured
+→ **16 passed**, and **10 RED on the base commit** (`3f134560b6c`): every
+positive, plus four negatives whose *new* half is an assertion about what the
+run SAYS or about the budget it spends — the backfill-decline's warning, the
+declined-pair budget, the decline's retention claim, and instant precision.
+The counts are measured, not counted by hand: the base run is
+`10 failed, 6 passed`. The emission-order, backfill and event-side cases were each measured
 RED under the mutation that reverts their gate — the `src`-only guard, the
 arrival-order direction, and the missing point-only guard — and the
 minted-successor and second-refuter shapes were produced by review, measured
@@ -300,10 +306,19 @@ Regression surface run alongside, all green: `test_extractor_v2`,
    `supersedes_by` (deliberately: the `pt_` prefix is the record's lane
    discriminator). A payload id there is skipped fail-open, so emitting it would
    produce exactly the false success this change exists to remove. The arm
-   declines with a warning that names the two world dates and says no interval
-   was closed; the declared edge is kept. Closing a backfill needs a producer of
-   the other shape (a graph-id `superseded`), which is a different change.
-6. **An unknown world-time start falls back to arrival order.** The prior's
+   declines with a warning that names the two world instants and says no
+   interval was closed. ⚠️ It does NOT claim the edge was kept: the decline
+   returns to the ordinary handling, which WIRES the NAND when the older side
+   resolved and DROPS it when the identity lookup was partial (the #14592
+   corpus's own recorded state) — so the warning says exactly that, and the
+   adjacent `operator dropped` line carries the rest. The decline also spends no
+   budget: `_closed_prior_ids` is filled only by a record actually written, so a
+   later refuter of the same prior can still close it. Closing a backfill needs
+   a producer of the other shape (a graph-id `superseded`), which is a
+   different change.
+6. **An unknown world-time start falls back to arrival order** — and the ordering
+   is decided on the consumer's OWN instants (`_created_sort_key`), never on a
+   date prefix. The prior's
    `when` reaches the arm through S3's `_enrich_point_priors` (best-effort), and
    the new claim's is its own `when` on the payload point. When either is
    missing or unparseable there is no instant to compare, so the arm orders by

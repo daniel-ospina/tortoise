@@ -12411,7 +12411,12 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     #: the interval was closed. Silent destruction reported as success. So the
     #: precondition is "will the successor EXIST in the write", never "did this
     #: capture mention the id", and the arm DECLINES otherwise (today's
-    #: behaviour: the mint, the edge, no closure).
+    #: behaviour: the mint, the edge, no closure). ⚠️ Deliberately CONSERVATIVE
+    #: in one direction: a minted endpoint that SURVIVES the prune (another
+    #: surviving operator still references it) is excluded here too, so a
+    #: closable closure is declined. Safe direction — a lost closure shows up as
+    #: two live claims, a lost claim does not — and narrowing it needs the
+    #: prune's own reachability computation, which runs after this pass.
     _minted_point_ids: frozenset[str] = frozenset(minted_endpoints)
     _written_point_ids: set[str] = {
         str(p.get("id") or "") for p in payload_points
@@ -12422,6 +12427,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     #: skips it SILENTLY, so suppressing its operator too would erase that
     #: attack from the graph with nothing said (review of #14794).
     _closed_prior_ids: set[str] = set()
+    #: Every id the PRIOR SET actually names. `older_id not in _capture_ids` is
+    #: NOT this property — see the guard in `_close_prior_contradiction`.
+    _prior_graph_ids: set[str] = {
+        str(r.get("id") or "").strip()
+        for r in (search or {}).get("points") or []
+        if isinstance(r, dict) and str(r.get("id") or "").strip()
+    }
 
     def _instant_key(value: str) -> tuple:
         """The ORDER the write path itself uses (``search_engine._created_sort_key``).
@@ -12492,6 +12504,17 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             return False
         if older_id in _capture_ids:
             return False
+        # …and it must name a row of the PRIOR SET, not merely something this
+        # capture did not emit (#14198 review 3, P2). "Not in this capture" is
+        # NOT the same property: consolidation step 1 folds onto a content-
+        # addressed PAYLOAD id when a prior row carries no `id` (:9321-9346
+        # iterates `for p in priors` with no id filter, while the UPDATE loop
+        # below it skips id-less priors — the ladder is asymmetric), so a
+        # fallback id would land on `superseded` and `apply_supersessions` would
+        # skip the record fail-open. `:11626` already names this id class: it
+        # "names NO graph point — never emit a record onto it".
+        if older_id not in _prior_graph_ids:
+            return False
         # The superseder must be a claim of THIS capture. Without this, two
         # endpoints that BOTH folded onto prior graph ids would close one prior
         # claim using another prior claim as its successor — a supersession
@@ -12507,8 +12530,11 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if new_id not in _written_point_ids:
             return False
         if older_id in _closed_prior_ids:
+            # ⚠️ This refusal is SILENT on purpose, and reaching it can only
+            # mean another operator in THIS payload already closed the prior
+            # (below adds the id only after a record is really appended). It
+            # must not be reached by a DECLINE — see the ordering note there.
             return False
-        _closed_prior_ids.add(older_id)
         new_when = str(_capture_point_when.get(new_id) or "")
         older_when = _prior_start(older_id, older_row)
         # ⛔ THE SAME MEASURE THE WRITE PATH REFUSES ON (review of #14794, P2).
@@ -12552,9 +12578,20 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 f"({older_when!r} vs this capture's {new_when!r}), and "
                 "the point-supersede channel cannot express that direction — "
                 "`superseded` must already be a graph id, so this capture's "
-                "claim cannot be the closed side. The declared edge is kept as "
-                "it was; neither interval is closed")
+                "claim cannot be the closed side. No interval is closed; the "
+                "declared edge is handled exactly as it would be without this "
+                "arm — emitted when the older side resolves, dropped when it "
+                "does not, which the adjacent warning states")
             return False
+        # ⛔ THE BUDGET IS SPENT ONLY BY A RECORD THAT IS ACTUALLY WRITTEN
+        # (#14198 review 3, P1): this used to run before the backfill test, so a
+        # DECLINED pair consumed the one-closure-per-prior slot — and a LATER,
+        # closable refuter of the same prior then returned above with no record
+        # AND no warning, leaving the #14198 defect (two live truths) in a shape
+        # where everything needed to close it was present. The only line in the
+        # payload about that prior was the decline's, which asserts the prior is
+        # the newer fact — false for the refuter it silently skipped.
+        _closed_prior_ids.add(older_id)
         # Only ONE direction reaches here, so the record is written once and
         # says exactly that: no `order` variable, because a field that can only
         # ever hold one value reads as if the other direction existed.
@@ -12608,8 +12645,17 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             if op_type == "NAND" and bool(src) != bool(dst):
                 prior_side = "dst" if src else "src"
                 prior_ref = str(o.get(prior_side, "") or "")
+                # ⛔ A LOCAL SINK (#14198 review 3, P2): `_resolve_point_supersede`
+                # writes "point supersedes=… matches no S3 prior — skipped
+                # (fail-open)", and the eval runner counts that marker as the
+                # REPLACE channel dropping a CORRECTS/supersession record. Here
+                # the model declared a NAND, not a `supersedes` ref, so letting
+                # it through mints a replace-channel loss that did not happen —
+                # on the very corpus this PR measures, 2 of doc-05's 3 drops
+                # would be re-attributed. The NAND-shaped fall-through warning
+                # below (`operator dropped: …`) already says what happened.
                 prior_row = _resolve_point_supersede(
-                    prior_ref, search, warnings=warnings)
+                    prior_ref, search, warnings=[])
                 if _close_prior_contradiction(
                         src or dst,
                         str((prior_row or {}).get("id") or "").strip(),
