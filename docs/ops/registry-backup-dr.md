@@ -1070,7 +1070,10 @@ Two residuals are known and tracked, not silently absorbed:
   `ops/teams/{team}/state.json` — takes its incident off every walk, so a still-open
   one needs a manual close after a watcher restart (or when the state disappears
   before this process ever polled it); same class as #3410. A process that DID see it
-  closes it on its next confirmed poll. While the state file lingers it stays open
+  closes it once the recovery window is satisfied — with the default
+  `ALERT_RECOVERY_STREAK=2` that is the second consecutive confirming poll, not the
+  next one (a first healthy observation is `SKIPPED_WINDOW` and the subject is kept
+  pending). While the state file lingers it stays open
   **without churn** (the shrink poll deliberately does not resolve it and then
   re-open it). Arm **(ii)** (#9938: state, plus a live
   prefix, plus no manifest) is a `per_team` key, so it closes on its own once the

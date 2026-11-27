@@ -1559,32 +1559,58 @@ def test_arm_i_outside_census_set_is_STRANDED_across_a_watcher_restart():
     """The `closes_when` payload names the cross-poll diff as the closer for an
     arm-(i) org that has left the census — and that diff is an IN-PROCESS
     register (`_last_backup_set_missing`), so it only closes a subject THIS
-    process saw on a previous CONFIRMED poll (#9938 round 8).
+    process saw on a previous CONFIRMED poll (#9938 round 9).
 
-    Measured at this head, same storage and same three healthy polls, one
-    difference — a second watcher re-creates the register: without the restart
-    the incident closes (`test_watcher_backup_set_missing_closes_when_the_state_
-    disappears`), with it nothing references the subject at all (`to_resolve`
-    sees it in neither `per_team` nor `_last_backup_set_missing`, and a
-    state-only org outside the census has no `per_team` key), so it is stranded
-    and needs a manual close — which is why the payload and the runbook residual
-    say so.
+    Modelled the way production runs it (`hosted_api._alert_store_from` →
+    `_backup_storage()`): ONE persistent alert store over ONE storage, two
+    watcher PROCESSES. That sharing is load-bearing — with a fresh store per
+    process a carried register would still close nothing, and the test would be
+    green under the exact mutation it guards (found by review round 9).
+
+    Without a restart the incident closes
+    (`test_watcher_backup_set_missing_closes_when_the_state_disappears`); with
+    one, nothing references the subject at all (`to_resolve` sees it in neither
+    `per_team` — a state-only org outside the census has no key — nor the
+    register), so no resolve is even ATTEMPTED and it needs a manual close.
     """
     ch = _Channels()
     storage = MemoryStorage()
+    shared = AlertStore(
+        storage, file_issue=ch.file_issue, close_issue=ch.close_issue,
+        search_open=ch.search_open, push_telegram=ch.push_telegram,
+        repo="daniel-ospina/tortoise", assignee="u", now=lambda: FIXED,
+    )
     _seed_state(storage, "team_x")          # arm (i): state, no R2 prefix
-    w = _watcher(storage, ch, orgs=())
-    w.poll()
+
+    def _proc() -> BackupWatcher:
+        return BackupWatcher(
+            storage, shared, org_provider=lambda: [], state_reader=lambda t: {},
+            driver_heartbeat_reader=lambda: {}, stale_threshold_min=90,
+            driver_down_threshold_min=240, grace_min=0, now=lambda: FIXED,
+        )
+
+    _proc().poll()
     assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_x"], ch.issues
 
-    # A watcher RESTART: a fresh in-process register over the same durable state.
-    # (A fresh alert store is immaterial here — no resolve is even attempted, so
-    # no store call is made either way.)
-    w = _watcher(storage, ch, orgs=())
+    # RESTART, then the state disappears — the shape the residual describes.
+    w = _proc()
+    legs: list[tuple[str, str]] = []
+    real_leg = w._alert_leg
+
+    def _spy(op, kind, subject="", detail=None):
+        legs.append((op, kind))
+        return real_leg(op, kind, subject, detail)
+
+    w._alert_leg = _spy  # type: ignore[method-assign]
     storage.delete("ops/teams/team_x/state.json")
     for _ in range(3):
         w.poll()
     assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_x"], ch.issues
+    bsm_resolves = [1 for op, kind in legs
+                    if op == "resolve_incident" and kind == "BACKUP_SET_MISSING"]
+    assert bsm_resolves == [], (
+        "the cross-poll diff is an IN-PROCESS register: with nothing carried over, "
+        f"no resolve may be attempted ({legs})")
     assert not any("resolved" in m.lower() for m in ch.telegram), ch.telegram
 
 
