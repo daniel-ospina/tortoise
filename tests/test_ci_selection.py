@@ -10335,35 +10335,40 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
 def test_the_derivation_surface_claims_are_graded_against_the_manifest():
     """#14623 review: the derivation STATES these files' surfaces, and nothing read them.
 
-    ⛔ NO NUMERAL IN THIS DOCSTRING EITHER (#14623 review): it said "four files" while the
-    derivation names FIVE, and the fifth (`test_expansion_fusion_14344.py` on `core`) was the one
-    missing from the tuple below — an over-claim of coverage written into the arm that exists to
-    prevent over-claims. The tuple is the count.
+    ⛔ NO NUMERAL HERE, deliberately (#14623 review): this docstring said "four files" while the
+    derivation names FIVE, and the fifth — `test_expansion_fusion_14344.py` on `core`, named at
+    `config/ci-surfaces.yml:86` — was the one missing from the assertions below. That is an
+    over-claim of coverage written into the arm that exists to prevent over-claims. The stated
+    set is the count.
 
-    The block names per-file registration while, three lines earlier, asserting that
-    "registration status is a THIS-HEAD fact no arm in this block's family reads" and justifying
-    the gap with "registration membership IS asserted by name elsewhere". Measured: mutating any
-    of these four registrations in the manifest left all eleven header arms GREEN, so that
-    justification did not hold for the files this sentence actually names.
+    The block named each file's surface while asserting, a few lines above, that "registration
+    status is a THIS-HEAD fact no arm in this block's family reads", and justified that gap with
+    "registration membership IS asserted by name elsewhere". Measured: mutating any of those
+    registrations in the manifest left every arm in this block's family GREEN, so the
+    justification did not hold for the files this derivation actually names.
 
     `#14544` is the proof the fact MOVES — `e66997b81e` took `test_dod_5090_probe.py` out of
     `core` — so a fold that drops `onboarding` below would leave the block silently false. The
     values are TRUE at this head; what was missing is the arm that notices when they stop being.
+
+    ⛔ THE WHOLE SURFACE SET IS GRADED, not membership alone: the block's parenthetical describes
+    WHICH surfaces each file is on, so a file that GAINS one it does not name is equally a
+    sentence that needs re-deriving — and a membership-only assertion is green over exactly that.
     """
     m = cs.load_manifest()
-    for fname, surface in (
-            ("test_expansion_fusion_14344.py", "core"),
-            ("test_14592_operating_model_evidence.py", "core"),
-            ("test_14592_operating_model_evidence.py", "eval"),
-            ("test_14592_read_parity.py", "core"),
-            ("test_14592_read_parity.py", "api"),
-            ("test_13450_ep_position_axis_participation.py", "core"),
-            ("test_own_site_fragment_targets.py", "core"),
-            ("test_own_site_fragment_targets.py", "onboarding")):
-        assert fname in m["surfaces"].get(surface, ()), (
-            f"the derivation claims `{fname}` is registered on `{surface}` and it is not — either "
-            f"re-derive that sentence or re-register the file; a registration claim no arm reads is "
-            f"the exact class this block exists to remove")
+    stated = {
+        "test_expansion_fusion_14344.py": {"core"},
+        "test_14592_operating_model_evidence.py": {"core", "eval"},
+        "test_14592_read_parity.py": {"core", "api"},
+        "test_13450_ep_position_axis_participation.py": {"core"},
+        "test_own_site_fragment_targets.py": {"core", "onboarding"},
+    }
+    for fname, surfaces in stated.items():
+        actual = {name for name, members in m["surfaces"].items() if fname in members}
+        assert actual == surfaces, (
+            f"the derivation describes `{fname}` as {sorted(surfaces)} and the manifest has "
+            f"{sorted(actual)} — either re-derive that sentence or re-register the file; a "
+            f"registration claim no arm reads is the exact class this block exists to remove")
     assert "test_14592_operating_model_evidence.py" in m["tier1"], (
         "the derivation claims `test_14592_operating_model_evidence.py` is a `tier1` member and it "
         "is not — re-derive the sentence")
