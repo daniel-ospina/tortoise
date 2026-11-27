@@ -9493,6 +9493,36 @@ def _unquoted_block(header: str) -> str:
     return _QUOTED_SPAN_RE.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', header)
 
 
+def _unbalanced_parenthetical(header: str) -> str | None:
+    """The block's first parenthetical that no matching paren closes, or `None` when all balance.
+
+    A clause DELETED out of the middle of a sentence leaves its CLOSER behind and its opener gone,
+    so the prose still reads as a sentence-shaped run of words while the reason it was carrying is
+    absent — `#14623` shipped exactly that at `fd1726210be8`: the `git show --stat` paragraph lost
+    "a MERGE commit unless it is given `-m` (it falls back to the combined `--cc` form," and kept
+    "which lists a file only when it differs from EVERY parent)". Read on the MASKED block for the
+    same reason the other arms do: a double-quoted span is a record of someone else's text.
+
+    Balance is the GRAMMAR of the block rather than a list of its phrasings, which is the
+    direction this file's own comments ask for after thirteen rounds of guarding English negation
+    by vocabulary. It is a NECESSARY condition, not a sufficient one: a truncation that drops an
+    opener and its closer TOGETHER still balances, so this arm claims truncations that leave half
+    a pair behind and claims nothing else.
+    """
+    text = _unquoted_block(header)
+    depth = 0
+    for offset, char in enumerate(text):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0:
+                return text[max(0, offset - 150):offset + 60]
+    if depth:
+        return text[-200:]
+    return None
+
+
 def _carry_row_claims(header: str) -> tuple[dict[str, set[float]], set[str]]:
     """Files the block says CARRY a `durations` row, split by the POLARITY it states.
 
@@ -13008,6 +13038,54 @@ def test_the_fast_shards_header_block_does_not_claim_its_row_list_is_complete():
     assert not rowless, (
         f"the row enumeration calls {rowless} a `durations` row, but the map carries none: the "
         "weight then comes from `DEFAULT_FAST_WEIGHT`, not from a reading")
+
+
+def test_the_fast_shards_header_block_carries_no_half_deleted_parenthetical():
+    """A clause cut out mid-sentence must not leave its paren behind as a fragment.
+
+    MEASURED at `fd1726210be8`, by reading the block rather than by any arm: the `git show --stat`
+    paragraph lost its middle and kept its closer, so the block shipped
+
+        ⛔ AND MEASURED, NOT with `git show --stat` — that prints NO diff for a
+        which lists a file only when it differs from EVERY parent), and this block's whole
+
+    Every arm in this family was GREEN over it — the row, carry, enumeration and completeness
+    readers all grade CLAIMS, and a severed sentence asserts nothing they can parse. `22bd9521`
+    then closed the same class one paragraph down by deleting an orphan `)`, which removes the
+    fragment's evidence instead of the fragment. The block's parentheticals balance at this head
+    only because the deleted middle was restored, so this arm is what keeps a re-wrapping editor
+    from taking it out again.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    residue = _unbalanced_parenthetical(header)
+    assert residue is None, (
+        "the `fast_shards` block carries a parenthetical whose other half is GONE — a clause was "
+        "cut out of the middle of a sentence and its `)` was left behind, so the sentence still "
+        f"looks like prose while the reason it carried is absent: …{residue}… Restore the deleted "
+        "clause rather than deleting the orphan paren: the fragment is what a reader sees, and "
+        "deleting the leftover `)` only removes the evidence that something was cut")
+    # …and the checker READS that shape: the block's own pre-fix fragment, quoted verbatim from
+    # `fd1726210be8`, REDs. Without this the arm is decoration — a `_unquoted_block` regression or a
+    # balancer pointed at the wrong text would leave assertion 1 GREEN over every severing.
+    for severed in (
+        # the SHIPPED one: opener removed with its clause, closer kept
+        "⛔ AND MEASURED, NOT with `git show --stat` — that prints NO diff for a\n"
+        "which lists a file only when it differs from EVERY parent), and this block's whole "
+        "subject is merges",
+        # the MIRROR class, which `22bd9521` deleted a `)` to hide: the opener stays, nothing closes
+        "measured them — never carried into this derivation (carrying\n"
+        "`#14597`'s expansion fusion over the residue RATCHET",
+    ):
+        assert _unbalanced_parenthetical(severed) is not None, (
+            "the balancer does not read a HALF-DELETED parenthetical it was cut for: "
+            f"{severed!r} — it is grading something other than the block's parens, so any "
+            "severing ships GREEN")
+    # …and TRUE prose is not refused: the restored sentence carries the nested `-m`/`--cc` pair and
+    # must still pass, which is what stops this arm from being solved by deleting the parenthetical.
+    assert _unbalanced_parenthetical(
+        _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))) is None, (
+        "the balancer refuses the block's own restored sentence — it is reading punctuation its "
+        "subject does not own")
 
 
 #: The ISSUE shorthand a row item may be spelled with — `` `#14560`'s `` — and the rule the block

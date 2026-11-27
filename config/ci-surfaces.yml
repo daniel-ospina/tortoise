@@ -71,8 +71,9 @@ version: 1
 # moved seventeen lines INSIDE this block; and an earlier fold, `f2d4f2408cf5`, spliced a SECOND
 # derivation in it (`de311a35a2da`), so `a0cea310786d` is the LAST fold to splice a second
 # DERIVATION — not the only fold to splice anything, since `ff10fb328891` spliced `durations`.
-# ⛔ AND MEASURED, NOT with `git show --stat` — that prints NO diff for a
-# which lists a file only when it differs from EVERY parent), and this block's whole subject is
+# ⛔ AND MEASURED, NOT with `git show --stat` — that prints NO diff for a MERGE commit unless it
+# is given `-m` (it falls back to the combined `--cc` form, which lists a file only when it
+# differs from EVERY parent), and this block's whole subject is
 # merges, so it reads "untouched" over a spliced file: measured on `bf16c791a489`, a two-parent
 # fold in THIS branch's history that moved seventeen lines of this block, and
 # `git show --stat bf16c791a489 -- config/ci-surfaces.yml` printed nothing. The safe form is
