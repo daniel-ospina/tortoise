@@ -416,7 +416,8 @@ async def run() -> int:
                                  {"node_id": eid, "hops": 1})
             # The OWNERSHIP door: `type="governance"` dispatches to
             # `tortoise_get_governance` → `sdk._get_owned_entities`, which reads
-            # `MATCH (s:Subject)<-[:ownedBy]-(e)` (sdk.py:62739-62758) — the
+            # `MATCH (s:Subject)<-[:ownedBy]-(e)` — cited by SYMBOL in `sdk.py`,
+            # not by line range (this one moved 23 lines on a rebase) — is the
             # DECLARED orientation. If the writer points the other way, this door
             # answers `[]` on a graph that holds ownership rows, which is the one
             # read that can witness the inversion directly.

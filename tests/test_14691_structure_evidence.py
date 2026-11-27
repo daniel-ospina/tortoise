@@ -634,7 +634,8 @@ def test_readback_provenance_binds_to_its_producer_or_the_stated_exception():
     # Two arms close it: the documented delta must REPRODUCE `produced_by` when
     # reverted (so any edit other than that one rename reds), and §8's stated
     # CURRENT hash must be the file's real hash.
-    # ⛔ THREE EDITS, STATED AS THREE (#14691 review, round 6, P1). The producer
+    # ⛔ FOUR EDITS, STATED AS FOUR (#14691 review, round 6, P1; the fourth is
+    # #14723's rebase repair). The producer
     # gained two error-vs-empty guards after the producing commit — `_call()` now
     # keeps the MCP `isError` flag, and the D4 emitter refuses a FAILED witness —
     # so the delta is no longer the rename alone. Each removal below must SUCCEED,
@@ -642,6 +643,26 @@ def test_readback_provenance_binds_to_its_producer_or_the_stated_exception():
     # a no-op and the reverted hash then differs from `produced_by`.
     def _reverted_to_producing_commit(text: str) -> str:
         text = text.replace("_element_kind", "element_kind")
+        # ⛔ THE FOURTH EDIT — COMMENT-ONLY, and it removes a claim the tree denied
+        # (#14723's rebase repair). The D6 comment cited the ownership read as
+        # `(sdk.py:62739-62758)`; `origin/main`'s creation hook inserted 23 lines into
+        # `tortoise/sdk.py` above `_get_owned_entities`, so that range no longer opens
+        # on the `def` — a citation the tree contradicts, which is the class the
+        # citation arms in this file exist to catch (they caught this one). It now
+        # cites the SYMBOL. One substitution reverts it, and it is asserted present
+        # first so a later reflow cannot silently drop it from the delta.
+        cited_by_symbol = (
+            "            # `MATCH (s:Subject)<-[:ownedBy]-(e)` — cited by SYMBOL in "
+            "`sdk.py`,\n"
+            "            # not by line range (this one moved 23 lines on a rebase) — "
+            "is the\n")
+        assert cited_by_symbol in text, (
+            "the documented D6 SYMBOL citation is gone from run_readback.py, so the "
+            "delta below no longer describes the file it binds")
+        text = text.replace(
+            cited_by_symbol,
+            "            # `MATCH (s:Subject)<-[:ownedBy]-(e)` "
+            "(sdk.py:62739-62758) — the\n", 1)
         blocks = [
             re.compile(r'(?s) *# ⛔ THE MCP ERROR FLAG LIVES ON THE RESULT.*?'
                        r'\n *"error": f"MCP isError: \{out!r\}"\[:400\]\}\n'),

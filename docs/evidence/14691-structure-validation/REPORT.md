@@ -212,7 +212,7 @@ table. It is below the table now, and the new test pins one row from each half.
 
    **The product's own ownership door proves it from the graph side.** `tortoise_get_entity(id,
    type="governance")` dispatches to `sdk._get_owned_entities`, whose query is
-   `MATCH (s)<-[:ownedBy]-(e)` (`tortoise/sdk.py:62739-62758`) — the **declared**
+   `MATCH (s)<-[:ownedBy]-(e)` (`tortoise/sdk.py:62762-62782`) — the **declared**
    orientation. Asked about all four owners the corpus names, it returns **`[]` for every one**
    (`out/readback.json` → `link_witness.*.governance_owned_by`), on a graph holding six `ownedBy`
    rows. So the inversion is not a convention violation a reader could notice — **it makes ownership
@@ -357,7 +357,7 @@ Every one of these was measured through MCP; none was worked around.
 | **D4** | does `expand_relationships` report the STRUCTURAL edges of an entity, the way it reports the epistemic ones? | **NO — it returns `[]` for a node that has edges, so a structurally-connected entity reads as isolated.** | Lumen Core: 1 row (its `IMPL` to `control-room customers`), 19 real neighbours. Amara Osei / Platform team / event-bus: **0 rows** each, while `explore_connections` sees 6 / 10 / 10. The read covers `IMPL\|NAND\|hasPart` only (`entity_reads.py:551-559`) — and `hasPart` only where it is an operator/point edge. |
 | **D3** | does the full-scan door accept the **bare** kind the packs declare? | **NO — a bare kind returns an EMPTY list with no error while the namespaced spelling returns rows.** | `search_knowledge(kind="product", entity_type="object")` → `[]`; `kind="product-strategy:product"` → 2 rows. Same for `team`/`core:team`. A caller who reads `objectKinds: [product]` in a manifest and asks for it is told *"there is nothing"* — an answer, not a refusal (AX: a surface must not answer where it cannot know). |
 | **D5** | does `graph_overview(section='topics', entity_id=…)` resolve an entity that `get_entity` and `explore_connections` both resolve? | **NO — it answers 'Entity … not found' for 7 of the 7 nodes asked about, including nodes those two doors return.** | Lumen Core, Amara Osei, Platform team, event-bus — all four resolve through `get_entity` and walk through `explore_connections`. |
-| **D6** | does the product's OWNERSHIP door — `tortoise_get_entity(id, type='governance')` — return what each person owns? | **NO — it returns `[]` for all 4 owners asked, on a graph holding 6 `ownedBy` rows.** | `tortoise_get_entity(id, type="governance")` → `_get_owned_entities` reads `MATCH (s)<-[:ownedBy]-(e)` (`sdk.py:62739-62758`), the declared orientation; the written rows point the other way, so nothing points *into* a Subject. |
+| **D6** | does the product's OWNERSHIP door — `tortoise_get_entity(id, type='governance')` — return what each person owns? | **NO — it returns `[]` for all 4 owners asked, on a graph holding 6 `ownedBy` rows.** | `tortoise_get_entity(id, type="governance")` → `_get_owned_entities` reads `MATCH (s)<-[:ownedBy]-(e)` (`sdk.py:62762-62782`), the declared orientation; the written rows point the other way, so nothing points *into* a Subject. |
 | **D2** | can a declared structure element be resolved by NAME through the MCP doors? | **NO for 2 of 32** | `out/readback.json` → `unresolved_elements` (2 rows) and `elements` (32 walks, `root_kind`); the *retrieval* half is a different artifact — `out/t6-score.json` → `A5_retrieval.probes[].walk_root_is_entity`, false on 5/5. ⚠️ The **walked** population is 32, **not** the 28 declared elements §1 names: `run_readback.ALL_ELEMENTS` is the 28 declared names plus every `ownedThing` in `_declared_structure.ownership`, and the 32 rows carry `Lumen Core` and `ingest-gateway` a second time each. Of those 32, 2 do not resolve — `explore_connections(query=…)` resolves names to **Points**, and `ingest-gateway`'s stored name is `ingest-gateway component` (from the sentence *"owns the ingest-gateway component"*). ⚠️ An earlier revision wrote `elements[].walk_root_kind`, a field that exists in neither file. Re-derived by `score_t6._door_findings`, so the artifact cannot state a count its own rows deny. |
 
 ⛔ **THE IDs ABOVE ARE THE ARTIFACT'S OWN** (`out/t6-score.json` → `door_findings`,
@@ -446,7 +446,7 @@ pairs — **13** — is the number this report's A2 line derives independently.
 
 **Its strongest finding was not in my first cut, and I re-measured it before adopting it**: the
 `type="governance"` ownership door returns `[]` for every owner (§3/A2, D6). That claim cited
-`sdk.py:62739` and I read the source, then asked the door in this bundle's own readback — four owners,
+`sdk.py:62762` and I read the source, then asked the door in this bundle's own readback — four owners,
 four empty answers — rather than take the finding on trust.
 
 ⚠️ **Two lanes were writing into one evidence directory and one git branch at the same time.** Its
@@ -482,7 +482,7 @@ measurement. It is also the process fact worth carrying back: the pre-dispatch c
 `provenance.probe_sha256`, the hash of the `run_readback.py` that produced it. It was produced at
 `d4fc8fe51ee5`, where that file hashed
 `5a441859d7f953a91d493d9606b8c8404018a40eac35b658a75e4fbe6200f192`; the file in this tree hashes
-`db619c1b3caffe02a9a59020b6d55f9c9eb24318c8ec98482e7940ae1400d763`, because three edits landed after it: a later commit renamed
+`276be41328cf4df8cbbfe3fd1b941a68d114d10cd7e06b6a08ceec6a8a57725d`, because four edits landed after it: a later commit renamed
 one unused loop variable (`element_kind` → `_element_kind`) to clear a `B007` finding on the
 `agent-infra-ci / lint` leg — **not a required context** (`main`'s protection, the active
 ruleset and `.mergify.yml` require `python-ci-gate`, `docs`, `pricing-artifact`,
@@ -496,7 +496,13 @@ discarding it, and the D4 emitter refuses a witness whose call FAILED, asking th
 spelling of "the call failed" — so a future
 run cannot manufacture D4 from a call that never answered. Both are inert to the numbers in the committed
 artifact (they change what a future run would refuse, not what this one measured), and the sweep
-that measured them is §8.7. The artifact's numbers stand and only the binding is stale. It is stated here rather than silently regenerated, because regenerating a
+that measured them is §8.7. **The fourth edit is comment-only and it removes a claim this tree
+denied** (#14723's rebase repair): the D6 comment cited the ownership read by LINE RANGE,
+and `origin/main`'s creation hook inserted lines into `tortoise/sdk.py` above that method, so the
+range no longer opened on the `def` — the class of defect this bundle's own citation arms exist to
+catch, found by them rather than by a reader. It now cites the SYMBOL and names no line: a symbol is
+what a reader can resolve, and a line range beside it is exactly what moved. The artifact's numbers
+stand and only the binding is stale. It is stated here rather than silently regenerated, because regenerating a
 791 KB receipt would rewrite every number downstream of it to fix a comment-sized defect.
 `tests/test_14691_structure_evidence.py` pins the binding against that stated exception, so a future
 drift reds instead of going unnoticed (which is what let this one through the first review).
@@ -828,7 +834,7 @@ the other three findings, each byte-neutral and `--check`-green:
   `bare_returned 0/0 → 2/3` while its own answer says "EMPTY list", i.e. refute
   itself. The counts are now derived from `bare_kind_probes`, and a FAILED probe is
   refused as a measurement.
-- **D6** — `sdk.py:62739-62758` → `:61000-61019` (unrelated code) was free. The
+- **D6** — `sdk.py:62762-62782` → `:61000-61019` (unrelated code) was free. The
   cited lines must mention `ownedBy`, and `owners_asked`/`rows_returned` must be the
   witnesses that actually answered nothing.
 
@@ -954,15 +960,15 @@ and three of the P2s, and states the residual rather than implying it away.
   grep for, and both arms are now scoped to the owning cell.
 - **P2 — the report's COPIES of the door citations were free.** `readback.json`'s copies are
   pinned to code content, but the report repeats them: `navigation.py:172-179` → `166-173`
-  (the round-10 mutant, applied to the prose) and `sdk.py:62739-62758` → `61000-61019` both
+  (the round-10 mutant, applied to the prose) and `sdk.py:62762-62782` → `61000-61019` both
   left `97 passed`. `test_every_CODE_citation_in_the_documents_is_one_an_artifact_carries`
   grades the SAME site — the same range, one line **inside** it, or a wider span that begins at
   most **20 lines** before the artifact's start (`_CITATION_WIDEN_BOUND`) and ends **exactly**
   where it ends — so the honest wider span (`:533-559` against the artifact's `:551-559`, slack
   18 at the start and 0 at the end) passes while a moved range, a range bracketing the site
-  (`:1-99999`), a range opening more than 20 lines early in unrelated code (`:62718-62758` at 21;
-  `:62720-62758` at 19 still passes, measured), and a range that pads its END onto the site
-  (`:62739-99999`, 37,241 lines) all red (each measured).
+  (`:1-99999`), a range opening more than 20 lines early in unrelated code (`:62741-62782` at 21;
+  `:62743-62782` at 19 still passes, measured), and a range that pads its END onto the site
+  (`:62762-99999`, 37,217 lines) all red (each measured).
 - **P2 — the DUPLICATE figure.** A pin shaped `expected in line` grades ONE copy, so
   `| … **5/5** | 5/5 (parent end…)` kept its second copy free: mutating EITHER `5/5` stayed
   green and only mutating BOTH reddened. `test_the_A2_class_table_derives_BOTH_cells_from_the_artifact`
@@ -1086,9 +1092,21 @@ Round 15's six P1/P2 figures (D4's `0 rows` and `19 real neighbours`, D2's `5/5`
 (adding `scored across 1,234 checks` to the artifacts table's `out/t6-score.json` row) RED; the four
 §3/A4 band figures RED; renaming the `## 9.` heading so the exclusion's lookahead no longer matches
 RED (the arm fails loud rather than silently grading nothing); and the citation bound RED in all
-five refused shapes (`61000-61019`, `61000-62758`, `1-99999`, `62739-99999`, `62718-62758`) while
-`62720-62758` — 19 lines of start slack, inside the 20-line allowance — stayed GREEN, which is what
+five refused shapes (`61000-61019`, `61000-62782`, `1-99999`, `62762-99999`, `62741-62782`) while
+`62743-62782` — 19 lines of start slack, inside the 20-line allowance — stayed GREEN, which is what
 makes the allowance a live bound rather than a blanket.
+
+⛔ **THE D6 SITE WAS RE-DERIVED ON THE REBASE ONTO `origin/main` `e2a9c695ad`, and the figures above
+are the re-derived ones.** `#14624`'s creation hook added lines to `tortoise/sdk.py` ABOVE this
+method, so `_get_owned_entities` moved from `62739-62758` to `62762-62782` — a citation is a claim
+about a line range, and a range that no longer opens on the `def` is a claim the tree denies. The
+suite reds on exactly that (`test_a_door_finding_PROSE_claim_is_derived_not_merely_cited`, both
+arms), which is how the move was found rather than carried. What did NOT move is the substance:
+the refused shapes are stated relative to the site, so 21 lines of start slack is still RED and 19
+is still GREEN, and the artifact was REGENERATED from its producer (`score_t6.py`) rather than
+hand-edited, so `out/t6-score.json` is still `build_score()`'s output. The graph figures this
+report scores (owners asked, rows returned, `ownedBy` row count) are the FIXTURE's and were not
+re-measured by this rebase — only the code citation was re-pointed.
 
 The one defect this pass found was in the rule's own description, not the rule. `_prose_tokens()`'s
 comment stated the excluded population as `### 8.1` to `### 8.19`; it was written when 8.19 was the
