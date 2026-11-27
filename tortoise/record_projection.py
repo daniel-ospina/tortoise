@@ -3930,19 +3930,19 @@ def _record_column_value(table: str, column: str, value: Any, *,
       record holding a value the node no longer has, i.e. the same divergence in
       the opposite direction.
 
-    ⚠️ THAT SECOND ARM MIRRORS THE LIVE DOOR, WHICH IS THE DOOR THAT WROTE — not
-    the graph's `PointRevised` REPLAY fold, and the two differ on this record
-    type for a PRE-EXISTING reason (`#2946`/`#2795`: that fold is an explicit
-    allow-list of fields — annotator dims, `BELIEF_PROPS`, `tags`, validity,
-    provenance, embedding text — and carries NO generic props, so replaying a
-    `PointRevised` keeps an old value a live update had cleared, whatever its
-    value shape). Measured 2026-11-26, both sides: the live `_update_point(pid,
-    quote={...})` leaves the node with no `quote`, while `proj.apply(PointRevised
-    {quote: {...}})` on the graph's replay engine leaves the previous `quote`
-    intact. So a record-sourced rebuild and a journal replay disagree here — a
-    divergence that exists WITHOUT this arm and is `#2946`'s design question, not
-    this fix's. What this arm guarantees is the narrower, load-bearing thing: the
-    record holds what the write that produced it left behind.
+    ⚠️ THAT SECOND ARM MIRRORS THE LIVE DOOR — not the graph's `PointRevised` REPLAY
+    fold, which differs here for a PRE-EXISTING reason (`#2946`/`#2795`: that fold is an
+    explicit allow-list — annotator dims, `BELIEF_PROPS`, `tags`, validity, provenance,
+    embedding text — carrying NO generic props, so replaying a `PointRevised` keeps an
+    old `quote` a live update had cleared; for a prop the fold never carries, a replay
+    leaves the old value while the record CLEARS it). Measured 2026-11-26:
+    `_update_point(pid, quote={...})` leaves no `quote`; `proj.apply(PointRevised
+    {quote: {...}})` leaves the previous one intact. ⛔ `search_keys` is NOT that case:
+    the fold RE-DERIVES it from content (#10203, `identifier_tokens_enabled()` ON by
+    default), so a record-sourced NULL and a replayed alias differ by that derivation,
+    not by a missing prop. So the two stores disagree — pre-existing WITHOUT this arm,
+    and `#2946`'s question. This arm guarantees the narrower thing: the record holds
+    what the write that produced it left behind.
     """
     if table == "point" and column in _POINT_FLATTEN_COLUMNS and isinstance(
             value, Mapping):
