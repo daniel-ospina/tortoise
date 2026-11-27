@@ -693,10 +693,16 @@ def test_the_name_variance_retry_drops_a_KIND_WORD_not_the_FIRST_word():
     full-name arm misses (the pair is never co-stated); `lumen` and `dana` both
     occur in doc-01, and the truncation is what let the row through.
     Post-fix the retry drops ONE trailing kind word (`ingest-gateway component`)
-    and nothing else. ⛔ A CODE-side mutant on `_unweld` reds at the CONTRACT
-    assertions below (`_unweld("Lumen Core product")`), before this row reaches
-    A4 — so the old "the same mutant reds A4" claim named a row that never
-    fires (round 10, mutation attribution P1). The A4-level dependence on the
+    and nothing else. ⛔ A CODE-side mutant on `_unweld` (→ identity) reds here at
+    the BASELINE assertion above the contract block — the one whose message is
+    `baseline is not clean` — because removing the retry flips `passes` to False
+    before any contract row is reached (measured). The CONTRACT assertions below
+    are pinned by a DIFFERENT mutant: the declared-name guard, whose failure message
+    is `un-welding truncated a DECLARED name to a bare common noun` (measured).
+    ⛔ Round 10's "the same mutant reds A4" claim named a row that never fires;
+    naming the CONTRACT rows for the identity mutant was the SAME misattribution
+    one level down, and is corrected here by measurement, not by rewording. The
+    A4-level dependence on the
     retry is pinned where it can actually be measured:
     `test_the_name_variance_rows_are_RECORDED_and_LOAD_BEARING` removes the retry
     and asserts the verdict flips.
@@ -894,9 +900,15 @@ def test_the_name_variance_rows_are_RECORDED_and_LOAD_BEARING():
     "load-bearing" half was a corpus name-presence check that survives the
     retry's removal too). It now derives from the LOADED scorer, and it removes
     the retry to prove the allowance carries the verdict — so the producer mutant
-    reds at the first assertion, and an `_unweld`-to-identity mutant reds at
-    `passes is False`. The committed artifact is still checked, as the receipt it
-    is.
+    reds at the ROW assertion (the first one below), and an `_unweld`-to-identity
+    mutant reds THERE TOO, because dropping the retry drops the row as well as the
+    verdict (measured). The `passes is False` assertion further down is pinned by
+    its OWN mutant — a verdict that ignores `relations_not_co_stated` — which reds
+    exactly there (measured). ⛔ An earlier revision of this paragraph said the
+    identity mutant reds at `passes is False`; it does not, and that is the same
+    mutation-attribution error this paragraph exists to correct, so it is stated
+    here rather than quietly reworded. The committed artifact is still checked, as
+    the receipt it is.
     """
     module = _load_score_module()
     live = module.a4_invention()
