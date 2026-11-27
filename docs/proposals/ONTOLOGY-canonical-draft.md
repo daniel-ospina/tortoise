@@ -239,8 +239,8 @@ it cannot be mistaken for a removal.
 The two sentences the header **gains** — D-3's changelog pointer and `P-3`'s naming rule — are
 deliberately **scoped to new prose**, and the scope is load-bearing, not stylistic. `D-3`'s other
 half is NOT scoped: its strict-zero target for the 323 existing `#NNNN` is the whole-model goal that
-the batches below carry out (`:64`, and §1.8's `P-1`). The neighbouring `as history` clause is
-guarded the same way (§1.3's change list, item 3) and for the same reason: an unconditional rule
+the batches below carry out (`:63`, and §1.8's `P-1`). The neighbouring `as history` clause is
+guarded the same way (§1.4's change list, item 3) and for the same reason: an unconditional rule
 would be false in every shape where a batch has not been approved. An unscoped version of the header
 rule would also contradict the `ONTOLOGY.md:36` carve-out in the shape §F.3 offers as the
 minimal-risk landing — **all six batches with `P-1` and `P-4` rejected**, where **18** references
