@@ -36,14 +36,16 @@ start, `expiredAt` stamped from ingestion time, and the older claim **retained
 as terminal** — closed, never deleted (§2.0: the record is truth) and never
 merged (⛔ no fold).
 
-⛔ THREE gates keep that honest, each pinned by a case below that REDS when it
-is removed: the arm is SYMMETRIC on emission order (the model may write the pair
-either way, and `_canonicalize_nand_direction` cannot repair a cross-capture
-NAND), the emitted side must be a POINT (an Event is a legal NAND endpoint but
-has no point-supersede channel — the consumer refuses it), and the two rivals
-are ordered by WORLD TIME rather than capture membership (#14198: *"facts are
-compared on world-time dates, not arrival order"*), so a backfill does not emit
-an inverted window the consumer refuses.
+⛔ THREE gates keep that honest — and only the first two are pinned by a case
+that REDS when its gate is removed. The arm is SYMMETRIC on emission order (the
+model may write the pair either way, and `_canonicalize_nand_direction` cannot
+repair a cross-capture NAND), and the two rivals are ordered by WORLD TIME
+rather than capture membership (#14198: *"facts are compared on world-time
+dates, not arrival order"*), so a backfill does not emit an inverted window the
+consumer refuses. The third — the emitted side must be a POINT — is
+**redundantly** guarded: an Event is never in `payload_points`, so removing the
+`pt_` gate alone leaves the event-side case green and it takes both gates removed
+to red it (measured; REPORT §5 states the same).
 
 ⛔ It is NOT a lexical contradiction detector. The issue's own ruling is that
 the MODEL labels a contradiction and code does the interval arithmetic; the
@@ -395,8 +397,11 @@ def test_an_event_side_is_dropped_not_recorded_as_a_supersession(make_graph):
 
     Passes on the base commit (nothing closes there) AND is real coverage for
     the surviving guard: removing `_written_point_ids` reds THIS case and the
-    minted-successor one (measured — review of #14794, cycle 4). It is RED in an
-    earlier cut of the arm, which had no point-only gate at all (review F5):
+    minted-successor one (measured — review of #14794, cycle 4). The separate
+    point-only (`pt_`) test that used to sit beside it was INERT once that guard
+    became the authority and has been removed, so this case names the mechanism
+    that actually refuses an Event side. It was RED in an earlier cut of the arm,
+    which had no point-only gate at all (review F5):
     `_resolve` returns `event_ids` as
     readily as `point_ids`, the arm accepted the event id as the successor, and
     the consumer then dispatched on the `pt_` prefix of the OLD id and refused
@@ -847,3 +852,90 @@ def test_an_id_less_prior_row_can_never_be_the_superseded_side():
             "the superseded side must name a node the graph HAS — got "
             f"{rec['superseded']!r}, which this payload never writes and the "
             "prior set never names")
+
+
+def test_a_prior_another_producer_closed_keeps_this_declaration_as_evidence():
+    """A prior closed by ANOTHER producer must not swallow this refutation.
+
+    ⛔ MEASURED (#14198 review 4, P1): a point carrying a declared `supersedes`
+    ref appends its own record — `CERT ← NEW` — before the operator pass runs.
+    `_closed_prior_ids` is this ARM's private budget, so it did not know, and the
+    arm appended a SECOND record for the same prior and `continue`d, suppressing
+    the operator. `apply_supersessions` skips a terminal target with a bare
+    `continue` (no warning, not even a `skipped` entry), so the declared
+    contradiction vanished from BOTH representations — no NAND edge, no CORRECTS
+    edge to this claim, nothing in the census to notice it — and the warning
+    attributed the closure to this pair.
+
+    ⚠️ HONEST SPLIT: on the base commit this test reds ONLY on the last
+    assertion (`said == []` — there is no arm, so nothing explains the
+    closure); the first two pass there because the NAND survives when no arm
+    exists at all. So the structural half is a PIN against the mutation that
+    reinstates the private budget alone — measured: `supersessions` gains
+    `(CERT, AUDIT)` and `operators` goes `[NAND]` → `[]` — and only the warning
+    half is new coverage.
+    """
+    lapsed = "ColdPath Logistics's cold-chain certificate lapsed in March"
+    out = None
+    from tortoise.extractor_v2 import execute_embed
+
+    search = {"points": [{"id": PRIOR_ID, "content": CERT, "kind": "statement",
+                          "when": "2026-01-05"}],
+              "query_coverage": _RESOLVED}
+    out = execute_embed({
+        "entities": [], "events": [],
+        "points": [_statement(lapsed),
+                   _statement(AUDIT),
+                   {**_statement(lapsed), "supersedes": CERT}],
+        "operators": [{"op_type": "NAND", "src": AUDIT, "dst": CERT}],
+    }, search, session_id="shape", session_date="2026-03-05")
+    records = out.get("supersessions") or []
+    assert [r["superseded"] for r in records].count(PRIOR_ID) == 1, (
+        "one record per prior: the consumer drops a second one silently, so a "
+        f"duplicate looks like two closures and is one — got {records}")
+    ops = (out.get("payload") or {}).get("operators") or []
+    assert any(str(o.get("src")) == _pid(AUDIT) and o.get("op_type") == "NAND"
+               for o in ops), (
+        "the declared NAND must survive as the evidence of this refutation — "
+        "the other producer's record already closed the claim, so suppressing "
+        "the edge erases the only trace that THIS document was refuted")
+    said = [w for w in out.get("warnings") or []
+            if "ALREADY closed by" in w]
+    assert said, (
+        "the receipt must say the claim was already closed, and by which "
+        "successor — otherwise the closure is attributed to the wrong document")
+
+
+def test_a_fuzzy_closure_still_discloses_its_recall_band():
+    """A closure decided on a NON-EXACT match must still say so (#8503).
+
+    ⛔ MEASURED (#14198 review 4, P2): the NAND route needs a LOCAL warning sink
+    — forwarding the resolver's refusals would mint a replace-channel loss that
+    did not happen — but the sink first swallowed its SUCCESS line too: `#8503`'s
+    recall-band disclosure, which is the only audit trail for terminalising a
+    live belief on an edge-trimmed match (and there is no un-supersede API to
+    repair a wrong one). It shares the `point supersedes=` prefix with the
+    refusals, so it is forwarded by its own words.
+    """
+    from tortoise.extractor_v2 import execute_embed
+
+    # ONE edge-trippable frame word in front (`_EDGE_TRIMMABLE` — "a", "the",
+    # "we" … are dropped at the edges; "so"/"thus"/"however" are load-bearing
+    # and refuse, which is a different test).
+    framed = f"a {CERT}"
+    search = {"points": [{"id": PRIOR_ID, "content": CERT, "kind": "statement",
+                          "when": "2026-01-05"}],
+              "query_coverage": _PARTIAL}
+    out = execute_embed({
+        "entities": [], "events": [],
+        "points": [_statement(AUDIT)],
+        "operators": [{"op_type": "NAND", "src": AUDIT, "dst": framed}],
+    }, search, session_id="shape", session_date="2026-03-05")
+    assert out.get("supersessions"), (
+        "the edge-trimmed ref must resolve — this test is about what the run "
+        "SAYS when it does")
+    said = " ".join(str(w) for w in out.get("warnings") or [])
+    assert "recall band" in said, (
+        "a closure decided on a non-exact match must disclose its recall band; "
+        "silently dropping it hides that a live belief was terminalised on a "
+        "fuzzy match")

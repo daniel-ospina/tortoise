@@ -12427,7 +12427,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     #: skips it SILENTLY, so suppressing its operator too would erase that
     #: attack from the graph with nothing said (review of #14794).
     _closed_prior_ids: set[str] = set()
-    #: Every id the PRIOR SET actually names. `older_id not in _capture_ids` is
+    #: Every id the PRIOR SET actually names. "Not an id this capture emits" is
     #: NOT this property — see the guard in `_close_prior_contradiction`.
     _prior_graph_ids: set[str] = {
         str(r.get("id") or "").strip()
@@ -12536,10 +12536,34 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if new_id not in _written_point_ids:
             return False
         if older_id in _closed_prior_ids:
-            # ⚠️ This refusal is SILENT on purpose, and reaching it can only
-            # mean another operator in THIS payload already closed the prior
-            # (below adds the id only after a record is really appended). It
-            # must not be reached by a DECLINE — see the ordering note there.
+            # SILENT on purpose: this ARM already closed the prior in this
+            # payload, so the pair's NAND is kept as the evidence of the second
+            # refutation and saying it twice would be noise.
+            return False
+        # ⛔ BUT A PRIOR CLOSED BY *ANOTHER* PRODUCER IS NOT THIS ARM'S BUDGET
+        # (#14198 review 4, P1 — measured, silent loss of evidence). The
+        # payload's `supersessions` already holds records from the UPDATE fold
+        # and from a `supersedes` ref, and `apply_supersessions` treats a
+        # terminal target as a bare `continue` — no warning, not even a
+        # `skipped` entry. So appending a SECOND record for the same prior and
+        # then `continue`ing (suppressing the operator) deleted the declared
+        # contradiction from BOTH representations: no NAND edge, no CORRECTS
+        # edge to this claim, nothing in the census to notice it, and a warning
+        # that attributed the closure to this pair. Measured: payload
+        # `supersessions` gained (CERT, AUDIT), `operators` went `[NAND]` → `[]`,
+        # while the graph's CORRECTS predecessor was the OTHER producer's
+        # successor. Declining instead keeps the NAND as evidence and says who
+        # closed the claim — the second-refuter rationale, one producer over.
+        closed_by = {str(r.get("superseded") or ""): str(r.get("supersedes_by") or "")
+                     for r in supersessions}
+        if older_id in closed_by:
+            warnings.append(
+                f"operator endpoint is an EARLIER-CAPTURE claim (#14198): {where} "
+                f"resolved to prior point {older_id[:20]!r}, whose interval is "
+                f"ALREADY closed by {closed_by[older_id][:20]!r} in this capture "
+                "— so no second supersession is recorded (the consumer would "
+                "skip it as an idempotent no-op, silently). The declared NAND "
+                "is kept as the evidence of this refutation")
             return False
         new_when = str(_capture_point_when.get(new_id) or "")
         older_when = _prior_start(older_id, older_row)
@@ -12660,8 +12684,21 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 # on the very corpus this PR measures, 2 of doc-05's 3 drops
                 # would be re-attributed. The NAND-shaped fall-through warning
                 # below (`operator dropped: …`) already says what happened.
+                # ⚠️ The sink must NOT swallow the resolver's SUCCESS line too
+                # (review 4, P2): `#8503`'s recall-band disclosure says a closure
+                # was decided on a NON-EXACT match ("the same claim once frame
+                # words at its edges are disregarded"), and that is the only
+                # audit trail for terminalising a live belief — in a module whose
+                # own docstring notes there is no un-supersede API. It shares the
+                # `point supersedes=` prefix with the refusals, so it is
+                # forwarded by its own words; the refusals stay dropped, and this
+                # warning path's `0 or 2+ candidates` detail is therefore not
+                # restated here (the fall-through drop warning carries it).
+                _resolver_said: list[str] = []
                 prior_row = _resolve_point_supersede(
-                    prior_ref, search, warnings=[])
+                    prior_ref, search, warnings=_resolver_said)
+                warnings.extend(w for w in _resolver_said
+                                if "recall band" in w)
                 if _close_prior_contradiction(
                         src or dst,
                         str((prior_row or {}).get("id") or "").strip(),
