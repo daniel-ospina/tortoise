@@ -10928,6 +10928,14 @@ _H_14544_INVERTED_RE = re.compile(
 #:     is the weight of the row.` is TRUE) and nothing here tells the two apart;
 #:   * an ANAPHORIC weight that names no row at all (`as is the weight it carries`, `as is its
 #:     weight`) — the noun phrase is required to NAME one, in either order (round 30);
+#:   * a sentence that REPORTS what the row says — `The row states that the REGISTRATION is exempt.`
+#:     — is READ, although it is TRUE prose (measured `READ` at round 34's head, with `states` /
+#:     `records` / `shows` / `says` / `explains` all reading): the run Rule 1b bounds is the same run
+#:     that reads `The row notes that the weight of the row is exempt.`, which IS the false claim, and
+#:     nothing in the pattern tells a reporting verb from an assertive one. A FALSE BLOCK on a shape
+#:     a fold is unlikely to produce, accepted rather than narrowed, because the narrowing would
+#:     reopen the fail-open beside it — and this list says which way the choice went rather than
+#:     leaving it to be rediscovered;
 #:   * a verb-to-`exempt` run LONGER THAN 60 CHARACTERS, or one that CROSSES A CLAUSE BOUNDARY —
 #:     the two bounds Rule 1b actually grades, measured at round 33: `The row is with a great
 #:     deal of confidence and after much discussion among the authors exempt.` (94 characters) and an
@@ -11018,7 +11026,18 @@ _H_14544_AUX = (r"(?:is|are|was|were|do|does|did|has|have|had|will|would|can|cou
 #: expressed as NAMED GROUPS rather than as a test on the matched text. The anaphoric markers elide
 #: the predicate their antecedent stated, so they may read one sentence back:
 #:   `anaph` — `so is the row` / `as did the row's weight` / `so too the row` / `so is its weight`
+#:   `anaph_too` — `so too the row` with the copula DROPPED (round 34)
+#:   `anaph_likewise` — `Likewise, the weight of the row.` (round 34)
+#:   `anaph_same` — `The same goes for the row.` (round 34)
 #:   `ellip` — `…, and the row is too.`
+#: ⛔ ONE TUPLE, so a branch that elides its predicate cannot be spelled without being tagged: a
+#: marker that REPLACES the predicate (a pro-form — `so`/`as`/`likewise`/`so too`/`the same` — or a
+#: bare clause-terminal `too`) can only be read against the sentence before it, and a marker that
+#: ATTACHES to a predicate the same sentence carries (`as well as` / `along with` / `as well` /
+#: `included`) must not read back. The three groups added at round 34 spell the elision WITHOUT a
+#: copula and stood beside the coordinated markers, so they were classified as coordination and
+#: could never fire in a sentence of their own.
+_H_14544_ANAPHORIC_GROUPS = ("anaph", "anaph_too", "anaph_likewise", "anaph_same", "ellip")
 #: A COORDINATION carries its OWN subject and may NOT: `along with the row's weight` is this block's
 #: own TRUE statement of fact about `durations_floors`, and carrying an `exempt` from the sentence
 #: before REFUSED it end-to-end (measured round 30). ⛔ A first attempt tested the match's first
@@ -11032,12 +11051,28 @@ _H_14544_ROW_ADDITIVE_RE = re.compile(
     # the `so|as` alternative above REQUIRES a light verb, so this spelling returned `None`. The verb
     # is optional only AFTER `so too`, which is unambiguous; making it optional after a bare `so`/`as`
     # would refuse TRUE prose like `As the row above states, …`.
-    + r"|so\s+too\s+(?:" + _H_14544_AUX + r"\s+)?" + _H_14544_ROW_NOUN_ANY
-    # coordination that names the row without restating the predicate it modifies
-    + r"|(?:as\s+well\s+as|likewise|along\s+with)\s+" + _H_14544_ROW_NOUN_ANY
+    # ⛔ AND IT IS ANAPHORIC (#14623 round 34): with the copula DROPPED this marker states NOTHING
+    # on its own — `so too` is a pro-form for the previous sentence's predicate — so it must be
+    # TAGGED, or Rule 4 refuses it the antecedent it cannot do without. Measured at round 33's head:
+    # `The REGISTRATION is exempt from the cut. So too the row.` shipped GREEN end-to-end through
+    # `_h_14544_banned_claim` — the branch matched, then the `exempt` gate found no exemption in ITS
+    # OWN sentence and returned None. The coordinated spelling (`… exempt and so too the row.`)
+    # read, because its antecedent is in the SAME sentence, which is what hid this: only the
+    # same-sentence form was ever measured.
+    + r"|(?P<anaph_too>so\s+too\s+(?:" + _H_14544_AUX + r"\s+)?" + _H_14544_ROW_NOUN_ANY + r")"
+    # coordination that names the row without restating the predicate it modifies. ⛔ `likewise` is
+    # NOT one of these, although it stood here until round 34: unlike `as well as` / `along with`,
+    # which attach to a predicate the same sentence states, `likewise` REPLACES that predicate, so in
+    # a sentence of its own it needs the antecedent. Measured at round 33's head:
+    # `The REGISTRATION is exempt from the cut. Likewise, the weight of the row.` shipped GREEN, and
+    # the comma spelling matched no alternative here at all.
+    + r"|(?:as\s+well\s+as|along\s+with)\s+" + _H_14544_ROW_NOUN_ANY
+    + r"|(?P<anaph_likewise>likewise\s*,?\s+" + _H_14544_ROW_NOUN_ANY + r")"
     + r"|" + _H_14544_ROW_NOUN_ANY + r"\s+as\s+well\b"
     + r"|" + _H_14544_ROW_NOUN_ANY + r"\s+included\b"
-    + r"|the\s+same\s+goes\s+for\s+" + _H_14544_ROW_NOUN_ANY
+    # ⛔ A PRO-FORM TOO — `the same` names no exemption either — so it is tagged for the same reason
+    # as `so too the row`. Measured GREEN in its own sentence at round 33's head.
+    + r"|(?P<anaph_same>the\s+same\s+goes\s+for\s+" + _H_14544_ROW_NOUN_ANY + r")"
     # the ELLIPTICAL form, which is ANAPHORIC. ⛔ `too` must END its sentence (Rule 3): an intensifier
     # takes an adjective (`the row is too specific to summarise`) and an appositive continues
     # (`that row, too, is a packing cause`) — both TRUE, both refused by a bare `too\b`.
@@ -11131,8 +11166,12 @@ def _h_14544_row_exempted(sentence: str, previous: str = "") -> str | None:
     m = _h_14544_first_unnegated(_H_14544_ROW_ADDITIVE_RE, sentence)
     if m is None:
         return None
-    # Rule 4: only the anaphoric branches may read the sentence before it.
-    anaphoric = bool(m.groupdict().get("anaph") or m.groupdict().get("ellip"))
+    # Rule 4: only the anaphoric branches may read the sentence before it. ⛔ EVERY anaphoric group
+    # is named in `_H_14544_ANAPHORIC_GROUPS` — a branch that elides its predicate but is missing
+    # from that tuple MATCHES and then finds no `exempt`, which is a GREEN over the very claim it
+    # was added for (how `so too the row` and `the same goes for the row` behaved at round 33's
+    # head), so the two lists are asserted against each other beside the arm.
+    anaphoric = any(m.groupdict().get(name) for name in _H_14544_ANAPHORIC_GROUPS)
     context = previous + " " + sentence if previous and anaphoric else sentence
     if not re.search(r"exempt", context, re.IGNORECASE):
         return None
@@ -11601,11 +11640,45 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # ⛔ AND THE ONE-SENTENCE-APART FORM, which needs `previous`: the block states the exemption once
     # and then reads `So is the row.`  Without the argument the additive marker has no exemption to
     # attach to, so this spelling was GREEN (round 29, P3).
+    #: ⛔ AND EVERY MARKER THAT ELIDES ITS PREDICATE MUST BE IN THIS LOOP (#14623 round 34), not only
+    #: the two that carry a copula. A marker spelled WITHOUT one matches the additive pattern and
+    #: then finds no `exempt` in its own sentence, so it reads as GREEN — measured at round 33's head
+    #: for all three of `So too the row.` / `The same goes for the row.` / `Likewise, the weight of
+    #: the row.`, each after an exempt antecedent. `likewise` is in this loop rather than in the
+    #: coordinated set because it REPLACES the predicate instead of attaching to one.
     for carried, implied in (("The REGISTRATION is exempt", "So is the row."),
+                             ("The REGISTRATION is exempt", "So too the row."),
+                             ("The REGISTRATION is exempt", "So too the weight of the row."),
+                             ("The REGISTRATION is exempt", "The same goes for the row."),
+                             ("The REGISTRATION is exempt", "Likewise the weight of the row."),
+                             ("The REGISTRATION is exempt", "Likewise, the weight of the row."),
                              ("The REGISTRATION is exempt", "The row is too.")):
         assert _h_14544_row_exempted(implied, carried) is not None, (
             f"the additive markers only read an exemption stated in the SAME sentence, so "
             f"{implied!r} after {carried!r} goes GREEN — pass the preceding sentence in")
+    #: ⛔ AND THE TAG IS NOT A LICENCE TO READ BACK (#14623 round 34): each marker above is driven
+    #: against a preceding sentence with NO exemption, where Rule 4's context gate must still say no.
+    #: Without these controls, tagging a coordinate marker anaphoric would silently accept the
+    #: block's own TRUE statement of fact (`along with the row's measured weight`) as a claim.
+    for carried, implied in (("The bin is held by that row in `durations`", "So too the row."),
+                             ("The bin is held by that row in `durations`",
+                              "The same goes for the row."),
+                             ("The bin is held by that row in `durations`",
+                              "Likewise, the weight of the row.")):
+        assert _h_14544_row_exempted(implied, carried) is None, (
+            f"{implied!r} is refused although {carried!r} states no exemption — the anaphoric tag "
+            "must carry the claim, not manufacture one")
+    for coordinated in ("`durations_floors` pins a declared value along with the row's measured "
+                        "weight.",):
+        assert _h_14544_row_exempted(coordinated) is None, (
+            f"{coordinated!r} attaches to a predicate the SAME sentence carries, so it must not be "
+            "in `_H_14544_ANAPHORIC_GROUPS` — a coordinated marker that reads the previous sentence "
+            "refuses this block's own TRUE statement of fact")
+    assert set(_H_14544_ROW_ADDITIVE_RE.groupindex) == set(_H_14544_ANAPHORIC_GROUPS), (
+        "a named group on `_H_14544_ROW_ADDITIVE_RE` is missing from `_H_14544_ANAPHORIC_GROUPS` (or "
+        "names a group the pattern does not carry), so it matches and then cannot read its "
+        "antecedent — that is the GREEN this round closed, and it is invisible at the definition "
+        "site")
     assert _h_14544_row_exempted("So is the row.", "The bin is held by that row in `durations`") is None, (
         "carrying the previous sentence must not manufacture an exemption that was never stated — "
         "a sentence about the row with no `exempt` in it cannot license `So is the row.`")
