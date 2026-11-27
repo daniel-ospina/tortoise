@@ -36,7 +36,16 @@ WHAT THE VERBS ARE FOR, one line each:
   graph's own `outcome` uses — so the summary cannot contradict the detail.
   This verb exists for an operator reading the numbers BEFORE arming a
   production deployment; a dry run that reported `seeded: N` would be read as
-  "N graphs are healed" by the one reader it has.
+  "N graphs are healed" by the one reader it has. ⛔ AND IT IS NOT A CLEAN EXIT
+  (#14587 review cycle 5, P2): a real run with any ``K refused`` returns
+  ``EXIT_REFUSED``, and so does a run with any ``arm_refused`` — the arm
+  refusal the counters above cannot see, because it is per graph and the run
+  continues. Both are reported in the PAYLOAD, not on stderr, and a
+  ``--dry-run`` is exempt (it returns ``EXIT_OK``: it wrote nothing and its
+  refusals are a projection). A scripted caller reads
+  ``graphs[i].reason`` / ``graphs[i].arm_refused``; a caller that treats exit 1
+  as "nothing happened" is wrong about every ``arm_refused`` graph, which was
+  seeded.
 
 THE SEED'S ONE INPUT THAT CANNOT BE DERIVED. `enumerated_floor` is *how many
 records a replay of THIS graph's journal enumerates* — the caller's fact. Two
@@ -71,9 +80,21 @@ preference; it is the tenant boundary.
 EXIT CODES (the rail's contract, not decoration):
 
   0  the verb happened (``status`` walked, ``seed``/``arm``/``halt``/``reopen`` wrote)
-  1  REFUSED by the allocator, with ``reason`` named on stderr (``divergence``,
-     ``armed``, ``missing``) — the graph is unchanged and working; read the
-     reason, do not re-run blindly
+  1  REFUSED — but WHICH SHAPE depends on the verb, and a scripted caller must not
+     conflate them:
+       * the single-graph verbs: REFUSED by the allocator, with ``reason`` named
+         on stderr (``divergence``, ``armed``, ``missing``) — the graph is
+         unchanged and working; read the reason, do not re-run blindly.
+       * ``backfill``: a refusal REPORTED IN THE PAYLOAD, never on stderr
+         (``refused`` for a graph the seed refused, ``arm_refused`` for a graph
+         the seed took and ``--arm`` could not). The reason is per graph, at
+         ``graphs[i].reason`` / ``graphs[i].arm_refused``, and the run
+         CONTINUES past it — so the population may be partly written. ⛔ An
+         ``arm_refused`` graph HAS CHANGED (it was seeded, and ``seeded``
+         allocates nothing until armed), which is why the fix for it is the
+         ``reopen`` command the entry names, not a re-run. ``--dry-run`` is
+         EXEMPT: it wrote nothing and its refusals are a projection, so it
+         returns 0.
   2  usage / environment (bad arguments, no DSN, no psycopg2, unreachable record)
 
 Usage:
@@ -684,6 +705,13 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
 
     entries: list[dict[str, Any]] = []
     seeded = refused = armed = 0
+    #: `--arm` refusals, counted SEPARATELY from `refused` (#14587 review P2).
+    #: A `halted` graph takes the seed leg (`seeded += 1`) and then refuses the
+    #: arm at `entry["arm_refused"]`, so it is in NEITHER `refused` NOR
+    #: `payload["refusals"]` — and a run of only those exited 0 over graphs that
+    #: allocate nothing, which is the shape `_exit_code_for`'s docstring says the
+    #: verb exists to remove. Counted so the exit code can see it.
+    arm_refused = 0
     #: The dry-run projection, counted separately from the writes. A dry run
     #: performs neither a seed nor an arm, so `seeded`/`armed` cannot be the
     #: field an operator reads to learn what the run WOULD do (#14624 review 3).
@@ -785,6 +813,7 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
             if arm_them:
                 entry["armed"] = bool(armed_now)
                 if not armed_now:
+                    arm_refused += 1
                     entry["arm_refused"] = (
                         f"the counter is {result.mode!r} after the seed and `arm` "
                         f"moves only `seeded` → `active` — run `reopen --org-id "
@@ -808,6 +837,11 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         "considered": len(graphs),
         "seeded": seeded,
         "refused": refused,
+        # ⛔ AN `--arm` REFUSAL IS A REFUSAL THE EXIT CODE MUST SEE (#14587 review
+        # P2): a `halted` graph is `seeded` and then refused the arm, so it is in
+        # neither `refused` nor `refusals` above, and a run made ONLY of those
+        # used to exit 0 over graphs that allocate nothing.
+        "arm_refused": arm_refused if arm_them else None,
         "armed": armed if arm_them else None,
         # ⛔ A DRY RUN REPORTS WHAT IT WOULD DO, NEVER WHAT IT DID. `seeded` and
         # `armed` above stay 0 on a dry run (nothing was written, nothing was
@@ -1063,6 +1097,44 @@ def main(argv: list[str] | None = None) -> int:
             conn.close()
 
     _emit(args, payload)
+    # ⛔ A REFUSAL IS NOT A CLEAN EXIT (#14587 review P3): the exit code covers
+    # the refusals the payload reports. See `_exit_code_for`.
+    return _exit_code_for(payload, dry_run=bool(getattr(args, "dry_run", False)))
+
+
+def _exit_code_for(payload: dict[str, Any], *, dry_run: bool) -> int:
+    """A REFUSAL IS NOT A CLEAN EXIT (#14587 review P3).
+
+    `backfill` printed `K refused` with a working remedy per graph and then
+    returned ``EXIT_OK``, while the single-graph ``seed`` returns
+    ``EXIT_REFUSED`` on the same `SeedRefused`. A human reading the payload is
+    told everything; a SCRIPTED caller reads the exit code, and it was told
+    "fine" over graphs that still allocate nothing — the exact shape (`exit 0`
+    over uncut graphs, so a checklist step reads as passed) this verb exists to
+    remove. So the exit code covers the refusals it reports.
+
+    A ``--dry-run`` does not: it wrote nothing, its refusals are a PROJECTION,
+    and refusing a pre-flight because it correctly PREDICTED a refusal would
+    make the dry run useless for the decision it exists to inform.
+    """
+    if dry_run:
+        return EXIT_OK
+    refused = payload.get("refused")
+    # ``refused`` is an INT for ``backfill`` and a STRING token on the refusal
+    # payloads other verbs emit; only the counted form is a run-level verdict
+    # here (the string forms already returned EXIT_REFUSED where they were
+    # built). `bool` is not a count either — `isinstance(True, int)` is True.
+    if isinstance(refused, int) and not isinstance(refused, bool) and refused > 0:
+        return EXIT_REFUSED
+    # ⛔ AND AN `--arm` REFUSAL COUNTS (#14587 review P2). A `halted` graph is
+    # `seeded` and then refused the arm, which lands in `arm_refused` and in
+    # neither `refused` nor `refusals` — so without this arm a `--arm` run over
+    # halted graphs exited 0 over graphs that allocate nothing, the exact
+    # `exit 0`-over-uncut shape the docstring above says this verb removes.
+    arm_refused = payload.get("arm_refused")
+    if (isinstance(arm_refused, int) and not isinstance(arm_refused, bool)
+            and arm_refused > 0):
+        return EXIT_REFUSED
     return EXIT_OK
 
 
