@@ -396,24 +396,30 @@ def test_the_renderer_refuses_the_all_surface_combination(tmp_path):
             "artifact the refusal exists to prevent")
 
 
-#: THE PER-ITEM BUDGET THIS ONE ARM DECLARES, because its cost is TWO FULL-TREE
-#: CENSUSES (`--markdown --all-surface` AND `--json --all-surface`, ~9,239 rows
-#: each) and `pyproject.toml`'s `timeout = 300` note says exactly what an item
+#: THE PER-ITEM BUDGET THIS ONE ARM DECLARES, because its cost is a FULL-TREE
+#: CENSUS — `--markdown --all-surface` walks every tracked Python file (~9,239
+#: rows) — and `pyproject.toml`'s `timeout = 300` note says exactly what an item
 #: like that must do: "a leg that needs a longer single item must SAY so —
 #: `--timeout=N` in the workflow or `@pytest.mark.timeout(N)` on the test".
-#: MEASURED, not guessed: ~140 s on an idle box (54.5 s + 85.0 s of census), and the
-#: shipped 300 s cap is crossed by load alone — CI run 45926492586, shard `(h)`:
+#: MEASURED, not guessed: ~54.5 s for that census on an idle box, and the shipped
+#: 300 s cap is crossed by LOAD ALONE — CI run 45926492586, shard `(h)`:
 #: `FAILED tests/test_13098_cypher_inventory.py::test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish
 #: - Failed: Timeout (>300.0s) from pytest-timeout.` ⛔ THAT RED IS NOT THIS
 #: SUITE'S GUARD AND NOT `#14741`'s: the cost is the census's AST walk, measured
 #: on BOTH trees over the same tree — `origin/main`'s `--markdown --all-surface`
 #: 51.0 s / 9,239 rows vs this head's 54.5 s / 9,239 rows, i.e. the boundary guard
 #: this PR adds does not move it (it runs in the `--render` branch only, and
-#: `--render` with `--check` is REFUSED here in 0.08 s). Two censuses is what the
-#: arms below need — one per output verb, each asserting its own PAYLOAD, because
-#: an rc-only arm cannot tell a wide census from the narrow one (`#14625` review,
-#: P2) — so the budget is what moves, not the coverage. 600 s is 4.3x the idle
-#: cost and ~2x above the observed failure point, and it is the same bound
+#: `--render` with `--check` is REFUSED here in 0.08 s).
+#:
+#: ⛔ AND ONLY ONE CENSUS IS PAID NOW, NOT TWO (`#14757`). The arm used to run
+#: `--json --all-surface` for real as well, and that form enumerates TWICE
+#: (`census()` then `rg_totals()`) — measured **6m10s** on this head over 2,604
+#: tracked files, i.e. the expensive half of the arm and past the 300 s default ON
+#: ITS OWN. The JSON form's widening is now graded at the TERM that carries it (the
+#: `prefixes`/`drop_test_modules` pair `main()` hands the enumerators) instead of by
+#: paying for the traversal twice — see the arm's own comment — so the surviving
+#: 600 s bound is ~11x the idle cost of what remains and absorbs the CI load the
+#: 300 s default could not. It is also the same bound
 #: `tests/test_7951_delete_resurrection.py` declares for its own cold-load arm.
 _DOUBLE_CENSUS_BUDGET_S = 600
 
@@ -439,7 +445,7 @@ def _item_timeout_s(item) -> float:
 
 @pytest.mark.timeout(_DOUBLE_CENSUS_BUDGET_S)
 def test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish(
-        tmp_path, request):
+        tmp_path, request, monkeypatch, capsys):
     """`--check --render <path>` must not accept a write it then silently drops.
 
     ⛔ THE NO-OP-GATE SHAPE, measured at #14625's round-4 review: `main()` returns
@@ -463,11 +469,11 @@ def test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish(
     budget = _item_timeout_s(request.node)
     assert budget == float(_DOUBLE_CENSUS_BUDGET_S), (
         f"this arm must carry @pytest.mark.timeout({_DOUBLE_CENSUS_BUDGET_S}); it "
-        f"resolves to {budget:g} s. Its TWO wide censuses cost ~140 s idle and "
-        "crossed the 300 s default under CI load (`Failed: Timeout (>300.0s)`, "
-        "run 45926492586 shard (h)), so a lower budget hands this arm back to a "
-        "flake that reds the required `python-ci-gate` for a diff it does not "
-        "touch — and the assertions below cannot see that."
+        f"resolves to {budget:g} s. Its surviving FULL-TREE census costs ~54.5 s "
+        "idle and the 300 s default was crossed by CI LOAD alone ("
+        "`Failed: Timeout (>300.0s)`, run 45926492586 shard (h)), so a lower budget "
+        "hands this arm back to a flake that reds the required `python-ci-gate` for "
+        "a diff it does not touch — and the assertions below cannot see that."
     )
 
     out = tmp_path / "both.md"
@@ -516,33 +522,90 @@ def test_check_and_render_in_one_command_are_REFUSED_so_the_write_cannot_vanish(
                 f"the refusal must name every verb in `{' '.join(combo)}` so the lane "
                 f"knows what to split; stderr was:\n{both.stderr}")
 
-    for legal in (("--markdown", "--all-surface"), ("--json", "--all-surface")):
-        ok = subprocess.run(
-            [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"), *legal],
-            capture_output=True, text=True, cwd=ROOT,
-        )
-        assert ok.returncode == 0, (
-            f"`{' '.join(legal)}` must stay LEGAL — `--all-surface` is the modifier "
-            f"that widens the census, not a second output verb; got {ok.returncode} "
-            f"with stderr:\n{ok.stderr}")
-        # ⛔ AND THE PAYLOAD, NOT JUST THE EXIT CODE (#14625 review, P2). Asserting
-        # `rc == 0` alone cannot tell §1's WIDE census from the PRODUCT census — a
-        # regression that silently ignores `--all-surface` (exactly the
-        # scope-narrowing the sibling refusal arm exists to prevent) would stay
-        # green, and the two outputs differ by ~7,900 rows. Measured at this head:
-        # `--markdown` emits ~1,334 lines, `--markdown --all-surface` ~9,239; the
-        # JSON form names its prefix set, which is the whole difference.
-        if "--json" in legal:
-            payload = json.loads(ok.stdout)
-            assert payload["prefixes"] == ["."], (
-                "`--json --all-surface` must report the ROOT prefix `.` (the wide "
-                f"census); got prefixes={payload['prefixes']!r} — `--all-surface` was "
-                "accepted and then ignored")
-        else:
-            assert len(ok.stdout.splitlines()) > 2000, (
-                "`--markdown --all-surface` must emit the WIDE table (thousands of "
-                f"rows at this tree); got {len(ok.stdout.splitlines())} line(s), i.e. "
-                "`--all-surface` was accepted and then ignored")
+    # ⛔ AND THE WIDENING OF BOTH WIDE FORMS, WITH ONLY ONE TRAVERSAL PAID FOR
+    # (#14757, measured). `--all-surface` widens the census in exactly TWO terms
+    # inside `main()` — `prefixes = (".",)` instead of `("tortoise",)` and
+    # `drop_test_modules=False` instead of `True` — and a wide table's SIZE is a
+    # consequence of those two terms, not an independent fact. So:
+    #
+    #   * `--markdown --all-surface` runs FOR REAL: the end-to-end wide census stays
+    #     graded, so a regression that breaks the enumeration itself still reds;
+    #   * `--json --all-surface` is graded at the TERM, because it is the form that
+    #     enumerates TWICE (`census()` then `rg_totals()`): measured **6m10s** on this
+    #     head over 2,604 tracked files — past this repo's 300 s per-test timeout ON
+    #     ITS OWN — and CI paid for it: `Failed: Timeout (>300.0s) from
+    #     pytest-timeout`, after which shard (h) was WATCHDOG-killed at 22m (rc 137)
+    #     reporting `test leg INCOMPLETE — no pytest summary; failure set
+    #     unobservable`, discarding 1,496 results that had already passed. A gate that
+    #     cannot run fails on the WRONG axis: it grades the box, not the invariant it
+    #     claims.
+    #
+    # The prefix assertion is also STRICTER than the row count it replaces: `>2000
+    # lines` could not tell `--all-surface` from a wider default, and the PRODUCT
+    # direction is graded below too, so a form that widened UNCONDITIONALLY cannot
+    # ride either.
+    ok = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "cypher_inventory.py"),
+         "--markdown", "--all-surface"],
+        capture_output=True, text=True, cwd=ROOT,
+    )
+    assert ok.returncode == 0, (
+        "`--markdown --all-surface` must stay LEGAL — `--all-surface` is the "
+        "modifier that widens the census, not a second output verb; got "
+        f"{ok.returncode} with stderr:\n{ok.stderr}")
+    # ⛔ AND THE PAYLOAD, NOT JUST THE EXIT CODE (#14625 review, P2). `rc == 0` alone
+    # cannot tell §1's WIDE census from the PRODUCT census — a regression that
+    # silently ignores `--all-surface` would stay green, and the two outputs differ
+    # by ~7,900 rows. Measured at this head: `--markdown` emits ~1,334 lines,
+    # `--markdown --all-surface` ~9,239.
+    assert len(ok.stdout.splitlines()) > 2000, (
+        "`--markdown --all-surface` must emit the WIDE table (thousands of rows at "
+        f"this tree); got {len(ok.stdout.splitlines())} line(s), i.e. "
+        "`--all-surface` was accepted and then ignored")
+
+    handed: list[tuple[str, tuple[str, ...], bool]] = []
+
+    def _recording(name):
+        def recorder(prefixes, *, drop_test_modules=True):
+            handed.append((name, prefixes, drop_test_modules))
+            return {"prefixes": list(prefixes), "files_scanned": 0,
+                    "files_with_sites": 0, "sites": [],
+                    "non_cypher_door_calls": 0, "unparsed_files": 0, "partial": 0}
+        return recorder
+
+    monkeypatch.setattr(census, "census", _recording("census"))
+    monkeypatch.setattr(census, "rg_totals", _recording("rg_totals"))
+
+    capsys.readouterr()
+    assert census.main(["--json", "--all-surface"]) == 0, (
+        "`--json --all-surface` must stay LEGAL — `--all-surface` is the modifier "
+        "that widens the census, not a second output verb; a refusal here breaks "
+        "§1's own wide-census recipe")
+    assert ("census", (".",), False) in handed, (
+        "`--json --all-surface` must census the ROOT prefix `.` with the test modules "
+        "INCLUDED — that is what `--all-surface` means. `main()` handed the "
+        f"enumerator {[(n, p, d) for n, p, d in handed]}, so the flag was accepted "
+        "and then IGNORED")
+    assert ("rg_totals", (".",), False) in handed, (
+        "`--json --all-surface` re-reads the index for its `rg` totals, so that "
+        "SECOND enumeration must widen too; `main()` handed it "
+        f"{[(n, p, d) for n, p, d in handed]}")
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["prefixes"] == ["."], (
+        "`--json --all-surface` must report the ROOT prefix `.` (the wide census); "
+        f"got prefixes={payload['prefixes']!r} — `--all-surface` was accepted and "
+        "then ignored")
+
+    # ⛔ THE COUNTERWEIGHT. Without it, a `main()` that widened UNCONDITIONALLY — the
+    # mirror regression, which would make §1's product counts unreproducible — passes
+    # every assertion above.
+    handed.clear()
+    assert census.main(["--json"]) == 0, (
+        "the PRODUCT `--json` form must stay legal; it answered non-zero")
+    assert handed and {(prefixes, drop) for _, prefixes, drop in handed} == {
+        (("tortoise",), True)}, (
+        "the product `--json` form must census `tortoise/` with the test-module "
+        f"exclusion ON; `main()` handed {[(n, p, d) for n, p, d in handed]}")
 
 
 def test_the_output_verb_refusal_is_pinned_over_the_PARSER_not_over_a_hand_list():
