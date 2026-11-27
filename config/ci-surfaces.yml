@@ -57,7 +57,6 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `c4b4142017b9` folded in, over
 # reader of the prose can see. On THIS tree — `origin/main` `e2a9c695adfb` folded in, over
 # `a0cea310786d`, the fold THIS BRANCH de-spliced (the de-splice is a commit of this branch's own,
 # not an act that fold performed — the possessive spelling credited it with an edit it never made);
