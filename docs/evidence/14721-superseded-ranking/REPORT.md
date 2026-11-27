@@ -217,7 +217,7 @@ uv run python tools/surface_manifest.py check
     → OK — 39 tool rows, 73 retired, thirteen properties hold
 uv run python tools/surface_manifest.py render  → wrote docs/product/mcp-sdk-surface.md
 uv run python tools/ci_selection.py --integrity → ✅ all test files classified
-python3 tools/sdk_privatise.py --check         → 11911 now vs 11912 baseline (1 FEWER — passes)
+uv run python tools/sdk_privatise.py --check    → 11911 now vs 11912 baseline (1 FEWER — passes)
 ```
 
 ## 5.2 Independent review — what it found, and what was fixed
