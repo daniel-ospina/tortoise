@@ -57,17 +57,15 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — `origin/main` `32ce876fbf` folded in, over
-# `ff10fb328891`, the fold THIS HEAD de-spliced one fold earlier (the de-splice is a commit of this
-# branch's own, not an act that fold performed — the possessive spelling credited it with an edit it
-# never made)
-# — the rows below landed across the folds and the
+# reader of the prose can see. On THIS tree — `origin/main` `32ce876fbf` folded in by `0bb030fad1` —
+# the rows below landed across the folds and the
 # ones before them. ⛔ NO POOL SIZE, NO ROW COUNT AND NO FOLD LIST here either — the rule the
 # paragraph below states, and the reason it is stated twice: an earlier spelling of THIS sentence
 # named a fold as "the newest" that was not, and credited another with a splice its file never
 # took. What a reader needs is PER-COMMIT fact, not a window: the splice that was de-spliced HERE
 # arrived on THIS branch's OWN union fold `0bb030fad1` — `git show 0bb030fad1:config/ci-surfaces.yml`
-# states the `watchdog_minutes: 28` derivation TWICE while `cd440fc70a` and this head state it ONCE —
+# states the `watchdog_minutes: 28` derivation TWICE while `cd440fc70a` states it ONCE — re-measure on
+# `cd440fc70a`, never on this tree, whose own count includes THIS sentence's quotation of the literal —
 # so the de-splice is
 # `cd440fc70a`'s, and it is not an act any `origin/main` commit performed: `e2a9c695adfb` and
 # `a0cea310786d` are single-parent commits carrying ONE derivation each, so neither is a fold and
@@ -78,7 +76,7 @@ version: 1
 # here. `bf16c791a489`, the fold cited in the next sentence, is itself after `a0cea310786d` and
 # moved seventeen lines INSIDE this block; and an earlier fold, `f2d4f2408cf5`, spliced a SECOND
 # derivation in it (`de311a35a2da`) — so "the last fold to splice anything" is itself a window
-# this head DECLINES to state, `ff10fb328891` having spliced `durations`.
+# this head DECLINES to state, `24493da53136` having spliced `durations`.
 # ⛔ AND MEASURED, NOT with `git show --stat` — that prints NO diff for a MERGE commit unless it
 # is given `-m` (it falls back to the combined `--cc` form, which lists a file only when it
 # differs from EVERY parent), and this block's whole subject is
