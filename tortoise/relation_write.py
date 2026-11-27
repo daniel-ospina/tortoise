@@ -161,7 +161,10 @@ not something the declaration can orient. See that function's residuals.
 ACCOUNTING
 ----------
 ``written + dropped + folded`` reconciles with the stated population, on EVERY
-arm — including the four where it did not (#11548 round 3 P2 + review F3):
+arm — including the four where it did not (#11548 round 3 P2 + review F3) — with
+ONE disclosed exception, named in the last bullet and repeated here so the
+headline cannot be read as unqualified: two statements that the ORIENTATION leg
+folds into one edge report ``written=1`` for a stated population of ``2``.
 
 * a refused edge that carried a fold reports one drop per LOST MEANING (never a
   bare "1 drop" for two statements);

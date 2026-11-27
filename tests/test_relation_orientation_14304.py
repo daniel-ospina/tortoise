@@ -84,9 +84,12 @@ def test_the_measured_corpus_pair_is_reversed_but_UNDECLARED_in_both_orders():
 
     `ownedBy` IS declared (`packs/dev`: `core:goal -> Subject`), so the pair leg
     has a premise — and it answers `reversed_pair` for the reverse of the
-    DECLARED pair, which the measured pair is not. Both orders are
-    `reversed_orientation` here because every declared `ownedBy` row puts its
-    label-spelled end (`Subject`) on the TARGET side.
+    DECLARED pair, which the measured pair is not. `core:naturalPerson -> object`
+    and `object -> core:naturalPerson` are both NOT `reversed_pair`, because no
+    pack declares this pair in either order. (The ORIENTATION leg is a different
+    question — it reads the label-spelled side, which is what
+    `test_the_owner_on_the_source_side_is_reversed` and
+    `test_the_owner_on_the_target_side_is_left_alone` assert, not this test.)
     """
     from tortoise.relation_guards import (
         REVERSED_PAIR,
@@ -322,9 +325,12 @@ def test_the_correction_carries_no_prose_from_the_record():
 def test_two_statements_of_one_fact_are_one_edge_after_orientation():
     """`A owns B` and `B --ownedBy--> A` are the SAME edge once oriented.
 
-    ⛔ A silent drop would be the one thing this leg must not do, so the second
-    statement is a recorded FOLD on the edge the first one planned — the same
-    accounting the arm already applies to a second verb over one pair.
+    ⛔ A silent drop would be the one thing this leg must not do, and ⛔ nor is
+    a second, opposite edge written. The second statement reaches the plan's
+    identity key AFTER its ends were oriented, so it is the same edge and is
+    deduped — the same accounting a literal repeat gets, ``folded`` EMPTY
+    because the predicate did not change (`_fold_onto` returns on an identical
+    ``stated_predicate``; a fold records a DIFFERENT meaning over one edge).
     """
     edges, drops = plan_relation_edges(
         [{"src": "Dana", "dst": "NordicFreight account",
@@ -335,6 +341,54 @@ def test_two_statements_of_one_fact_are_one_edge_after_orientation():
     assert drops == []
     assert len(edges) == 1
     assert (edges[0].src_id, edges[0].dst_id) == (ACCOUNT, DANA)
+    # No meaning was folded away: the two statements said the same thing, so the
+    # dedupe is not a fold and must not be counted as one.
+    assert edges[0].folded == ()
+
+
+def test_a_reverse_row_places_the_labelled_end_by_the_SPELLING_and_keeps_its_direction():
+    """A `direction: "<-"` row is a PLACEMENT rule, not an ownership claim.
+
+    `packs/venture`'s `holds` is the shipped reverse row: `venture:investment ->
+    Subject`, `direction: "<-"` (#11083), where the labelled `:Subject` is the
+    company the investment is a stake IN — the OWNED end, not the owner. The leg
+    must still place that label on the side the row spells (the TO side), and
+    must leave the `<-` sense token alone: the redirect moves the ENDS, never
+    the meaning.
+
+    The mutation this pins: a leg that inferred "the label is the owner, so it
+    goes on the target" would pass on `ownedBy` and still be wrong here; one
+    that swapped the ends of the ALREADY declared order would invert a correct
+    row. Both are measured below in the same test.
+    """
+    investment = "inv-nordic"
+    person = "subj-dana"
+    index = {
+        "Nordic Capital": [(investment, "venture:investment")],
+        "Dana": [(person, "core:naturalPerson")],
+    }
+    edges, drops = plan_relation_edges(
+        [{"src": "Nordic Capital", "dst": "Dana", "predicate": "holds"}],
+        index)
+    assert drops == []
+    assert (edges[0].src_id, edges[0].dst_id) == (investment, person)
+    # The declaration's own sense survives: a `<-` row keeps `<-`.
+    assert edges[0].direction == "<-"
+    assert edges[0].orientation is None, (
+        "the statement already has the labelled end on the declared side — "
+        "a redirect here would report a correction that did not happen")
+
+    # …and the reversed ask is redirected to the SAME written edge, with the
+    # sense token still `<-` (the redirect moves ends, not meaning).
+    reversed_edges, reversed_drops = plan_relation_edges(
+        [{"src": "Dana", "dst": "Nordic Capital", "predicate": "holds"}],
+        index)
+    assert reversed_drops == []
+    assert (reversed_edges[0].src_id, reversed_edges[0].dst_id) == (
+        investment, person)
+    assert reversed_edges[0].direction == "<-"
+    assert reversed_edges[0].orientation is not None, (
+        "a swapped pair on a `<-` row is still a redirect and must be declared")
 
 
 def test_an_unresolved_endpoint_is_still_a_drop_not_a_swap():

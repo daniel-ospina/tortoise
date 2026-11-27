@@ -178,11 +178,21 @@ So the answer is **detect-and-re-derive, not migrate**:
 ## 5. Residuals this fix does NOT close (stated, not hidden)
 
 * **`managedBy` / `authoredBy` are not declared as relations by any shipped
-  pack** (`declared_relation_pairs()` has rows for `ownedBy`, `assignedTo`,
-  `holds`, `hasPart`, `dependsOn` only), so the orientation leg abstains on them.
+  pack** — `declared_relation_pairs()` carries no row for either (it carries
+  rows for many other predicates: `ownedBy`, `assignedTo`, `holds`, `hasPart`,
+  `dependsOn`, `partOf`, `blocks`, `funds`, … — the absence that matters is
+  THESE two, not a short list), so the orientation leg abstains on them.
   `_create_object(..., managedBy=…)` writes through the entity door, which
   already orients correctly (`entity -[:managedBy]-> subject`). Closing the
   narrative-route case is a **pack declaration**, not a verb list in code.
+* **The leg is a PLACEMENT rule, not an ownership claim.** It puts the
+  label-spelled end on the side the declaration spells it and never infers
+  which end owns which. That matters on a `direction: "<-"` row —
+  `packs/venture`'s `holds` ("`venture:investment -> Subject`", `<-`) spells
+  `:Subject` on the target, and there the Subject is the company the investment
+  is a stake IN, not the accountable owner. The placement is still the declared
+  one, and the row's `<-` sense token is untouched. Pinned by
+  `test_a_reverse_row_places_the_labelled_end_by_the_SPELLING_and_keeps_its_direction`.
 * **Labels other than `Subject`** (`Object`, `Event`, `Point`, `Source`,
   `Document`) have no kind-level test in the planner — it holds `(id, kind)`,
   not the node's label — so a pack declaring one of those as a relation endpoint

@@ -827,6 +827,21 @@ def relation_pair_verdict(
 #   packs/project-management `assignedTo: pm:card   -> Subject`
 #   packs/venture            `holds:      venture:investment -> Subject`
 #
+# So the orientation leg reads the LABEL-SPELLED side of the declarations, and
+# only that side. ⛔ IT IS A PLACEMENT RULE, NOT AN OWNERSHIP CLAIM: it puts the
+# labelled end where the declaration spells it and never asks which end OWNS
+# which. That distinction is load-bearing on a `direction: "<-"` row, and
+# `packs/venture`'s `holds` is one (`venture:investment -> Subject`, `<-`,
+# #11083): there the labelled `Subject` is the company the investment is a stake
+# IN — the OWNED end, not the accountable owner — and the leg still places it on
+# the TO side, because that is the side the row spells. Its `direction` token is
+# untouched, so the sense the row records (`<-`: the source is the ownership
+# interest) survives the redirect intact. Reading the label as "the owner" is
+# the mistake this paragraph exists to prevent: it is true of the `->` rows
+# (`ownedBy`, `assignedTo`) and false of `holds`, and the leg does not need it
+# to be true either way. Pinned by
+# `tests/test_relation_orientation_14304.py::test_a_reverse_row_places_the_labelled_end_by_the_SPELLING_and_keeps_its_direction`.
+#
 # …and ONTOLOGY §3.5/§3.6 and the graph's own writers agree with all three: the
 # canonical row is `(:Object)-[:ownedBy]->(:Subject)`,
 # `projection.edges.create_owned_by(entity_id, subject_id)` writes entity→subject,
@@ -834,8 +849,7 @@ def relation_pair_verdict(
 # — so an `ownedBy` edge whose SOURCE is the Subject does not merely look odd, it
 # is invisible to the read door that answers "what does this person own?".
 #
-# So the orientation leg reads the LABEL-SPELLED side of the declarations, and
-# only that side. It is deliberately narrow, and every narrowing is a residual
+# It is deliberately narrow, and every narrowing is a residual
 # stated below rather than a guess:
 #
 #   * it fires only when the packs name a label on EXACTLY ONE side of the pair
