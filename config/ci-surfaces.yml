@@ -134,11 +134,18 @@ version: 1
 # job-level wall clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28`
 # with `watchdog_headroom: 2.03` (1680 / 827.8 = 2.0295), so the two agree by construction rather
 # than by a hand re-read.
+# reader of the prose can see. On THIS tree — the `#14645` fold (`a0be10ac456b`), the `#14694` fold
+# (`8fd022fdd1c5`) and the `#14741` fold (`0204a219aa90`) merged in, plus THIS lane's own row
+# (`tests/test_14691_structure_evidence.py`, `core`, at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) — the
+# verb packs nine shards at 827.8 s (a, b, e, f, g, h, i, j, k) and two at 827.7 s (c, d), so
+# `ceil(827.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
+# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 827.8 =
+# 2.0295), so the two agree by construction rather than by a hand re-read.
 # ⛔ THE PARTITION is stated here, not only the minute, because at this base the move is INVISIBLE
-# to arithmetic: each folded `origin/main` (`a0be10ac456b`, then `8fd022fdd1c5`) re-derived to all
-# ELEVEN shards at one figure, and this tree splits them NINE and TWO, while the minute is 28 m
-# and the headroom 2.03 on BOTH sides — so a check that read only `28 m` would call the move
-# cosmetic and let a figure nobody emits stand.
+# to arithmetic: each folded `origin/main` (`a0be10ac456b`, then `8fd022fdd1c5`, then `0204a219aa90`)
+# re-derived to all ELEVEN shards at one figure, and this tree splits them NINE and TWO, while the
+# minute is 28 m and the headroom 2.03 on BOTH sides — so a check that read only `28 m` would call
+# the move cosmetic and let a figure nobody emits stand.
 # ⛔ The parent's split is described here by COUNT and by direction on purpose: restating either
 # side as a shard-figure sentence would put a SECOND partition in a block whose guard reads ONE (the
 # `_EMISSION_UNREAD_SENTENCE_RE` arm reds a figure spelled where the clause parser cannot read it),
@@ -147,8 +154,8 @@ version: 1
 # ⛔ THAT PAIR IS THIS TREE'S ALONE: no parent's figure may be carried here, and none is — `main`'s
 # own partition must be re-derived on `main`, never read out of this sentence, and each fold's own
 # figures stay on the commit that measured them. The delta is measurable and small: `fast_pool()`
-# holds 1342 files at this head against 1341 on the newest `origin/main` it folded in
-# (`8fd022fdd1c5`), read by running the verb on one manifest per side (`origin/main`'s blob and this
+# holds 1342 files at this head against 1341 on the `#14741` fold (`0204a219aa90`) it folded in,
+# read by running the verb on one manifest per side (`origin/main`'s blob and this
 # tree's), and the ONE addition THIS lane brings is `tests/test_14691_structure_evidence.py`, the row
 # registered by the commit that added the T6 bundle's falsifiers. With nothing `main` carries
 # missing from this tree, that one row is the whole delta: measured, `set(fast_pool(head)) -
@@ -171,9 +178,12 @@ version: 1
 # they are a graded claim about THIS head — a fold re-derives them with the verb, it never carries
 # them. ⛔ EVERY BASE SHA ABOVE IS A HISTORICAL FACT ABOUT A FOLD, never a present-tense claim
 # that "the base IS this" — because NOTHING grades a base token: the two header arms read the shard
-# FIGURES only, while the pool counts beside them are prose. It rotted ONCE exactly that way,
-# between the review and the merge: the reviewed head stated `a0cea31078` in the present tense, the
-# `#14645` fold then landed `a0be10ac456b` on top, and that sentence was FALSE with nothing to red.
+# FIGURES only, while the pool counts beside them are prose. It has rotted that way THREE times:
+# between the review and the merge (the reviewed head stated `a0cea31078` in the present tense, and
+# the `#14645` fold then landed `a0be10ac456b` on top); when the `#14694` fold landed on the
+# correction that had named the `#14645` tree as "the newest"; and again when the `#14741` fold
+# (`0204a219aa90`) landed on the correction that had named `8fd022fdd1c5` as "the newest" — each a
+# sentence that was FALSE at its own head with nothing to red it.
 # A past tense cannot rot in that way — "that fold merged `a0be10ac456b`" stays true of this head
 # for good, and the next fold brings its own — so no lane owes this block a base re-derivation.
 # What it describes is unchanged: one row, this lane's own.
