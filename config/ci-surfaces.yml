@@ -246,8 +246,8 @@ version: 1
 # restating a fold's numbers inline is the carry the paragraph above refuses, and the measurement
 # lives on the commit that took it (`git log`). An earlier spelling of this sentence claimed
 # "NEITHER copy described this tree: both stated" a single partition — which cannot be true of a
-# pair that disagreed, and was measured false. Neither copy was picked; the paragraph above is a
-# fresh re-derivation on this merged tree, and WHICH ONE IT COUNTS AS IS NOT STATED: that ordinal
+# pair that disagreed, and was measured false. Neither copy was picked; the paragraph above is
+# re-derived fresh on this merged tree, and WHICH ONE IT COUNTS AS IS NOT STATED: that ordinal
 # is a window the NEXT fold renumbers — the same reason the paragraph below states no window — so
 # it is left unstated rather than stated and re-staled, on the schedule the figures above refuse.
 # ⛔ NO WINDOW IS STATED HERE, and the reason is a measurement: "the folds after `a0cea310786d`
