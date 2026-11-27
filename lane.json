@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-14304-ownedby-1795797864-p2054456-22f39268",
+  "_sha": "db79bbec530186fe9d9322ea4e59568c5658537b",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/14304-ownedby.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/14304-ownedby-direction"
+    },
+    {
+      "kind": "sha",
+      "value": "676dfd0e0f4af4ac7affd77280c023c9121d8c7e"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/14304-ownedby"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 6485,
+  "ended_at": 1795804349,
+  "exit_code": 0,
+  "heartbeat_at": 1795804349,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-14304-ownedby-1795797864-p2054456-22f39268",
+  "lease_until": 1795840949,
+  "pid": 2054456,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795797864,
+  "state": "DONE",
+  "tag": "14304-ownedby",
+  "worktree": "/home/cmux/tortoise/.worktrees/14304-ownedby"
+}
