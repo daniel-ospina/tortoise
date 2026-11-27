@@ -77,14 +77,23 @@ claimed the leg fires "exactly where this leg abstains or reports
   (a) the EXACT declared pair asked in REVERSE. Every declaration whose pair is
       asked the other way round is corrected here, and the pair leg calls that
       same state ``reversed`` — this leg performs the swap that message already
-      prescribes. Measured at `#14304`'s head: **37 pairs across 27 predicates**
-      (``causes``, ``hasPart``, ``addresses``, ``decomposesInto``, …, every one
-      of them ``evidence="declared-pair"``); the figure moves with the packs,
-      so it is a measurement of that head and not a constant. ⚠️ On a DIRECT-arm
-      predicate this is where a PRICED belief moves: a reversed ``causes`` now
-      writes ``IMPL(bug -> incident)``, so the expectation it raises moves
-      between the two endpoints — that IS the declared correction, and it is
-      stated rather than left to be discovered.
+      prescribes. Measured at `#14304`'s head, and split the way a REACHABLE ask
+      reaches it: the **33 pairs across 24 predicates** that declare no label end
+      are corrected here with ``evidence="declared-pair"`` (``causes``,
+      ``hasPart``, ``addresses``, ``decomposesInto``, …); the 4 label-spelled rows
+      (``ownedBy``, ``assignedTo`` ×2, ``holds``) cannot be asked as a declared
+      pair by any write — a ``Subject`` is a LABEL, not a kind — so they are
+      premise (b)'s, with ``evidence="declared-endpoint-label"``. Both counts
+      move with the packs, so they measure that head and are not constants. ⚠️ On
+      a DIRECT-arm predicate this is where a PRICED belief moves: a reversed
+      ``causes`` now writes ``IMPL(bug -> incident)``, so the expectation it
+      raises moves between the two endpoints — that IS the declared correction,
+      and it is stated rather than left to be discovered. ⚠️ And the other priced
+      verbs are NOT reached: ``supports``, ``refutes``, ``produces``, ``related``,
+      ``transacts``, ``managedBy``, ``mutuallyExclusive`` and
+      ``mutuallySupportive`` declare no pair row at all, so the leg abstains
+      ``predicate-not-declared`` on every one of them (measured) — a pack
+      declaration is the fix, not a verb list here.
   (b) the LABEL-SPELLED side, which is the only premise that can orient a pair
       the packs declare for OTHER kinds, and where this leg does fire exactly
       when the pair leg abstains or reports ``undeclared``.
@@ -852,7 +861,8 @@ def relation_pair_verdict(
 # "and only that side": an exact declared pair asked in reverse is corrected by
 # step (1) with ``evidence="declared-pair"``, which is a wider population than
 # the three label-spelled rows below and reaches the PRICED direct-arm
-# predicates (``causes``/``supports`` → ``IMPL``). ⛔ IT IS A PLACEMENT RULE, NOT
+# predicates (``causes`` → ``IMPL``; NOT ``supports``, which declares no pair row
+# and therefore abstains ``predicate-not-declared``). ⛔ IT IS A PLACEMENT RULE, NOT
 # AN OWNERSHIP CLAIM: it puts the labelled end where the declaration spells it
 # and never asks which end OWNS which. That distinction is load-bearing on a
 # `direction: "<-"` row, and
