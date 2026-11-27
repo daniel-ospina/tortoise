@@ -930,14 +930,32 @@ mechanisms:
       extractor, the S2.2 pass DISARMED by the real kill-switch
       (`TORTOISE_VALUE_GATE=0`, SET rather than omitted) — measured
       37/90 = 41.1% and 41/90 = 45.6% (mean 39/90 = 43.3%). ⛔ THE THIRD
-      COMPARATOR TERM IS ON THE RECORD, NOT ASSUMED: the flags-on receipts were
-      produced at `234d7db4be` and the control receipts at `4530cd5d54ca`, so
-      their `extractor.source_file` differs (each arm ran in its own worktree, and
-      a PATH locates bytes without identifying them); what makes "same extractor"
-      true is that `git diff 4530cd5d54ca 234d7db4be -- tortoise/` is EMPTY, so
-      the extractor is byte-identical across the two arms — a reader can check
-      that instead of taking it on trust, and the derivation pin reds on any
-      other commit. ⛔ THE SAMPLE IS TOO
+      COMPARATOR TERM IS ESTABLISHED FOR THE COMMITS AND INFERRED FOR THE RUNS —
+      say exactly that, because the difference is the provenance defect a later
+      review found here. The flags-on receipts were produced at `234d7db4be`
+      (their missing `arm` block is precisely what that commit's runner emits) and
+      the control receipts carry the `commit` label `4530cd5d54ca`, so
+      `extractor.source_file` differs between the arms (each ran in its own
+      worktree, and a PATH locates bytes without identifying them). What is
+      MEASURED is about those two LABELLED commits: `git diff` between them
+      limited to `tortoise/` is EMPTY, and both carry the same
+      `tortoise/extractor_v2.py` blob, so the extractor is byte-identical across
+      the two commits. ⛔ WHAT IS *NOT* MEASURED, and must not be read into the
+      above: `commit` is a HEAD label (`git rev-parse --short HEAD`), not a
+      content identity — it is returned whether or not the tree is dirty — and
+      the two control receipts carry an `arm` block that the runner at
+      `4530cd5d54ca` CANNOT write (that code first appears at `5fa9634cb9`, ~13
+      minutes after the last control run), so those two runs demonstrably executed
+      a worktree that was dirty in `tests/`. Whether `tortoise/` was also dirty in
+      them is UNOBSERVABLE from the artifact set: a receipt records the extractor's
+      module, entrypoint and `real` flag, and no content identity. So "same
+      extractor" is a claim about the two commits, not about the two runs, and the
+      derivation pin asserts the comparator on the receipts' agreement in
+      module/entrypoint/`real` and on the commit labels — no more. The durable
+      closure is to record a content identity for the extractor (a blob sha plus a
+      dirty-tree indicator) on every receipt; that is a change to
+      `tests/eval/write_path/runner.py` and is not in this lane's scope, which is
+      why the limit is stated here instead of implied away. ⛔ THE SAMPLE IS TOO
       SMALL TO SEPARATE THE ARMS, AND THE BAR IS NOT RESOLVED EITHER — saying so
       is part of the record: the four flags-on draws span 40–50 units, so the
       committed bar sits INSIDE that spread (it is one draw of a noisy

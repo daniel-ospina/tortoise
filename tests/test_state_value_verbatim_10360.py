@@ -7689,10 +7689,14 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     for arm, runs in (("on", on), ("off", off)):
         commits = {run["commit"] for run in runs}
         assert commits == {_E2_ARM_COMMITS[arm]}, (
-            f"the {arm!r} arm's receipts were produced at {sorted(commits)}, not "
-            f"at the recorded {_E2_ARM_COMMITS[arm]!r} — the arm was re-run, so "
-            "the 'same extractor' comparator and the row's record of the two "
-            "commits must be re-established, not inherited")
+            f"the {arm!r} arm's receipts carry the commit label "
+            f"{sorted(commits)}, not the recorded {_E2_ARM_COMMITS[arm]!r} — the "
+            "arm was re-run, so the 'same extractor' comparator and the row's "
+            "record of the two commits must be re-established, not inherited. "
+            "⚠️ These are LABELS (`git rev-parse --short HEAD`), not content "
+            "identities: a re-run at the SAME commit with a dirty tree keeps the "
+            "label. That gap is recorded, not closed — see the row's statement "
+            "and the arms record.")
     _identities = {
         ((run["extractor"] or {}).get("module"),
          (run["extractor"] or {}).get("qualname"),
@@ -7764,15 +7768,31 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
                 f"{sorted(k for k, v in (readback.get('env') or {}).items() if v)} "
                 "… an arm that resolves like the other arm is a comparison of a "
                 "run against itself (#10610, #14774 review P1)")
-    assert {r["path"].name for r in on + off if r["arm"] is None} == (
+    # ⛔ A SUBSET, NOT AN EQUALITY (#14774 review cycle 9, P3-2). The set shrinks in
+    # the GOOD direction too: regenerate `on-1` with the current runner and it
+    # gains an `arm` block, so set EQUALITY would RED — accusing the lane of
+    # stripping a block it actually gained, and blocking the very improvement
+    # that closes the residual the record admits ("the `on` side is established by
+    # the documented commands, not by those four files"). A receipt that gains a
+    # readback is then verified by the per-receipt loop above, which is strictly
+    # stronger than being grandfathered by name.
+    assert {r["path"].name for r in on + off if r["arm"] is None} <= (
         _ARM_READBACK_GRANDFATHERED), (
-            "the set of receipts carrying NO arm readback moved — a receipt this "
-            "runner produced always carries one, so a new receipt without it was "
-            "produced by something else or had its arm block stripped")
-    assert (min(r["arm"]["value_gate"] for r in off),
-            max(r["arm"]["value_gate"] for r in off)) == (False, False), (
-        "a control-arm receipt has the mechanical value gate ENABLED — that is "
-        "the exact mislabelling #14774 review P1 measured")
+            "a receipt carries NO arm readback and is NOT one of the named "
+            "pre-readback receipts — a receipt this runner produced always carries "
+            "one, so this one was produced by something else or had its arm block "
+            "stripped")
+    # ⚠️ AN ASSERTION STOOD HERE AND COULD NOT FIRE (#14774 review cycle 9,
+    #    `value_gate` on the control receipts). `vet_enabled = vet_toggle or
+    #    value_gate` is enforced by the recompute in `_validate_arm_block`, which
+    #    the arm-block guard routes every receipt of record through — so
+    #    `value_gate is True` implies `vet_enabled is True`, and the per-receipt
+    #    assertion above already REDS first for any such receipt. No mutant could
+    #    make this the row that fires: it is the "implied by the assertion above
+    #    it" shape this file has deleted three times (cycles 5, 9, 10). Deleted
+    #    rather than reworded, and reachability is NOT claimable on the `on`
+    #    side either, because those four receipts carry no `arm` block to assert
+    #    on — that gap is what the grandfathering note records.
 
     baseline = json.loads(_E2_BASELINE.read_text(encoding="utf-8"))
     totals = {run["total"] for run in on + off}
@@ -7849,6 +7869,31 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
                      / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
     flattened = " ".join(_b2_region(_residual_region(registry_text)).split())
 
+    # ⛔ THE PROVENANCE LIMIT IS WRITTEN DOWN, IN BOTH RECORDS (#14774 review
+    #    cycle 9, P1, MEASURED). The comparator term's honest statement is that it
+    #    is established for the two LABELLED COMMITS and INFERRED for the control
+    #    RUNS: `commit` is a HEAD label, the two control receipts carry an `arm`
+    #    block that the runner at their label cannot write (that code first appears
+    #    at `5fa9634cb9`, ~13 min after the last control run), and no receipt
+    #    records an extractor content hash. Recording that limit is what stops the
+    #    next reader inferring a content identity the artifacts never carried, so
+    #    it is pinned rather than left to prose discipline.
+    assert "not a content identity" in flattened.replace("\n", " "), (
+        "clause (b2) must say that a receipt's `commit` is a LABEL and not a "
+        "content identity — without that, the row reads as established for the "
+        "runs when it is established only for the commits")
+    assert "UNOBSERVABLE" in flattened, (
+        "clause (b2) must say what is NOT established: whether `tortoise/` was "
+        "dirty in the control runs, which no receipt can answer")
+    _arms_doc_text = _E2_ARMS_DOC.read_text(encoding="utf-8")
+    assert "not a content identity" in _arms_doc_text, (
+        "the arms record must carry the same provenance limit as the row — the "
+        "record of the experiment may not claim more than the receipts hold")
+    assert "5fa9634cb9" in _arms_doc_text, (
+        "the arms record must name the commit at which the `arm` block appears, "
+        "since that is the fact which proves the control runs had a dirty tree")
+
+
     def _stated_once(figure: str, why: str) -> None:
         """The clause (b2) states `figure` exactly once — not merely somewhere."""
         assert flattened.count(figure) == 1, (
@@ -7869,8 +7914,13 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     #     commit appearing in the clause, or one of the two going missing. Derived
     #     from the receipts, not typed here, so a re-run at another commit reds
     #     this until the row says the new one.
+    #     ⚠️ PLUS THE PROVENANCE THIRD COMMIT (`#14774` review cycle 9, P1): the
+    #     clause names `5fa9634cb9`, the commit at which the runner first writes an
+    #     `arm` block. That is not a third ARM — it is the fact which proves the
+    #     control runs executed a dirty tree, so it belongs in the closed set and a
+    #     reader who drops it loses the provenance caveat.
     _scan_commits = set(re.findall(r"\b[0-9a-f]{10,40}\b", flattened))
-    assert _scan_commits == set(_E2_ARM_COMMITS.values()), (
+    assert _scan_commits == set(_E2_ARM_COMMITS.values()) | {"5fa9634cb9"}, (
         "clause (b2) must name exactly the commits the receipts were produced "
         f"at — unexpected {sorted(_scan_commits - set(_E2_ARM_COMMITS.values()))}, "
         f"missing {sorted(set(_E2_ARM_COMMITS.values()) - _scan_commits)}; a "
