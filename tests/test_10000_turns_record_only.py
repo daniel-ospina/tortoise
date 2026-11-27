@@ -3218,7 +3218,16 @@ def test_the_write_path_vocabulary_does_not_call_a_statement_failure_an_outage()
 
     Mutation (MEASURED): restore the pre-fix bullet — *"``write_failed`` is the
     record being UNREACHABLE, or a connection/statement failing — ``degraded``
-    literally;"* — and the third assertion reddens.
+    literally;"* — and the FIRST assertion reddens, on the case: that text spells
+    the half ``unreachable`` while the needle is ``UNREACHABLE``. ⛔ THAT IS A
+    CASE PIN, NOT THIS FINDING'S DISCRIMINATOR (#11783 round 27 P3): the base
+    bullet already carried both ``not an outage`` and a ``statement`` mention, so
+    restoring it cannot grade the new claim. The needle that does is ``FOR THAT
+    HALF`` — the ``degraded``-literal scope added here; deleting it from the
+    current bullet reddens the fourth assertion (MEASURED, in-process, without
+    touching the tree: ``sv.__doc__.replace("FOR THAT HALF", "FOR THAT")`` →
+    red), while dropping the word ``statement`` alone does NOT red (MEASURED:
+    it survives), so do not read that needle as the proof.
     """
     from tortoise import status_vocabulary
 

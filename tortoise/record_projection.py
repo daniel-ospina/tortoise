@@ -3793,10 +3793,10 @@ def _split_properties(
     `previousValidTo`, a snapshot's identity keys).
 
     ``patch`` says the statement this split is FOR is a PATCH (`UPDATE … SET
-    col = %s`), not a create-or-update upsert. It reaches exactly one rule —
-    a Mapping-valued ``_POINT_FLATTEN_COLUMNS`` key, whose two graph doors
-    behave differently and whose record half must match the door it shares a
-    record type with (#11783, measured: see `_record_column_value`).
+    col = %s`), not a create-or-update upsert. It reaches exactly one rule — a
+    Mapping-valued ``_POINT_FLATTEN_COLUMNS`` key, whose two graph doors differ
+    and whose record half must match the door it shares a record type with
+    (#11783, measured: see `_record_column_value`). ⛔ TWO FEEDS ONLY — `PointRevised`, `EntityMutated`; `OperatorAnnotated` rides the same `from_payload is None` branch but folds annotator dims only, so there this CLEARS what the node keeps.
     """
     cols = columns[table]
     refused_here = refused.get(table, frozenset())
@@ -3942,7 +3942,7 @@ def _record_column_value(table: str, column: str, value: Any, *,
     derivation. But a `search_keys`-only revision carries no content, so there the
     fold keeps the old alias and this IS the missing-prop case. So the two stores
     disagree — pre-existing WITHOUT this arm, and `#2946`'s question. This arm
-    guarantees the narrower thing: the record holds what the write left behind.
+    guarantees the narrower thing: the record holds what the write left behind — for `PointRevised`/`EntityMutated`, NOT for `OperatorAnnotated`, which shares `patch=True` but folds annotator dims only (see `_split_properties`).
     """
     if table == "point" and column in _POINT_FLATTEN_COLUMNS and isinstance(
             value, Mapping):
@@ -6972,7 +6972,7 @@ def _declared_mutations(
                                             # Mapping degrades to null there and
                                             # a null in a map-merge REMOVES the
                                             # property, so the column must
-                                            # clear too (#11783, measured).
+                                            # clear too (#11783, measured). ⛔ `OperatorAnnotated` ALSO rides this branch but folds annotator dims only — on it the column clears while the node keeps its value (round 27 P3).
                                             patch=True)
         return [_patch_statement(org_id, graph_id, node, key, col_values, tail)]
     if isinstance(effect, NodeDelete):

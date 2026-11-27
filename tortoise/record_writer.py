@@ -4839,21 +4839,21 @@ def write_live_record(record: Mapping[str, Any], *,
             remedy = (
                 # ⛔ NOT "a replay heals the record": this arm's population is
                 # every `write_failed` left after the statement stores — an
-                # outage (replay heals it), a STATEMENT that executed and failed
+                # OUTAGE (replay heals it), a STATEMENT that executed and failed
                 # on the record's own data (a replay RE-EXECUTES and re-fails
                 # until the data or the constraint is fixed), and the
                 # store/CONFIG refusals the note above enumerates (a replay
                 # re-raises until the DSN/role is fixed). The cursor row is a
                 # THIRD axis, not the only one.
-                "an OUTAGE is healed by a replay; a statement that executed and "
-                "failed re-fails until its cause is fixed; and a replay is also "
-                "UNLESS this graph has a `record_cursor` row (cut over), where an "
-                "enumerated one is refused — the remedy is then the one the "
-                "refusal below names for the row's MODE, not a chain that assumes "
-                "`active`: `replay(allocate=True)` needs mode='active' (a CODE "
-                "call — no CLI verb ships), `halt` is scoped to 'active', "
-                "`reopen` to 'halted'. Run `record_allocator_cli.py status` for "
-                "the mode"
+                "an OUTAGE is healed by a replay; a statement that EXECUTED and "
+                "failed re-fails until its own cause (its data or a constraint) "
+                "is fixed; and an ENUMERATED replay is refused when this graph "
+                "has a `record_cursor` row (cut over) — the remedy is then the "
+                "one that refusal names for the row's MODE, not a chain that "
+                "assumes `active`: `replay(allocate=True)` needs mode='active' "
+                "(a CODE call — no CLI verb ships), `halt` is scoped to "
+                "'active', `reopen` to 'halted'. Run "
+                "`record_allocator_cli.py status` for the mode"
             )
         else:
             remedy = (

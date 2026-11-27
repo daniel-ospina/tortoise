@@ -1199,6 +1199,18 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
     generic arm exists for (a statement executed and failed) and is explicitly
     excluded from that stamp, so it still lands here and the sentence pinned
     below keeps being the one an operator reads on it.
+
+    ⛔ AND THE ENUMERATED ARM'S SENTENCE MUST NOT PROMISE A HEAL THIS CLASS
+    DENIES (a P3 the branch carried: the arm's remedy texts were UNPINNED, and
+    the enumerated copy read *"a replay heals the record UNLESS … a
+    `record_cursor` row"*). The writer below reaches this arm AS a
+    `RecordStatementError` — the one class whose remedy is *not* a replay: a
+    replay RE-EXECUTES the same statement and re-fails until the data or the
+    constraint is fixed. The old sentence sent that operator to a chain that
+    cannot work, which is the SAME defect this branch fixes in the vocabulary
+    home (`status_vocabulary.py`) and on `/health` (`monitoring.py`). Both arms
+    are driven on the SAME exception so the assertion is about the arm's
+    SENTENCE, not about which failure was produced.
     """
     org, graph = tenant
     _append_positions(schema, org, graph, [1, 2])
@@ -1231,10 +1243,31 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
             assert "a replay heals the record" not in text, (
                 f"the enumerated arm's sentence leaked onto the armed arm: "
                 f"{text[-400:]!r}")
+            assert "EXECUTED and failed" not in text, (
+                "the enumerated arm's OUTAGE/STATEMENT split leaked onto the "
+                f"armed arm, where every remedy is an allocating replay: "
+                f"{text[-400:]!r}")
         else:
-            assert "a replay heals the record" in text, (
-                "the ENUMERATED arm lost its original remedy, which IS correct "
-                f"there: {text[-400:]!r}")
+            # ⛔ EVERY CLAUSE OF THE SPLIT IS PINNED, because this sentence is
+            # read on ALL THREE populations (an outage, a statement that
+            # executed and failed, a store/CONFIG refusal) and the exception
+            # driven here is the middle one. The old text pinned nothing and
+            # claimed the first for all three.
+            assert "an OUTAGE is healed by a replay" in text, (
+                "the ENUMERATED arm stopped naming the outage half — a replay "
+                f"IS the remedy there: {text[-400:]!r}")
+            assert "statement that EXECUTED and failed re-fails" in text, (
+                "the ENUMERATED arm still promises a heal to the ONE class "
+                "that lands on it without one — a `RecordStatementError` "
+                f"re-fails on a replay: {text[-400:]!r}")
+            assert "a replay heals the record" not in text, (
+                "the blanket 'a replay heals the record' claim is back on a "
+                "population that includes a statement that executed and "
+                f"failed: {text[-400:]!r}")
+            assert "ENUMERATED replay is refused" in text, (
+                "the enumerated arm lost the cursor-row condition that makes "
+                "the allocating replay the remedy on a cut-over graph: "
+                f"{text[-400:]!r}")
     monkeypatch.delenv(rw.RECORD_ALLOCATE_ENV, raising=False)
 
 

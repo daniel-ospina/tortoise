@@ -1371,17 +1371,39 @@ class _ScopeBlindConn(_FakeConn):
 
 
 class _ScopeBlindCursor:
+    """Answers the ALLOCATOR's isolation gate, then blinds the SCOPE read-back.
+
+    ⛔ ORDER MATTERS, and the first cut of this fake got it wrong (#11783 round
+    27 P2): `journal_skipped=True` IMPLIES `allocate`, and the allocator's
+    isolation gate (`record_allocator._assert_read_committed`) opens its own
+    cursor and `close()`s it in a `finally` BEFORE `_apply_tenant_scope` runs.
+    A fake with no `close()` therefore died in that `finally` with
+    `AttributeError: '_ScopeBlindCursor' object has no attribute 'close'` — so
+    the arm this leg claims to grade (a scope refusal, a STORE/CONFIG fact
+    raised after the plan was built) was never reached, and the leg graded an
+    `AttributeError` instead. Answering the isolation read with READ COMMITTED
+    and every LATER read with no row is what actually reaches the refusal.
+    """
+
     def __init__(self) -> None:
         self.statements = 0
+        self._row = None
 
     def execute(self, sql, params=None):
         self.statements += 1
+        # The allocator's gate asks for the transaction's isolation; the scope
+        # read-back is the only statement that must come back EMPTY.
+        self._row = (("read committed",) if "transaction_isolation" in sql
+                     else None)
 
     def fetchone(self):
-        return None
+        return self._row
 
     def fetchall(self):
         return []
+
+    def close(self) -> None:
+        self.closed = True
 
     def __enter__(self):
         return self
@@ -1633,7 +1655,14 @@ def test_a_write_failure_on_the_record_only_arm_does_not_claim_a_journal_line(
 
     `_ScopeBlindConn` is the honest trigger: it makes the door execute the tenant
     scope read-back and fail it, which is a STORE fact raised AFTER the plan was
-    built — the exact population of this arm.
+    built — the exact population of this arm. ⛔ AND THE LEG ASSERTS THE CAUSE,
+    not merely the clauses (#11783 round 27 P2): the first cut of this fake had
+    no `cursor.close()`, so `journal_skipped` (which implies `allocate`) died in
+    the allocator's isolation gate with an `AttributeError` and the scope refusal
+    it names was never reached — the two arms of this test then graded two
+    different failures, and this leg would have kept passing unchanged if the
+    scope-refusal path moved. The `scope could not be verified` assertion below
+    is what makes that impossible.
     """
     from tortoise import record_writer
 
@@ -1660,6 +1689,15 @@ def test_a_write_failure_on_the_record_only_arm_does_not_claim_a_journal_line(
     assert "reached NEITHER store" in message, (
         "the record-only arm has NO journal line, so the write reached neither "
         f"store and the WARN must say so — got: {message}"
+    )
+    # ⛔ THE CAUSE, NOT JUST THE CLAUSES (#11783 round 27 P2). Without this the
+    # leg passes on ANY generic-arm failure — it passed on an `AttributeError`
+    # from the allocator's isolation gate — so the clause assertions above were
+    # grading a different failure than the one this docstring names.
+    assert "the record's scope could not be verified" in message, (
+        "this leg must reach the tenant-scope READ-BACK refusal (a store/config "
+        "fact raised after the plan was built); anything else — an allocator "
+        f"gate, a cursor close, a plan build — is a different population: {message}"
     )
     assert "the journal has the record" not in message, (
         "this arm's pre-existing copy of the false claim must be gone too: "
