@@ -1981,11 +1981,114 @@ def run_benchmark(
            if relation_runs else {}),
         "graph_census": graph_census_report,
         "extractor_identity": extractor_identity(),
+        # #10360 / #14774 review P1: the ARM this run actually produced, read
+        # back through the production resolvers. Without it a receipt's arm is
+        # only its FILENAME, and a mislabelled arm is undetectable from every
+        # artifact the run commits.
+        "arm": extractor_arm_readback(),
         "semantic_judge": semantic_block,
         "session_results": session_results,
         "notes": notes,
         "log": log,
     }
+
+
+#: The switches that decide whether the S2.2 VET pass runs, in the order the
+#: production OR reads them (``extractor_v2.extract_session_v2``).
+#:
+#: ⛔ **AN ABSENT ``TORTOISE_VALUE_GATE`` IS THE *ON* SPELLING** (`#10996`), which
+#: is why this tuple exists rather than being inferred from a filename: the
+#: ``#14774`` review measured that the documented "flags-OFF" arm —
+#: ``env -u TORTOISE_VET -u TORTOISE_VALUE_GATE`` — resolved ``vet_enabled``
+#: **True**, i.e. the control arm was a second realization of the treatment and
+#: the A/B was a comparison of a run against itself. The same defect is recorded
+#: and guarded in ``docs/evidence/7949-capstone/probes/e1_paired_arm.py``
+#: (``DEFAULT_ON_KEYS`` / ``off_arm_readback``); this is the write-path runner's
+#: copy of that readback, so a receipt can never again claim an arm it did not
+#: produce.
+ARM_SWITCHES = (
+    "TORTOISE_VET",
+    "TORTOISE_VALUE_GATE",
+    "TORTOISE_S2_DECISION_SEAM",
+    "TORTOISE_STATE_VALUE_VERBATIM",
+)
+
+
+def extractor_arm_readback() -> dict:
+    """The arm this run ACTUALLY produced — read back, never asserted.
+
+    The receipt's other arm-side fields cannot answer this: ``resolved_config`` is
+    ``dict(corpus.BASELINE_CONFIG)`` (posture/lanes/mode/seed — never env), and
+    ``extractor_posture == "llm"`` holds under BOTH arms. So before this block the
+    only thing tying a receipt to an arm was its **filename**, and a run whose
+    "off" spelling silently resolved ON committed a receipt indistinguishable
+    from the treatment arm (`#14774` review P1).
+
+    ``vet_enabled`` is composed through the PRODUCTION terms rather than a mirror
+    of them, because the whole failure class is a resolver whose unset value is
+    ON: a copy of the rule here would drift from the rule that decides
+    (``tortoise.value_gate.resolve_enabled``, `#10996`; `extractor_v2._vet_enabled`
+    ORs in `TORTOISE_S2_DECISION_SEAM`, `#5087`).
+
+    ⚠️ An unreadable arming path records ``readable: False`` + the error instead
+    of raising: a receipt that says the arm could not be read is honest and is
+    REFUSED by the consumer, whereas one that omits the question is a label.
+    """
+    raw = {key: os.environ.get(key) for key in ARM_SWITCHES}
+    try:
+        import tortoise.extractor_v2 as ev2
+        import tortoise.value_gate as vg
+
+        vet_toggle = bool(ev2._vet_enabled())          # TORTOISE_VET | seam
+        seam = bool(ev2._s2_seam_armed())
+        value_gate = bool(vg.value_gate_enabled())     # ON unless told otherwise
+    except Exception as exc:  # noqa: BLE001 — recorded, never swallowed silently
+        return {
+            "env": raw,
+            "readable": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "env": raw,
+        "readable": True,
+        # the three terms `extract_session_v2` ORs, so a reader can attribute the
+        # boolean instead of trusting it
+        "vet_toggle": vet_toggle,
+        "s2_seam": seam,
+        "value_gate": value_gate,
+        # …and the one boolean that decides whether the pass runs
+        "vet_enabled": bool(vet_toggle or value_gate),
+    }
+
+
+def _validate_arm_block(arm: dict) -> list[str]:
+    """Shape-validate the additive ``arm`` block (present-only)."""
+    issues: list[str] = []
+    if not isinstance(arm, dict):
+        return ["receipt.arm: expected an object"]
+    env = arm.get("env")
+    if not isinstance(env, dict):
+        issues.append("receipt.arm.env: expected an object")
+    else:
+        unknown = sorted(set(env) - set(ARM_SWITCHES))
+        if unknown:
+            issues.append(
+                "receipt.arm.env: unknown switches "
+                f"{unknown} — ARM_SWITCHES is the arming surface; a new switch "
+                "must be added there or it is recorded nowhere"
+            )
+    if not isinstance(arm.get("readable"), bool):
+        issues.append(
+            "receipt.arm.readable: expected a bool, got "
+            f"{arm.get('readable')!r}"
+        )
+    elif arm["readable"]:
+        if not isinstance(arm.get("vet_enabled"), bool):
+            issues.append(
+                "receipt.arm.vet_enabled: a readable arm requires a bool, got "
+                f"{arm.get('vet_enabled')!r}"
+            )
+    return issues
 
 
 def extractor_identity() -> dict:
@@ -2641,6 +2744,12 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
     # the identity is what lets the receipt check reject a wire-only number.
     if report.get("extractor_identity") is not None:
         receipt["extractor"] = report["extractor_identity"]
+    # #10360 additive ARM readback (a completed-run dimension only): the S2.2
+    # arming switches and what the PRODUCTION resolvers made of them. Added only
+    # when the report carries it, so every pre-#10360 receipt stays byte-identical
+    # and shape-valid — a receipt WITHOUT this block is an arm nobody verified.
+    if report.get("arm") is not None:
+        receipt["arm"] = report["arm"]
     # #11237 additive relation-write block: the S5 Job 1 channel's WRITE half,
     # added ONLY when the run stated one, so a receipt from a run whose
     # extraction produced no relations is byte-identical to the pre-#11237 one.
@@ -2723,6 +2832,13 @@ def validate_receipt(receipt: dict) -> list[str]:
                 "receipt.extractor.real: expected a bool, got "
                 f"{extractor.get('real')!r}"
             )
+    # #10360 additive ARM readback — validated only when present, for the same
+    # back-compat reason (pre-#10360 receipts carry no arm block at all). SHAPE
+    # only: whether the arm is the one the filename claims is the consumer's
+    # verdict (`test_state_value_verbatim_10360.py` §25), not a shape check.
+    arm = receipt.get("arm")
+    if arm is not None:
+        issues.extend(_validate_arm_block(arm))
     # #11237 additive relation-write block — SHAPE only, and only when present.
     # Whether the number is GOOD belongs to the write-path lane
     # (``test_write_path_relation_lane``) and to the census, not to a receipt

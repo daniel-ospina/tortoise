@@ -6246,7 +6246,12 @@ def test_the_registry_rows_measured_disclosures_are_pinned():
 # census corpus (7 sealed sessions × 2 arms, real `deepseek-v4-flash`
 # extractions) measured through the SHIPPED helpers. It is NOT the flags-on E2
 # arm, so it neither confirms nor contradicts the 54.4% baseline in the row's
-# (b2) — that number needs an E2 LLM arm run and stays `UNMEASURED`.
+# (b2). ⛔ THAT SURVIVAL FIGURE IS NOW MEASURED, NOT `UNMEASURED` (#14774 review
+# P3: this sentence outlived the receipts by one commit — a comment saying a
+# number is unmeasured is how the next lane re-quotes a dead figure): it is
+# re-derived from the committed E2 receipts in §25, which is the only place the
+# number is pinned, and it is a property of a MODEL RUN — not of anything this
+# census corpus measures.
 #
 # The classifier is deliberately THIN and reuses the shipped predicates
 # (`_carries_value`, `_value_slots_scaled`, `_write_span`, `_PAREN_NUMERAL_RE`)
@@ -7247,12 +7252,21 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
 #   * the arm definition (two receipts per arm) and the arm-independent
 #     invariants (posture, judge pin, corpus hash): a receipt from another
 #     corpus or another judge protocol is not a comparator;
-#   * that both flags-on runs are BELOW the committed baseline, and that the
-#     baseline sits INSIDE the flags-off arm's observed band. That is the honest
-#     reading at n = 2 per arm: the Target is missed, and the bar is not
-#     RESOLVED either — the two arms' between-run range is as large as their
-#     mean separation, so neither "the flags cost survival" nor "the flags buy
-#     it" is a supported claim.
+#   * ⛔ THE ARM ITSELF (#14774 review P1). Until the runner recorded it, the only
+#     thing tying a receipt to an arm was its FILENAME — and the documented
+#     "flags-OFF" command (`env -u TORTOISE_VALUE_GATE`) resolves the value gate
+#     **ON**, because since `#10996` an ABSENT switch is the ON spelling. The
+#     runner now writes the resolved arming switches into `arm`, this test reads
+#     them back per receipt, and the arms DOC's own two commands are resolved
+#     through that same production readback
+#     (`test_the_e2_off_arm_definition_uses_the_REAL_kill_switch`) — so a
+#     mislabelled arm reds instead of certifying a comparison against itself;
+#   * that the pass-armed arm's MEAN stays below the committed baseline, and that
+#     the baseline sits INSIDE that arm's own between-run spread. That is the
+#     honest reading at this sample size: the Target is missed on the mean, and
+#     the bar is not RESOLVED either — the between-run range is as large as the
+#     arms' mean separation, so neither "the flags cost survival" nor "the
+#     flags buy it" is a supported claim.
 # It does NOT claim the Target is met, and it does not test the extractor: the
 # survival number is a property of a MODEL RUN, and running the arms again is
 # the only thing that moves it. An assertion on the number without the receipts
@@ -7262,6 +7276,111 @@ _E2_RECEIPTS = (pathlib.Path(__file__).parent / "eval" / "write_path"
                 / "receipts")
 _E2_BASELINE = (pathlib.Path(__file__).parent / "eval" / "write_path"
                 / "baselines" / "main.json")
+
+#: The arms doc — the ONLY home of the arm definition (a receipt's
+#: `resolved_config` records the posture and lanes, never the env).
+_E2_ARMS_DOC = _E2_RECEIPTS / "10360-E2-ARMS-2026-11-27.md"
+
+#: The switches an arm command's env prefix may set, plus the extractor selector.
+#: Anything else is REFUSED rather than ignored: an arm command whose prefix this
+#: parser silently skipped would be an arm nobody read, which is the defect
+#: `#14774` review P1 is about.
+_ARM_PREFIX_KEYS = ("TORTOISE_VET", "TORTOISE_VALUE_GATE",
+                    "TORTOISE_S2_DECISION_SEAM", "TORTOISE_EXTRACT_MODEL")
+
+#: Clause (b2) of the row — the ONE span the E2 figures belong to.
+#:
+#: ⛔ A STATED NUMBER BELONGS TO ONE CLAUSE, NOT TO A ROW (#14774 review P2,
+#: MEASURED). `_residual_region` is right for the REOPENING scan ("a reopening is
+#: a reopening wherever in the row it is written") and wrong for a FIGURE: the row
+#: is 58,448 chars and clause (b2) is ~2,050 of them, so perturbing (b2)'s
+#: `44/90 = 48.9%` → `49.9%` while appending the correct string as prose anywhere
+#: ELSE in the row kept `in <flattened>` GREEN — the same fail-open one bound
+#: further in, arriving by the route this file already records for the reopening
+#: scan (`[:1200]` → the `(d)` block → the marker → the row, `#11223`). Each figure
+#: is asserted exactly ONCE inside this span, which closes the in-span decoy too.
+_B2_START = "(b2) STRICT VERBATIM"
+_B2_END = "\n      (c) a rewritten CLOCK"
+
+
+def _b2_region(row_text: str) -> str:
+    """Clause (b2) of the `state_value_carve_out` row — the figures' own span."""
+    assert row_text.count(_B2_START) == 1, (
+        f"the row must carry exactly ONE {_B2_START!r} clause (found "
+        f"{row_text.count(_B2_START)}) — the E2 figures' bound is anchored on it")
+    start = row_text.index(_B2_START)
+    tail = row_text[start + len(_B2_START):]
+    end = tail.find(_B2_END)
+    assert end != -1, (
+        f"clause (b2) has no end anchor {_B2_END!r} — the terminator was "
+        "re-indented or the following clause was renamed, so this bound would "
+        "read past (b2) into the rest of the row")
+    return tail[:end]
+
+
+def _e2_arm_commands() -> dict[str, str]:
+    """The two committed arm commands, as the arms doc states them.
+
+    Read out of the doc rather than re-typed here, because the doc is the record:
+    a copy of the command in this file could agree with itself while the doc — the
+    thing a lane replays — drifted to a spelling that resolves the other arm.
+    """
+    text = _E2_ARMS_DOC.read_text(encoding="utf-8")
+    flat = re.sub(r"\\\s*\n\s*", " ", text)   # join the shell continuations
+    found: dict[str, str] = {}
+    for arm in ("on", "off"):
+        match = re.search(
+            r"(?P<prefix>(?:^|\s)(?:env\s+)?(?:[A-Z_]+=\S+\s+|-u\s+[A-Z_]+\s+)+)"
+            r"\S*python\s+-m\s+tests\.eval\.write_path\.runner\s+run\s+"
+            r"--out\s+\S*e2-" + arm + r"-",
+            flat)
+        if match:
+            found[arm] = match.group("prefix").strip()
+    return found
+
+
+def _arm_settings(prefix: str) -> dict[str, str | None]:
+    """An arm command's env prefix as ``{switch: raw value | None}``.
+
+    ``None`` is the UNSET state, which is a real value for these switches and the
+    whole subject of this pin: `TORTOISE_VALUE_GATE` absent means ON.
+    """
+    settings: dict[str, str | None] = {}
+    tokens = prefix.split()
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "env":
+            index += 1
+            continue
+        if token == "-u":
+            settings[tokens[index + 1]] = None
+            index += 2
+            continue
+        key, _, value = token.partition("=")
+        settings[key] = value
+        index += 1
+    return settings
+
+
+#: The receipts that predate the runner's `arm` readback, named explicitly (#14774
+#: review P1). They are the four committed at `4530cd5d54ca`, MINUS the two that
+#: were mislabelled `-off-` and renamed to their true arm — their content is
+#: unchanged; only the label moved from a false one to a true one.
+#:
+#: ⚠️ WHY THESE FOUR ARE STILL A SOUND ON-ARM: every spelling of the documented ON
+#: command resolves `vet_enabled` True (`TORTOISE_VET=1` arms it, and
+#: `TORTOISE_VALUE_GATE=1` arms it; with a default-ON switch, absent is ON too).
+#: There is NO environment under which that command disarms the pass, so the arm
+#: is verifiable by construction even without the readback. The OFF arm had no
+#: such property — that asymmetry is exactly what `#10996` created and what P1
+#: measured. A NEW receipt without a readable readback is refused below.
+_ARM_READBACK_GRANDFATHERED = frozenset({
+    "w2b-10360-e2-on-1-2026-11-27.json",
+    "w2b-10360-e2-on-2-2026-11-27.json",
+    "w2b-10360-e2-on-3-2026-11-27.json",
+    "w2b-10360-e2-on-4-2026-11-27.json",
+})
 
 
 def _e2_arm_receipts(arm: str) -> list[pathlib.Path]:
@@ -7301,6 +7420,9 @@ def _e2_arm_runs(arm: str) -> list[dict]:
             "corpus_hash": blob["corpus_hash"],
             "judge_pin": blob["judge_pin"],
             "posture": (blob["resolved_config"] or {}).get("extractor_posture"),
+            # #14774 review P1: the ARM the run actually produced. `None` on a
+            # receipt older than the readback — refused unless grandfathered.
+            "arm": blob.get("arm"),
         })
     return runs
 
@@ -7326,12 +7448,51 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     """
     on = _e2_arm_runs("on")
     off = _e2_arm_runs("off")
-    # ⚠️ TWO PER ARM is the arm definition, not an accident: one run under
+    # ⚠️ THE ARM DEFINITION, and why the counts are asserted: one run under
     # stochastic decoding is one draw, and the run-to-run range on this corpus
-    # (4-5 units) is as large as the two arms' mean separation. A receipt count
-    # other than 2 must move the row's own statement of its sample size.
-    assert len(on) == 2, f"expected 2 flags-on receipts, found {len(on)}"
+    # is as large as the arms' mean separation. A receipt count other than these
+    # must move the row's own statement of its sample size.
+    # 4 pass-armed draws + 2 control draws: the two receipts originally labelled
+    # `-off-` were produced by the `-u TORTOISE_VALUE_GATE` spelling, which
+    # resolves the gate ON (#10996), so they are pass-armed realizations and are
+    # named `-on-3`/`-on-4` now. Their content is unchanged.
+    assert len(on) == 4, (
+        f"expected 4 flags-on receipts, found {len(on)} — the pass-armed arm's "
+        "sample size is what the row states")
     assert len(off) == 2, f"expected 2 flags-off receipts, found {len(off)}"
+
+    # ⛔ THE ARM ITSELF (#14774 review P1, MEASURED). The filename was the ONLY
+    #    thing tying a receipt to an arm: `resolved_config` carries posture/lanes/
+    #    mode/seed and never env, and `posture == "llm"` below holds in BOTH arms.
+    #    So a run whose "off" spelling resolved ON committed a receipt
+    #    indistinguishable from the treatment arm, and every assertion in this
+    #    test certified it. The runner now records the resolved switches; this
+    #    reads them back per receipt, and the two arms must resolve DIFFERENT
+    #    `vet_enabled` — the A/A-vs-A/B distinction the arms doc relies on.
+    for arm, runs in (("on", on), ("off", off)):
+        for run in runs:
+            readback = run["arm"]
+            if readback is None:
+                continue          # refused by set equality below, with its own message
+            assert readback.get("readable") is True, (
+                f"{run['path'].name}: the receipt's arm block is unreadable "
+                f"({readback.get('error')}) — an arm nobody read is a label")
+            assert readback["vet_enabled"] is (arm == "on"), (
+                f"{run['path'].name} is filed under the {arm!r} arm but its own "
+                f"readback resolves vet_enabled={readback['vet_enabled']} — the "
+                "S2.2 pass was armed by "
+                f"{sorted(k for k, v in (readback.get('env') or {}).items() if v)} "
+                "… an arm that resolves like the other arm is a comparison of a "
+                "run against itself (#10610, #14774 review P1)")
+    assert {r["path"].name for r in on + off if r["arm"] is None} == (
+        _ARM_READBACK_GRANDFATHERED), (
+            "the set of receipts carrying NO arm readback moved — a receipt this "
+            "runner produced always carries one, so a new receipt without it was "
+            "produced by something else or had its arm block stripped")
+    assert (min(r["arm"]["value_gate"] for r in off),
+            max(r["arm"]["value_gate"] for r in off)) == (False, False), (
+        "a control-arm receipt has the mechanical value gate ENABLED — that is "
+        "the exact mislabelling #14774 review P1 measured")
 
     baseline = json.loads(_E2_BASELINE.read_text(encoding="utf-8"))
     totals = {run["total"] for run in on + off}
@@ -7382,24 +7543,30 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
             "units — a failed_units row is missing or double-counted, so the "
             "census below is not a census")
 
-    # ⛔ THE BOUND IS THE ROW, NOT THE FILE (#14774 review P1, MEASURED). This
-    #    pin's whole job is that the row cannot cite a figure no receipt
-    #    produces, and `in <the whole registry's flattened text>` satisfies it
-    #    from ANY other mechanism's prose — the exact fail-open this file already
-    #    measured and fixed 500 lines above for the sibling row pin (#11730
-    #    finding 3: a decoy row appended elsewhere left the pin GREEN).
-    #    `_residual_region` is that tighter bound and the row carries every
-    #    string asserted below.
+    # ⛔ THE BOUND IS CLAUSE (b2), NOT THE FILE **AND NOT THE ROW** (#14774 reviews
+    #    P1 then P2, both MEASURED). Two fail-opens, one bound further in each
+    #    time: `<the whole registry's flattened text>` satisfied a figure assertion
+    #    from ANY other mechanism's prose, and `<the whole row>` still satisfied it
+    #    from prose anywhere in those 58,448 chars — perturbing (b2)'s figure and
+    #    appending the correct string elsewhere IN THE ROW stayed GREEN. A stated
+    #    number belongs to ONE clause, so the assertion reads that clause (2,046
+    #    chars at this head) and requires the string to appear EXACTLY ONCE in it,
+    #    which also refuses an in-clause decoy.
     registry_text = (pathlib.Path(__file__).resolve().parent.parent
                      / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
-    flattened = " ".join(_residual_region(registry_text).split())
+    flattened = " ".join(_b2_region(_residual_region(registry_text)).split())
+
+    def _stated_once(figure: str, why: str) -> None:
+        """The clause (b2) states `figure` exactly once — not merely somewhere."""
+        assert flattened.count(figure) == 1, (
+            f"clause (b2) must state {figure!r} exactly once for {why}; found "
+            f"{flattened.count(figure)} — a figure the clause does not state, or "
+            "one a decoy repeats elsewhere in the row, is not a derivation")
 
     # 4. every per-run figure the row states is the one its receipt produces.
     for run in on + off:
         stated = f"{run['survived']}/{run['total']} = {_pct_1dp(run['survived'], run['total'])}"
-        assert stated in flattened, (
-            f"the row does not state {stated} — receipt {run['path'].name} "
-            f"({run['run_id']}) produces it")
+        _stated_once(stated, f"receipt {run['path'].name} ({run['run_id']})")
     # 5. …and so is each arm's MEAN, which is the figure a reader compares to
     #    the bar (the per-run pair alone invites cherry-picking the better draw).
     for arm, runs in (("flags-on", on), ("flags-off", off)):
@@ -7407,38 +7574,49 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
         mean_total = sum(r["total"] for r in runs) / len(runs)
         stated = (f"{_count(mean_survived)}/{_count(mean_total)} = "
                   f"{_pct_1dp(mean_survived, mean_total)}")
-        assert stated in flattened, (
-            f"the row does not state the {arm} mean {stated}")
+        _stated_once(stated, f"the {arm} mean over {len(runs)} draws")
     # 6. the committed bar itself, in the row's own form.
-    assert f"{base_survived}/{base_total} = {_pct_1dp(base_survived, base_total)}" in flattened, (
-        "the row must state the committed baseline it compares against")
+    _stated_once(
+        f"{base_survived}/{base_total} = {_pct_1dp(base_survived, base_total)}",
+        "the committed baseline the row compares against")
     # 6b. AND THE CENSUS THE ROW PUBLISHES, digit for digit (#14774 review P2,
     #     MEASURED): the row names the per-run `content_missing` counts, which the
     #     PR calls the usable result of the whole measurement, and the tuple was
     #     asserted NOWHERE — `(46, 50, 45, 40)` -> `(46, 50, 45, 41)` stayed green.
-    #     Derived here in run order (flags-on 1,2 then flags-off 1,2).
+    #     Derived here in run order (pass-armed 1..4 then control 1,2).
     census = tuple(sum(r["classes"].values()) for r in on + off)
     stated_census = "(" + ", ".join(str(n) for n in census) + ")"
-    assert stated_census in flattened, (
-        f"the row does not state the derived failure census {stated_census} — "
-        "the counts it publishes beside 'THE LOSS CLASS IS THE USABLE RESULT' "
-        "must be the ones the receipts produce")
+    _stated_once(
+        stated_census,
+        "the failure census it publishes beside 'THE LOSS CLASS IS THE USABLE "
+        "RESULT' must be the one the receipts produce")
 
-    # 7. THE VERDICT THE ROW RECORDS, held to the artifacts: every flags-on run
-    #    is BELOW the bar, and the bar is INSIDE the flags-off band. Both halves
-    #    are load-bearing — the first is "the Target is missed", the second is
-    #    "and the bar is not resolved either", which is why the row must not
-    #    claim the flags cost survival.
-    assert all(r["survived"] < base_survived for r in on), (
-        "a flags-on run reached the committed baseline — the row's 'stays "
-        "SHORT of target' clause is now false and must be re-derived")
-    assert any(r["survived"] >= base_survived for r in off), (
-        "no flags-off run reached the committed baseline — the row's claim "
-        "that the bar sits INSIDE the flags-off band is now false")
-    assert min(r["survived"] for r in off) < base_survived, (
-        "every flags-off run cleared the bar — then the baseline is a CEILING "
-        "of that arm, not a draw inside its band, and the row overstates the "
-        "aperture")
+    # 7. THE VERDICT THE ROW RECORDS, held to the artifacts. Three clauses, each
+    #    a different claim, so each gets its own assertion:
+    #    (i) the Target is MISSED ON THE ARM MEAN, which is the figure the issue
+    #        names — not on every draw (one pass-armed draw does clear the bar,
+    #        which is exactly why the row may not claim a direction);
+    #    (ii) the committed bar sits INSIDE the pass-armed arm's own between-run
+    #        spread, so the bar is not a ceiling of the arm;
+    #    (iii) the arms' mean separation is smaller than the between-run range, so
+    #        `neither "the flags cost survival" nor "the flags buy it"`.
+    on_mean = sum(r["survived"] for r in on) / len(on)
+    off_mean = sum(r["survived"] for r in off) / len(off)
+    assert on_mean < base_survived, (
+        "the pass-armed arm's mean reached the committed baseline — the row's "
+        "'stays SHORT of target' clause is now false and must be re-derived")
+    assert min(r["survived"] for r in on) < base_survived <= max(
+        r["survived"] for r in on), (
+            "the committed bar is no longer INSIDE the pass-armed arm's spread "
+            f"({[r['survived'] for r in on]}) — the row's 'the bar is not "
+            "resolvable at this sample size' clause must be re-derived")
+    spread = max(r["survived"] for r in on + off) - min(
+        r["survived"] for r in on + off)
+    assert abs(on_mean - off_mean) < spread, (
+        f"the arms' means are separated by {abs(on_mean - off_mean)} units, "
+        f"which is NOT smaller than the {spread}-unit between-run range over the "
+        "committed draws — the row's 'no direction is supported' clause must be "
+        "re-derived rather than left standing")
 
     # 8. the reading this replaces must be gone, not merely supplemented: the
     #    old clause asserted BOTH that the figure was not re-measured and that
@@ -7449,3 +7627,68 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     assert "SURVIVAL is now MEASURED on the flags-on arm" in flattened, (
         "the row must state that the figure is now measured on the flags-on "
         "arm — that is Indicator (2) of this issue")
+
+
+def test_the_e2_off_arm_definition_uses_the_REAL_kill_switch(monkeypatch):
+    """The arms DOC's control command must resolve the pass DISARMED. (#14774 P1)
+
+    This is the definitional half of the same finding the readback assertions
+    above police per receipt: the committed "flags-OFF" command was
+
+        env -u TORTOISE_VET -u TORTOISE_VALUE_GATE …
+
+    which since `#10996` selects the ON default — `TORTOISE_VALUE_GATE` is ON
+    unless it says otherwise, so UNSETTING it arms the pass. The arms doc is the
+    only record of the arm definition (a receipt carries no env), so the defect
+    is in the record, and the fix is to resolve the record through the runner's
+    own readback rather than to re-read the prose.
+
+    MUTANT (measured on the pre-fix doc): the `-u` spelling resolves
+    `vet_enabled=True` — identical to the ON command — so the `is False`
+    assertion below REDS. That is the A/B the whole receipt set is built on, and
+    the comparison of a run against itself it was built on instead.
+
+    ⚠️ This pins the DEFINITION; it cannot pin what an old receipt ran, which is
+    why the receipts' own `arm` blocks are asserted above and the four
+    pre-readback ones are named in `_ARM_READBACK_GRANDFATHERED`.
+    """
+    from tests.eval.write_path import runner as wp_runner
+
+    commands = _e2_arm_commands()
+    assert set(commands) == {"on", "off"}, (
+        f"the arms doc must define exactly two arm commands, found {sorted(commands)} "
+        "— a reworded block means no arm is verified at all")
+    resolved: dict[str, dict] = {}
+    for arm in ("on", "off"):
+        settings = _arm_settings(commands[arm])
+        unknown = sorted(set(settings) - set(_ARM_PREFIX_KEYS))
+        assert not unknown, (
+            f"the {arm!r} arm command sets switches this pin does not read: "
+            f"{unknown} — add them to the runner's `ARM_SWITCHES` and to "
+            "`_ARM_PREFIX_KEYS`, or they arm the run invisibly")
+        for key in wp_runner.ARM_SWITCHES:
+            monkeypatch.delenv(key, raising=False)
+        for key in _ARM_PREFIX_KEYS:
+            value = settings.get(key)
+            if value is not None:
+                monkeypatch.setenv(key, value)
+        resolved[arm] = wp_runner.extractor_arm_readback()
+
+    assert resolved["on"]["readable"] and resolved["off"]["readable"], resolved
+    assert resolved["on"]["vet_enabled"] is True, (
+        "the documented flags-ON command does not arm the S2.2 pass: "
+        f"{resolved['on']}")
+    assert resolved["off"]["vet_enabled"] is False, (
+        "the documented flags-OFF command ARMS the pass (vet_enabled="
+        f"{resolved['off']['vet_enabled']}, value_gate="
+        f"{resolved['off']['value_gate']}) — since #10996 an ABSENT "
+        "TORTOISE_VALUE_GATE is the ON spelling, so the 'control' arm is a second "
+        "realization of the treatment. Set it to 0; do not unset it")
+    assert resolved["on"]["vet_enabled"] != resolved["off"]["vet_enabled"], (
+        "the two documented arms resolve the SAME vet_enabled — a comparison of "
+        "a run against itself, reported as a measurement (#10610, #14774 P1)")
+    # …and the kill-switch is the SPELLING that does it: the OFF prefix must
+    # SET the default-ON switch to its falsy value, not merely omit it.
+    assert "TORTOISE_VALUE_GATE=0" in commands["off"], (
+        f"the flags-OFF command does not use the kill-switch: {commands['off']!r}"
+        " — an unset default-ON switch is the ON arm")

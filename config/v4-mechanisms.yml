@@ -924,29 +924,49 @@ mechanisms:
       after it landed, 62 judged / 0 refused), which is why the pin did not have
       to move; (b2) STRICT VERBATIM
       SURVIVAL is now MEASURED on the flags-on arm, and it still stays SHORT of
-      target: 44/90 = 48.9% and 40/90 = 44.4% over two runs (mean 42/90 = 46.7%)
-      against the 49/90 = 54.4% committed baseline (`#7949` E2). ⛔ THAT IS
-      TWO RUNS PER ARM, AND THE BAR IS NOT RESOLVABLE AT THIS SAMPLE SIZE —
-      saying so is part of the record: the FLAGS-OFF arm measured 45/90 = 50.0%
-      and 50/90 = 55.6% (mean 47.5/90 = 52.8%), so the committed 54.4% bar sits
-      INSIDE the off arm's observed band — it is one draw of the same noisy
-      distribution, not a ceiling of it — while both flags-on runs land below it
-      and the 4–5 unit between-run range is as large as the two arms' mean
-      separation. Neither "the flags cost survival" nor "the flags buy it" is a
-      supported claim at n = 2 per arm; a run count that could resolve a 5-point
-      gap needs a power analysis this corpus (90 graded units) does not supply.
-      ⛔ THE LOSS CLASS IS THE USABLE RESULT: every failed unit in all FOUR runs
-      is `content_missing` (46, 50, 45, 40) — not one `provenance_missing` and
-      not one `ep_update_missing` — which is residual (a) below measured on the
-      shipped arm instead of asserted: the value is not in the point's CONTENT
-      at all, so no rule that acts on an already-emitted point (this refusal, or
-      any repair/merge arm) can recover it. ⚠️ THE RECEIPTS ARE DURABLE AND THE
-      FIGURES ARE DERIVED FROM THEM:
-      `tests/eval/write_path/receipts/w2b-10360-e2-{on,off}-{1,2}-2026-11-27.json`,
-      with the arm definition (and what may NOT be concluded) in
+      target: 44/90 = 48.9%, 40/90 = 44.4%, 45/90 = 50.0% and 50/90 = 55.6% over
+      four runs (mean 44.75/90 = 49.7%) against the 49/90 = 54.4% committed
+      baseline (`#7949` E2). The CONTROL arm — same corpus, same judge pin, same
+      extractor, the S2.2 pass DISARMED by the real kill-switch
+      (`TORTOISE_VALUE_GATE=0`, SET rather than omitted) — measured
+      37/90 = 41.1% and 41/90 = 45.6% (mean 39/90 = 43.3%). ⛔ THE SAMPLE IS TOO
+      SMALL TO SEPARATE THE ARMS, AND THE BAR IS NOT RESOLVED EITHER — saying so
+      is part of the record: the four flags-on draws span 40–50 units, so the
+      committed bar sits INSIDE that spread (it is one draw of a noisy
+      distribution, not a ceiling of the arm), the six draws together span
+      37–50, and the 5.75-unit separation between the arm means is SMALLER than
+      that 13-unit between-run range. Neither "the flags cost survival" nor
+      "the flags buy it" is a supported claim; a run count that could resolve a
+      5-point gap needs a power analysis this corpus (90 graded units) does not
+      supply.
+      ⛔ THE ARM IS READ BACK, NOT LABELLED (`#14774` review P1). An earlier
+      version of these receipts called two PASS-ARMED runs "flags-off", because
+      it spelled the control arm `env -u TORTOISE_VALUE_GATE` — and since
+      `#10996` an ABSENT value gate is the ON spelling
+      (`tortoise/value_gate.py::resolve_enabled`: absent ⇒ ON), so that arm was
+      a second realization of the treatment and the control did not exist. Those
+      two receipts are committed unchanged as `on-3` and `on-4` (only the label
+      moved), the control was re-run with the switch SET to `0`, and the runner
+      now writes each run's resolved `vet_enabled` into the receipt's `arm`
+      block so a label cannot drift from the arm again. Worth knowing, because it
+      is the opposite of what the mislabelled pair implied: the corrected
+      control came in LOWER than the treatment, and the pair is therefore not
+      re-read as evidence for either direction.
+      ⛔ THE LOSS CLASS IS THE USABLE RESULT: every failed unit in all SIX runs
+      is `content_missing` (46, 50, 45, 40, 53, 49) — not one
+      `provenance_missing` and not one `ep_update_missing` — which is residual
+      (a) below measured on the shipped arm instead of asserted: the value is
+      not in the point's CONTENT at all, so no rule that acts on an
+      already-emitted point (this refusal, or any repair/merge arm) can recover
+      it. ⚠️ THE RECEIPTS ARE DURABLE AND THE FIGURES ARE DERIVED FROM THEM:
+      `tests/eval/write_path/receipts/w2b-10360-e2-on-{1,2,3,4}-2026-11-27.json`
+      and `…-off-{1,2}-2026-11-27.json`, with the arm definition (and what may
+      NOT be concluded) in
       `tests/eval/write_path/receipts/10360-E2-ARMS-2026-11-27.md`; this clause
       is re-derived from those files by
-      `tests/test_state_value_verbatim_10360.py::test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts`.
+      `tests/test_state_value_verbatim_10360.py::test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts`,
+      which also resolves the arm definition itself and requires the two arms to
+      resolve DIFFERENT `vet_enabled`.
       The `38/77 = 49.4%` / `UNMEASURED(<an E2 LLM arm run>)` reading this
       replaces was a `#5064` comment figure (2026-10-13) that nothing could
       re-derive.
