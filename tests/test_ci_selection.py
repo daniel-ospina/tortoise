@@ -12908,39 +12908,40 @@ def test_the_row_claim_list_pattern_reads_an_inner_parenthetical():
 #: only, and the arm below is what keeps a `merge=union` fold from splicing the old frame back in.
 _COMPLETENESS_CLAIM_RE = re.compile(
     r"enumeration\s+is\s+complete|is\s+a\s+completeness\s+claim"
-    r"|those\s+are\s+the\s+named\s+files"
-    # ⛔ THE PROPERTY, NOT AN ENUMERATION OF SPELLINGS (#14623 review). The three phrases above are
-    # this block's own RETRACTION wording; they are not the CLAIM. Measured on the block at
-    # `38e860488303` with the three-phrase form: a live frame spelled "— a COMPLETE list of every
-    # row.", "The list above is complete.", "— every rowed file." and "This enumeration is
-    # exhausted." shipped GREEN over EVERY arm in the family (0/8 red) — the
-    # enumerate-the-spelling class this file's own comments name (`#14730`). A completeness frame
-    # is a SUPERLATIVE PREDICATED OF THE LIST, so the additions below read the PREDICATION
-    # (`<copula> a complete list`, `<list> … is complete`, `every … row file`) rather than the bare
-    # word.
-    # ⛔ THE BARE WORD IS NOT READ, AND THE REASON IS MEASURED — a first cut that read any
-    # `complete*`/`exhaust*`/`every … row*` FALSE-BLOCKED THE LIVE BLOCK, and assertion 1 reads the
-    # WHOLE header, not `_row_enumeration`: `NO NUMERAL AND NO EXHAUSTIVE ENUMERATION` (this block's
-    # own rule, twice) and the TRUE "Every row item above is therefore spelled with its path beside
-    # it" both matched. Predication is what separates them. Verified both ways on the live header:
-    # no match; on each of the four escapes below and on the block's retired wording: a match.
-    # ⛔ AND THE ADJECTIVE MUST BE PREDICATED BY A COPULA, not stood beside the noun: a first cut
-    # spelled this alternative `\bcomplete\s+(?:list|enumeration|set)\b`, which FALSE-BLOCKED the
-    # block's own prohibition idiom — "⛔ NO COMPLETE LIST OF ROWS IS CLAIMED HERE." and
-    # "Never call this a complete list: a sweep adds a row." both RED, and the failure message told
-    # the maintainer the block FRAMES its enumeration as complete, the opposite of what those
-    # sentences say. A CLAIM has a copula (`that is a complete list`); a PROHIBITION does not. The
-    # inverse fixtures below pin that.
-    r"|(?:that|this|it)\s+(?:is|was)\s+a\s+complete\s+(?:list|enumeration|set)\b"
-    # ⛔ …OR IT NAMES THE UNIVERSAL IT CLAIMS (`complete list of every row`), which is the copula-less
-    # spelling a fold writes. It must anchor on `of every|all`: `NO COMPLETE LIST OF ROWS IS CLAIMED
-    # HERE.` and `never call this a complete list: …` both carry `complete list` and neither is a
-    # claim, so the article alone cannot separate them.
-    r"|\bcomplete\s+(?:list|enumeration|set)\s+of\s+(?:every|all)\b"
-    r"|\b(?:list|enumeration|set)\b(?:\W+\w+){0,4}?\W+(?:is|are|remains)\W+(?:now\s+)?"
-    r"(?:complete|exhaust(?:ive|ed))\b"
-    r"|\bevery\s+(?:named\s+)?row(?:s|ed)\s+(?:file|entry)\b",
-    re.IGNORECASE)
+    r"|those\s+are\s+the\s+named\s+files", re.IGNORECASE)
+#: ⛔ DECLARED RESIDUAL — what this pattern does NOT grade, and why three widenings were REFUSED on
+#: measurement rather than attempted a fourth time (#14623 review). It reads three phrases, all of
+#: them this block's own RETRACTION wording, so a completeness frame spelled ANY OTHER WAY ships
+#: GREEN. That is declared here, in the block's own convention (the `#14560` role split and the
+#: `#14544` pronoun-object paraphrase are declared the same way), because every wider form was
+#: falsified:
+#:
+#: MEASURED GREEN over this pattern — four live frames (injected into the block header, whole arm
+#: run, 0/8 arms in the family RED for each):
+#:     "… a COMPLETE list of every row."   "The list above is complete."
+#:     "… every rowed file."               "This enumeration is exhausted."
+#: MEASURED RED by a wider form, i.e. still ungraded HERE, and named so the list is not a guess:
+#:     "a complete enumeration of the rows"  "the rows above are the complete set"
+#:     "these are the complete list of rows" "the file list below is a complete set"
+#:
+#: WHY NOT WIDEN — each attempt was caught by measurement, and the third is the one that settles it:
+#:   1. reading the bare word (`complete*`, `exhaust*`, `every … row*`) FALSE-BLOCKED THE LIVE BLOCK:
+#:      assertion 1 reads the WHOLE header, and `NO NUMERAL AND NO EXHAUSTIVE ENUMERATION` (the
+#:      block's own rule) matched, as did the TRUE "Every row item above is therefore spelled with
+#:      its path beside it".
+#:   2. reading the adjective (`\bcomplete\s+(?:list|enumeration|set)\b`) FALSE-BLOCKED TRUE PROHIBITION
+#:      PROSE — "⛔ NO COMPLETE LIST OF ROWS IS CLAIMED HERE.", "Never call this a complete list: a
+#:      sweep adds a row." — and the arm's own message then told the maintainer the block FRAMES its
+#:      enumeration as complete, pushing the repair onto the prohibition instead of the claim.
+#:   3. predicating on a copula STILL RED a prohibition that embeds one ("DO NOT CLAIM THIS IS A
+#:      COMPLETE LIST"), and narrowing to `complete list of (every|all)` RED the arm's own pinned
+#:      prohibition with `EVERY` inserted ("NO COMPLETE LIST OF EVERY ROW IS CLAIMED HERE.") while
+#:      LOSING the four spellings listed above.
+#: A CLAIM and a PROHIBITION are separated by NEGATION SCOPE, not by a phrase shape, and a
+#: same-sentence negative lookbehind is the text-controlled pattern this file rejects elsewhere
+#: (a reflow moves the graded text out from under it). A guard that REDs on a maintainer's true
+#: prohibition is worse than one that grades fewer spellings, so the narrow form stays and the gap
+#: is declared.
 #: The row enumeration's OPENING, and the `⛔` that closes it: the arm below asserts a property of
 #: this list, so it is BOUNDED rather than read out of the whole block — an unbounded read would
 #: grade prose it does not own.
@@ -12985,7 +12986,9 @@ def test_the_fast_shards_header_block_does_not_claim_its_row_list_is_complete():
     """
     header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
     rows = set(cs.load_manifest()["durations"])
-    # 1. No LIVE completeness frame anywhere in the block.
+    # 1. No LIVE completeness frame in any spelling `_COMPLETENESS_CLAIM_RE` READS. That pattern
+    # grades three phrases only; the class it cannot read is DECLARED beside it, so this assertion
+    # must not be read as "no completeness frame exists in the block".
     live_claim = _COMPLETENESS_CLAIM_RE.search(_unquoted_block(header))
     assert live_claim is None, (
         "the `fast_shards` block frames its row enumeration as COMPLETE "
@@ -13005,27 +13008,14 @@ def test_the_fast_shards_header_block_does_not_claim_its_row_list_is_complete():
         "the completeness-frame pattern no longer reads the sentence it was cut for, so assertion "
         "1 passes over any spelling of it — re-point `_COMPLETENESS_CLAIM_RE` at the block's own "
         "retired wording")
-    # ⛔ …AND THE PATTERN READS THE PROPERTY, not three spellings of that retraction (#14623
-    # review, P2). Each `escape` below is a LIVE completeness frame that the three-phrase pattern
-    # did not read — measured at `38e860488303`: 0/8 arms in this family RED for every one of them,
-    # so each shipped GREEN. They are the fixture that stops a re-narrowing going silent, exactly
-    # as the ratio spellings above do for `_EMISSION_RATIO_RE`.
-    for escape in (
-        "A ROW is an entry in `durations` — `tests/test_x.py` row — a COMPLETE list of every row.",
-        "A ROW is an entry in `durations` — `tests/test_x.py` row. The list above is complete.",
-        "A ROW is an entry in `durations` — `tests/test_x.py` row — every rowed file.",
-        "A ROW is an entry in `durations` — `tests/test_x.py` row. This enumeration is exhausted.",
-    ):
-        assert _COMPLETENESS_CLAIM_RE.search(_unquoted_block(escape)) is not None, (
-            "the completeness-frame pattern misses a live frame spelled "
-            f"{escape!r} — it is matching this block's own retraction wording rather than the "
-            "CLAIM, so a frame using any other spelling ships GREEN)"
-        )
+    # ⛔ …AND THE DECLARED RESIDUAL IS PINNED BY NEGATIVE FIXTURES. This arm grades three
+    # phrases, so the frames below are GREEN — that is the DECLARED gap beside the pattern, not a
+    # claim of coverage. The assertions here keep the assertion one-way: a future widening that
+    # started REDing on TRUE prose would fail HERE, which is the failure mode that killed all three
+    # earlier attempts (a maintainer's own prohibition read as a completeness claim).
     # ⛔ EVERY WIDENING IS PAIRED WITH ITS INVERSE — the rule the sibling arms here use, and this
-    # inverse was MEASURED as a real false block, not added for symmetry: the first cut's
-    # `\bcomplete\s+(?:list|enumeration|set)\b` RED on the block's own prohibition idiom, and
-    # `NO NUMERAL AND NO EXHAUSTIVE ENUMERATION` is that same idiom two lines from the frame. All
-    # four below are TRUE statements, so a RED here is a false block on correct prose.
+    # inverse was MEASURED as a real false block, not added for symmetry. All four below are TRUE
+    # statements, so a RED here is a false block on correct prose.
     for prohibition in (
         "A ROW is an entry in `durations` — ⛔ NO COMPLETE LIST OF ROWS IS CLAIMED HERE.",
         "A ROW is an entry in `durations` — never call this a complete list: a sweep adds a row.",
