@@ -131,10 +131,17 @@ version: 1
 # ⛔ Not claiming "and every one is `core`": registration status is a THIS-HEAD fact, and `#14544`
 # is the proof it moves (the sentence below records that file leaving `core`) — which is why the
 # registrations this derivation STATES are GRADED rather than trusted:
-# `test_the_derivation_surface_claims_are_graded_against_the_manifest` reads every file whose
-# surface is named above and REDs if any of them moves. ⛔ NO NUMERAL, deliberately (#14623
-# review): an earlier count here was stale — `test_expansion_fusion_14344.py` on `core` carries a
-# named surface above and was asserted-closed while ungraded. The arm's stated set is the count.
+# `test_the_derivation_surface_claims_are_graded_against_the_manifest` asserts the surface set
+# this derivation STATES, file for file, and REDs if a stated registration moves in EITHER
+# direction. ⛔ THE POPULATION IS HAND-MAINTAINED, declared rather than implied: the arm holds the
+# set as a LITERAL and asserts the manifest against it — it does not read surfaces out of the prose
+# above, so spelling a NEW file's surface into this paragraph reds nothing. That parse was not
+# attempted because "plus `eval` on the first and `api` on the second" is an ANAPHOR: a reader
+# bound to surface tokens would have to guess which file each one names, the one-spelling matcher
+# class this block files separately. What IS graded is the arm's own set, whole.
+# ⛔ NO NUMERAL, deliberately (#14623 review): an earlier count here was stale —
+# `test_expansion_fusion_14344.py` on `core` carries a named surface above and was asserted-closed
+# while ungraded. The arm's stated set is the count.
 # ⛔ AND THAT SET IS GRADED WHOLE rather than one membership at a time: a file
 # that GAINS a surface this paragraph does not name re-stales the sentence exactly as a loss does.
 # ⛔ THE SCOPE IS THE ARM FAMILY, not every arm in the suite: registration membership IS asserted
