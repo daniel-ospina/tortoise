@@ -69,7 +69,7 @@ version: 1
 # provenance (that resolution belongs to `ff10fb328891`'s fold `24493da53136`, which is the one
 # that produced DUPLICATE `durations` keys) — and `ff10fb328891` changed ONE `durations` ROW and
 # no line of this block. ⛔ AND NOT "the folds after X touched nothing": that window was FALSE
-# here. `bf16c791a489`, the fold cited two sentences down, is itself after `a0cea310786d` and
+# here. `bf16c791a489`, the fold cited in the next sentence, is itself after `a0cea310786d` and
 # moved seventeen lines INSIDE this block; and an earlier fold, `f2d4f2408cf5`, spliced a SECOND
 # derivation in it (`de311a35a2da`), so `a0cea310786d` is the LAST fold to splice a second
 # DERIVATION — not the only fold to splice anything, since `ff10fb328891` spliced `durations`.
@@ -81,7 +81,7 @@ version: 1
 # `git show --stat bf16c791a489 -- config/ci-surfaces.yml` printed nothing. The safe form is
 # `git diff <sha>^1 <sha> -- config/ci-surfaces.yml`, run PER FOLD — never as "empty since X",
 # which is the same census rot one level down. Each splice's figures live on the commit that
-# measured them — never carried into this derivation, carrying
+# measured them — never carried into this derivation. THIS TREE'S DERIVATION CARRIES:
 # `#14597`'s expansion fusion over the residue RATCHET
 # (`tests/test_expansion_fusion_14344.py`, `core`, carrying a `durations` row),
 # `#14415`'s `tests/test_14219_batch_ingest.py` row and `tests/test_14219_batches_api.py` row,
