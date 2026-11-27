@@ -11356,7 +11356,11 @@ _H_14544_NOT_A_ROW_RE = re.compile(
     # so ONE DROPPED COMMA turned the banned sentence GREEN. `and` / `but` / `so` complete the
     # predication exactly as a comma does; a RELATIVE pronoun does not, which is why
     # `the row is not a row the ratchet EXEMPTS` stays unmasked and stays GREEN.
-    r"(?=\s*(?:[,;:.!?)\]]|and\b|but\b|so\b|$))",
+    # ⛔ A HYPHEN AND AN EN-DASH COMPLETE IT TOO (#14623, measured): the em-dash was covered only
+    # incidentally, by the clause-break regex, so `A REGISTRATION IS NOT A ROW - the row is exempt
+    # too` and its en-dash twin left the thesis unmasked and shipped GREEN — the same one-keystroke
+    # hole this rule exists to close. All three dash lengths now complete the predication.
+    r"(?=\s*(?:[,;:.!?)\]\u2013\u2014-]|and\b|but\b|so\b|$))",
     re.IGNORECASE)
 
 
@@ -11388,7 +11392,16 @@ def _h_14544_first_unnegated(pattern: re.Pattern[str],
     # ⛔ The obvious resume rule does NOT work and was measured failing: resuming one character past a
     # match start re-matches `No `durations` row is exempt` at `row`, dropping its `No` and turning
     # TRUE prose RED.
+    # ⛔ TWO MASKS, applied ONCE, and both are needed by BOTH readers (#14623, measured). The
+    # `not only` mask started life inside `_h_14544_exempt_negated` — the ANAPHORIC antecedent's
+    # reader only — so the SUBJECT branch, which reads polarity through `_h_14544_negated`, still
+    # counted the particle's `not` as a negation and certified the retired claim:
+    #     The `durations` row is ONLY exempt, its weight is the shard-layout input.        RED
+    #     The `durations` row is not only exempt, its weight is the shard-layout input.    GREEN
+    # One claim, one garnish, opposite verdicts. `A FOCUS PARTICLE ASSERTS THE EXEMPTION`, so the
+    # phrase is masked here, where every reader inherits it.
     masked = _H_14544_NOT_A_ROW_RE.sub(lambda hit: "\x00" * len(hit.group(0)), sentence)
+    masked = _H_14544_FOCUS_PARTICLE_RE.sub(lambda hit: " " * len(hit.group(0)), masked)
     for m in pattern.finditer(masked):
         if not _h_14544_negated(masked, m):
             return m
@@ -11743,6 +11756,26 @@ def test_the_14544_exemption_paragraph_states_what_14544_did_to_the_row():
     # measured): one DROPPED COMMA left the thesis unmasked and its own `NOT` then read as negating
     # the next clause's claim, turning the banned sentence GREEN. Both comma'd and uncomma'd forms of
     # the TRUE thesis must stay GREEN as well, which is the other half of the pin.
+    # ⛔ THE SUBJECT BRANCH READS POLARITY THROUGH A DIFFERENT FUNCTION than the anaphoric one, and the
+    # focus mask started life only in the latter — so the same claim in a plain subject sentence
+    # shipped GREEN (#14623, measured). Pinned here so the mask cannot drift back to one reader.
+    for focus in ("not only", "not merely", "not just"):
+        assert _h_14544_banned_claim(
+            f"The `durations` row is {focus} exempt, its weight is the shard-layout input.") is not None, (
+            f"{focus!r} asserts the exemption, so the SUBJECT branch must not read its `not` as a "
+            "negation — one claim, one garnish, opposite verdicts")
+    assert _h_14544_banned_claim(
+        "The row is not only not exempt, and so is the weight of the row.") is None, (
+        "a focus particle over a REAL negated exemption is still TRUE prose — the mask must not "
+        "launder it")
+    # ⛔ AND EACH COORDINATOR AND DASH IS PINNED INDIVIDUALLY (#14623, measured): `but` and `so` were
+    # in the lookahead with no fixture, so DROPPING them — a tightening — left the arm GREEN while the
+    # banned sentence reverted to GREEN. A hyphen / en-dash were not covered at all.
+    for boundary in ("but", "so", "-", "\u2013", "\u2014"):
+        assert _h_14544_banned_claim(
+            f"A REGISTRATION IS NOT A ROW {boundary} the row is exempt too.") is not None, (
+            f"{boundary!r} completes the thesis's predication, so it must mask like a comma does — "
+            "without it one keystroke turns the banned sentence GREEN")
     assert _h_14544_banned_claim(
         "A REGISTRATION IS NOT A ROW and the row is exempt too.") is not None, (
         "the boundary-less thesis was not masked, so its `NOT` licensed the following clause — one "
