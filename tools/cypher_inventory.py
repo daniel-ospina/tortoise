@@ -1445,11 +1445,12 @@ def _destination_probes(
        tracked file (measured: `git ls-files` is case-SENSITIVE even with
        `-c core.ignorecase=true`).
 
-    All three are filed as follow-ups, not closed here; the narrow claim is the one this
-    code earns, and a docstring that claims more is what a later lane reads instead of the
-    arm. Two of them are PRE-EXISTING on `origin/main` (which carries the boundary walk from
+    All three are PRE-EXISTING on `origin/main` (which carries the boundary walk from
     #14625 without `_own_gitdir`), so this PR narrows the fail-open surface rather than
-    closing it.
+    closing it — it closes neither of the three. Measured on both trees: each reproduces at
+    rc 0 with the tracked bytes replaced, before and after this change. They are filed as
+    follow-ups rather than half-fixed here; the narrow claim is the one this code earns, and
+    a docstring that claims more is what a later lane reads instead of the arm.
 
     ⛔ NOT THE TWO ENDPOINTS (#14625 review, round 10, P3, measured). Rounds 7 and 8
     each fixed the endpoint they were shown — the destination's own repository, then

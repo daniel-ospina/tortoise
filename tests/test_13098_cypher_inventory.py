@@ -1872,7 +1872,7 @@ def test_EVERY_git_probe_carries_the_modules_own_timeout_bound():
     there — the figure belongs to THAT tree, not to this one): deleting
     `timeout=_GIT_PROBE_TIMEOUT_S` from `surface_files`'s `git ls-files` stayed GREEN;
     from `_tracked_destination_refusal`'s probe, GREEN again. Re-verified at this head by
-    mutation — every one of the five `subprocess.run` sites reds when its kwarg goes.
+    mutation — every one of the six `subprocess.run` sites reds when its kwarg goes.
     ⛔ NOT "a call site": the metadata probe's own arm records `passed_kwargs`, so
     deleting the kwarg THERE reds it (`the probe's bound must be the module's own`). The
     two sites this arm exists for are the other two. The artifact claimed the bound was
@@ -1894,6 +1894,12 @@ def test_EVERY_git_probe_carries_the_modules_own_timeout_bound():
     (#14741 review, cycle 2): it asks git WHICH repository it resolved, so it is a git
     probe and it carries the same bound — a hung git there hangs every `--render` before
     any other refusal can fire.
+
+    ↳ AND THE SIXTH SITE is `_resolves_to_own_gitdir`'s `git rev-parse --absolute-git-dir`
+    (#14741 review, cycle 4): the SECOND subprocess that decides askability, added when the
+    gitdir identity replaced ancestor-hood as the discriminator. It is reached from both
+    askability branches, so a hung git there hangs every `--render` exactly as the fifth
+    site does, and it carries `_GIT_PROBE_TIMEOUT_S` for the same reason.
     """
     source = Path(census.__file__).read_text(encoding="utf-8")
     calls = [
