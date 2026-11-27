@@ -253,11 +253,15 @@ def compute_status(
     """Pure staleness computation. Returns the watcher's decision surface.
 
     Per-org statuses: ``never`` (seam org with no R2 archive), ``stale`` — which
-    is TWO different readings, and only the first is an age (#5047/#9937):
-    (a) the newest archive is older than the threshold (a non-expired simulate
-    object carries an OLD age and forces this too); (b) the listing did not
-    answer this poll and the last CONFIRMED measurement is old (a degraded read,
-    #3658). ``ok``, ``stamp_missing`` (archives exist but no state object),
+    is THREE different readings, and only the first is an age (#5047/#9937):
+    (a) the newest archive is older than the threshold on a CONFIRMED poll (a
+    non-expired simulate object carries an OLD age and forces this too);
+    (b) a DEGRADED poll with a CACHED reading — the listing did not answer and
+    the last CONFIRMED measurement is old, so the age is published as an UPPER
+    BOUND (a newer archive may have landed unobserved) and STALE IS filed
+    (#3658); (c) a DEGRADED poll with NO cached reading at all — the cache-miss
+    label: no age claim, and NO STALE is filed for it (the shipped #9937
+    guard). ``ok``, ``stamp_missing`` (archives exist but no state object),
     ``backup_set_missing`` (team state exists, the R2 prefix exists, and a
     CONFIRMED listing found no default manifest — an absence, never an age;
     #2374/#9938), ``not_eligible`` (org the sweep will not back up — #3658).
@@ -272,8 +276,12 @@ def compute_status(
     ==========================  =========================  ================
     condition                   per-org class              per-graph class
     ==========================  =========================  ================
-    unconfirmed read (degraded) ``stale`` (cache-miss;      ``stale``
-                                no age claim, no open)     (opens STALE)
+    degraded, CACHED reading    ``stale`` (the age is an   ``stale``
+      (listing silent)          UPPER BOUND; OPENS)        (opens STALE)
+    degraded, cache MISS        ``stale`` (cache-miss;      ``stale``
+      (no cached reading)       no age claim, no open)     (opens STALE —
+                                                           the #9937 residual
+                                                           is per-graph only)
     confirmed, no state,        ``never``                  ``never``
       no archive
     confirmed, state PRESENT,   ``backup_set_missing``     ``backup_set_missing``
