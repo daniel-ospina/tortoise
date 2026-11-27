@@ -1768,9 +1768,18 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
     # the docstring proves the SENTENCE exists, not that the loop implements it. Measured at the
     # previous head, shrinking this loop to `range(1, span + 1)` left `103 passed` while the
     # sentence "SWEEPS every offset in `1..span + 3`" went false at the tree it describes.
+    # ⛔ AND THE EXTENT IS READ FROM THE ROWS THAT REACHED THE TABLE, never from the dict that
+    # feeds them (#14723, round 30). Round 28 graded the dict, so the LOOP's bound was covered;
+    # the EMISSION is a second place a sweep can stop short, and it was graded by nothing:
+    # measured at `ea006476a872`, `if k > span: continue` inside the emission loop left all
+    # **103 passed** while the sentence "SWEEPS every offset in `1..span + 3`" was false at the
+    # tree it describes — the same defect one level down again, and invisible to every assertion
+    # above because the dict still covered 1..span + 3. The arm therefore derives the swept set
+    # from `table`'s own keys below, so a hole in the middle is caught too.
+    start_key = "start offset {k} inside a span-{span} site, end exact"
     start_sweep = {k: ((name, lo + k, hi), k == span) for k in range(1, span + 4)}
     for k, (cited, expected) in start_sweep.items():
-        table[f"start offset {k} inside a span-{span} site, end exact"] = (cited, expected)
+        table[start_key.format(k=k, span=span)] = (cited, expected)
     # ⛔ …and the END side is swept too (#14723, round 25). The paragraph above says shape 3
     # requires the citation to end at EXACTLY the artifact's end, and the table's only end-padded
     # row pads by the site's WHOLE span — so every tolerance narrower than that was graded by
@@ -1778,9 +1787,13 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
     # `<= 1` left all **103 passed** while the sentence became false at the tree it describes.
     # …and likewise as data, for the same reason: `range(1, span + 1)` -> `range(1, span)` at the
     # previous head left `103 passed` while "every end offset `1..span`" became false.
+    # …and the same rule for the END sweep (#14723, round 30): measured at `ea006476a872`,
+    # `if k > 1: continue` in its emission loop left all **103 passed** while the docstring's
+    # "every end offset `1..span`" claimed rows that never ran. Read from `table` below.
+    end_key = "end offset {k} past a span-{span} site, start at its start"
     end_sweep = {k: ((name, lo, hi + k), False) for k in range(1, span + 1)}
     for k, (cited, expected) in end_sweep.items():
-        table[f"end offset {k} past a span-{span} site, start at its start"] = (cited, expected)
+        table[end_key.format(k=k, span=span)] = (cited, expected)
     # ⛔ …and NEITHER home of the rule may name an artifact by LINE RANGE. A literal site
     # expired twice here (round 21, and the +23-line hook that also widened the span), so a
     # literal — qualified or bare — is the defect the offset rule exists to remove. Grade it in
@@ -1872,16 +1885,26 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
         "`_cites_a_site_in`'s docstring no longer names the start sweep as \"sweeps every offset "
         "in `1..span + <n>`\" — the sweep's extent is graded against that sentence")
     deepest = span + int(stated_past.group(1))
-    assert (min(start_sweep), max(start_sweep)) == (1, deepest), (
-        f"the start sweep covers offsets {min(start_sweep)}..{max(start_sweep)} while the "
-        f"docstring states `1..span + {stated_past.group(1)}`, i.e. 1..{deepest} on the "
-        f"span-{span} site — a sweep that stops early grades nothing past where it stops")
+    # ⛔ The swept set is the set of rows the TABLE actually carries (#14723, round 30), so both
+    # a short loop bound AND an emission that skips rows red this arm, and a hole in the middle
+    # cannot hide behind an intact min/max pair.
+    swept_start = sorted(k for k in start_sweep if start_key.format(k=k, span=span) in table)
+    assert swept_start == list(range(1, deepest + 1)), (
+        f"the start sweep's rows miss offsets "
+        f"{sorted(set(range(1, deepest + 1)) - set(swept_start))} and reach past it by "
+        f"{sorted(set(swept_start) - set(range(1, deepest + 1)))} while the docstring states "
+        f"`1..span + {stated_past.group(1)}`, i.e. 1..{deepest} on the span-{span} site — a "
+        f"sweep that stops early, in its bound OR in the rows it emits, grades nothing past "
+        f"where it stops")
     assert re.search(r"every end offset `1\.\.span` past the artifact's end", doc_all), (
         "`_cites_a_site_in`'s docstring no longer names the end sweep as \"every end offset "
         "`1..span` past the artifact's end\" — its extent is graded against that sentence")
-    assert sorted(end_sweep) == list(range(1, span + 1)), (
-        f"the end sweep covers offsets {min(end_sweep)}..{max(end_sweep)} while the docstring "
-        f"states `1..span`, i.e. 1..{span} on the span-{span} site")
+    swept_end = sorted(k for k in end_sweep if end_key.format(k=k, span=span) in table)
+    assert swept_end == list(range(1, span + 1)), (
+        f"the end sweep's rows miss offsets {sorted(set(range(1, span + 1)) - set(swept_end))} "
+        f"and reach past it by {sorted(set(swept_end) - set(range(1, span + 1)))} while the "
+        f"docstring states `1..span`, i.e. 1..{span} on the span-{span} site — graded on the "
+        f"rows the table carries, so neither a short bound nor a short emission can pass")
     # ⛔ AND REPORT §8.23'S COPY OF THAT EXTENT IS THE SAME EXTENT (#14723, round 29). Round 27
     # established that EVERY copy of a derived figure must be graded, not whichever one a fix
     # happens to reach; the end sweep's extent has two homes — the predicate's docstring and
@@ -1901,10 +1924,10 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
         "REPORT §8.23 no longer states the END sweep's extent as \"every end offset `1..span` "
         "past a site\" — the swept set is graded against that sentence")
     reported_max = span + int(reported_end.group(1) or 0)
-    assert reported_max == max(end_sweep), (
-        f"REPORT §8.23 states the END sweep reaches 1..{reported_max} while the loop sweeps "
-        f"1..{max(end_sweep)} on the span-{span} site — the docstring's copy of this extent is "
-        "graded, so the evidence document's copy may not drift from it")
+    assert reported_max == max(swept_end), (
+        f"REPORT §8.23 states the END sweep reaches 1..{reported_max} while the rows the table "
+        f"carries reach 1..{max(swept_end)} on the span-{span} site — the docstring's copy of "
+        "this extent is graded, so the evidence document's copy may not drift from it")
     # …and REPORT's copies, which are the ones a reader of the EVIDENCE doc actually meets. The
     # slack copy is a REGEX, not a needle, because it is the same figure the docstring copy is
     # graded on and it sits one line below §8.20's allowance needle (#14723, round 28: measured

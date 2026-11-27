@@ -1221,6 +1221,38 @@ Mutants, each applied alone at this head: §8.23's extent → `1..span + 1` RED 
 deleted RED · control **103 passed**. Every red is exactly
 `test_the_citation_shape_table_is_the_predicate_the_docstring_states`.
 
+### 8.26 Round 30 — the extent was read from the DICT, so the emission was free
+
+Round 28 graded each sweep's extent from the dict that FEEDS its rows, so the loop's BOUND was
+covered. The emission is a second place a sweep can stop short, and it was graded by nothing.
+Measured at `ea006476a872`, each mutant applied alone and the file restored byte-for-byte
+(`sha256sum` compared):
+
+| mutant | result | what became false |
+|---|---|---|
+| `if k > span: continue` in the start sweep's emission loop | **103 passed** | "SWEEPS every offset in 1..span + 3" |
+| `if k > 1: continue` in the end sweep's emission loop | **103 passed** | "every end offset 1..span" |
+
+The dict still covered `1..span + 3`, so the extent assertion round 28 added stayed green while the
+rows it is supposed to generate stopped at the site's span — the same defect one level down again,
+and it is the defect class §8.24's own paragraph names.
+
+**Fix (the swept set is read from the rows the TABLE carries).** The emission and the extent now
+share one key template per sweep, and the graded set is `{k for k in sweep if key(k) in table}` —
+so a short bound, a short emission, an over-long bound and a HOLE in the middle all red the same
+arm. Set equality, not `min`/`max`: a middle hole leaves an intact min/max pair, which is why the
+first form of round 28's assertion could not have caught it. §8.23's extent is compared against
+the same table-derived maximum.
+
+Mutants, each applied alone at this head, file restored byte-for-byte: start bound → `span + 1` RED ·
+start bound → `span + 3` RED · start bound → `span + 5` RED · end bound → `span` RED · end bound →
+`span + 2` RED · start emission stops at `span` RED ("rows miss offsets [21, 22, 23]") · start
+emission hole at `5` RED · end emission stops at `1` RED · end emission hole at `3` RED · docstring
+start extent `+ 3` → `+ 2` RED · docstring end extent → `1..span - 1` RED · §8.23's extent →
+`1..span + 1` RED · §8.23's sentence deleted RED · control **103 passed**. Every red is exactly
+`test_the_citation_shape_table_is_the_predicate_the_docstring_states`. No artifact, pin, row or
+predicate changed; no new test file, so no `config/ci-surfaces.yml` row is needed.
+
 ---
 
 ## 9. Mandate-preflight disclosure
