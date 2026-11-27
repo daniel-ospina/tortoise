@@ -2294,7 +2294,7 @@ def test_the_divergence_arm_prescribes_no_journal_repair_on_the_record_only_arm(
     )
 
     # ⛔ THE REFUSAL IS CONDITIONED ON DISAGREEMENT, not on the act of passing:
-    # the guard is `allocated_first != seq` (`record_writer.py:4425`), so a direct
+    # the guard is `allocated_first != seq` (`record_writer.py:4430`), so a direct
     # caller that supplies the allocator's own next number APPLIES. "passing one
     # again refuses" was a universal this arm's own guard falsifies, so the advice
     # has to name the disagreement instead.
