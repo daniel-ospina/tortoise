@@ -84,8 +84,9 @@ aboutObjects: ONTOLOGY.md, ONTOLOGY-CHANGELOG.md, canonical ontology
 
 ### Batch 1 — header, §1, §2 (9 references)
 
-**Header — 0 references, +2 rules, version bumped.** The header gains one normative sentence (a
-location is named by section or code symbol, never by an issue), **loses** the `ONTOLOGY.md:36`
+**Header — 0 references, +2 rules, version bumped.** The header gains one normative sentence (new
+prose names a location by section or by code symbol, never by an issue — **scoped to new prose**, so
+it composes with `P-1` either way), **loses** the `ONTOLOGY.md:36`
 carve-out that kept *"where a term or decision lives"* references in the model (draft `P-1`), and
 moves `v3.38` → `v3.39` in the frontmatter `title:` and the H1 with `updated:` → `2026-11-23`
 (draft `P-2`). Both policy items are listed here because they are the only places in this change

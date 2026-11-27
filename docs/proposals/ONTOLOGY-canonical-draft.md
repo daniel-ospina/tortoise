@@ -232,9 +232,19 @@ sentence stays.*
 
 **Header D1: 1 → 2, delta +1, and the delta is an ADDED rule, not a lost one.** The single
 source token is `never` at **`:26`** ("never a licence to treat the model as wrong"). The added
-token is the `never` in the D-3 pointer rule ("…names a section of this document or a code
-symbol, **never** an issue"). It is called out here, in §1.1, and on the approval line so it
-cannot be mistaken for a removal.
+token is the `never` in the D-3 pointer rule ("New prose here names a location by section or by
+code symbol, and **never** an issue"). It is called out here, in §1.1, and on the approval line so
+it cannot be mistaken for a removal.
+
+Both halves of D-3 are deliberately **scoped to new prose**, and the scope is load-bearing, not
+stylistic. The neighbouring `as history` clause is guarded the same way (§1.3's change list, item 3)
+and for the same reason: an unconditional rule would be false in every shape where a batch has not
+been approved.
+A strict-zero claim in the header would also contradict the `ONTOLOGY.md:36` carve-out in the one
+shape this document itself offers as the minimal-risk landing — **all batches with `P-1` rejected**
+(§F.3) — where 17 location refs stay. Scoped, `P-3` and `P-1` are independent: `P-1` decides whether
+the *existing* location refs survive, `P-3` decides what *new* prose may mint. Approach it as
+"never numbers anywhere" and both become false the moment one batch is deferred.
 
 **Deliberately NOT counted, and stated so it cannot look like an oversight:** the header also
 gains *"Anything that records when something was decided… belongs in
@@ -304,7 +314,7 @@ doc_status: live
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in `ONTOLOGY-CHANGELOG.md`.
 >
-> **No issue state, no change history.** New prose here names no PR, no issue and no build status **as history**: a reference to *when* something was decided, fixed or landed belongs in `ONTOLOGY-CHANGELOG.md`, and so does a sentence reporting the state of the build. What belongs here is only *what the model is*. **A location is named by section or by code symbol — never by an issue.** `ONTOLOGY-CHANGELOG.md` is the single home for the provenance this document once carried inline.
+> **No issue state, no change history.** New prose here names no PR, no issue and no build status **as history**: a reference to *when* something was decided, fixed or landed belongs in `ONTOLOGY-CHANGELOG.md`, and so does a sentence reporting the state of the build. What belongs here is only *what the model is*. **New prose here names a location by section or by code symbol, and never by an issue.** `ONTOLOGY-CHANGELOG.md` is the single home for provenance; anything this document still carries inline is what no batch has moved yet.
 
 **Convention:** camelCase throughout. `kind` = classification tag on an entity. `predicate` = named edge between entities. Capture-path/pipeline fields keep their code spelling (snake_case, or a leading-underscore internal field) — e.g. `file_hash`, `is_episodic`, `c_cal`, `passes_frequency_gate`, `provenance_spans`, `_searchText`.
 
@@ -414,9 +424,9 @@ than removing a citation from them, and each is separately rejectable.
 
 | # | The change | Why it needs a decision | Rejecting it means |
 |---|-----------|------------------------|--------------------|
-| **P-1** | **The carve-out at the tail of `ONTOLOGY.md:36` is removed.** The source says a reference recording *where a term or decision lives* (`validTo`'s registration, `c_cal`) *"is not history and **stays**"*. D-3's strict-zero target removes that category too. | The source header protects this category explicitly. A change that removes it is a **policy change**, not an application of the existing rule — the header's own sentence even calls the removal of history refs *"a separate change"* while marking location refs as out of scope. Presenting this as "the change the sentence leaves open" would misrepresent it. | **Restore the carve-out**: location refs (`#909 §4.3 #11` at `:405`, `#909 §4.3 #10` at `:398`) stay, and the model keeps **17** references (the `#NNNN §x.y` form: 16 × `#909 §4.3`, 1 × `#5013 §4.4`). The rest of this proposal is unaffected. |
+| **P-1** | **The carve-out at the tail of `ONTOLOGY.md:36` is removed.** The source says a reference recording *where a term or decision lives* (`validTo`'s registration, `c_cal`) *"is not history and **stays**"*. D-3's strict-zero target removes that category too. | The source header protects this category explicitly. A change that removes it is a **policy change**, not an application of the existing rule — the header's own sentence even calls the removal of history refs *"a separate change"* while marking location refs as out of scope. Presenting this as "the change the sentence leaves open" would misrepresent it. | **Restore the carve-out**: location refs (`#909 §4.3 #11` at `:405`, `#909 §4.3 #10` at `:398`) stay, and the model keeps **17** references (the `#NNNN §x.y` form: 16 × `#909 §4.3`, 1 × `#5013 §4.4`). The rest of this proposal is unaffected, and **`P-3` does NOT have to be rejected with it**: `P-3`'s rule is scoped to *new prose*, so it governs what the document mints from here on and says nothing about the 17 pointers the carve-out keeps. |
 | **P-2** | **`v3.38` → `v3.39`, in the frontmatter `title:` and the H1, with `updated:` → `2026-11-23`.** | Those lines are part of the exact change the owner approves (`ONTOLOGY-CHANGELOG.md:585`), and a proposal that bumps one and not the other leaves the file asserting two versions. | Keep `v3.38`; the diff then contains no version change and the changelog entry records the model change without a version number. |
-| **P-3** | **The header gains one normative sentence** — a location is named by section or code symbol, never by an issue — plus the single changelog pointer. | It is the only place in this proposal where the model **gains** a rule, and additions to an owner-gated document deserve their own line. | The pointer stays in the changelog and this file names no rule about naming; the remaining batches then have no header to lean on for "no numbers, ever". |
+| **P-3** | **The header gains one normative sentence** — new prose names a location by section or by code symbol, never by an issue — plus the single changelog pointer. The sentence is scoped to *new prose* on purpose: unscoped, it would contradict `P-1`'s carve-out in the shape §F.3 recommends (all batches, `P-1` rejected). | It is the only place in this proposal where the model **gains** a rule, and additions to an owner-gated document deserve their own line. | The pointer stays in the changelog and this file names no rule about naming; the remaining batches then have no header to lean on for "no numbers, ever". |
 
 **Nothing else in Batch 1 changes a policy.** If P-1, P-2 and P-3 are all rejected, Batch 1
 reduces to: nine citations removed from §2, the header untouched, and §1 untouched.
@@ -2555,7 +2565,7 @@ source rather than by adding up the parts.*
 |---|---|---|---|
 | **P-1** | Remove the carve-out at the tail of `ONTOLOGY.md:36` — *"A reference that records **where a term or a decision lives** … is not history and **stays**"* | 1 | **17** location references stay (the `#NNNN §x.y` form); strict-zero is unreachable for those. |
 | **P-2** | Bump `v3.38` → `v3.39` in frontmatter `title:` *and* H1, `updated:` → `2026-11-23` | 1 | The model changes without a version change. |
-| **P-3** | Add the header's one changelog pointer + the "named by section or code symbol, never by an issue" rule | 1 | No in-file rule against re-pollution. |
+| **P-3** | Add the header's one changelog pointer + the "new prose names a location by section or by code symbol, never by an issue" rule (scoped to new prose, so it composes with `P-1` either way) | 1 | No in-file rule against re-pollution. |
 | **P-4** | Rewrite §4.1's owner-approved *"Percent, ratio, duration and quantity …"* sentence and delete its `#11915` status note | 3 | That sentence and its note return verbatim; §4.1 keeps one reference. |
 
 **P-1, P-2 and P-4 change an EXISTING rule; P-3 ADDS one.** ⚠️ **A fourth rule is ADDED outside
