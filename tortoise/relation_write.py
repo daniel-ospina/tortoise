@@ -1049,6 +1049,14 @@ def apply_relation_edges(
     a stated relation that produced no edge of its own is never silent — and
     ``written + dropped + folded`` reconciles with the stated population
     (``folded`` counts MEANINGS, so one edge that absorbed two verbs counts 2).
+    ⚠️ ONE EXCEPTION, stated rather than left to be found: two statements that
+    become the SAME edge after the ORIENTATION leg ran (``A owns B`` and
+    ``B --ownedBy--> A``, #14304) are one edge and are deduped — silently, and
+    only the FIRST spelling's correction reaches ``orientation``/``warnings``/
+    ``reoriented``; the module header's order-dependence bullet is the full
+    disclosure. Two statements can therefore yield ``written=1, dropped=0,
+    folded=0`` with one of them unaccounted, and that is intended, not a lost
+    meaning.
     That holds on the REFUSAL arm too: a refused edge that had absorbed a
     meaning yields one drop row per lost MEANING, so a refused fold is counted
     as the loss it is rather than reported as ``written=0, dropped=1`` for a

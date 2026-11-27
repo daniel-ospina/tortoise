@@ -43,6 +43,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tortoise.pack_hierarchy import DeclaredHierarchy
 from tortoise.relation_guards import (
     ABSTAIN,
     ABSTAIN_NO_LABEL_SIDE,
@@ -149,8 +150,20 @@ def test_the_owner_on_the_target_side_is_left_alone():
     assert verdict.payload is None
 
 
-def test_an_exactly_declared_pair_reversed_is_also_reversed():
-    """The pair leg's `reversed_pair` case, on this leg (goal/person, no labels)."""
+def test_a_declared_pair_whose_end_is_a_LABEL_reversed_uses_the_LABEL_premise():
+    """A declared pair with a LABEL end reversed → premise (b), not premise (a).
+
+    ⚠️ The name used to be `…is_also_reversed`, which described the guard wrongly:
+    this ask is NOT which premise answers it — `ownedBy` declares
+    `core:goal -> Subject`, and `Subject` is a LABEL, so premise (a)'s exact-pair
+    match cannot reach it from KINDS. The correction comes from the label leg and
+    therefore carries `evidence="declared-endpoint-label"`. Premise (a)'s own tag
+    is pinned separately, on `causes`
+    (`test_a_KIND_only_declared_pair_reversed_carries_the_DECLARED_PAIR_evidence`).
+
+    Mutation: make `declared_label_sides` return `((), ())` for this predicate and
+    the outcome becomes `abstain` (`no-label-endpoint`).
+    """
     verdict = orient_declared_pair("ownedBy", "core:naturalPerson", "core:goal")
     assert verdict.outcome == ORIENTATION_REVERSED
     assert (verdict.payload or {})["evidence"] == "declared-endpoint-label"
@@ -340,6 +353,52 @@ def test_the_receipt_declares_the_correction():
     assert row["orientation"]["rule"] == RULE_ORIENTATION
     assert row["direction"] is None  # structural arm carries no direction
     assert any("RE-ORIENTED (#14304)" in w for w in warnings), warnings
+
+
+def test_the_HIERARCHY_arm_declares_the_correction_it_applied():
+    """⛔ THE THIRD LANDING ARM — and the one where the declaration was unpinned.
+
+    A pack-declared hierarchy (`dev`: `hasPart`, `theme -> epic`) lands on its own
+    `RelationEdge` construction, not on the story's-verb arm. A statement in the
+    REVERSE order (`epic --hasPart--> theme`) is oriented FIRST, so the declared
+    pair is restored **and** the hierarchy edge carries the correction.
+
+    Mutation, and it is the reason this test exists: delete
+    `orientation=orientation` from the hierarchy arm's `RelationEdge(...)`
+    (`relation_write.py`, the `RELATION_STRUCTURAL` + `declared_by=edge.pack`
+    construction) and the whole suite stays GREEN while `orientation` reads
+    `None` on a row the seam DID correct — a live fix with no assertion
+    (found by this PR's mutation-attribution pass, agent-infra#3442). The WRITTEN
+    edge is unaffected either way, which is exactly why nothing caught it: the
+    graph is right and only the declaration is lost, and
+    `docs/ax/ax-principles.md` Rule 1 makes the declaration mandatory.
+
+    Second mutation: drop the swap and `src_id`/`dst_id` come out stated-order.
+    """
+    declared = (DeclaredHierarchy(
+        pack="dev", path="Theme \u2192 Epic", predicate="hasPart",
+        from_kind="dev:theme", to_kind="dev:epic", write_path="structural"),)
+    index = {
+        "quarry": [("obj-theme", "dev:theme")],
+        "auth table": [("obj-epic", "dev:epic")],
+    }
+    # Stated in the REVERSE of the declared pair (`epic -> theme`).
+    edges, drops = plan_relation_edges(
+        [{"src": "auth table", "dst": "quarry", "predicate": "hasPart"}],
+        index, declared=declared)
+    assert not drops, drops
+    assert len(edges) == 1
+    edge = edges[0]
+    assert (edge.src_id, edge.dst_id) == ("obj-theme", "obj-epic"), \
+        "the declaration, not the sentence's word order, fixes the ends"
+    assert edge.predicate == "hasPart"
+    assert edge.write_path == "structural"
+    assert edge.declared_by == "dev"
+    assert edge.orientation is not None, \
+        "the hierarchy arm must DECLARE the correction it applied"
+    assert edge.orientation["outcome"] == ORIENTATION_REVERSED
+    assert edge.orientation["evidence"] == "declared-pair"
+    assert edge.orientation["rule"] == RULE_ORIENTATION
 
 
 def test_a_correct_pair_raises_no_warning_and_counts_zero():
