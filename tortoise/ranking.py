@@ -805,10 +805,13 @@ def _superseded_below_successor(ann: list[dict], *,
 
     A CYCLE in the data (X replaced by Y and Y by X — only raw/imported data
     can write one: ``supersede_point`` refuses a terminal endpoint, #2498) has
-    NO valid order, so cycle members keep their positions and are not moved; a
-    row that merely feeds the cycle is still placed below it. That is stated
-    rather than left to a budget running out: an expensive pass that in the end
-    changes nothing is the shape that made this quadratic-to-the-fourth.
+    NO valid order, so cycle members keep their positions and are not moved
+    (``_successor_depths`` reports them and the placement pass skips them
+    entirely, so this holds for cycles of any length and not just for a 2-cycle
+    whose two placements happen to cancel); a row that merely feeds the cycle is
+    still placed below it. That is stated rather than left to a budget running
+    out: an expensive pass that in the end changes nothing is the shape that
+    made this quadratic-to-the-fourth.
 
     ``page_limit`` — the caller's page size, when it knows it. A replacement
     that will NOT be served must not drag the replaced row out of the page
@@ -849,9 +852,10 @@ def _superseded_below_successor(ann: list[dict], *,
             succ_of.append(None)
             continue
         succ_of.append(succ_id)
+    depths, in_cycle = _successor_depths(succ_of, where)
     by_depth: dict[int, list[int]] = {}
-    for k, d in enumerate(_successor_depths(succ_of, where)):
-        if succ_of[k] is not None:
+    for k, d in enumerate(depths):
+        if succ_of[k] is not None and k not in in_cycle:
             by_depth.setdefault(d, []).append(k)
     if not by_depth:
         return ann
@@ -874,7 +878,7 @@ def _superseded_below_successor(ann: list[dict], *,
 
 
 def _successor_depths(succ_of: list[str | None],
-                      where: dict[str, int]) -> list[int]:
+                      where: dict[str, int]) -> tuple[list[int], set[int]]:
     """Links from each row to a terminal successor — one walk per chain.
 
     ``A <- B <- C`` gives ``{C: 0, B: 1, A: 2}``. The walk is iterative and each
@@ -882,13 +886,18 @@ def _successor_depths(succ_of: list[str | None],
     :func:`_superseded_below_successor` then needs one move per row, never
     ``n·(n-1)`` passes.
 
-    A row in a CYCLE gets depth 0 (it is not placed) and a row that merely
-    feeds the cycle still gets the chain depth that leads into it, so it is
-    still held below the row it names.
+    Returns ``(depth, in_cycle)``. A row in a CYCLE is named in the second
+    element and is NEVER placed: no order satisfies every edge of a cycle, so
+    moving its members one at a time cannot converge on one — it just relocates
+    rows the data says are unordered (and a 2-cycle's two placements cancel,
+    which hides exactly that). A row that merely feeds the cycle is not in the
+    set and still gets the chain depth that leads into it, so it is still held
+    below the row it names.
     """
     n = len(succ_of)
     depth = [0] * n
     resolved = [False] * n
+    in_cycle: set[int] = set()
     for start in range(n):
         if resolved[start]:
             continue
@@ -902,7 +911,9 @@ def _successor_depths(succ_of: list[str | None],
                 break
             seen_at = on_path.get(i)
             if seen_at is not None:
-                for j in path[seen_at:]:     # the cycle itself: unresolvable
+                members = path[seen_at:]
+                in_cycle.update(members)     # the cycle itself: unresolvable
+                for j in members:
                     resolved[j] = True       # depth stays 0 ⇒ never moved
                 path = path[:seen_at]
                 base = 0
@@ -922,7 +933,7 @@ def _successor_depths(succ_of: list[str | None],
             base += 1
             depth[j] = base
             resolved[j] = True
-    return depth
+    return depth, in_cycle
 
 
 def _row_id(row: dict) -> str:

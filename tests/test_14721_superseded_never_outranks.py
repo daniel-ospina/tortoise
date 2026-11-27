@@ -175,53 +175,60 @@ def test_a_four_link_chain_resolves_too():
 
 
 def test_two_unidentifiable_rows_are_never_reordered_by_each_other():
-    """REGRESSION PIN (review P2): a non-injective id map drops a row.
+    """REGRESSION PIN (review P2): a row with no unique id is NEVER MOVED.
 
-    An id-to-index map built from ids that are EMPTY points at the wrong row,
-    so a positional move removed a different row than the one inspected — one
-    row duplicated, another silently lost (measured: three rows in, one of two
-    id-less rows gone, the other doubled). Rows without a unique id must be
-    left alone, and the row count must never change.
+    The index this pass moves by is only usable when it is injective, so a row
+    with no id (or an empty one) is unaddressable and the constraint does not
+    apply to it. What a broken index does is measured, not asserted: drop the
+    ``rid not in where`` guard and the pass re-locates the row by
+    ``list.index("")`` — the FIRST id-less row — so it pops and relocates the
+    row ABOVE the one it inspected (``no id at all``, here the innocent
+    bystander) and leaves the id-less row that carries ``superseded_by`` where
+    it was. Row COUNT alone cannot see that: ``pop`` + ``insert`` of one object
+    preserves the multiset either way, which is why this asserts POSITIONS.
     """
     rows = [
-        {"content": "no id at all", "scores": {"rrf": 5.0},
+        {"content": "no id at all", "scores": {"rrf": 5.0}},
+        {"id": "", "content": "empty id", "scores": {"rrf": 3.0}},
+        {"content": "no id but superseded", "scores": {"rrf": 2.0},
          "superseded_by": {"id": "pt_s", "content_snippet": "…",
                            "created_at": "t1"}},
-        {"id": "", "content": "empty id", "scores": {"rrf": 3.0}},
-        _row("pt_s", 1.0),
+        {"id": "pt_s", "content": "pt_s", "scores": {"rrf": 1.0}},
     ]
     out = StateRanker().rerank(rows)
-    assert len(out) == 3, [r.get("content") for r in out]
-    # Same three rows, none lost, none duplicated — the order may change, the
-    # population may not.
-    assert sorted(r.get("content", "") for r in out) == [
-        "empty id", "no id at all", "pt_s"], [r.get("content") for r in out]
+    assert [r.get("content") for r in out] == [
+        "no id at all", "empty id", "no id but superseded", "pt_s"], \
+        [r.get("content") for r in out]
 
 
 def test_rows_sharing_one_non_empty_id_are_never_dropped_or_duplicated():
     """REGRESSION PIN (review C2): the SHARED-id half of the injectivity guard.
 
     ``test_two_unidentifiable_rows_are_never_reordered_by_each_other`` above
-    exercises only EMPTY ids — and both the fixed code and the pre-fix line skip
-    an empty id, so that row cannot fail for the class this docstring names.
-    Two rows sharing a NON-EMPTY id are the reachable shape: an index keyed on
-    it is not injective, so a positional move takes the row at the index rather
-    than the row inspected. Verified against the ungated map
-    (``if rid and ids.count(rid) == 1`` → ``if rid``): contents come out
-    ``A, pt_s, A`` — ``B`` lost, ``A`` duplicated — where this asserts
-    ``A, B, pt_s``. The shipped pre-fix line already carried the ``counts == 1``
-    half, so what this pins is that the gate is not dropped again.
+    exercises only EMPTY ids, and both the fixed code and the pre-fix line skip
+    an empty id, so a shared NON-EMPTY id is the reachable shape for the
+    ``counts[rid] == 1`` half of the gate.
+
+    ⛔ WHAT A BROKEN INDEX DOES HERE IS MEASURED, AND IT IS NOT LOSS. An earlier
+    draft of this docstring claimed ``A, pt_s, A`` — one row duplicated, one
+    lost. That cannot happen in this shape and never could: the pass moves one
+    row with ``pop`` + ``insert`` of the SAME object, so the multiset is
+    invariant under every mutation of it. What the ungated map (``if rid``)
+    really does is pop the row at ``index("dup")`` — the FIRST ``dup``, i.e.
+    the innocent ``A`` — and re-insert it after ``pt_s``: ``B`` stays ABOVE its
+    own successor, and a row that was in no violation is relocated instead.
+    Count and multiset are blind to that, so this asserts ORDER.
     """
     rows = [
-        {"id": "dup", "content": "A", "scores": {"rrf": 5.0},
+        {"id": "dup", "content": "A", "scores": {"rrf": 5.0}},
+        {"id": "dup", "content": "B", "scores": {"rrf": 3.0},
          "superseded_by": {"id": "pt_s", "content_snippet": "…",
                            "created_at": "t1"}},
-        {"id": "dup", "content": "B", "scores": {"rrf": 2.0}},
-        _row("pt_s", 1.0),
+        {"id": "pt_s", "content": "pt_s", "scores": {"rrf": 1.0}},
     ]
     out = StateRanker().rerank(rows)
     assert len(out) == 3, [r.get("content") for r in out]
-    assert sorted(r["content"] for r in out) == ["A", "B", "pt_s"], \
+    assert [r.get("content") for r in out] == ["A", "B", "pt_s"], \
         [r.get("content") for r in out]
 
 
@@ -310,6 +317,59 @@ def test_a_cycle_keeps_its_rows_in_place():
     ]
     out = _ids(StateRanker().rerank(rows))
     assert out == ["pt_x", "pt_y", "pt_z"], out
+
+
+def test_a_longer_cycle_is_left_alone_too():
+    """REGRESSION PIN (review P3): a THREE-cycle is not moved either.
+
+    The 2-cycle above passes for the wrong reason on the previous shape: two
+    placements that cancel make the input order reappear, so the row cannot tell
+    "left alone" from "moved twice". A 3-cycle can: with the members placed like
+    any other row they come back ``x, z, y`` — moved, with two of the three
+    edges still inverted — while the contract (and ``_successor_depths``'s own
+    docstring) says a cycle has no order that satisfies its edges and its
+    members are therefore not placed at all.
+    """
+    rows = [
+        _row("pt_x", 5.0, status="superseded", outdated=True,
+             superseded_by={"id": "pt_y", "content_snippet": "…",
+                            "created_at": "t1"}),
+        _row("pt_y", 3.0, status="superseded", outdated=True,
+             superseded_by={"id": "pt_z", "content_snippet": "…",
+                            "created_at": "t2"}),
+        _row("pt_z", 1.0, status="superseded", outdated=True,
+             superseded_by={"id": "pt_x", "content_snippet": "…",
+                            "created_at": "t3"}),
+    ]
+    out = _ids(StateRanker().rerank(rows))
+    assert out == ["pt_x", "pt_y", "pt_z"], out
+
+
+def test_a_row_feeding_a_cycle_is_still_held_below_it():
+    """A cycle is left alone; the chain that FEEDS it is not (review P3).
+
+    Leaving cycle members unplaced must not degenerate into "skip anything that
+    touches a cycle": ``pt_feed`` names ``pt_x`` (a cycle member), so
+    ``pt_feed`` must still come out BELOW ``pt_x`` — it is placed directly after
+    it, not last, because the rows of the cycle itself are unordered.
+
+    ⛔ This is a CONTROL, not a proof of the cycle fix: the old
+    place-everything shape reaches this same order by accident. It reds on the
+    over-broad mutant that drops every row downstream of a cycle instead.
+    """
+    rows = [
+        _row("pt_feed", 9.0, status="superseded", outdated=True,
+             superseded_by={"id": "pt_x", "content_snippet": "…",
+                            "created_at": "t0"}),
+        _row("pt_x", 5.0, status="superseded", outdated=True,
+             superseded_by={"id": "pt_y", "content_snippet": "…",
+                            "created_at": "t1"}),
+        _row("pt_y", 3.0, status="superseded", outdated=True,
+             superseded_by={"id": "pt_x", "content_snippet": "…",
+                            "created_at": "t2"}),
+    ]
+    out = _ids(StateRanker().rerank(rows))
+    assert out == ["pt_x", "pt_feed", "pt_y"], out
 
 
 def test_a_large_pool_resolves_within_the_wait_bound():
