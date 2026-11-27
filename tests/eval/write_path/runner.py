@@ -2075,16 +2075,21 @@ def extractor_arm_readback() -> dict:
         # ORs an injected ``vet_arbiter is not None`` ahead of these terms
         # (``extractor_v2.py``, the arming-OR at the call site), and no receipt
         # can observe an injected arbiter — this runner has ONE extraction entry,
-        # ``sdk._capture_session`` (``runner.py:1672``), which passes no
-        # ``vet_arbiter``, and ``sdk._extract_session_v2``'s own two entries record
-        # that they inject none (``sdk.py:19265``, ``:21960``) — so the two agree
-        # on every receipt this runner can write.
-        # ⛔ The check is NAMED, not offered as a grep: the first version of this
-        # comment said ``rg 'arbiter' tests/eval/write_path/runner.py`` is empty,
-        # and that command returns FIVE hits, every one of them inside this very
-        # comment — an instruction that invalidates itself, on the load-bearing
-        # caveat of the one boolean the arm-attribution story rests on (#14774
-        # review cycle 7, MEASURED: ``grep -c arbiter`` -> 5).
+        # ``sdk._capture_session`` (``runner.py``), which passes no
+        # ``vet_arbiter``, and no call into ``extract_session_v2`` anywhere in
+        # ``tortoise/sdk.py`` passes one either (``_commit_session_v2`` and
+        # ``_extract_session_v2`` both omit the argument — ``grep -n
+        # 'vet_arbiter=' tortoise/sdk.py`` is empty) — so the two agree on every
+        # receipt this runner can write.
+        # ⛔ The check is NAMED, not offered as a grep on this FILE: the first
+        # version of this comment said ``rg 'arbiter' tests/eval/write_path/
+        # runner.py`` is empty, and that can never be true while this caveat
+        # exists, because the caveat must name the term it excludes — it matched
+        # this paragraph AND the ``_ARM_SWITCHES`` block above. An instruction
+        # that invalidates itself, on the load-bearing caveat of the one boolean
+        # the arm-attribution story rests on (#14774 reviews 7 and 8).
+        # ⚠️ No count is quoted here on purpose: a bare hit total drifts with
+        # every edit to this comment, which is the class this PR removes.
         # The arbiter is recorded here rather than silently dropped, because it is
         # the one term a future caller could add without moving this field.
         "vet_enabled": bool(vet_toggle or value_gate),
