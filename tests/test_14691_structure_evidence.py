@@ -1432,8 +1432,15 @@ def _cites_a_site_in(cited: tuple[str, int, int], sites) -> bool:
     into the same file left `102 passed` (measured). So shape 3 admits a citation that begins at
     the artifact's start or up to `_CITATION_WIDEN_BOUND` lines BEFORE it, and requires it to end
     at EXACTLY the artifact's end (`hi - other_hi == 0`). A start strictly INSIDE the range is
-    refused by the `lo <= other_lo` clause — measured: holding the end at the artifact's end, start
-    offsets 1..19 inside return False. That is
+    refused by the `lo <= other_lo` clause — measured, holding the end at the artifact's end:
+    start offsets 1..18 inside return False, and every offset past the artifact's end returns
+    False too, because `hi - other_hi == 0` then fails. ⛔ NOT "1..19": the offset that lands ON
+    the artifact's last line (`lo == hi == other_hi`) returns **True**, and it is not an inside
+    start at all — it is the degenerate single-line range shape 2 exists to admit. (Measured on
+    the site `sdk.py:62739-62758`: offsets 1..18 RED, 19 GREEN, 20..22 RED. The restatement of
+    the rule was the defect here once already, so grade it against
+    `test_the_citation_shape_table_is_the_predicate_the_docstring_states` rather than trust this
+    sentence.) That is
     what the one honest wider span in the two documents actually does — `entity_reads.py:533-559`
     against the artifact's `:551-559` is slack 18 at the start and 0 at the end (measured) — so
     the honest shape stays green, and an end-padded citation cannot pass at ANY start offset.
@@ -1607,6 +1614,60 @@ def test_every_CODE_citation_in_the_documents_is_one_an_artifact_carries():
         "these `path:line` citations appear in REPORT.md / VERIFICATION-independent.md "
         f"and in no committed artifact: {unsupported}. Either the prose cites code no "
         "measurement named, or the citation drifted from the artifact's own copy.")
+
+
+def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
+    r"""Reds if `_cites_a_site_in` admits or refuses a shape its docstring names.
+
+    ⛔ #14723, round 22. The arm below grades the DOCUMENTS, so a wrong table in the
+    predicate's OWN docstring is prose nothing grades — and it was wrong: it read
+    "start offsets 1..19 inside return False", while the offset that lands on the
+    artifact's last line collapses the range to the single line shape 2 exists to
+    admit and returns True (measured: 1..18 RED, 19 GREEN, 20..22 RED). Fixing the
+    sentence alone leaves the next restatement free, so the TABLE is pinned here.
+
+    Both directions are graded: the honest shapes must stay green (an over-tightened
+    predicate reds the documents) and the padded/moved ones must stay red (the
+    containment-in-either-direction predicate this replaced admitted them — mutated
+    back in, this arm reds on the end-padded and inside-start rows).
+
+    Every vector is an OFFSET from a site a committed artifact carries, never a literal
+    line number, so this arm cannot expire when a product file is rebased.
+    """
+    artifacts: set[tuple[str, int, int]] = set()
+    for path in (BUNDLE / "out").glob("*.json"):
+        artifacts |= {_citation_key(c)
+                      for c in _CITATION_RE.findall(path.read_text(encoding="utf-8"))}
+    sites = sorted(a for a in artifacts if a[0] == "sdk.py")
+    assert sites, "no committed artifact carries an `sdk.py` citation to shape the table from"
+    name, lo, hi = sites[0]
+    span = hi - lo
+    assert span >= 2, (
+        f"the shaping site {name}:{lo}-{hi} spans {span} line(s); the inside-start rows need "
+        "two or more to be distinguishable from the degenerate single-line shape")
+
+    one = [(name, lo, hi)]
+    table = {
+        "the same range": ((name, lo, hi), True),
+        "one line at the artifact's start (shape 2)": ((name, lo, lo), True),
+        "one line at the artifact's END (shape 2, the degenerate range)": ((name, hi, hi), True),
+        f"start slack of exactly the bound ({_CITATION_WIDEN_BOUND}), end exact (shape 3)":
+            ((name, lo - _CITATION_WIDEN_BOUND, hi), True),
+        f"start slack one PAST the bound ({_CITATION_WIDEN_BOUND + 1}), end exact":
+            ((name, lo - _CITATION_WIDEN_BOUND - 1, hi), False),
+        "one line INSIDE the artifact's start, end exact": ((name, lo + 1, hi), False),
+        "one line INSIDE the artifact's end, end exact": ((name, hi - 1, hi), False),
+        "a range that begins exactly where the artifact begins and pads its END":
+            ((name, lo, hi + span), False),
+        "a range that brackets the artifact on both sides": ((name, lo - span, hi + span), False),
+        "a MOVED range (the next span down), same width": ((name, lo - span, hi - span), False),
+    }
+    wrong = {shape: got for shape, (cited, expected) in table.items()
+             if (got := _cites_a_site_in(cited, one)) is not expected}
+    assert not wrong, (
+        f"`_cites_a_site_in` disagrees with its own docstring's shape table on "
+        f"{sorted(wrong)} — the vector is shaped on {name}:{lo}-{hi}, and the rule must be "
+        f"the predicate, not a wider gloss of it")
 
 
 def test_EVERY_bytes_figure_in_the_documents_is_the_committed_file():
