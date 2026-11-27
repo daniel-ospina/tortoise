@@ -4375,3 +4375,30 @@ def test_the_whole_body_fallback_needs_an_AFFIRMATIVE_clause_naming_every_row():
     findings, stats = L.classify_partial_close(
         f"Closes #13036\n\nEvery row is proved: {listing}.\n", 500, {13036: _scope(rows)})
     assert findings == [] and stats["clean"] == 1, stats
+
+
+# Review round 16: the claim read dropped a FULLY-QUALIFIED closing ref (it called `_claims_in` with
+# `repo=None`) while `closing_targets` resolved the repo and counted it — so the arm flagged a PR whose
+# closing line it then refused to read, and the empty claim set fell through to the whole-body fallback.
+@pytest.mark.parametrize("body,expected,unclaimed", [
+    # the qualified partial close must be READ, not dropped
+    ("Closes daniel-ospina/tortoise#13036 (row V2 only).\n",
+     "finding", ["V1", "V3", "V4", "V5", "V6"]),
+    # …and the fallback must not be reachable THROUGH the drop: a whole-body clause naming all six
+    # cannot launder it. This is the row that reddens iff the repo is not threaded through.
+    ("Closes daniel-ospina/tortoise#13036 (row V2 only).\n\n"
+     "Every row is proved: V1, V2, V3, V4, V5, V6.\n", "finding", ["V1", "V3", "V4", "V5", "V6"]),
+    # …while a qualified COMPLETE close stays clean — the control that separates "the repo was
+    # threaded" from "the line was simply whitelisted".
+    ("Closes daniel-ospina/tortoise#13036 (rows V1–V6)\n", "clean", None),
+])
+def test_a_fully_qualified_closing_ref_is_read_with_its_repo(body, expected, unclaimed):
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)},
+                                              "daniel-ospina/tortoise")
+    assert stats[expected] == 1, (body, stats)
+    if expected == "finding":
+        assert findings[0].evidence["claimed"] == ["V2"], findings[0].evidence
+        assert findings[0].evidence["unclaimed"] == unclaimed, findings[0].evidence
+    else:
+        assert findings == [], [f.as_dict() for f in findings]

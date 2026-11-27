@@ -1696,12 +1696,22 @@ def _closing_line_range_claim(line: str, claim_text: str, rows: list[str]) -> se
     return out
 
 
-def _closing_line_claim(pr_body: str, issue: int,
-                        rows: list[str]) -> tuple[set[str], bool]:
+def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
+                        repo: str | None = None,
+                        skipped: list[int] | None = None) -> tuple[set[str], bool]:
     """`(rows this PR claims, did a closing line DISCLAIM rows)` — the polarity-aware read.
 
     Two sources, and both are GROUNDED in the issue's declared rows, so a token the issue does not use
     can never count as a claim:
+
+    ⛔ `repo` IS PART OF THE READ, NOT A DISPLAY DETAIL (review round 16). The line test below uses the
+    module's own binding grammar (`_claims_in`), and that grammar needs the repo to resolve a
+    FULLY-QUALIFIED ref: with `repo=None` a `Closes owner/repo#N` was dropped by the claim read while
+    `closing_targets` — which DOES resolve the repo — counted it in the population. The arm then flagged
+    a PR whose closing line it refused to read, the empty claim set fell through to the whole-body
+    fallback, and a one-row close of a six-row capstone came back `clean`. This is the same invisible
+    drop `closing_targets`' own docstring records; it was threaded through ONE reader and this is the
+    second.
 
     * a ``Satisfies #<issue>: <ids>`` clause — the documented partial form;
     * the **qualifier on the closing keyword's own line**. That is the measured shape: #13886 wrote
@@ -1736,7 +1746,7 @@ def _closing_line_claim(pr_body: str, issue: int,
         # above it: `clean` on the exact shape the arm was filed for. The module already owns the
         # binding grammar (`CLAIM_RE` via `_claims_in`, the same test `closing_targets` trusts), so the
         # line qualifies only when that grammar says the keyword resolves THIS issue here.
-        if issue not in _claims_in(line)["closing"]:
+        if issue not in _claims_in(line, None, repo, skipped)["closing"]:
             # ⛔ NOT a closing line, but it can still DISCLAIM. A disclosure written on its OWN line
             # is the shape the careful author produces — `Closes #N` on one line, then `V2 is proved;
             # V1, V3–V6 remain unmeasured and are follow-ups` on the next — and reading disclaimers
@@ -1808,14 +1818,15 @@ def _closing_line_claim(pr_body: str, issue: int,
     return named, disclaimed
 
 
-def claimed_row_ids(pr_body: str, issue: int, rows: list[str]) -> set[str]:
+def claimed_row_ids(pr_body: str, issue: int, rows: list[str],
+                    repo: str | None = None) -> set[str]:
     """Which of the ISSUE's own rows this PR NAMES as its claim — the only set the arm compares against.
 
     The claim set alone; see `_closing_line_claim` for the read and for why a disclaimer's rows are
     NOT claims. `classify_partial_close` uses the wider pair, because it also has to know whether a
     disclaimer was seen before it may fall back to the whole body.
     """
-    return _closing_line_claim(pr_body, issue, rows)[0]
+    return _closing_line_claim(pr_body, issue, rows, repo)[0]
 
 
 def criteria_state(comment_bodies: list[str]) -> dict:
@@ -1959,7 +1970,7 @@ def classify_partial_close(body: str, number: int | str,
             # issue has, so "did this PR close part of it" is UNANSWERABLE. Never a pass.
             stats["abstained"] += 1
             continue
-        named_rows, disclaimed = _closing_line_claim(body, issue, rows)
+        named_rows, disclaimed = _closing_line_claim(body, issue, rows, repo)
         named_rows &= set(rows)
         if not named_rows:
             # ⛔ THE FALLBACK IS NOT A PASS EITHER. A PR that never puts a row id on its closing line
