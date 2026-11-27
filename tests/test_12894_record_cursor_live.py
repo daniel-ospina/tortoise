@@ -1247,9 +1247,11 @@ def test_a_mis_armed_counter_is_refused_with_a_remedy_that_applies(
     collision refusal. The docstring claimed ``refusal`` distinguished them; it
     does not, and now says so.
 
-    Both halves asserted: the token stays in the closed vocabulary (`write_failed`
-    — a new token would be a surface change), and the LOG names the state and the
-    remedy that applies. A "heals the record" line here reds this test.
+    Both halves asserted: the token stays on `write_failed` (`#11783`: these two
+    allocator refusals stay one bucket BY CHOICE — not because the vocabulary
+    cannot grow, which it did: `plan_refused` — see `write_live_record`), and
+    the LOG names the state and the remedy that applies. A "heals the record"
+    line here reds this test.
     """
     org, graph = tenant
     # `seeded`, NOT armed: the counter exists and refuses to issue.
