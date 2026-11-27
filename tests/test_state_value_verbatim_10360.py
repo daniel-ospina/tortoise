@@ -7372,10 +7372,27 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
             f"{run['path'].name}: failure classes are {run['classes']} — a "
             "provenance or EP-update failure would mean the loss is NOT purely "
             "upstream, and the row's residual (a) would be the wrong story")
+        # 3b. …and the census must RECONCILE with the survivors, or deleting a
+        #     `failed_units` row shrinks the census (and its stated counts) while
+        #     every other assert here stays green: an add-a-wrong-class mutant
+        #     reds, a delete-one mutant would not (#14774 review P2, measured).
+        assert run["survived"] + sum(run["classes"].values()) == run["total"], (
+            f"{run['path'].name}: {run['survived']} survived + "
+            f"{sum(run['classes'].values())} failed != {run['total']} graded "
+            "units — a failed_units row is missing or double-counted, so the "
+            "census below is not a census")
 
-    row = (pathlib.Path(__file__).resolve().parent.parent
-           / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
-    flattened = " ".join(row.split())
+    # ⛔ THE BOUND IS THE ROW, NOT THE FILE (#14774 review P1, MEASURED). This
+    #    pin's whole job is that the row cannot cite a figure no receipt
+    #    produces, and `in <the whole registry's flattened text>` satisfies it
+    #    from ANY other mechanism's prose — the exact fail-open this file already
+    #    measured and fixed 500 lines above for the sibling row pin (#11730
+    #    finding 3: a decoy row appended elsewhere left the pin GREEN).
+    #    `_residual_region` is that tighter bound and the row carries every
+    #    string asserted below.
+    registry_text = (pathlib.Path(__file__).resolve().parent.parent
+                     / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    flattened = " ".join(_residual_region(registry_text).split())
 
     # 4. every per-run figure the row states is the one its receipt produces.
     for run in on + off:
@@ -7395,6 +7412,17 @@ def test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts
     # 6. the committed bar itself, in the row's own form.
     assert f"{base_survived}/{base_total} = {_pct_1dp(base_survived, base_total)}" in flattened, (
         "the row must state the committed baseline it compares against")
+    # 6b. AND THE CENSUS THE ROW PUBLISHES, digit for digit (#14774 review P2,
+    #     MEASURED): the row names the per-run `content_missing` counts, which the
+    #     PR calls the usable result of the whole measurement, and the tuple was
+    #     asserted NOWHERE — `(46, 50, 45, 40)` -> `(46, 50, 45, 41)` stayed green.
+    #     Derived here in run order (flags-on 1,2 then flags-off 1,2).
+    census = tuple(sum(r["classes"].values()) for r in on + off)
+    stated_census = "(" + ", ".join(str(n) for n in census) + ")"
+    assert stated_census in flattened, (
+        f"the row does not state the derived failure census {stated_census} — "
+        "the counts it publishes beside 'THE LOSS CLASS IS THE USABLE RESULT' "
+        "must be the ones the receipts produce")
 
     # 7. THE VERDICT THE ROW RECORDS, held to the artifacts: every flags-on run
     #    is BELOW the bar, and the bar is INSIDE the flags-off band. Both halves
