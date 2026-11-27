@@ -1575,11 +1575,15 @@ def test_arm_i_outside_census_set_is_STRANDED_across_a_watcher_restart():
       object — so a fresh `AlertStore` over the same storage still finds it and
       would still close the incident. That is why the restart below builds a NEW
       store over the same storage instead of reusing the first one: a reused
-      instance cannot tell the two apart, so it would leave the storage reach
-      untested (the one half of the restart that a new process DOES carry over).
-      What strands the subject is a fresh ALERT-STORE storage, which is what
-      `_watcher()` builds (its own `MemoryStorage` per call), and that is why the
-      round-9 version was blind;
+      instance cannot tell the two apart. ⚠️ That construction is FIDELITY to the
+      production shape, NOT a guard — measured: reverting to ONE shared store
+      leaves this test green, and so does giving each process a store over a
+      fresh `MemoryStorage` (the carryover actually lost). No assertion here
+      consults the dedup object: after the restart the test asserts that NO
+      resolve is attempted, so nothing can distinguish a carried-over dedup from
+      a lost one. What strands the subject is a fresh ALERT-STORE storage, which
+      is what `_watcher()` builds (its own `MemoryStorage` per call), and that is
+      why the round-9 version was blind;
     * the `_alert_leg` SPY is what makes an attempt visible at all: it records
       `resolve_incident` whether or not a dedup object exists, so a carried
       register reds `bsm_resolves == []` independently of the store's state.
