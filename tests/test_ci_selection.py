@@ -10333,7 +10333,12 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
 
 
 def test_the_derivation_surface_claims_are_graded_against_the_manifest():
-    """#14623 review: the derivation STATES four files' surfaces, and nothing read them.
+    """#14623 review: the derivation STATES these files' surfaces, and nothing read them.
+
+    ⛔ NO NUMERAL IN THIS DOCSTRING EITHER (#14623 review): it said "four files" while the
+    derivation names FIVE, and the fifth (`test_expansion_fusion_14344.py` on `core`) was the one
+    missing from the tuple below — an over-claim of coverage written into the arm that exists to
+    prevent over-claims. The tuple is the count.
 
     The block names per-file registration while, three lines earlier, asserting that
     "registration status is a THIS-HEAD fact no arm in this block's family reads" and justifying
@@ -10347,6 +10352,7 @@ def test_the_derivation_surface_claims_are_graded_against_the_manifest():
     """
     m = cs.load_manifest()
     for fname, surface in (
+            ("test_expansion_fusion_14344.py", "core"),
             ("test_14592_operating_model_evidence.py", "core"),
             ("test_14592_operating_model_evidence.py", "eval"),
             ("test_14592_read_parity.py", "core"),
