@@ -547,6 +547,49 @@ def test_state_read_tells_the_ranker_the_page_size():
         sdk.close()
 
 
+def test_a_confidence_floor_cannot_hide_a_superseded_claim_above_its_successor():
+    """#14721 (final-review P2): the floor CUT, not just the page, can hide the pair.
+
+    ``page_limit=limit`` is handed to the ranker over the PRE-floor pool, so the
+    page-edge guard in ``_superseded_below_successor`` compares the successor's
+    POOL index against ``limit``. The served page is cut AFTER ``_passes_floor``
+    drops rows, so every dropped row shifts a later row INTO the page: a
+    successor sitting past the pool's page edge is skipped by the guard ("its
+    replacement will not be served") and then served anyway, leaving the
+    replaced claim above it — the exact defect the pairwise constraint exists to
+    remove, one confidence floor away.
+
+    The geometry is the measured one: the query terms select the OLD claim and
+    the fillers (which fail the floor), while the successor answers none of them
+    and therefore scores last in the pool despite passing the floor.
+    """
+    sdk = _fresh_sdk()
+    try:
+        old = sdk._create_point(
+            "statement", "zebra quantum coldpath holds a validated certificate")
+        fillers = [sdk._create_point(
+            "statement", f"zebra quantum coldpath logistics note {i}")
+            for i in range(6)]
+        new = sdk._create_point(
+            "statement", "coldpath does not hold a validated certificate")
+        _raw(sdk, "MATCH (o:Point {id:$o}), (n:Point {id:$n}) "
+                  "CREATE (n)-[:CORRECTS]->(o)", o=old["id"], n=new["id"])
+        _set_posterior(sdk, old["id"], 9.0, 1.0)          # conf 0.90 — served
+        for filler in fillers:
+            _set_posterior(sdk, filler["id"], 9.0, 11.0)  # conf 0.45 — dropped
+        _set_posterior(sdk, new["id"], 6.0, 4.0)          # conf 0.60 — served
+
+        page = [r["id"] for r in sdk._recall_state(
+            "zebra quantum", kind="statement", limit=4,
+            include_superseded=True, min_confidence=0.5)]
+        assert old["id"] in page and new["id"] in page, page
+        assert page.index(new["id"]) < page.index(old["id"]), (
+            "the floor dropped the rows that kept the successor past the page "
+            f"edge, so the served page leads with the claim it refutes: {page}")
+    finally:
+        sdk.close()
+
+
 def test_mitigation_on_nand_operator_surfaced():
     """Review P2 (#898): a mitigation on the very NAND that contradicts a
     surfaced claim is attached (high-contention NANDs/mitigations context)."""

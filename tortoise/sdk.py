@@ -50796,6 +50796,23 @@ class TortoiseSDK:
             return conf >= min_confidence
 
         ranked = [r for r in ranked if _passes_floor(r)][:limit]
+        # #14721 (final-review P2): the pairwise order is re-applied HERE, on the
+        # SERVED page, and this is not redundant with the `page_limit=limit`
+        # above. That call receives the PRE-floor pool, so the page-edge guard
+        # compares the successor's POOL index against `limit` — while the page
+        # this function returns is cut AFTER `_passes_floor` drops rows. Every
+        # dropped row shifts a later row INTO the page, so a successor at pool
+        # index >= `limit` is skipped by the guard ("its replacement is not
+        # served") and then IS served, with the replaced claim still above it:
+        # MEASURED through this door, stale@conf 0.9 above successor@conf 0.6
+        # with `limit=4, min_confidence=0.5` (and at 6 and 9), while the same
+        # read at `min_confidence=0.0` — where pool index == served index —
+        # orders correctly, which is why no pool-level test could see it. On the
+        # served page the index is exact and no pair can be dragged out: a
+        # successor that is not in this list is not served either, so applying
+        # every pair here can only reorder rows that are already in the page.
+        from .ranking import _superseded_below_successor as _order_served_page
+        ranked = _order_served_page(ranked)
 
         # 5. State context surfacing (batched, not N+1).
         point_ids = [r["id"] for r in ranked if r.get("entity_type") == "point"]

@@ -9,7 +9,7 @@ hit, and the refutation was not in the top 8:
 
     rank 1  [superseded] "ColdPath Logistics holds a validated cold-chain certificate"
             (FTS similarity 5.0 — higher than every current row)
-    rank 9  [live]       "Two of ColdPath's vehicles could not show a validated
+    rank 10 [live]       "Two of ColdPath's vehicles could not show a validated
                           cold-chain certificate, so ColdPath does not hold a
                           validated cold-chain certificate"   <- its successor
 
