@@ -3402,8 +3402,8 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # absorbed those three inserts into `main`'s own `sdk.py`, so they no longer move anything
     # here, and this head's `sdk.py` carries THREE remaining hunks over `origin/main`, all BELOW
     # `update_knowledge` (`:23117`/`:23292`, UNMOVED) and ABOVE the three other rows: 23 lines
-    # inserted at `:51599`, this PR's own 1 line at `:50770` (`page_limit=limit` on the
-    # rerank call), and a further 17 at `:50796` (the served-page re-application) — which
+    # inserted at `:51599`, this PR's own 1 line at `:50771` (`page_limit=limit` on the
+    # rerank call), and a further 17 at `:50799` (the served-page re-application) — which
     # together shift exactly those three by **+41**. Re-measured at the
     # MERGE RESULT by content (`grep -n` on each row's own FIRST-line text, and on the arm's
     # `continue`): `56543`/`56695`/`23117`/`57210`, the `continue` at `56704`, and every SPAN
