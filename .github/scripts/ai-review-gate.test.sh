@@ -1117,6 +1117,17 @@ echo "── (t) acceptance rule (c): the PATCH projection survives a base advan
 # were "pinned by the harness" while no fixture carried either — a coverage
 # claim the harness did not back. They are also checked to move AWAY from the
 # reviewed digest, so neither pin can pass vacuously.
+#   RELOCATED into another scope  patch a DIFFERENT digest  ← a fresh review IS owed (t10)
+#
+# ⛔ THE PATCH LITERALS MOVED ONCE, DELIBERATELY (fresh review of #4255, P1). The
+# projection used to drop the `@@ … @@` frame ENTIRELY, which made it position-blind:
+# the same `+`/`-` lines RELOCATED from inside `def alpha()` to inside `def zulu()`
+# projected IDENTICALLY, so a force-push that only MOVED the reviewed lines carried
+# the verdict with no base advance at all. The frame is now kept with its
+# enclosing-scope heading and without its numbers (`@@ l7` above — this fixture's hunk
+# has the heading `l7`). Both sides of the cross-repo contract changed together; the
+# literals above were recomputed from agent-infra's `diff-normalize.py --patch-only`
+# at the same head, and the inline twin produced the same three digests.
 REVIEWED_DIFF_FILE="$T/rev-base-moved.diff"
 cat > "$REVIEWED_DIFF_FILE" <<'DIFFEOF'
 diff --git a/f.md b/f.md
@@ -1189,11 +1200,11 @@ index 819129e..2355478 100644
 DIFFEOF
 PB_REVIEWED="dfebaa86f270853c99b5f809b31f6f5621009e8e5a0f03d3a42597470a62420c"
 PB_LIVE="4d4d1118333448a5c97de826680e7fdcc929e133b179001565c03b2c80583eca"
-PP_REVIEWED="f7f1d204dfd1bcd120e2088c8e6ac3b8cf768e6bb29fac3f947417c6840c5388"
-PP_EDITED="d747ddd2a35a20377203a59ed6137b6e692634d020507840dc9c5319d0aaad60"
-PP_WS="13c304e8ebf5fe32a50f855cb2fc7385fc01703fa7a47e8f3a38758507d80d7a"
-PP_RENAME="52810b4893cde4493c51aa292454a7dab213c4c10cb80b4c8dc7ae7b3d3f3224"
-PP_DELETED="d6e0cf6a8dc8f2cba10969a5726d92092f923f10911a6c94fe8bc6d220f1464c"
+PP_REVIEWED="b243470836a141b2808db9ce56a772217fc51aed6d919e01e74bb1f6f62bede8"
+PP_EDITED="c71ae6af2931817321618d8ba92507d4096ba76e4d89c2352ea7b28604a438b7"
+PP_WS="d99fac9ba2b8a910c951b5328e277d331f00ba752df3a5138245233f8e3f99e8"
+PP_RENAME="98ae79a1c98bfe47651b1af658f653036c0e7f8b639545d43851a678e57a3014"
+PP_DELETED="8662d5bdf1efd2faefdfb73fc90a334a4add05d73cac8b4b717afefc131453e0"
 BASE_SHA="$(printf 'c%.0s' $(seq 1 40))"
 
 # ── Direct vector tests of the extracted PATCH projector ──────────────────
@@ -1522,8 +1533,16 @@ U_G() { git -C "$U_REPO" -c user.email=t@example.invalid -c user.name=t \
                               -c commit.gpgsign=false -c init.defaultBranch=main "$@"; }
 mkdir -p "$U_REPO"
 git -c init.defaultBranch=main init -q "$U_REPO" || bad "(u) could not create the scratch repository"
+# ⛔ THE CONTEXT LINES ARE INDENTED ON PURPOSE. git derives a hunk's SECTION HEADING
+# from the line preceding the hunk using its funcname heuristic, and for a file with no
+# driver that heuristic matches a line starting in column 0 — so a base advance that
+# inserted `upstream A` above the change ALSO changed the heading (`context line 18` →
+# `context line 20`) and the projection rightly refused. That is an over-block, and it
+# would have hidden the carry this section exists to demonstrate. Indented lines match
+# no funcname, so the heading is empty (`@@`) on both sides and the ONLY thing that
+# moves is what a base advance is allowed to move.
 {
-  for n in $(seq 1 40); do printf 'context line %02d\n' "$n"; done
+  for n in $(seq 1 40); do printf '  context line %02d\n' "$n"; done
 } > "$U_REPO/doc.txt"
 U_G add doc.txt && U_G commit -qm "base1" && U_BASE1="$(U_G rev-parse HEAD)"
 U_G checkout -qb feat
@@ -1640,6 +1659,82 @@ STUB_DIFF_FILE="$U_LIVE3_DIFF" STUB_BASE_SHA="$U_BASE2" \
     STUB_COMPARE_FILE="$U_REVIEWED_AT_BASE2" run_gate "$T/body-u"
 assert_rc 1 "(u5) a WHITESPACE-only edit → RED (the projection is byte-exact; \`patch-id\` would have carried it)"
 HEAD="$_saved_head"
+
+
+# ── (t20) A RELOCATION IS NOT A CARRY (fresh review of #4255, P1) ────────────
+# The projection drops CONTEXT and the hunk's line numbers, so before this case nothing in
+# it was POSITION-BEARING. Measured by the fresh review: the same `+GATE_BYPASS` reviewed
+# inside `def alpha()` and shipped inside `def zulu()` projected IDENTICALLY, so a
+# force-push that only MOVED the reviewed lines carried the verdict — with no base advance
+# at all, which is not the harm this rule exists for. Keeping the hunk frame's
+# enclosing-scope heading closes that: the heading is derived from the enclosing
+# definition, which a base advance does not rewrite.
+RELOC_REVIEWED="$T/reloc-reviewed.diff"
+cat > "$RELOC_REVIEWED" <<'DIFFEOF'
+diff --git a/g.py b/g.py
+index 1111111..2222222 100644
+--- a/g.py
++++ b/g.py
+@@ -3,3 +3,4 @@ def alpha():
+     a1
+     a2
++GATE_BYPASS
+     a3
+DIFFEOF
+RELOC_LIVE="$T/reloc-live.diff"
+cat > "$RELOC_LIVE" <<'DIFFEOF'
+diff --git a/g.py b/g.py
+index 3333333..4444444 100644
+--- a/g.py
++++ b/g.py
+@@ -40,3 +40,4 @@ def zulu():
+     a1
+     a2
++GATE_BYPASS
+     a3
+DIFFEOF
+RELOC_ANCHOR="$(normalize_review_diff < "$RELOC_REVIEWED" | openssl dgst -sha256 | awk '{print $NF}')"
+_reloc_r="$(patch_projection_review_diff < "$RELOC_REVIEWED" | openssl dgst -sha256 | awk '{print $NF}')"
+_reloc_l="$(patch_projection_review_diff < "$RELOC_LIVE" | openssl dgst -sha256 | awk '{print $NF}')"
+if [ "$_reloc_r" != "$_reloc_l" ]; then
+    ok "(t20) the projection DISTINGUISHES a relocation: same +/- bytes under \`def alpha()\` vs \`def zulu()\` project differently"
+else
+    bad "(t20) a relocation projects IDENTICALLY — the projection is position-blind again, so a force-push can move reviewed lines with no re-review"
+fi
+diff_marker "$STALE" "$RELOC_ANCHOR" > "$T/body-t8"
+STUB_DIFF_FILE="$RELOC_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$RELOC_REVIEWED" run_gate "$T/body-t8"
+assert_rc 1 "(t20) the RELOCATED change is REFUSED end to end (anchor reproduces, patch differs)"
+# The other direction, on the same pair: the reviewed diff ITSELF still carries, so the
+# refusal above is the relocation and not a broken fixture.
+STUB_DIFF_FILE="$RELOC_REVIEWED" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$RELOC_REVIEWED" run_gate "$T/body-t8"
+assert_rc 0 "(t20) and the UNRELOCATED change still carries — so the refusal above is the relocation, not a dead rule"
+
+
+# ── (t21) AN UNSIGNED MARKER-SHAPED LINE BUYS NO API CALL (fresh review of #4255, P2) ──
+# Rule (c) fetches `.base.sha` and a `compare` per CANDIDATE, and `$all_markers` is every
+# line of the AUTHOR-WRITABLE PR body that merely MATCHES the marker regex. Measured by
+# the fresh review: a body with 50 unsigned marker-shaped lines produced 103 gh calls; a
+# 64 KiB body (the cap) fits ~257 such lines ≈ 514 calls inside a `timeout-minutes: 15`
+# job, on the RED path, repeatable by anyone who can open a PR. The HMAC is now checked
+# BEFORE the API, which removes no acceptance: a line whose signature does not verify can
+# never be accepted by the check that follows.
+_unsigned="$T/body-t9"
+: > "$_unsigned"
+for _i in $(seq 1 20); do
+    printf 'review recorded: reviews/2982.json verdict=clean @ %s diff=%s (%s) sig=%s\n' \
+        "$STALE" "$RELOC_ANCHOR" "$REPO_NAME" "$(printf '0%.0s' $(seq 1 64))" >> "$_unsigned"
+done
+STUB_DIFF_FILE="$RELOC_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$RELOC_REVIEWED" run_gate "$_unsigned"
+assert_rc 1 "(t21) twenty unsigned marker-shaped lines still FAIL CLOSED"
+_n_cmp="$(grep -cE -- '/compare/' "$T/gh.log" || true)"
+if [ "$_n_cmp" -eq 0 ]; then
+    ok "(t21) and bought ZERO compare calls — the signature is verified before the API, so an attacker-writable body cannot spend the job's budget"
+else
+    bad "(t21) made $_n_cmp compare call(s) for UNSIGNED lines — the patch arm is reachable from any marker-shaped line before its signature is checked"
+fi
 
 echo "  PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { echo "  ❌ FAILURES — fix and re-run"; exit 1; }

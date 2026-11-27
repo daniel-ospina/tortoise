@@ -92,6 +92,35 @@ entry condition closes that path.
   regardless — that binding is the stronger, pre-#2982 claim, so its `diff=`
   field (if present) is never matched against the live diff.
 
+  **A third arm: the PATCH projection (#4255).** When neither rule above finds
+  an acceptable marker, the gate asks a narrower question — *is the change this
+  PR AUTHORED still the change a reviewer approved?* — and accepts a marker whose
+  **patch projection** equals this PR's live patch projection. The projection
+  keeps the `diff --git`/`---`/`+++` lines, every mode/rename/copy/similarity
+  line, every `+`/`-` line BYTE-EXACT (including whitespace), `\ No newline`
+  markers, and each hunk's frame with its enclosing-scope heading (`@@ def f():`)
+  — and drops blob `index` ids, hunk line numbers and counts, and hunk CONTEXT
+  lines. Those are exactly the fields a **base advance** rewrites while the
+  reviewed change is untouched, which is why a refreshed branch used to demand a
+  fresh 20–40 minute review for a diff nobody changed.
+
+  ⛔ **The patch arm cannot mint evidence.** It is consulted only after the
+  marker's own signed `diff=` has been REPRODUCED by the gate: it fetches
+  `compare/<current base>...<the marker's signed @ sha>`, normalizes those bytes,
+  and requires the result to equal the marker's `diff=` (the **anchor**). A
+  patch match with a wrong anchor is a refusal. Nothing here relaxes the
+  sha-match or the diff-match arm, and the green path pays no extra API call.
+
+  **What the patch arm does NOT do.** It is position-blind below the enclosing
+  scope: a relocation between two hunks under the SAME heading (or in a
+  heading-less file) still projects identically. That residual is declared, not
+  hidden — it is bounded by the anchor, and the alternative (no patch arm at all)
+  is the ~37-minute-per-PR wall this replaces. A relocation into a DIFFERENT
+  scope is refused (pinned by harness case `(t8)`).
+
+  The pass message names which arm fired: `passed via PATCH match` (this one),
+  `passed via diff match` (the digest arm), or the head-bound message.
+
   **Two channels (#1224).** The marker is read from the PR body AND from the
   PR's issue comments, because the body is a mutable field any later legitimate
   edit rewrites — a body-only copy reddens this check on a review that genuinely
@@ -199,7 +228,8 @@ express it). Never use `git patch-id`: `--stable` and the default both
 forward (a false accept). sha256 over normalized bytes does not.
 
 The gate computes **both** digests from the same fetched bytes and accepts a
-marker whose signed `diff=` equals either:
+marker whose signed `diff=` equals either (the digest arms; the patch arm above
+is separate and additionally anchored on that same `diff=`):
 
 - `live_diff_hash_norm` — the normalized digest, for markers a post-#1362
   producer emits; and
@@ -296,7 +326,7 @@ is unambiguous:
 | `was found for <other>, not for <repo>` | marker is STALE **and** bound to a different repo | re-record for this repo |
 | `normalises to an empty value` | the configured secret is whitespace-only, so the HMAC key would be the empty (public) string | set a real `AI_REVIEW_GATE_KEY` |
 | `HMAC mismatch` | key or signed text differs; prints `sha256` prefixes of the text it checked | compare the prefix with the recording machine, then re-record |
-| `is stale` | marker is for another head sha, and its `diff=` is absent, could not be hashed live, or matches neither the normalized nor the raw digest | re-run the review, re-record at the new head |
+| `is stale` | marker is for another head sha, and its `diff=` is absent, could not be hashed live, matches neither the normalized nor the raw digest, AND its patch projection does not match this PR's (or its anchor could not be reproduced) — check the run log for `passed via PATCH match`: if that line is present the gate DID carry, and the red you are reading is from a different job | re-run the review, re-record at the new head — or, if the PR was refreshed onto a moved base and nothing you authored changed, the patch arm should already have carried it: treat a red here as a bug in this gate, not a missing review |
 | `NO marker in this PR's body[ or its admitted comments] is bound to <head>` | the stale verdict, stated as what it examined: `or its admitted comments` appears only when the comment channel was actually read. It prints `candidate marker(s): N` (with their shas), the channel the last candidate came from, the head it expected, and the provenance of BOTH sources (`body=<rest-live\|event-snapshot>`, `comments=<read\|NOT-READ>`) | if `body=event-snapshot` the run judged a body frozen at the event, so re-run the check before acting — a record posted afterwards is invisible to it; if `comments=NOT-READ` the comment side was never examined; otherwise re-record at the head |
 | `the LIVE body could not be used (…)` | the run fell back to the event payload: the REST read failed, or it succeeded and returned an empty body | re-run the check before acting on the verdict; the evidence may still be valid |
 | `live diff hash could not be computed` | the REST diff fetch failed; a `diff=` marker fails closed rather than carrying forward | re-run the job once the API is reachable — the evidence may still be valid |

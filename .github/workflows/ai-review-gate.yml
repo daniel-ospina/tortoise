@@ -610,10 +610,19 @@ jobs:
           # ── The PATCH projection (#1377; consumed by acceptance rule (c), #4255) ──
           # A SECOND projection of the SAME bytes, for a DIFFERENT question: "is the
           # change the reviewer approved still the change in this branch?". It drops
-          # exactly the three fields a rebase/base-move rewrites while the reviewed
-          # change is untouched — `index` blob ids, `@@ … @@` line numbers, and hunk
-          # CONTEXT (a leading single space) — and keeps everything else VERBATIM:
-          # the `diff --git`/`---`/`+++` lines (so the PATH is part of the identity),
+          # exactly the fields a rebase/base-move rewrites while the reviewed change
+          # is untouched — `index` blob ids, the `@@ … @@` LINE NUMBERS AND COUNTS,
+          # and hunk CONTEXT (a leading single space) — and keeps everything else
+          # VERBATIM. The hunk FRAME is kept with its enclosing-scope heading
+          # (`@@ def f():`, or `@@` when the hunk has none): without it the
+          # projection was POSITION-BLIND and the same `+`/`-` lines RELOCATED into
+          # another function projected identically, so a force-push that only moved
+          # the reviewed lines carried the verdict with no base advance at all
+          # (measured by the fresh review of #4255). A relocation under the SAME
+          # heading still projects the same — a residual DECLARED here, and bounded
+          # by the anchor: the marker's signed `diff=` must still be reproduced from
+          # its own `@ sha` against the current base before this arm is consulted.
+          # KEPT, VERBATIM: the `diff --git`/`---`/`+++` lines (so the PATH is part of the identity),
           # every mode/rename/copy/similarity line, every `+`/`-` line BYTE-EXACT
           # including whitespace, and `\ No newline at end of file` markers. An entry
           # with NO hunk is emitted WHOLE — for a binary or hunk-less entry the
@@ -639,7 +648,19 @@ jobs:
                   return list(entry)
               kept = []
               for l in entry:
-                  if _IDX.match(l) or _HUNK.match(l) or l.startswith(" "):
+                  if _IDX.match(l):
+                      continue
+                  h = _HUNK.match(l)
+                  if h is not None:
+                      # The FRAME is kept, with its enclosing-scope heading and
+                      # WITHOUT its numbers: `@@ -N,C +N,C @@ def f():` becomes
+                      # `@@ def f():` (and `@@` for a heading-less hunk). Line
+                      # numbers move on a base advance, the scope heading does
+                      # not — so this costs nothing on the carry it exists for,
+                      # and it refuses a change RELOCATED into another scope.
+                      kept.append("@@" + h.group(7))
+                      continue
+                  if l.startswith(" "):
                       continue
                   kept.append(l)
               return kept
