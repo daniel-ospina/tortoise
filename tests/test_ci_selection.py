@@ -10348,10 +10348,14 @@ def test_the_derivation_surface_claims_are_graded_against_the_manifest():
 
     `#14544` is the proof the fact MOVES — `e66997b81e` took `test_dod_5090_probe.py` out of
     `core` — so a fold that drops `onboarding` below would have left THIS SENTENCE false with no
-    arm in this family grading it. ⛔ NOT "the block, silently": the same fold also breaks a ROW,
-    and the row's own selector arm REDs on it (measured, with this arm deselected) — so what went
-    ungraded was the PROSE, not the registration. The values are TRUE at this head; what was
-    missing was the arm that notices when they stop being.
+    arm in this family grading it. ⛔ NOT "the block, silently", and NOT a dropped ROW either:
+    `config/ci-surfaces.yml` grades that "A REGISTRATION IS NOT A ROW", and `--integrity` stays
+    green on this fold — the file still classifies under `core`. What REDs is the SELECTION arm,
+    `test_the_own_site_fragment_guard_is_selected_by_every_tree_it_scans`, on the same fold
+    (measured, with this arm deselected). ⛔ THAT ONE REGISTRATION IS THE EXCEPTION, not the rule:
+    measured with `grep -rn` over `tests/`, no other arm asserts the surface membership of the
+    other files named here. So what went ungraded was the PROSE, not their registrations. The
+    values are TRUE at this head; what was missing was the arm that notices when they stop being.
 
     ⛔ THE WHOLE SURFACE SET IS GRADED, not membership alone: the block's parenthetical describes
     WHICH surfaces each file is on, so a file that GAINS one it does not name is equally a
