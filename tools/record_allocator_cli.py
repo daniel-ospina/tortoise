@@ -36,7 +36,16 @@ WHAT THE VERBS ARE FOR, one line each:
   graph's own `outcome` uses — so the summary cannot contradict the detail.
   This verb exists for an operator reading the numbers BEFORE arming a
   production deployment; a dry run that reported `seeded: N` would be read as
-  "N graphs are healed" by the one reader it has.
+  "N graphs are healed" by the one reader it has. ⛔ AND IT IS NOT A CLEAN EXIT
+  (#14587 review cycle 5, P2): a real run with any ``K refused`` returns
+  ``EXIT_REFUSED``, and so does a run with any ``arm_refused`` — the arm
+  refusal the counters above cannot see, because it is per graph and the run
+  continues. Both are reported in the PAYLOAD, not on stderr, and a
+  ``--dry-run`` is exempt (it returns ``EXIT_OK``: it wrote nothing and its
+  refusals are a projection). A scripted caller reads
+  ``graphs[i].reason`` / ``graphs[i].arm_refused``; a caller that treats exit 1
+  as "nothing happened" is wrong about every ``arm_refused`` graph, which was
+  seeded.
 
 THE SEED'S ONE INPUT THAT CANNOT BE DERIVED. `enumerated_floor` is *how many
 records a replay of THIS graph's journal enumerates* — the caller's fact. Two
@@ -71,9 +80,21 @@ preference; it is the tenant boundary.
 EXIT CODES (the rail's contract, not decoration):
 
   0  the verb happened (``status`` walked, ``seed``/``arm``/``halt``/``reopen`` wrote)
-  1  REFUSED by the allocator, with ``reason`` named on stderr (``divergence``,
-     ``armed``, ``missing``) — the graph is unchanged and working; read the
-     reason, do not re-run blindly
+  1  REFUSED — but WHICH SHAPE depends on the verb, and a scripted caller must not
+     conflate them:
+       * the single-graph verbs: REFUSED by the allocator, with ``reason`` named
+         on stderr (``divergence``, ``armed``, ``missing``) — the graph is
+         unchanged and working; read the reason, do not re-run blindly.
+       * ``backfill``: a refusal REPORTED IN THE PAYLOAD, never on stderr
+         (``refused`` for a graph the seed refused, ``arm_refused`` for a graph
+         the seed took and ``--arm`` could not). The reason is per graph, at
+         ``graphs[i].reason`` / ``graphs[i].arm_refused``, and the run
+         CONTINUES past it — so the population may be partly written. ⛔ An
+         ``arm_refused`` graph HAS CHANGED (it was seeded, and ``seeded``
+         allocates nothing until armed), which is why the fix for it is the
+         ``reopen`` command the entry names, not a re-run. ``--dry-run`` is
+         EXEMPT: it wrote nothing and its refusals are a projection, so it
+         returns 0.
   2  usage / environment (bad arguments, no DSN, no psycopg2, unreachable record)
 
 Usage:
