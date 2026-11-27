@@ -3892,6 +3892,30 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
     ):
         findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
         assert findings == [] and stats["clean"] == 1, (body, stats)
+    # ⛔ AND THE SAME CONTRADICTION ON THE CLOSING LINE ITSELF IS UNANSWERABLE TOO (review round 24, P1).
+    # `disclaimed` was captured from the closing line but consulted only where the claim set was EMPTY,
+    # so a closing line that named EVERY row and also disclaimed them took the non-empty branch and
+    # reported `clean`. The third shape below is the measured `#13886` defect — the PR delivers two
+    # rows, says so, and `Closes` closes all six. These four read `clean` before the refusal at
+    # `_closing_line_claim`'s return; deleting it reddens this block.
+    for body in (
+        "Closes #13036 (V1, V2, V3, V4, V5, V6 are proved — not by this PR)\n",
+        "Closes #13036 (V1, V2, V3, V4, V5, V6 are proved; V3-V6 are follow-ups)\n",
+        "Closes #13036 (V1, V2, V3, V4, V5, V6 landed — V1 and V2 in this PR, V3-V6 in later PRs)\n",
+        "Closes #13036 (rows V1 — V6 — see the predecessor PR)\n",
+    ):
+        findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
+        assert findings == [] and stats["clean"] == 0 and stats["ambiguous"] == 1, (body, stats)
+    # CONTROL — and the refusal is gated on a COMPLETE claim, which is what keeps the careful author's
+    # correct form a FINDING rather than an abstention: a partial closing claim beside a disclosure of
+    # the remaining rows names V2, so it must still be flagged on exactly V2.
+    for body in (
+        "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 remain unmeasured\n",
+        "Closes #13036 (row V2 only); V1, V3, V4, V5, V6 are separate PRs\n",
+    ):
+        findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
+        assert stats["finding"] == 1 and stats["clean"] == 0, (body, stats)
+        assert findings[0].evidence["claimed"] == ["V2"], (body, findings[0].as_dict())
 
 
 def test_naming_every_row_ANYWHERE_is_a_complete_close():

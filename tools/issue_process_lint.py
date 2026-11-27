@@ -1917,6 +1917,27 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
         if disclaimed and set(rows) <= satisfies_named:
             satisfies_named = set()
         named |= satisfies_named
+    # ⛔ A COMPLETE CLAIM BESIDE A DISCLAIMER IS A CONTRADICTION, NOT A PASS — AND THIS IS THE ONE PLACE
+    # BOTH SOURCES ARE STILL VISIBLE AT ONCE (review round 24, P1). `disclaimed` was CAPTURED from the
+    # closing line and then consulted only in `classify_partial_close`'s `if not named_rows:` branch —
+    # so a closing line that named EVERY row and also disclaimed some of them took the non-empty
+    # branch and never reached that read. It reported `clean` on the shape `#13886` IS:
+    #
+    #     Closes #13036 (V1, V2, V3, V4, V5, V6 landed — V1 and V2 in this PR, V3-V6 in later PRs)
+    #     Closes #13036 (V1, V2, V3, V4, V5, V6 are proved; V3–V6 are follow-ups)
+    #     Closes #13036 (V1, V2, V3, V4, V5, V6 are proved — not by this PR)
+    #     Closes #13036 (rows V1–V6 — see the predecessor PR)
+    #
+    # all `clean` (measured) — the instrument held the datum and did not read it. A claim on ALL rows
+    # that the same body negates or defers is UNANSWERABLE, which is the verdict this module already
+    # states for the identical contradiction on the `Satisfies` path above; it is the same rule, so it
+    # is applied to the claim set itself rather than to one source of it.
+    # ⛔ IT IS GATED ON a COMPLETE claim, which is what keeps the two pinned TRUE positives: a PARTIAL
+    # closing claim beside a disclosure of the remaining rows (`(row V2 only); V1, V3, V4, V5, V6
+    # remain unmeasured`, `… are separate PRs`) is the careful author's correct form and still yields
+    # the finding on V2 — that claim is not complete, so this refusal never fires on it.
+    if disclaimed and set(rows) <= named:
+        named = set()
     return named, disclaimed
 
 
