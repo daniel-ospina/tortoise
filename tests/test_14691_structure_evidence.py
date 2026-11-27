@@ -1785,6 +1785,57 @@ def test_the_citation_shape_table_is_the_predicate_the_docstring_states():
         f"`_CITATION_WIDEN_BOUND` is {_CITATION_WIDEN_BOUND} — the 19/21 rows admit either 19 "
         "or 20, so without this the prose's own figure is graded by nothing (measured: 20 -> 19 "
         "left 103 passed)")
+    # ⛔ AND EVERY *OTHER* COPY OF THOSE TWO FIGURES MUST BE THE SAME FIGURES (#14723, round 27).
+    # Round 26 derived the slack and pinned the allowance against it — and left four copies of the
+    # same numbers textually free: two in this docstring ("slack 18 at the start and 0 at the end",
+    # "needs 18 of it"), two in REPORT §8.20/§8.21 (the "20 lines" allowance and the 19/21 pair),
+    # plus §8.21's "21 lines of start slack … and 19". Each was mutable into a falsehood with the
+    # suite GREEN (measured: 18 -> 17 at all four, `103 passed`). A figure is graded when a
+    # DERIVATION checks it, not when one of its copies happens to be asserted.
+    doc_all = _cites_a_site_in.__doc__ or ""
+    derived_slack = min(wider)
+    stated_slack = re.search(r"slack (\d+) at the start and (\d+) at the\s+end", doc_all)
+    assert stated_slack, (
+        "`_cites_a_site_in`'s docstring no longer states the honest span as "
+        "\"slack <n> at the start and <n> at the end\"; it is now graded here, so it may not "
+        "be dropped silently")
+    assert (int(stated_slack.group(1)), int(stated_slack.group(2))) == (derived_slack, 0), (
+        f"the docstring states slack {stated_slack.group(1)} at the start / "
+        f"{stated_slack.group(2)} at the end while the documents derive {derived_slack} / 0")
+    stated_needs = re.search(r"needs (\d+) of it", doc_all)
+    assert stated_needs, "`_cites_a_site_in`'s docstring no longer states \"needs <n> of it\""
+    assert int(stated_needs.group(1)) == derived_slack, (
+        f"the docstring says the honest citation needs {stated_needs.group(1)} of the allowance "
+        f"while the documents derive {derived_slack}")
+    green_txt = re.search(r"\*\*(\d+) lines before\*\*\s+it is GREEN", doc_all)
+    red_txt = re.search(r"\*\*(\d+) lines before\*\* is RED", doc_all)
+    assert green_txt and red_txt, (
+        "`_cites_a_site_in`'s docstring no longer states the live pair as "
+        "\"**<n> lines before** is GREEN / **<n> lines before** is RED\"")
+    assert (int(green_txt.group(1)), int(red_txt.group(1))) == (
+            _CITATION_WIDEN_BOUND - 1, _CITATION_WIDEN_BOUND + 1), (
+        f"the docstring states the pair as {green_txt.group(1)}/{red_txt.group(1)} while the "
+        f"constant makes it {_CITATION_WIDEN_BOUND - 1}/{_CITATION_WIDEN_BOUND + 1}")
+    assert "1..span + 3" in doc_all, (
+        "`_cites_a_site_in`'s docstring no longer names the sweep as \"1..span + 3\" — the sweep "
+        "below is `range(1, span + 4)`, i.e. 1..span+3 inclusive")
+    # …and REPORT's copies, which are the ones a reader of the EVIDENCE doc actually meets.
+    report_txt = _report()
+    for needle, why in (
+            (f"most **{_CITATION_WIDEN_BOUND} lines** before",
+             "the allowance's figure in §8.20"),
+            (f"more than {_CITATION_WIDEN_BOUND} lines early",
+             "the allowance restated in §8.20's refused-class list"),
+            (f"{_CITATION_WIDEN_BOUND - 1} lines of start slack, inside the "
+             f"{_CITATION_WIDEN_BOUND}-line allowance",
+             "the live slack and the allowance together in §8.21"),
+            (f"{_CITATION_WIDEN_BOUND + 1} lines of start slack is still RED and "
+             f"{_CITATION_WIDEN_BOUND - 1}",
+             "the live pair in §8.21"),
+    ):
+        assert needle in report_txt, (
+            f"REPORT.md no longer states {why} as {needle!r} — it is graded against "
+            "`_CITATION_WIDEN_BOUND`/the derived slack, so it may not drift from them")
     wrong = {shape: got for shape, (cited, expected) in table.items()
              if (got := _cites_a_site_in(cited, one)) is not expected}
     assert not wrong, (
