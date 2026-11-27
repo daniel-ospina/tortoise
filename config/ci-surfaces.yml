@@ -103,20 +103,23 @@ version: 1
 # on the commit that measured them — `git log` holds them, and restating one here is what produced
 # the duplicated spellings in the first place.
 # ⛔ IT ARRIVED SPLICED ONCE MORE ON THIS LANE'S REBASE ONTO `origin/main` `c1c8df1a3817` — the same
-# driver, the same failure — and this time NEITHER copy described this tree: both stated the
-# 827.2/827.3 partition and a `fast_pool()` of 1339, against the 827.4/827.5 and 1340 the verb
-# emitted at that rebase. Neither copy was picked either; the paragraph above is a third fresh
-# re-derivation.
+# driver, the same failure — and this time NEITHER copy described the folded tree: both stated the
+# 827.2/827.3 partition and a `fast_pool()` of 1339, and those are the PRE-FOLD BASE's own emission
+# (measured by loading `git show c1c8df1a3817:config/ci-surfaces.yml` through `fast_pool()` and
+# `push_legs()`), not the fold's — a fold carries this lane's row as well, so its pool is strictly
+# larger by construction. Neither copy was picked either; the re-derivation above is a third fresh
+# one.
 # ⛔ THIS BLOCK ARRIVES SPLICED, REPEATEDLY, and that is mechanical rather than mysterious:
 # `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
-# derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. Measured on
-# this rebase: two copies arrived, one naming `origin/main` `c1c8df1a3817` with `#14700`'s row, one
-# naming the same base with this change's row, and NEITHER described the merged tree (both said
-# 827.4/827.5 and a `fast_pool()` of 1340 against the 827.6 and 1341 the verb emitted at that
-# rebase). Neither
-# side is picked: both are DELETED and the paragraph above is a fresh re-derivation with
-# `--emit-push-matrix` on this merged tree. Each earlier fold's figures live on the commit that
-# measured them (`git log`), which is where a spliced copy belongs.
+# derivations and the guard then reads `<est stated twice>` / `<ceil stated 2 times>`. The copies
+# disagree on the FIGURES, and every base this lane has folded emits a DIFFERENT partition —
+# measured by loading each base's OWN manifest through `fast_pool()` and `push_legs()`:
+# `c1c8df1a3817` packs 1339 files to 827.2/827.3 s, `f2d4f2408cf5` packs 1340 to 827.4/827.5 s,
+# and the `a0cea31078`…`0204a219aa90` line packs 1341 to 827.6 s on all eleven. So no carried copy
+# can be right about the tree being folded, which is why neither side is picked: both are DELETED
+# and the re-derivation above is computed with `--emit-push-matrix` on the merged tree. Each
+# earlier fold's figures live on the commit that measured them (`git log`), which is where a
+# spliced copy belongs.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`

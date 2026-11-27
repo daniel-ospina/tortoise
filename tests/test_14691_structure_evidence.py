@@ -211,12 +211,17 @@ def test_a2_ownership_is_present_and_inverted_in_the_committed_receipt():
     assert a2["totals"]["dependency_present_and_correct"].startswith("7/7")
     assert a2["passes"] is False
 
-    # The write door reported SIX `ownedBy` rows, and the scorer's totals above read them as
-    # `0/4` ORIENTED / 4 INVERTED — every row points INTO a Subject rather than out of one.
+    # The write door reported SIX `ownedBy` rows. The scorer's totals above read them as
+    # `ownership_oriented_correct` 0 and `ownership_inverted` 4 — all four ownership PAIRS are
+    # inverted, and the artifact's `A2_edges.ownership[].verdicts[]` says which way: every row
+    # carries the OWNER at `src` (`src_is_owner: true`, `src_kind: core:naturalPerson`) and the
+    # owned thing at `dst`, so the arrow LEAVES the Subject instead of landing on one — the
+    # reverse of the `(owned)-[:ownedBy]->(Subject)` the door reads. (Six edges over four pairs,
+    # which is why the report's `0/6` and this arm's `4` are both right: different units, and the
+    # report's §A2 note says so.)
     # ⛔ THIS ARM GRADES THE POPULATION, AND SAYS SO (#14723 review, P3). The receipt's rows
     # carry endpoints as ids (`src_id`/`dst_id`) with no KIND, so the ORIENTATION cannot be
-    # read off them here: it is graded by `ownership_oriented_correct` (`0/4`) and
-    # `ownership_inverted` (4) in the totals asserted above, which the scorer derives from the
+    # read off them here: it is graded by those two totals, which the scorer derives from the
     # readback's typed nodes. The comment that used to sit here claimed this arm checked "a
     # Subject as src", which nothing in it can see — a claim nothing grades, in the arm whose
     # job is to grade claims.
