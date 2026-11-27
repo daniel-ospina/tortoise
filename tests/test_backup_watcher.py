@@ -1562,16 +1562,24 @@ def test_arm_i_outside_census_set_is_STRANDED_across_a_watcher_restart():
     process saw on a previous CONFIRMED poll (#9938 round 9).
 
     Modelled the way production runs it (`hosted_api._alert_store_from` →
-    `_backup_storage()`): ONE persistent storage behind the alert store, two
-    watcher PROCESSES. Two details are load-bearing, and the first version of
+    `_backup_storage()`): ONE persistent storage behind the alert store, and a
+    FRESH `AlertStore` + `BackupWatcher` for the restarted process. The alert
+    store's storage is what a restart carries over; the backup surface is the
+    same scenario with the state file ABSENT, built as a fresh surface rather
+    than by removing the key in place (`tools/sdk_privatise.py` ratchets untyped
+    `.delete` receivers). Two details are load-bearing, and the first version of
     this test got them wrong (round 9 measured it green under the mutation it
     named):
 
     * the DEDUP object lives in the alert store's STORAGE, not on the store
       object — so a fresh `AlertStore` over the same storage still finds it and
-      would still close the incident. What strands the subject is a fresh
-      STORAGE, which is what `_watcher()` builds (its own `MemoryStorage` per
-      call), and that is why the round-9 version was blind;
+      would still close the incident. That is why the restart below builds a NEW
+      store over the same storage instead of reusing the first one: a reused
+      instance cannot tell the two apart, so it would leave the storage reach
+      untested (the one half of the restart that a new process DOES carry over).
+      What strands the subject is a fresh ALERT-STORE storage, which is what
+      `_watcher()` builds (its own `MemoryStorage` per call), and that is why the
+      round-9 version was blind;
     * the `_alert_leg` SPY is what makes an attempt visible at all: it records
       `resolve_incident` whether or not a dedup object exists, so a carried
       register reds `bsm_resolves == []` independently of the store's state.
@@ -1584,16 +1592,22 @@ def test_arm_i_outside_census_set_is_STRANDED_across_a_watcher_restart():
     """
     ch = _Channels()
     storage: MemoryStorage = MemoryStorage()
-    shared = AlertStore(
-        storage, file_issue=ch.file_issue, close_issue=ch.close_issue,
-        search_open=ch.search_open, push_telegram=ch.push_telegram,
-        repo="daniel-ospina/tortoise", assignee="u", now=lambda: FIXED,
-    )
+
+    def _store_over_shared_storage() -> AlertStore:
+        # A fresh store per process over the ONE persistent storage — the
+        # production restart shape (`_alert_store_from` is built per process).
+        return AlertStore(
+            storage, file_issue=ch.file_issue, close_issue=ch.close_issue,
+            search_open=ch.search_open, push_telegram=ch.push_telegram,
+            repo="daniel-ospina/tortoise", assignee="u", now=lambda: FIXED,
+        )
+
     _seed_state(storage, "team_x")          # arm (i): state, no R2 prefix
 
     def _proc() -> BackupWatcher:
         return BackupWatcher(
-            storage, shared, org_provider=lambda: [], state_reader=lambda t: {},
+            storage, _store_over_shared_storage(),
+            org_provider=lambda: [], state_reader=lambda t: {},
             driver_heartbeat_reader=lambda: {}, stale_threshold_min=90,
             driver_down_threshold_min=240, grace_min=0, now=lambda: FIXED,
         )
