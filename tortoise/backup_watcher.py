@@ -280,7 +280,8 @@ def compute_status(
     ==========================  =========================  ================
     degraded, CACHED reading    ``stale`` (the age is an   ``stale``
       over threshold (the       UPPER BOUND; OPENS)        (opens STALE)
-      listing did not answer)
+      listing did not answer),
+      state PRESENT
     degraded, cache MISS        ``stale`` (cache-miss;      ``stale``
       (no cached reading)       no age claim, no open)     (opens STALE —
                                                            the #9937 residual
@@ -297,8 +298,9 @@ def compute_status(
     measured age ANY, no state  ``ok`` / ``stale``         ``ok`` / ``stale``
       NOT in census             (``stamp_missing`` needs   (``stamp_missing``
                                 ``org in orgs``)            needs ``t in orgs``)
-    measured age > threshold,   ``stale``                  ``stale``
-      state PRESENT
+    measured age > threshold,   ``stale`` (on ANY poll —   ``stale``
+      state PRESENT             rows 1-2 are its
+                                degraded cases)
     measured age <= threshold,  ``ok``                     ``ok``
       state PRESENT
     org the sweep skips         ``not_eligible``           (key omitted)
