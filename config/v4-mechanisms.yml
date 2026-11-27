@@ -923,10 +923,90 @@ mechanisms:
       the separator exclusion moved neither number on this corpus (re-measured
       after it landed, 62 judged / 0 refused), which is why the pin did not have
       to move; (b2) STRICT VERBATIM
-      SURVIVAL stays SHORT of target and is NOT re-measured here: 38/77 = 49.4%
-      on the flags-on arm against the 49/90 = 54.4% committed baseline (`#5064`
-      comment 2026-10-13, `#7949` E2) — the figure that would move is the E2
-      arm's, and this lane ran no LLM arm. `UNMEASURED(<an E2 LLM arm run>)`.
+      SURVIVAL is now MEASURED on the flags-on arm, and it still stays SHORT of
+      target: 44/90 = 48.9%, 40/90 = 44.4%, 45/90 = 50.0% and 50/90 = 55.6% over
+      four runs (mean 44.75/90 = 49.7%) against the 49/90 = 54.4% committed
+      baseline (`#7949` E2). The CONTROL arm — same corpus, same judge pin, and
+      the same extractor AT THE TWO LABELLED COMMITS (what that does and does not
+      establish for the RUNS is stated below, and must not be read back into this
+      sentence), the S2.2 pass DISARMED by the real kill-switch
+      (`TORTOISE_VALUE_GATE=0`, SET rather than omitted) — measured
+      37/90 = 41.1% and 41/90 = 45.6% (mean 39/90 = 43.3%). ⛔ THE THIRD
+      COMPARATOR TERM IS ESTABLISHED FOR THE COMMITS AND INFERRED FOR THE RUNS —
+      say exactly that, because the difference is the provenance defect a later
+      review found here. The flags-on receipts were produced at `234d7db4be`
+      (their missing `arm` block is precisely what that commit's runner emits) and
+      the control receipts carry the `commit` label `4530cd5d54ca`, so
+      `extractor.source_file` differs between the arms (each ran in its own
+      worktree, and a PATH locates bytes without identifying them). What is
+      MEASURED is about those two LABELLED commits: `git diff` between them
+      limited to `tortoise/` is EMPTY, and both carry the same
+      `tortoise/extractor_v2.py` blob, so the extractor is byte-identical across
+      the two commits. ⛔ WHAT IS *NOT* MEASURED, and must not be read into the
+      above: `commit` is a HEAD label (`git rev-parse --short HEAD`), not a
+      content identity — it is returned whether or not the tree is dirty — and
+      the two control receipts carry an `arm` block that the runner at
+      `4530cd5d54ca` CANNOT write (that code first appears at `5fa9634cb9`,
+      12:31:07Z — 9 minutes after the LAST control run at 12:21:57Z and 13 after
+      the first at 12:18:29Z), so those two runs demonstrably executed
+      a worktree that was dirty in `tests/`. Whether `tortoise/` was also dirty in
+      them is UNOBSERVABLE from the artifact set: a receipt records the extractor's
+      module, entrypoint and `real` flag, and no content identity. So "same
+      extractor" is a claim about the two commits, not about the two runs, and the
+      derivation pin asserts the comparator on the receipts' agreement in
+      module/entrypoint/`real` and on the commit labels — no more. The durable
+      closure is to record a content identity for the extractor (a blob sha plus a
+      dirty-tree indicator) on every receipt; that is a change to
+      `tests/eval/write_path/runner.py` and is not in this lane's scope, which is
+      why the limit is stated here instead of implied away. ⛔ THE SAMPLE IS TOO
+      SMALL TO SEPARATE THE ARMS, AND THE BAR IS NOT RESOLVED EITHER — saying so
+      is part of the record: the four flags-on draws span 40–50 units, so the
+      committed bar sits INSIDE that spread (it is one draw of a noisy
+      distribution, not a ceiling of the arm), the six draws together span
+      37–50, and the 5.75-unit separation between the arm means is SMALLER than
+      that 13-unit between-run range. Neither "the flags cost survival" nor
+      "the flags buy it" is a supported claim; a run count that could resolve a
+      5-point gap needs a power analysis this corpus (90 graded units) does not
+      supply.
+      ⛔ THE ARM IS READ BACK, NOT LABELLED (`#14774` review P1). An earlier
+      version of these receipts called two PASS-ARMED runs "flags-off", because
+      it spelled the control arm `env -u TORTOISE_VALUE_GATE` — and since
+      `#10996` an ABSENT value gate is the ON spelling
+      (`tortoise/value_gate.py::resolve_enabled`: absent ⇒ ON), so that arm was
+      a second realization of the treatment and the control did not exist. Those
+      two receipts are committed unchanged as `on-3` and `on-4` (only the label
+      moved), the control was re-run with the switch SET to `0`, and the runner
+      now writes each run's resolved `vet_enabled` into the receipt's `arm`
+      block so a label cannot drift from the arm again. Worth knowing, because it
+      is the opposite of what the mislabelled pair implied: the corrected
+      control came in LOWER than the treatment, and the pair is therefore not
+      re-read as evidence for either direction.
+      ⛔ THE LOSS CLASS IS THE USABLE RESULT: every failed unit in all SIX runs
+      is `content_missing` (46, 50, 45, 40, 53, 49) — not one
+      `provenance_missing` and not one `ep_update_missing` — which is residual
+      (a) below measured on the shipped arm instead of asserted: the value is
+      not in the point's CONTENT at all, so no rule that acts on an
+      already-emitted point (this refusal, or any repair/merge arm) can recover
+      it. ⚠️ THE RECEIPTS ARE DURABLE AND THE FIGURES ARE DERIVED FROM THEM:
+      `tests/eval/write_path/receipts/10360-e2-arms-2026-11-27/w2b-10360-e2-on-{1,2,3,4}-2026-11-27.json`
+      and `…-off-{1,2}-2026-11-27.json`, with the arm definition (and what may
+      NOT be concluded) in
+      `tests/eval/write_path/receipts/10360-e2-arms-2026-11-27/10360-E2-ARMS-2026-11-27.md`; this clause
+      is re-derived from those files by
+      `tests/test_state_value_verbatim_10360.py::test_the_strict_verbatim_arm_numbers_are_DERIVED_from_the_committed_receipts`
+      — which also pins the two commits above and requires all six receipts to
+      agree on the extractor's module, entrypoint and `real` flag — and the arm
+      DEFINITION is resolved by a *different* test in that file,
+      `…::test_the_e2_off_arm_definition_uses_the_REAL_kill_switch`, which is the
+      one requiring the two documented commands to resolve DIFFERENT
+      `vet_enabled`. ⚠️ The four flags-on receipts predate the arm readback, so
+      they carry NO `arm` block and are named in `_ARM_READBACK_GRANDFATHERED`:
+      their arm is sound — no spelling of the documented ON command disarms the
+      pass — but it is NOT verified per receipt, and this clause must not read as
+      if it were.
+      The `38/77 = 49.4%` / `UNMEASURED(<an E2 LLM arm run>)` reading this
+      replaces was a `#5064` comment figure (2026-10-13) that nothing could
+      re-derive.
       (c) a rewritten CLOCK or ISO date is not caught (form excluded by design),
       and neither is a colon-form value that happens to be a valid clock shape
       without being a clock (`4:32` read as a marathon time) — the two are the
