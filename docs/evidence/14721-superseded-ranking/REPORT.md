@@ -178,9 +178,12 @@ second.**
 
 ## 5.1 Suites run
 
-At this head (the second review round). The first three commands are the embedded carve-out lane —
-`TORTOISE_TEST_CARVE_OUT=1`, this worktree's own `.venv` — and they are stated as such because that
-lane SKIPS the cases that need a live URI rather than running them, so its counts are not
+At this head — the numbers below were re-measured at `34345ffd36` after the `origin/main` fold,
+and §5.5 names every row that was re-run in that pass and every row carried from the pre-fold head.
+Two rows moved with `origin/main`, NOT with this diff, and are marked `(fold)`. The first three
+commands are the embedded carve-out lane — `TORTOISE_TEST_CARVE_OUT=1`, this worktree's own
+`.venv` — and they are stated as such because that lane SKIPS the cases that need a live URI rather
+than running them, so its counts are not
 interchangeable with the private-docker-lane counts quoted by the first revision of this report.
 The two clusters below it were then re-run on the private lane (`tools/test_lane.py run`, docker
 available on this box) so the graph-backed cases are INCLUDED, which is the comparable reading.
@@ -196,11 +199,13 @@ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_relationships_bo
 
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_13098_cypher_inventory.py \
     -q -p no:cacheprovider
-    → 128 passed, 15 skipped       (the census pins — main's generated-source form, see §5.3 B5)
+    → 141 passed, 15 skipped       (the census pins — main's generated-source form, see §5.3 B5;
+                                    (fold): 128 at the pre-fold head, §5.5)
 
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_surface_manifest.py \
     -q -p no:cacheprovider
-    → 293 passed, 1 skipped        (after `tools/surface_manifest.py render`)
+    → 293 passed, 1 skipped        (after `tools/surface_manifest.py render`; 294 collected at
+                                    this head, not re-run — §5.5)
 
 .venv/bin/python tools/test_lane.py run -- tests/test_recall_state.py \
     tests/test_belief_order_10137.py tests/test_11702_absent_belief_state.py \
@@ -214,7 +219,8 @@ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_surface_manifest
     → 407 passed
 
 uv run python tools/surface_manifest.py check
-    → OK — 39 tool rows, 73 retired, thirteen properties hold
+    → OK — 30 tool rows, 82 retired, fourteen properties hold
+                                   (fold: 39/73/thirteen at the pre-fold head, §5.5)
 uv run python tools/surface_manifest.py render  → wrote docs/product/mcp-sdk-surface.md
 uv run python tools/ci_selection.py --integrity → ✅ all test files classified
 uv run python tools/sdk_privatise.py --check    → 11911 now vs 11912 baseline (1 FEWER — passes)
@@ -290,6 +296,48 @@ M-noaddr   (`rid not in where` dropped)    -> both id rows                      
 M-idmap    (`counts[rid] == 1` dropped)    -> test_rows_sharing_one_non_empty_id…    RED
 M-overskip (feeders into a cycle dropped)  -> test_a_row_feeding_a_cycle…            RED
 ```
+
+## 5.5 Fourth pass — the fold's re-measurement at `34345ffd36`
+
+The `origin/main` fold (`92e6dd5953`, folding `3f134560b6`) brought three peer commits, and two of
+them move a number this report had already recorded. Neither is a change of this diff's subject, and
+neither was re-derived by the earlier rounds: a proof-of-work block that no longer reproduces at the
+head it ships at is the defect the rows below close.
+
+⛔ **The numbers below are measured at `34345ffd36`**, the head this pass started from. `55b79f9531`
+sits after it and changes ONE file, all of it comment prose in `config/ci-surfaces.yml` (two
+sentences naming the wrong pre-existing file and the wrong surface list — `git show --stat` shows no
+other file); no test, row, pin, count or emission figure is touched by it, and the guards that grade
+that block were re-run after rebasing this pass onto it (`-k "fast_shards or derivation or
+surface_claims or header_block or shard"`, below). So the measurements here are statements about
+the tree this document ships in, not about a stale base.
+
+**Re-run at this head, and what moved**
+
+| row | pre-fold | at `34345ffd36` | why it moved |
+|---|---|---|---|
+| `tests/test_13098_cypher_inventory.py` | `128 passed, 15 skipped` | **`141 passed, 15 skipped`** | main's `#14741` fixes added the 13 rows exactly: `0204a219aa` adds 10 `def test_` lines in that file and `234d7db4be` adds 3 (counted off their diffs), and **156** collect at this head against the **143** the pre-fold row accounted for (128 + 15). Not this diff: `git diff --numstat c3f5191308..HEAD -- tests/test_13098_cypher_inventory.py` is empty |
+| `tools/surface_manifest.py check` | `39 tool rows, 73 retired, thirteen properties hold` | **`30 tool rows, 82 retired, fourteen properties hold`** | `config/surface-manifest.yml` is UNCHANGED since the reviewed head (`git diff --numstat c3f5191308..HEAD -- config/surface-manifest.yml` empty), and its own `counts` block reads `tools: 30, sdk_public_methods: 39, retired: 82` over a `rows` list of 69 addresses. So the old line put `39` — the SDK-METHOD count `render` prints as `30 tools, 39 SDK methods` — under the label "tool rows", and `73` matches no field of the shipped manifest (it is an earlier cut's retired count). It never described the artifact it cited, which is why nothing regenerated it |
+
+**Re-run at this head, unchanged**: `test_14721_superseded_never_outranks.py` → `14 passed`;
+`test_relationships_bounded.py` → `46 passed`; `tools/ci_selection.py --integrity` → `✅ all test
+files classified`; `tools/surface_manifest.py render` → writes the committed
+`docs/product/mcp-sdk-surface.md` byte-identically (a no-op, `git status` clean);
+`tools/sdk_privatise.py --check` → `11911 now vs 11912 on the baseline (3f134560b6)` — `1 FEWER`,
+which is the row §5.1 already carries.
+
+**Carried, and said so rather than implied away**: `tests/test_surface_manifest.py` was not re-run in
+this pass (it spawns a full tool-schema build per row and takes tens of minutes on this box); it
+collects **294** at this head, and neither it nor the manifest changed since the reviewed head
+(`git diff --numstat c3f5191308..HEAD -- tests/test_surface_manifest.py config/surface-manifest.yml`
+empty), so the `293 passed, 1 skipped` row is retained. The two private-docker-lane clusters (`208`,
+`407`) are likewise carried: measured at the pre-fold head on the private lane, and the fold moved
+none of their files — `git diff --numstat c3f5191308..HEAD` over all nine of their test modules is
+empty, so no row of theirs is a statement about the fold.
+
+One body-level consequence, fixed with this pass: the PR body's Tests block quoted
+`tools/sdk_privatise.py --check → OK (11912 vs 11912 baseline)`, a reading this artifact has never
+carried (§5.1 has said `11911 vs 11912` since `696114811f`) — the body now states the measured value.
 
 ## 6. Proof the tests fail on the pre-fix code
 
