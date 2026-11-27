@@ -291,10 +291,11 @@ def compute_status(
     confirmed, state PRESENT,   ``backup_set_missing``     ``backup_set_missing``
       no manifest                                          (#2374)
     confirmed, state PRESENT,   ``never`` — and in the     ``backup_set_missing``
-      no R2 prefix at all AND   census (the double-file    (#2374: state exists,
-      org still in the census   tracked in #14769);        so not ``never``)
+      no R2 prefix at all AND   KIND's census, so that     (#2374: state exists,
+      org still in the org      kind is filed too (the     so not ``never``)
+      census                    double-file in #14769);
                                 NO per-org key once it
-                                leaves the census
+                                leaves the ORG census
     measured age ANY, no state  ``stamp_missing``          ``stamp_missing``
       AND org still in census
     measured age ANY, no state  ``ok`` / ``stale``         ``ok`` / ``stale``
@@ -1346,9 +1347,13 @@ class BackupWatcher:
                 "an arm-(i) org still in the census (NOT arm (i) of this kind, "
                 "which requires state PRESENT); an arm-(i) org ALREADY outside "
                 "the census has no `per_team` key at all, so nothing is filed "
-                "there and the cross-poll diff simply resolves this incident — "
-                "or the class becomes `not_eligible` (the org left the DR "
-                "surface: this closes and "
+                "there and the cross-poll diff resolves this incident — and that "
+                "diff is an IN-PROCESS register, so it closes only a subject THIS "
+                "process saw on a previous CONFIRMED poll: after a watcher "
+                "restart the subject is tracked nowhere and the incident needs a "
+                "MANUAL close (the arm-(i) residual, `docs/ops/registry-backup-dr.md` "
+                "§How incidents CLOSE). ALSO: the class becomes `not_eligible` "
+                "(the org left the DR surface: this closes and "
                 "NOTHING is opened). ⛔ NOT a closer: the org leaving the "
                 "`per_team` CENSUS while it remains ELIGIBLE and its state "
                 "lingers — `compute_status` re-lists every ELIGIBLE state-only "

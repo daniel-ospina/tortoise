@@ -1555,6 +1555,39 @@ def test_watcher_backup_set_missing_closes_when_the_state_disappears():
     assert ch.issues == {}
 
 
+def test_arm_i_outside_census_set_is_STRANDED_across_a_watcher_restart():
+    """The `closes_when` payload names the cross-poll diff as the closer for an
+    arm-(i) org that has left the census — and that diff is an IN-PROCESS
+    register (`_last_backup_set_missing`), so it only closes a subject THIS
+    process saw on a previous CONFIRMED poll (#9938 round 8).
+
+    Measured at this head, same storage and same three healthy polls, one
+    difference — a second watcher re-creates the register: without the restart
+    the incident closes (`test_watcher_backup_set_missing_closes_when_the_state_
+    disappears`), with it nothing references the subject at all (`to_resolve`
+    sees it in neither `per_team` nor `_last_backup_set_missing`, and a
+    state-only org outside the census has no `per_team` key), so it is stranded
+    and needs a manual close — which is why the payload and the runbook residual
+    say so.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_state(storage, "team_x")          # arm (i): state, no R2 prefix
+    w = _watcher(storage, ch, orgs=())
+    w.poll()
+    assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_x"], ch.issues
+
+    # A watcher RESTART: a fresh in-process register over the same durable state.
+    # (A fresh alert store is immaterial here — no resolve is even attempted, so
+    # no store call is made either way.)
+    w = _watcher(storage, ch, orgs=())
+    storage.delete("ops/teams/team_x/state.json")
+    for _ in range(3):
+        w.poll()
+    assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_x"], ch.issues
+    assert not any("resolved" in m.lower() for m in ch.telegram), ch.telegram
+
+
 def test_watcher_generator_eligibility_is_materialised_once():
     """#3658 review: validating a one-shot iterator consumes it, so ``set()``
     would cache an EMPTY confirmed set and silence the whole census. The value
@@ -2448,6 +2481,13 @@ def test_a_confirmed_no_manifest_org_that_HAS_state_is_not_called_never():
     # NEVER_BACKED_UP for an org the code computes no class for (#9938 round 8).
     assert "ALREADY outside the census" in body, body
     assert "no `per_team` key at all" in body, body
+    # …and the diff it names as that closer is IN-PROCESS, so after a restart the
+    # subject is tracked nowhere and the incident strands
+    # (`test_arm_i_outside_census_set_is_STRANDED_across_a_watcher_restart`
+    # measures that stranding). An unqualified "simply resolves" promised a
+    # close the code cannot deliver for a restarted watcher (#9938 round 8).
+    assert "IN-PROCESS register" in body, body
+    assert "MANUAL close" in body, body
 
 
 def test_watcher_arm_ii_missing_set_closes_when_its_state_disappears():
