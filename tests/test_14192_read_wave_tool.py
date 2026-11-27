@@ -3805,7 +3805,15 @@ def _read_reach(tree: ast.AST, consts: dict[str, frozenset[str]] | None = None,
 #: on purpose: `_door_read_contract()` derives the same set from the door, and this is the
 #: independent statement that reds when the DOOR moves — a derivation checked only against
 #: itself cannot tell "unchanged" from "widened".
-_EXPECTED_DOOR_ARGS = frozenset({"query", "limit", "read_status_out", "_truncation_out"})
+#:
+#: ⛔ RE-DERIVED for `#14033`, deliberately (the red below tells you to): the door now also
+#: passes `_state_question_out=state_out`. That is a THIRD OUT-SINK (`read_status_out`,
+#: `_truncation_out`, `_state_question_out`), not a lever: it is a dict the read WRITES a
+#: report into, so it changes nothing about WHICH rows survive `limit` — the property this
+#: allow-list exists to protect. A row added here that selected or filtered rows would be
+#: the defect; verify that on any future widening of this line.
+_EXPECTED_DOOR_ARGS = frozenset(
+    {"query", "limit", "read_status_out", "_truncation_out", "_state_question_out"})
 
 
 def _door_read_contract(
@@ -3818,9 +3826,14 @@ def _door_read_contract(
     `_elevated_timeout_ms` is the read's collective budget, `pool_size` / `order_by` /
     `claim_class` / `exclude_status` each change WHICH rows survive `limit`. So the
     allow-list is not "the read's parameters" (that is 40-odd names, most of them
-    levers) and not "private keywords" (that forbids the door's own `_truncation_out`
-    out-sink): it is **exactly what `hosted_api.py::search` passes**, plus the
-    out-sink this harness needs to declare the legs it measured.
+    levers) and not "private keywords" (that forbids the door's own out-sinks): it is
+    **exactly what `hosted_api.py::search` passes**, plus the out-sink this harness needs
+    to declare the legs it measured.
+
+    ⛔ The door's out-sinks are `read_status_out`, `_truncation_out` and (since `#14033`)
+    `_state_question_out`. An OUT-SINK is safe to admit — the read writes INTO it, so it
+    cannot change which rows survive `limit`. A keyword that SELECTS or FILTERS is the
+    thing this list must never grow to admit.
 
     ⛔ Two successive shapes of this check were falsified by review before this one: a
     "any `_`-prefixed keyword" test false-red a faithful mirror passing the door's
@@ -9705,7 +9718,8 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     the SAME read with a DIFFERENT argument set — seven levers the door does not name
     (``kind``, ``threshold``, ``entity_type``, ``min_confidence``, ``order_by``,
     ``relationship_filter``, ``traversal_path`` — ``tortoise/mcp_server.py``), and
-    NEITHER of the door's two out-sinks (``read_status_out``, ``_truncation_out``) — so
+    NONE of the door's three out-sinks (``read_status_out``, ``_truncation_out``,
+    ``_state_question_out`` — the last since ``#14033``) — so
     the two are INCOMPARABLE, not ordered. The allow-list below is derived from the
     ``/v1/search`` door alone, so it does NOT describe the MCP arm; a harness that
     mirrors THAT arm needs its own contract, not a widened one here.
@@ -12340,17 +12354,20 @@ def test_every_door_contract_clause_reds() -> None:
         assert needle in message, (needle, message)
         return message
 
-    anchor = "_truncation_out=trunc_out),"
+    # The anchor is the CALL'S tail, so it moves whenever the door's argument list does —
+    # which is why it was re-derived with `_EXPECTED_DOOR_ARGS` for `#14033` rather than
+    # being widened to something looser (a looser anchor would mutate a DIFFERENT call).
+    anchor = "_state_question_out=state_out),"
     assert hosted.count(anchor) == 1
 
     # 1. the door itself names a BOOL lever -> `not named_levers`
     raised("the door itself already names",
            hosted_source=hosted.replace(
-               anchor, "_truncation_out=trunc_out, _rerank_candidates=False),", 1))
+               anchor, "_state_question_out=state_out, _rerank_candidates=False),", 1))
 
     # 2. the door names a lever the bool-lever intersection cannot see -> the equality
     raised("re-derive this contract and the harness's",
-           hosted_source=hosted.replace(anchor, "_truncation_out=trunc_out, "
+           hosted_source=hosted.replace(anchor, "_state_question_out=state_out, "
                                                'kind="statement"),', 1))
 
     # 3. a second read call inside `search` (a hoisted `_do_search`, an added arm) -> the
@@ -12358,7 +12375,7 @@ def test_every_door_contract_clause_reds() -> None:
     raised("read calls — this contract is derived from exactly one",
            hosted_source=hosted.replace(
                anchor,
-               "_truncation_out=trunc_out),\n"
+               "_state_question_out=state_out),\n"
                "                lambda: sdk._tortoise_fts_query(q, limit=limit),", 1))
 
     # 4. `_rerank_candidates` stops being a bool-defaulted parameter -> the bool-lever seed,
