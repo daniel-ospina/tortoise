@@ -1364,9 +1364,14 @@ def test_every_github_task_list_marker_counts_as_a_checklist(marker):
 
 def test_the_arm_two_wording_names_the_body_too():
     """Both the arm table and the emitted detail must name the BODY: since the round-2 fix every
-    issue mode feeds `[body, *comments]` in, so "in its comments" understates the population."""
-    doc = L.__doc__ or ""
-    assert "anywhere in its\n                           body or comments" in doc
+    issue mode feeds `[body, *comments]` in, so "in its comments" understates the population.
+
+    Asserted over the docstring's WORDS, not its line wrapping: the claim is that the sentence is
+    there, and pinning the column made this row go red whenever the table was re-indented — a red
+    that says nothing about the code (it did, at this head, while the sentence was intact).
+    """
+    doc = " ".join((L.__doc__ or "").split())
+    assert "anywhere in its body or comments" in doc
     findings, _ = L.classify_issue([IN_FLIGHT], 1)
     assert "body or comments" in findings[0].detail
 
@@ -1427,8 +1432,8 @@ def test_a_separator_alone_does_not_make_a_release(marker):
 def test_the_arm_table_states_that_a_continuation_does_not_resolve():
     """The table is the spec a maintainer edits `CLAIM_RE` from; round 6 fixed the CODE for
     continuations and left the table claiming the opposite (one clause over)."""
-    doc = L.__doc__ or ""
-    assert "only the\n                           **first** ref of a RESOLVING word resolves" in doc
+    doc = " ".join((L.__doc__ or "").split())
+    assert "only the **first** ref of a RESOLVING word resolves" in doc
     assert "a continuation is CLAIMED, never resolved" in doc
     # agree with the code
     assert L.claims("Closes #1, #2\n", None, None)["closing"] == [1]
@@ -3675,6 +3680,60 @@ def test_a_pr_that_claims_every_row_is_not_flagged():
         "daniel-ospina/tortoise")
     assert findings == []
     assert stats["clean"] == 1
+
+
+def test_a_row_range_shorthand_claims_every_row_it_spans():
+    """F1: `(rows V1-V6)` names the SPAN, not its two endpoints.
+
+    A range is how a careful author writes "all six" without spelling out six ids, so reading only
+    its endpoints flagged the CORRECT complete close the arm exists to encourage — and the finding's
+    own remediation told the author to claim `V1, V6` of six. Every spelling below is a complete
+    claim; pre-fix every one of them reported `claimed ['V1','V6']` and four unclaimed rows.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    for line in ("Closes #13036 (rows V1–V6)\n",      # en dash, the standard range mark
+                 "Closes #13036 (rows V1-V6)\n",
+                 "Closes #13036 (rows V1—V6)\n",
+                 "Closes #13036 (rows V1..V6)\n",
+                 "Closes #13036 (rows V1 through V6)\n",
+                 "Closes #13036 (rows from V1 to V6)\n",
+                 "Closes #13036 (rows V6–V1)\n",       # stated backwards, still the same span
+                 "Closes #13036 — all six rows V1..V6 are proved\n"):
+        findings, stats = L.classify_partial_close(line, 500, {13036: _scope(rows)},
+                                                  "daniel-ospina/tortoise")
+        assert findings == [], (line, [f.as_dict() for f in findings])
+        assert stats == {"closes": 1, "clean": 1, "finding": 0,
+                         "abstained": 0, "ambiguous": 0, "unread": 0}, line
+
+
+def test_a_range_that_covers_only_part_of_the_issue_still_names_the_rows_outside_it():
+    """CONTROL for the range read — the widening must not swallow the defect.
+
+    `V2–V4` claims three of six and leaves V1, V5, V6 unmeasured. Pre-fix it claimed `V2, V4` and
+    named V3 as unclaimed as well, so both assertions below fail on the pre-fix code.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close("Closes #13036 (rows V2–V4)\n", 500,
+                                               {13036: _scope(rows)})
+    assert stats["finding"] == 1
+    assert findings[0].evidence["claimed"] == ["V2", "V3", "V4"]
+    assert findings[0].evidence["unclaimed"] == ["V1", "V5", "V6"]
+    # …and the same read applies to the documented partial form, which is the remediation the arm asks
+    # for: `Satisfies #N: V2–V4` is a claim on three rows, not on two.
+    assert L.claimed_row_ids("Satisfies #13036: V2–V4\nRefs #13036\n", 13036, rows) == {
+        "V2", "V3", "V4"}
+
+
+def test_a_range_spans_only_rows_the_issue_DECLARES_and_never_invents_one():
+    """The span is a SLICE of the issue's own declared order, so a gap spans its declared members —
+    and an endpoint the issue does not declare cannot anchor a span at all (`V9` on a six-row issue
+    is not a row this issue has)."""
+    assert L._ids_in("rows V1..V6", ["V1", "V2", "V6"]) == {"V1", "V2", "V6"}
+    assert L._ids_in("rows V2..V6", ["V1", "V2", "V6"]) == {"V2", "V6"}
+    assert L._ids_in("rows V1..V9", ["V1", "V2", "V6"]) == {"V1"}
+    # A hyphen inside prose is not a range between two declared ids unless both ids are declared.
+    assert L._ids_in("V1-24 hours", ["V1", "V2"]) == {"V1"}
+    assert L._row_range_span("V1 only", ["V1"]) == set()
 
 
 def test_naming_every_row_ANYWHERE_is_a_complete_close():

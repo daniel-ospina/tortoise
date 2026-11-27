@@ -56,11 +56,16 @@ comment with one ``- [ ]`` per acceptance criterion, the lane TICKS each as it p
 2026-11-05). A tick state answers "which of this issue's rows are measured" exactly, so arm 3 reads
 THAT and reports the unticked criteria **by label** — the rows the PR did not claim, named.
 
-⛔ **IT ABSTAINS WHERE THE FIELD IS ABSENT, AND SAYS SO WITH A COUNT.** ``#13036`` itself carried no
-``## Satisfies`` comment (3 comments, none with the heading), so arm 3 would NOT have flagged #13886:
-the issue predates the checklist discipline. Every run of the arm therefore prints how many closing
-refs carried a checklist and how many carried NONE, because an abstention reported as health is the
-false PASS this module ranks worst. An issue with no checklists is UNMEASURABLE for this question —
+⛔ **IT ABSTAINS WHERE THE ISSUE DECLARES NO ROWS AT ALL — AND SAYS SO WITH A COUNT.** The arm has TWO
+sources, so a ``## Satisfies`` comment is not the only one: the issue's own row HEADINGS (``### V1 ·``)
+declare the same rows, and ``#13036`` carries six of them — which is why this arm DOES flag #13886's
+shape. What ``#13036`` did NOT carry is a ``## Satisfies`` comment (3 comments, none with the heading):
+it predates the checklist discipline, and an arm keyed ONLY on that field would have been an enforcer
+whose condition never fires. The abstention is therefore narrower than "no checklist", not wider:
+measured at this head, **0 of the 30 newest open issues** carry a checklist and **1** declares ≥2 row
+headings, so almost every closing ref still abstains. Every run of the arm therefore prints how many
+closing refs it could answer and how many it could not, because an abstention reported as health is the
+false PASS this module ranks worst. An issue that declares no rows is UNMEASURABLE for this question —
 never "finished".
 
 ``--arm`` exists so a consumer mounts ONE arm. ``.github/workflows/closes-coherence.yml`` mounts
@@ -1374,8 +1379,9 @@ def classify_issue(comment_bodies: list[str], number: int | str,
 # shape `#13946` calls "the row table". Grounded deliberately: an id only counts when the ISSUE itself
 # uses it as a heading, so the arm can never invent a row the issue does not declare.
 ROW_ID = r"[A-Z]{1,3}\d{1,2}"
-# The issue's own row DECLARATION: an ATX heading whose first token is a row id. Not `#`/`##` (those
-# are titles and sections); `### V1 · …` / `## R1 — …` are the measured shapes.
+# The issue's own row DECLARATION: an ATX heading whose first token is a row id. `#` alone is a title
+# and is NOT accepted; `##` IS — `## R1 — …` is one of the measured shapes (`#14715`), so narrowing
+# this to `###` would silently drop that issue's rows.
 ROW_HEADING_RE = re.compile(rf"^[ \t]{{0,3}}#{{2,4}}[ \t]+(?P<id>{ROW_ID})(?![A-Za-z0-9])",
                             re.MULTILINE)
 # The documented PARTIAL form, `Satisfies #<N>: <ids>` (`docs/ops/ISSUE-WORKING-PROCESS.md` §7) — the
@@ -1413,10 +1419,48 @@ def row_ids(issue_bodies: list[str]) -> list[str]:
     return out
 
 
+# A RANGE SHORTHAND between two row ids — `V1–V6`, `V1-V6`, `V1—V6`, `V1..V6`, `V1 through V6`,
+# `V1 to V6` (and `from V1 to V6`). The en dash is the standard mark for a range and reads "to" or
+# "through" (The Punctuation Guide, *En dash*), which is how an author writes "all of them" without
+# spelling out six ids — the CORRECT complete close this arm must not flag.
+_RANGE_JOIN = r"(?:\s*(?:--?|–|—|\.\.)\s*|\s+(?:through|to)\s+)"
+
+
+def _row_range_span(text: str, rows: list[str]) -> set[str]:
+    """The rows a DECLARED range in `text` spans — `V1–V6` over `#13036`'s six is all six, not two.
+
+    ⛔ GROUNDED IN THE ISSUE'S OWN ORDER, and only where BOTH endpoints are declared rows, so the
+    expansion can never invent a row: the span is a slice of `rows`, not an arithmetic sequence.
+
+    ⚠️ RESIDUAL (narrow, and in the flagging direction): an endpoint the issue does not declare
+    cannot anchor a span — `rows V1..V9` on a six-row issue reads as `V1` alone, because `V9` is not
+    a row this issue has. Guessing its position is how the arm would start inventing rows.
+    """
+    if len(rows) < 2:
+        return set()
+    alternation = "|".join(re.escape(row) for row in sorted(rows, key=len, reverse=True))
+    pattern = re.compile(rf"(?<![A-Za-z0-9])(?P<a>{alternation}){_RANGE_JOIN}"
+                         rf"(?P<b>{alternation})(?![A-Za-z0-9])")
+    order = {row: i for i, row in enumerate(rows)}
+    spanned: set[str] = set()
+    for match in pattern.finditer(text):
+        lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
+        spanned |= set(rows[lo:hi + 1])
+    return spanned
+
+
 def _ids_in(text: str, rows: list[str]) -> set[str]:
-    """Which of `rows` this text NAMES, as whole tokens (so `R1` is not found inside `R10`/`AR1`)."""
-    return {row for row in rows
-            if re.search(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", text)}
+    """Which of `rows` this text NAMES — whole tokens (so `R1` is not found inside `R10`/`AR1`), plus
+    every row a range shorthand spans.
+
+    The range read is not cosmetic: `Closes #13036 (rows V1–V6)` is a COMPLETE close of all six, and
+    reading it as its two endpoints flagged it as a partial claim naming four unclaimed rows — a false
+    positive on the correct behaviour this arm exists to encourage, with remediation that told the
+    author to claim two rows of six.
+    """
+    named = {row for row in rows
+             if re.search(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", text)}
+    return named | _row_range_span(text, rows)
 
 
 def claimed_row_ids(pr_body: str, issue: int, rows: list[str]) -> set[str]:
@@ -1431,6 +1475,9 @@ def claimed_row_ids(pr_body: str, issue: int, rows: list[str]) -> set[str]:
       away from the keyword that fired. This is the ONE prose-adjacent read in the arm, and it is
       deliberately narrow: the line must carry a CLOSING word, must name THIS issue, and a token only
       counts when the issue declares that exact row id.
+
+    A RANGE SHORTHAND names every row it spans, not its two endpoints (see `_row_range_span`):
+    ``(rows V1–V6)`` is a claim on all six, which is what its author wrote.
 
     ⛔ AN EMPTY RESULT IS NOT "NO CLAIM" — it is "this PR did not say on this line", which is why the
     caller falls back to the WHOLE body before deciding, and reports a body that names nothing as
@@ -1486,7 +1533,7 @@ def criteria_state(comment_bodies: list[str]) -> dict:
                 "total": len(boxes), "unticked": len(unticked), "unticked_labels": unticked}
     return {"measured": False, "ticked": 0, "total": 0, "unticked": 0, "unticked_labels": []}
 
-def closing_targets(body: str, number: int | str, repo: str | None) -> list[int]:
+def closing_targets(body: str, number: int | str, repo: str | None = None) -> list[int]:
     """The issues this body RESOLVES with a closing keyword — the refs a `Closes` will actually fire on.
 
     Read through `_claims_in`, the same reader arm 1 uses, so the two arms cannot disagree about
@@ -1756,7 +1803,8 @@ def main(argv: list[str] | None = None) -> int:
                          "ONE arm and must not inherit another's findings — "
                          "`.github/workflows/closes-coherence.yml` mounts `pr-partial-close` on "
                          "every PR, and running `all` there would also publish arm 1's findings, "
-                         "whose measured false-positive population (36% of live open PRs) is exactly "
+                         "whose measured false-positive population (36%% of live open PRs) is "
+                         "exactly "
                          "why it was never mounted on an every-PR surface. An arm this mode cannot "
                          "run is REFUSED, never silently dropped.")
     ap.add_argument("--comments-file", type=Path, default=None,
