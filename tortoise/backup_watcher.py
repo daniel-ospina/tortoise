@@ -253,16 +253,38 @@ def compute_status(
     """Pure staleness computation. Returns the watcher's decision surface.
 
     Per-org statuses: ``never`` (seam org with no R2 archive), ``stale`` — which
-    is THREE different readings, and only the first is an age (#5047/#9937):
+    is TWO different readings, and only the first is an age (#5047/#9937):
     (a) the newest archive is older than the threshold (a non-expired simulate
     object carries an OLD age and forces this too); (b) the listing did not
     answer this poll and the last CONFIRMED measurement is old (a degraded read,
-    #3658); (c) a CONFIRMED listing found no default-graph archive for an org
-    whose team state exists (an absence — the archive SET is missing, #9938).
-    Callers must not treat (c) as an age claim. ``ok``,
-    ``stamp_missing`` (archives exist but no state object), ``not_eligible``
-    (org the sweep will not back up — #3658). ``unknown`` when R2 is
-    unreachable with no last-known-good (fresh boot — honest silence).
+    #3658). ``ok``, ``stamp_missing`` (archives exist but no state object),
+    ``backup_set_missing`` (team state exists, the R2 prefix exists, and a
+    CONFIRMED listing found no default manifest — an absence, never an age;
+    #2374/#9938), ``not_eligible`` (org the sweep will not back up — #3658).
+    ``unknown`` when R2 is unreachable with no last-known-good (fresh boot —
+    honest silence).
+
+    THE CLASS SET, side by side with the per-graph twin (#9938). The two tables
+    are computed independently (this one here, ``per_graph`` in
+    ``_poll_inner``); keeping them ONE-to-ONE is the contract, so the next
+    divergence is visible instead of incidental:
+
+    ==========================  =========================  ================
+    condition                   per-org class              per-graph class
+    ==========================  =========================  ================
+    unconfirmed read (degraded) ``stale`` (cache-miss;      ``stale``
+                                no age claim, no open)     (opens STALE)
+    confirmed, no state,        ``never``                  ``never``
+      no archive
+    confirmed, state PRESENT,   ``backup_set_missing``     ``backup_set_missing``
+      no manifest                                          (#2374)
+    measured age > threshold    ``stale``                  ``stale``
+    measured age <= threshold,  ``stamp_missing``          ``stamp_missing``
+      no state                                             
+    measured age <= threshold,  ``ok``                     ``ok``
+      state                                                
+    org the sweep skips         ``not_eligible``           (key omitted)
+    ==========================  =========================  ================
 
     ``eligible_orgs`` is the sweep's eligibility set
     (``backup_sweep.enumerate_eligible_orgs``: ``tier != 'free' AND
@@ -335,13 +357,29 @@ def compute_status(
             # 3. CONFIRMED poll, team state PRESENT: a dump SUCCEEDED once
             #    (state is written only after one), so ``never`` would be a
             #    false claim — the archive SET is what is missing (#2374's
-            #    case). This table has no class for it (the org-level census for
-            #    it is the separate ``backup_set_missing`` list), so it keeps
-            #    its pre-existing label rather than gaining a new false one.
-            #    Teaching this table that class is #9938's, not this change's.
-            if not r2_ok or org in state_orgs:
+            #    case, and the per-graph twin already names it
+            #    ``backup_set_missing``). Since #9938 this table names it too,
+            #    instead of keeping ``stale`` (a false age claim about an
+            #    archive nobody measured an age for): the class is what the
+            #    operator needs, and BACKUP_SET_MISSING is the kind that names
+            #    the actual condition.
+            #
+            #    The org is added to ``backup_set_missing`` (the kind's own
+            #    census, below) so that the ONE block which opens and
+            #    reconciles BACKUP_SET_MISSING owns its open AND its resolve.
+            #    Two universes reach that census and they are DISJOINT — this
+            #    arm (prefix present, no manifest) and the state-only loop
+            #    (state present, no prefix at all) — because this arm only runs
+            #    for an org that IS in ``r2_orgs``.
+            if not r2_ok:
+                # Case 1 — an UNMEASURED cache miss keeps the legacy label.
                 result["per_team"][org] = "stale"
+            elif org in state_orgs:
+                # Case 3 — a dump succeeded once; the archive SET is missing.
+                result["per_team"][org] = "backup_set_missing"
+                result["backup_set_missing"].append(org)
             else:
+                # Case 2 — a CONFIRMED absence with no state: never dumped.
                 result["per_team"][org] = "never"
             continue
         if simulate_age is not None and simulate_age < newest:
@@ -425,8 +463,10 @@ class BackupWatcher:
         # mistaken for a confirmed one (#3658 review).
         self._eligible_degraded: bool = False
         # Subjects of the previous BACKUP_SET_MISSING census, so a subject that
-        # leaves the set resolves — the per_team scan alone cannot close a
-        # state-only org (never present in per_team).
+        # leaves the set resolves. The census has TWO disjoint arms (#9938): an
+        # org with state and NO prefix (never present in ``per_team``, so the
+        # per_team scan cannot close it) and an org with state + a prefix but no
+        # default manifest (a ``per_team`` key whose class IS the kind).
         self._last_backup_set_missing: set[str] = set()
         # #3658 review (cycle 7): the universe-shrink reference, re-baselined
         # ONLY on a CONFIRMED poll — the mirror of `_last_graph_keys`. A
@@ -1055,13 +1095,13 @@ class BackupWatcher:
         * ``newest`` is the newest DEFAULT-graph archive the poll had — measured
           now, or (on a degraded poll) the last CONFIRMED measurement it kept.
         * when ``newest`` is ``None`` the filing is an absence/unknown, never an
-          age, and the payload names WHICH absence. ``compute_status`` reaches
-          ``stale`` with ``newest is None`` on two different polls: an
-          UNCONFIRMED one (the listing did not answer — a cache miss off the
-          census) and a CONFIRMED one for an org that has team state but no
-          default archive (a dump succeeded once, so the archive SET is what is
-          missing — the class this table cannot name yet, #9938). They send a
-          triager to different places, so they must not share a string.
+          age, and the payload names WHICH absence. Since #9938 the CONFIRMED
+          "state present, no default archive" absence is its OWN class
+          (``backup_set_missing``) with its own payload
+          (``_backup_set_missing_evidence``), so the only ``newest is None``
+          filing left on this kind is the UNCONFIRMED one (the listing did not
+          answer — a cache miss off the census). The two absences send a triager
+          to different places, so they do not share a string.
         * an ``ops/simulate`` DRILL forces the class without changing the
           archive, so the simulated timestamp is reported as ``simulated_age``
           and NEVER as ``newest_default_archive`` — publishing a key that does
@@ -1084,8 +1124,12 @@ class BackupWatcher:
         for an unlisted reason concludes the watcher lies (#9940 review).
 
         The arms below are the SHIPPED ones, not an aspiration:
-          * ``_drive_alerts`` ``never`` / ``stamp_missing`` -> class change, which
-            closes this one AND opens the matching kind (#3294 org exclusivity);
+          * ``_drive_alerts`` ``never`` / ``stamp_missing`` / ``backup_set_missing``
+            -> class change, which closes this one AND opens the matching kind
+            (#3294 org exclusivity). ⚠️ For ``stamp_missing`` the close is
+            conditional: that class OVERRIDES the age (#9938), so it closes this
+            one only when the same poll MEASURED a fresh archive — a class change
+            is not a freshness reading;
           * ``_drive_alerts`` ``not_eligible`` -> closes, opens NOTHING (the org
             left the DR surface);
           * the ``departed`` universe-shrink leg -> the subject is gone;
@@ -1098,9 +1142,13 @@ class BackupWatcher:
         window = resolve_streak_for(KIND_STALE)
         return (
             f"{lead} ALSO: the org's class changes to NEVER_BACKED_UP / "
-            "METADATA_LOST — that arm closes this one AND opens the matching "
+            "METADATA_LOST / BACKUP_SET_MISSING — that arm closes this one AND "
+            "opens the matching "
             "kind (#3294: exactly the incidents matching the current "
-            "classification are open); or the class changes to not_eligible "
+            "classification are open), except that a change to METADATA_LOST "
+            "closes this one only when the same poll MEASURED an archive fresh "
+            "(#9938: that class overrides the age, so the class change alone is "
+            "not a freshness reading); or the class changes to not_eligible "
             "(the org left the DR surface: this closes and NOTHING is opened); "
             "or the org leaves the census and its archive listing entirely "
             "(universe-shrink: the subject is gone). Each is held for "
@@ -1206,15 +1254,37 @@ class BackupWatcher:
                     "archive older than the staleness threshold — a MEASURED "
                     "age, not a cache miss.")
                 evidence["closes_when"] = self._stale_closes_when(f"{fresh_arm}:")
-        elif r2_confirmed:
+        else:
+            # Unreachable from ``_drive_alerts``: a CONFIRMED absence with team
+            # state is its OWN class since #9938 (``backup_set_missing``, whose
+            # payload is ``_backup_set_missing_evidence``), so no STALE is filed
+            # for it — and with no state the class is ``never``, which opens a
+            # different kind. Kept as keys only: a payload that TELLS a reader
+            # the filing was not made is a claim that can only mislead if it is
+            # ever published.
             evidence["newest_default_archive"] = None
-            # The in-flight cause comes FIRST: it is both the most common and the
-            # benign one, and sending a triager to "bulk delete" on a routine
-            # in-progress backup is worse than saying nothing. ``create_backup``
-            # uploads ``dump.enc`` then ``manifest.json``, and this watcher reads
-            # the manifest key only — so a run between the two uploads is
-            # invisible here.
-            evidence["measurement"] = (
+        return evidence
+
+    def _backup_set_missing_evidence(self, org: str) -> dict[str, Any]:
+        """Payload for the #9938 arm of BACKUP_SET_MISSING — state present, R2
+        prefix present, no default manifest.
+
+        This condition was filed as ``stale`` until #9938, and this diagnosis is
+        carried onto the kind that NAMES it rather than dropped with the
+        relabel: the absence has not changed, only the class. It states ONLY
+        what was measured — no age exists here, and R2 connectivity is not the
+        suspect.
+
+        The in-flight cause comes FIRST: it is both the most common and the
+        benign one, and sending a triager to "bulk delete" on a routine
+        in-progress backup is worse than saying nothing. ``create_backup``
+        uploads ``dump.enc`` then ``manifest.json``, and this watcher reads the
+        manifest key only — so a run between the two uploads is invisible here.
+        """
+        return {
+            "subject": org,
+            "newest_default_archive": None,
+            "measurement": (
                 "a CONFIRMED listing found no default-graph archive (manifest "
                 "key) under this org's R2 prefix, while team state EXISTS. MOST "
                 "LIKELY a backup is IN FLIGHT: `create_backup` uploads "
@@ -1223,15 +1293,43 @@ class BackupWatcher:
                 "minutes before treating this as loss. If it persists: the "
                 "archive SET is missing (bulk delete / prune) or a key's "
                 "timestamp does not parse (#9938). R2 connectivity is NOT the "
-                "suspect.")
-            evidence["closes_when"] = self._stale_closes_when(f"{fresh_arm}:")
-        else:
-            # Unreachable from ``_drive_alerts`` — the open gate at the `stale`
-            # arm is exactly the complement of this predicate. Kept as keys only:
-            # a payload that TELLS a reader the filing was not made is a claim
-            # that can only mislead if it is ever published.
-            evidence["newest_default_archive"] = None
-        return evidence
+                "suspect."),
+            "closes_when": (
+                "a default-graph archive is MEASURED under this org's R2 prefix "
+                "— the class becomes `ok`, `stale` or `stamp_missing` — and the "
+                "store holds this kind's resolve for the recovery window; an "
+                "archive that merely REAPPEARS without a manifest is still not a "
+                "measurement. ALSO: the team state disappears (the class is then "
+                "`never`, and the state-only arm of this kind takes the subject "
+                "over), or the org leaves the census and its archive listing "
+                "entirely (universe-shrink: the subject is gone)."),
+        }
+
+    def _measured_fresh(self, org: str,
+                        newest_ts_by_org: dict[str, datetime] | None,
+                        now: datetime | None,
+                        simulate_age: datetime | None) -> bool:
+        """True only when THIS poll MEASURED this org's newest default archive
+        at or under the staleness threshold (#9938).
+
+        The one thing a class change may not stand in for. ``compute_status``
+        OVERRIDES the age classification with ``stamp_missing``, so a
+        stale-AND-stateless org arrives in that arm carrying its OLD archive;
+        resolving STALE off the class change would close an incident whose
+        subject (an old archive) is still true, having measured nothing.
+
+        Same newest-primary rule ``compute_status`` applies, so a non-expired
+        ``ops/simulate`` drill object wins selection and can never be mistaken
+        for freshness. A cache miss, an unparsed timestamp and a DEGRADED poll
+        all return False — the caller gates on ``r2_confirmed`` as well, because
+        absence of a measurement is not freshness (#9937/#9940).
+        """
+        newest = (newest_ts_by_org or {}).get(org)
+        if newest is None or now is None:
+            return False
+        if simulate_age is not None and simulate_age < newest:
+            newest = simulate_age
+        return (now - newest).total_seconds() / 60.0 <= self._stale_min
 
     def _drive_alerts(self, status: dict[str, Any], r2_ok: bool | None,
                       *, r2_reachable: bool | None = None,
@@ -1318,9 +1416,40 @@ class BackupWatcher:
                         )
                 elif state == "stamp_missing":
                     if r2_confirmed:
-                        self._alert_leg("resolve_incident", KIND_STALE, org)
+                        # #9938: ``stamp_missing`` is computed AFTER the age
+                        # classification and OVERRIDES it (``compute_status``),
+                        # so a stale-AND-stateless org lands here while its old
+                        # archive is still the newest one. Resolving STALE off
+                        # the CLASS CHANGE therefore closed a STALE nobody
+                        # re-measured — a false recovery, and the same rule
+                        # #9937/#9940 establish (`stale` may only be resolved
+                        # from a measured age <= the threshold). A class change
+                        # is not a freshness reading.
+                        if self._measured_fresh(
+                                org, newest_ts_by_org, now, simulate_age):
+                            self._alert_leg("resolve_incident", KIND_STALE, org)
+                        # NEVER_BACKED_UP needs no age: an archive EXISTS, which
+                        # is positive evidence against "never backed up".
                         self._alert_leg("resolve_incident", KIND_NEVER_BACKED_UP, org)
                     self._alert_leg("open_incident", KIND_METADATA_LOST, org)
+                elif state == "backup_set_missing":
+                    # #9938: a CONFIRMED listing found NO default manifest for an
+                    # org whose team state EXISTS (state is written only after a
+                    # successful dump), so the archive SET is what is missing.
+                    # It is not an age and it is not ``never`` (#2374).
+                    #
+                    # The kind's OPEN and its reconciliation are NOT here: this
+                    # org is in ``status["backup_set_missing"]``, and the ONE
+                    # BACKUP_SET_MISSING block below owns both (open gated on a
+                    # confirmed read; resolve by the census diff). This arm only
+                    # closes the kinds this classification is not the truth for,
+                    # so exactly the incidents matching the current class stay
+                    # open (#3294) instead of the old "resolves STALE" habit that
+                    # left an age incident open beside a missing-set one.
+                    if r2_confirmed:
+                        self._alert_leg("resolve_incident", KIND_STALE, org)
+                        self._alert_leg("resolve_incident", KIND_NEVER_BACKED_UP, org)
+                        self._alert_leg("resolve_incident", KIND_METADATA_LOST, org)
                 elif state == "not_eligible":
                     # #3658: an org the sweep does not target is not a DR
                     # gap. Open nothing — and close everything a previous
@@ -1419,8 +1548,28 @@ class BackupWatcher:
                 # data-loss condition. Opening is normally the conservative
                 # direction; this one is not, because the state it asserts was
                 # never measured.
+                #
+                # #9938: this list is the kind's WHOLE census, and its two arms
+                # are disjoint — (i) state present, NO R2 prefix at all (the
+                # state-only org, never a `per_team` key) and (ii) state present,
+                # prefix present, NO default manifest (`compute_status`'s
+                # `backup_set_missing` class, always a `per_team` key). Arm (ii)
+                # exists so the org's class and its incident are the SAME
+                # condition: before it, such an org read `stale` (a false age
+                # claim) and no BACKUP_SET_MISSING was filed for it.
                 for org in status.get("backup_set_missing", []):
-                    self._alert_leg("open_incident", KIND_BACKUP_SET_MISSING, org)
+                    # Arm (ii) carries its own diagnosis (the absence is a
+                    # missing manifest under a LIVE prefix, whose likeliest
+                    # cause is an in-flight dump); arm (i) keeps the plain
+                    # artifact it has always filed. `_title` renders neither
+                    # an `age` nor an `age_minutes` key from this payload, so
+                    # the title shape is unchanged.
+                    detail = (
+                        self._backup_set_missing_evidence(org)
+                        if status["per_team"].get(org) == "backup_set_missing"
+                        else None)
+                    self._alert_leg("open_incident", KIND_BACKUP_SET_MISSING,
+                                    org, detail=detail)
                 # BACKUP_SET_MISSING resolves when the org's archives reappear
                 # OR the org leaves the set. Gated on a confirmed archive read,
                 # like every other resolve here.

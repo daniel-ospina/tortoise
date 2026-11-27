@@ -2357,9 +2357,10 @@ def test_a_confirmed_no_manifest_org_that_HAS_state_is_not_called_never():
     """The three-way split on `newest is None` must not collapse case 3 into
     `never`: team state is written only after a SUCCESSFUL dump (#2374), so
     "never backed up" is false for an org that has state — what is missing is
-    the archive SET, which the separate `backup_set_missing` census owns. This
-    table has no class for it yet (#9938), so the pre-existing label stands
-    rather than gaining a new false one."""
+    the archive SET, and since #9938 this table NAMES it: the class is
+    `backup_set_missing` (the twin's, #2374) and BACKUP_SET_MISSING is the kind
+    that is filed for it — not `stale`, which was an age claim about an archive
+    nobody measured an age for."""
     ch = _Channels()
     storage = MemoryStorage()
     _seed_state(storage, "team_a")                 # a dump succeeded once
@@ -2373,23 +2374,142 @@ def test_a_confirmed_no_manifest_org_that_HAS_state_is_not_called_never():
         grace_min=0, now=lambda: FIXED,
     )
     status = w.poll()
-    assert status["per_team"]["team_a"] == "stale", status["per_team"]
+    assert status["per_team"]["team_a"] == "backup_set_missing", status["per_team"]
+    assert status["backup_set_missing"] == ["team_a"], status
     assert not any("NEVER_BACKED_UP" in t for t in ch.issues.values()), ch.issues
+    # EXACTLY ONE incident, of the kind that names the condition: `stale` is gone
+    # (it was a false age claim) and no second kind is open for the same org
+    # (#3294: exactly the incidents matching the classification are open).
+    assert list(ch.issues.values()) == ["[DR] BACKUP_SET_MISSING — team_a"], ch.issues
     # …and the filed payload must not send the triager to R2 connectivity: this
     # poll's listing DID answer, so the absence is a missing archive SET, not a
     # cache miss. (Two different absences must not share one string.)
     (body,) = (ch.bodies[n] for n in ch.issues)
     assert "CONFIRMED listing" in body, body
     assert "cache miss" not in body, body
-    # …and it names EVERY arm that can close it. The branch used to assign its own
-    # `closes_when`, which silently dropped `not_eligible` and the universe-shrink
-    # leg — a list of some closers reads as exhaustive, so an issue that closed for
-    # an unlisted reason makes the watcher look like it lies.
+    # …and it names EVERY arm that can close it — a list of some closers reads as
+    # exhaustive, so an issue that closed for an unlisted reason makes the watcher
+    # look like it lies.
     assert "IN FLIGHT" in body, body          # the benign cause leads
-    assert "merely REAPPEARS does not close it" in body, body  # an OLD key is not freshness
-    assert "not_eligible" in body, body
+    assert "merely REAPPEARS without a manifest is still not a measurement" in body, body
     assert "universe-shrink: the subject is gone" in body, body
-    assert "ALSO: the org's class changes to NEVER_BACKED_UP" in body, body
+    assert "the class is then `never`" in body, body
+
+
+def test_status_confirmed_state_org_without_manifest_is_backup_set_missing():
+    """The compute_status arm of #9938, at the table level: state + prefix + no
+    manifest is the archive-set class, in BOTH the ``per_team`` table and the
+    kind's census — the census is what makes one block own the open AND the
+    resolve."""
+    s = _status(orgs=["team_a"], r2_orgs=["team_a"], state_orgs=["team_a"],
+                newest_ts_by_org={})
+    assert s["per_team"]["team_a"] == "backup_set_missing", s["per_team"]
+    assert s["backup_set_missing"] == ["team_a"], s["backup_set_missing"]
+
+    # …and the DEGRADED poll keeps the pre-existing `stale` cache-miss label: a
+    # cache miss is not a measurement, so it may not assert the set is missing.
+    degraded = _status(orgs=["team_a"], r2_orgs=["team_a"],
+                       state_orgs=["team_a"], newest_ts_by_org={}, r2_ok=False)
+    assert degraded["per_team"]["team_a"] == "stale", degraded["per_team"]
+    assert degraded["backup_set_missing"] == [], degraded["backup_set_missing"]
+
+
+def test_watcher_state_plus_prefix_gone_manifest_is_one_incident_not_two():
+    """#9938, the transition that used to report two conditions for one org.
+
+    A measured-stale org whose manifest disappears (bulk prune: `dump.enc`
+    survives, the manifest does not) is a missing archive SET, not an age. The
+    class change must close STALE and open BACKUP_SET_MISSING, leaving EXACTLY
+    one incident — the old code kept the STALE arm's label and never opened the
+    kind that names the condition."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)  # a real measured age: stale
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stale", status["per_team"]
+    assert list(ch.issues.values()) == ["[DR] STALE — team_a"], ch.issues
+
+    # the manifest is pruned; `dump.enc` survives, so the prefix stays listed
+    for k in list(storage.list("backups/team_a/")):
+        if k.endswith("/manifest.json"):
+            storage.delete(k)
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "backup_set_missing", status["per_team"]
+    assert list(ch.issues.values()) == [
+        "[DR] BACKUP_SET_MISSING — team_a"], ch.issues
+
+
+def test_watcher_state_plus_prefix_no_manifest_round_trip_does_not_refile():
+    """#9938 indicator 3 — the round trip, asserted at EVERY poll.
+
+    `state + prefix + no manifest` -> `state + prefix + fresh manifest`: the
+    open-incident set must match the state at each step, with NO resolve-then-
+    refile pair (resolving deletes the dedup sentinel, so a flip files a new
+    issue every window — the flood class #5047/#9937 removed for stateless
+    orgs)."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_state(storage, "team_a")
+    _seed_partial_archive(storage, "team_a")
+    w = _watcher(storage, ch)
+
+    s1 = w.poll()
+    assert s1["per_team"]["team_a"] == "backup_set_missing", s1["per_team"]
+    first = list(ch.issues)
+    assert [ch.issues[n] for n in first] == ["[DR] BACKUP_SET_MISSING — team_a"]
+
+    # A second poll of the SAME state is idempotent: no re-file, no resolve.
+    w.poll()
+    assert list(ch.issues) == first, ch.issues
+
+    # …and the manifest lands: the class is healthy, the incident closes, and
+    # NOTHING new is filed.
+    _seed_archive(storage, "team_a", 0.5)
+    s3 = w.poll()
+    assert s3["per_team"]["team_a"] == "ok", s3["per_team"]
+    assert s3["backup_set_missing"] == [], s3["backup_set_missing"]
+    assert ch.issues == {}, ch.issues
+    # exactly one resolve push for the one incident — not a resolve/refile pair
+    assert sum("resolved" in t.lower() for t in ch.telegram) == 1, ch.telegram
+
+
+def test_watcher_stamp_missing_does_not_resolve_a_stale_it_never_measured():
+    """#9938 indicator 2 — a class change is not a freshness reading.
+
+    `stamp_missing` is computed AFTER the age classification and OVERRIDES it, so
+    a stale-AND-stateless org arrives in that arm carrying its OLD archive. The
+    arm used to resolve STALE off the class change — closing a live age incident
+    having measured nothing (#9937/#9940's rule). It now closes only on a
+    MEASURED fresh archive."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)   # old archive …
+    _seed_state(storage, "team_a")          # … and state: stale
+    clock = [FIXED]
+    w = _watcher(storage, ch, now_fn=lambda: clock[0])
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stale", status["per_team"]
+    assert any("STALE — team_a" in t for t in ch.issues.values()), ch.issues
+
+    # The team mirror disappears. The class becomes `stamp_missing`, which
+    # OVERRIDES the age — but the archive above is STILL 200m old, so the STALE
+    # is still true and must survive.
+    storage.delete("ops/teams/team_a/state.json")
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stamp_missing", status["per_team"]
+    assert any("STALE — team_a" in t for t in ch.issues.values()), (
+        "a class change may not close a STALE nobody re-measured", ch.issues)
+    assert any("METADATA_LOST — team_a" in t for t in ch.issues.values()), ch.issues
+
+    # A FRESH archive lands (still no state): now the age WAS measured, so the
+    # STALE closes — via the measurement, not via the class.
+    _seed_archive(storage, "team_a", 0.5)
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stamp_missing", status["per_team"]
+    assert not any("STALE" in t for t in ch.issues.values()), ch.issues
+    assert any("METADATA_LOST — team_a" in t for t in ch.issues.values()), ch.issues
 
 
 def test_a_degraded_poll_files_no_new_stale_for_an_unmeasured_org():
