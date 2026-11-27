@@ -9190,6 +9190,16 @@ _EMISSION_RATIO_RE = re.compile(
 #: sentences. ⛔ The shape requires a DECIMAL ON BOTH SIDES of the relation, so ordinary prose
 #: parentheticals in this block ("(measured at 90.0 s = the row's weight)") do not trip it —
 #: measured: the live block carries exactly ONE such parenthetical, the real ratio.
+#: The two `key: value` figures the same sentence prints beside the derivation —
+#: `` `watchdog_minutes: 28` `` and `` `watchdog_headroom: 2.03` ``. ⛔ THEY WERE GRADED BY NOTHING
+#: (#14623 round 36, P2): mutating either to `29` / `2.04` left the WHOLE FILE green (`503 passed, 1
+#: skipped`), while the two figures BESIDE them (`= 28 m` and `(1680 / 827.6 = 2.0300)`) both RED when
+#: falsified — so the sentence read as fully graded and was not. The block asserts that “a carried
+#: figure reds a required leg instead of shipping”; these ARE carried figures, and nothing redded. Read
+#: here and compared to the live emission, under the same GRADED-OR-ABSENT rule the ratio uses:
+#: deleting them is legal, printing a different number is not.
+_EMISSION_MINUTES_KEY_RE = re.compile(r"`watchdog_minutes:\s*(?P<minutes>\d+)`")
+_EMISSION_HEADROOM_KEY_RE = re.compile(r"`watchdog_headroom:\s*(?P<headroom>\d+(?:\.\d+)?)`")
 _EMISSION_RATIO_SHAPE_RE = re.compile(
     # Anchored on an unambiguous DIVISION SIGN (`/`, `÷`) rather than on a relation glyph: a stated
     # headroom ratio IS a quotient, so this catches a division statement the reader did not consume
@@ -9894,6 +9904,28 @@ def _emission_block_claims(
     # — reds here instead of reading as verified. Tolerance is half the stated precision, so the
     # block may round to as many places as it likes without the arm owning a spelling.
     ceil_by_est = {float(e): int(m) for e, _h, m in ceil_matches}
+    # ⛔ THE `key: value` FIGURES BESIDE THE DERIVATION, graded against the live emission (#14623 round
+    # 36, P2). They sat in the same sentence as two figures that DO red when falsified (`= 28 m`, the
+    # ratio), so the sentence read as fully graded while these two were read by nothing: `28` -> `29`
+    # and `2.03` -> `2.04` each left the whole file green. GRADED-OR-ABSENT: no match = no claim, which
+    # is legal; a match that disagrees with what the tree emits is not.
+    if ceil_by_est:
+        governing_est = max(ceil_by_est)
+        governing_minutes = ceil_by_est[governing_est]
+        for stated_minutes in _EMISSION_MINUTES_KEY_RE.findall(header):
+            assert int(stated_minutes) == governing_minutes, (
+                f"the block prints `watchdog_minutes: {stated_minutes}` beside a derivation that emits "
+                f"{governing_minutes} for its governing estimate ({governing_est} s) — the printed key "
+                "is a carried figure, and the block's own claim is that a carried figure reds a "
+                "required leg rather than shipping. Re-emit it with the verb.")
+        for stated_headroom in _EMISSION_HEADROOM_KEY_RE.findall(header):
+            expected_headroom = round(cs.watchdog_headroom(governing_est, governing_minutes), 2)
+            assert abs(float(stated_headroom) - expected_headroom) < 1e-9, (
+                f"the block prints `watchdog_headroom: {stated_headroom}` but "
+                f"`round(ci_selection.watchdog_headroom({governing_est}, {governing_minutes}), 2)` is "
+                f"{expected_headroom} — the printed key is a carried figure graded by nothing else in "
+                "the tree (`rg 'watchdog_headroom: 2'` outside this file finds no reader). Re-emit it "
+                "with the verb.")
     # ⛔ A FIGURE NOBODY READS IS NOT AN ABSENT FIGURE. Every ratio-SHAPED parenthetical must be
     # CONSUMED by the reader below; one that is not is a live claim graded by nothing, which is this
     # block's whole subject. This is what makes the widening above safe rather than one more
