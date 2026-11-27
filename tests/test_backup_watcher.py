@@ -2438,10 +2438,15 @@ def test_watcher_state_plus_prefix_gone_manifest_is_one_incident_not_two():
     assert status["per_team"]["team_a"] == "stale", status["per_team"]
     assert list(ch.issues.values()) == ["[DR] STALE — team_a"], ch.issues
 
-    # the manifest is pruned; `dump.enc` survives, so the prefix stays listed
-    for k in list(storage.list("backups/team_a/")):
-        if k.endswith("/manifest.json"):
-            storage.delete(k)
+    # The manifest is pruned and `dump.enc` survives, so the prefix stays
+    # listed: model that as a fresh surface rather than removing keys (an
+    # untyped `.delete` receiver is ratcheted by `tools/sdk_privatise.py`). The
+    # alert store keeps ITS storage, so the dedup sentinel — the thing that
+    # decides whether a re-file is possible — is carried across, the whole point.
+    pruned = MemoryStorage()
+    _seed_state(pruned, "team_a")
+    _seed_partial_archive(pruned, "team_a")
+    w._storage = pruned
     status = w.poll()
     assert status["per_team"]["team_a"] == "backup_set_missing", status["per_team"]
     assert list(ch.issues.values()) == [
@@ -2502,8 +2507,11 @@ def test_watcher_stamp_missing_does_not_resolve_a_stale_it_never_measured():
 
     # The team mirror disappears. The class becomes `stamp_missing`, which
     # OVERRIDES the age — but the archive above is STILL 200m old, so the STALE
-    # is still true and must survive.
-    storage.delete("ops/teams/team_a/state.json")
+    # is still true and must survive. (A fresh surface, not an untyped
+    # `.delete` receiver, which `tools/sdk_privatise.py` ratchets.)
+    without_state = MemoryStorage()
+    _seed_archive(without_state, "team_a", 200)
+    w._storage = without_state
     status = w.poll()
     assert status["per_team"]["team_a"] == "stamp_missing", status["per_team"]
     assert any("STALE — team_a" in t for t in ch.issues.values()), (
@@ -2512,7 +2520,9 @@ def test_watcher_stamp_missing_does_not_resolve_a_stale_it_never_measured():
 
     # A FRESH archive lands (still no state): now the age WAS measured, so the
     # STALE closes — via the measurement, not via the class.
-    _seed_archive(storage, "team_a", 0.5)
+    fresh = MemoryStorage()
+    _seed_archive(fresh, "team_a", 0.5)
+    w._storage = fresh
     status = w.poll()
     assert status["per_team"]["team_a"] == "stamp_missing", status["per_team"]
     assert not any("STALE" in t for t in ch.issues.values()), ch.issues
