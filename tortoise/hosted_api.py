@@ -17181,6 +17181,16 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     from tortoise.status_vocabulary import STATUS_DEGRADED as _STATUS_DEGRADED
     from tortoise.truncation import truncation_field
 
+    # #14033: the STATE-QUESTION report's sink. Always on, for the same reason the
+    # truncation marker below is: the defect it fixes is a SILENT decline — a caller
+    # who asked an ending question that the router did not recognise gets relevance
+    # rows, which may be empty or unrelated, and nothing in the reply distinguishes
+    # that from "nothing has ended". Gating it behind a flag would preserve exactly
+    # the silence (#14033 acceptance item 4). The payload is minted in
+    # `tortoise/state_intent.py` (its ONE home) and is written ONLY when the read saw
+    # a state cue, so a non-state query's response is byte-identical.
+    state_out: dict = {}
+
     # The sink is the READ PATH's carrier for both fields; each field is
     # emitted only under its own flag. The ONE exception is the impairment
     # term: a residency-only deployment that could not assess the store still
@@ -17270,7 +17280,8 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
             results = await _read_offload(
                 lambda: sdk._tortoise_fts_query(
                     q, limit=limit, read_status_out=status_out,
-                    _truncation_out=trunc_out),
+                    _truncation_out=trunc_out,
+                    _state_question_out=state_out),
                 op="search")
         except HTTPException:
             # #10602 review P1: the read lane's capacity refusal is an
@@ -17307,6 +17318,12 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     # is unreachable by any follow-up call: exempted pagination (which reports
     # ``total``/``hasMore``) is a different surface, see ``truncation.py``.
     response.update(truncation_field(trunc_out))
+    # #14033: the state-question report — present only when the read saw a state
+    # CUE, so a caller can tell "the state route declined my question" from "the
+    # graph says nothing has ended". Absent (not null) for every other query, so a
+    # caller who never asks about state gets a byte-identical response.
+    if state_out.get("state_question"):
+        response["state_question"] = state_out["state_question"]
     if status_out is not None:
         # The SDK sets `status` on every return path; a missing term is a bug,
         # not a reason to emit null under a vocabulary of exactly four terms.

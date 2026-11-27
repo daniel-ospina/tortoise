@@ -240,7 +240,7 @@
 # it down here, not "fix" a row by cutting.
 manifest_version: 1
 issue: 3863
-cut_at_commit: a29b5f24ce95b852c84243dadb022a1dc857d853
+cut_at_commit: 2e9c5cdfbbdff05e95aa8a73bbb2d9626b3a6f08
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1615,7 +1615,21 @@ rows:
     tag = the Points reachable through one Tag (page sliced from a full scan — approximate when walked); sessions
     = indexed agent sessions (agent/topics/after/before); entry_points = natural-language query → matching entities;
     issue_insight = ''there is more in the graph'' for a would-be issue (title/body/repo), call BEFORE filing. For
-    a single known id use tortoise_get_entity.'
+    a single known id use tortoise_get_entity. ⛔ WHICH STATE QUESTIONS ROUTE, so you can predict it (#14033). An
+    ENDING question is answered from the ended records only when its wording is one of the shapes below; the cue
+    is the question''s own PREDICATE, never an ending word that happens to sit near a wh-word. ROUTES — rows from
+    the ended population, each carrying how it ended: `has anything we relied on been withdrawn` `what ended` `is
+    the onboarding flow retired?` `list what we retired` DOES NOT ROUTE — you get relevance rows, and only the rows
+    differ: `what has ended recently` (trailing adverb; ask `what ended`) `which of our withdrawn claims affected
+    pricing` (the ending word MODIFIES `claims`; ask `which claims were withdrawn`) ⛔ SO A STATE QUESTION THAT DOES
+    NOT ROUTE BEHAVES EXACTLY LIKE A NORMAL SEARCH. There is no second attempt and no fallback: you get the rows
+    the words match, which may be empty or unrelated, and an EMPTY ANSWER HERE IS NOT EVIDENCE THAT NOTHING HAS
+    ENDED. This tool takes no argument that forces the ended read, so the wording is the only way in. ⛔ AND A ROUTED
+    READ IS NOT ANNOUNCED IN THE ROW LIST either — this reply is the rows alone, with no field saying a state question
+    was recognised. The `state_question` report (`{routed, population, cue, reason, hint}`) rides the HOSTED `GET
+    /v1/search` response body, which is the one customer-facing channel for it; the same payload rides the private
+    `TortoiseSDK._tortoise_fts_query(..., _state_question_out=...)` sink, so the line is: this MCP tool cannot report
+    the distinction, the hosted route can.'
   dependency: declares TortoiseSDK.search_knowledge (resolves)
   lifecycle: active
   used_by: never called

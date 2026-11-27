@@ -1114,6 +1114,215 @@ _COMMITMENT_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
+#: ⛔ WHICH PHRASINGS ROUTE — #14033's acceptance item 3, and it is SERVED text.
+#:
+#: The issue measured that the gap around the cue table was itself the defect: a
+#: question that is plainly ABOUT state but is not in a shape is answered by the
+#: ordinary relevance read, and nothing on any surface said so — so a customer
+#: asking a reasonable question got silence or unrelated rows and could not tell
+#: a declined state question from "nothing has ended". The recall half landed in
+#: #14491 (two new shapes); this constant is the PREDICTABILITY half, and it is
+#: read by a caller who has no access to this module.
+#:
+#: ⛔ IT IS SERVED FROM ``tool_registry`` — NOT from a docstring. ``FastMCPAdapter``
+#: hands FastMCP ``ToolDefinition.description`` and an explicit ``description=``
+#: OVERRIDES the handler's docstring, so prose added to ``tortoise_search.__doc__``
+#: reaches NO caller. ``ToolDefinition.description`` for ``tortoise_search`` is
+#: built from THIS string, so the served text and the test read one value.
+#:
+#: ⛔ AND THE ROWS ARE A CONTRACT, NOT PROSE: ``tests/test_14033_state_cue_gap.py``
+#: parses the two headed sections below and asserts each row's stated routing
+#: against :func:`detect_state_question` on the real detector — a row that goes
+#: stale reds instead of quietly misleading a caller. So a phrasing added here
+#: must be a phrasing whose behaviour the module actually has; the parsers are
+#: the format this constant has to keep (a row is `` \u0060<question>\u0060 `` under
+#: one of the two headings, one per line).
+#:
+#: ⛔ KEPT SHORT ON PURPOSE (#14203): every served description competes for the
+#: client's budget (Claude Code shows the first 4096 characters of a tool that
+#: loads upfront), so the pairing of a phrasing with its status carries the whole
+#: argument and the reasoning lives in this module's prose, which costs a caller
+#: nothing. The length is pinned by a test.
+ROUTING_NOTE = """\
+\u26d4 WHICH STATE QUESTIONS ROUTE, so you can predict it (#14033). An ENDING question
+is answered from the ended records only when its wording is one of the shapes
+below; the cue is the question's own PREDICATE, never an ending word that
+happens to sit near a wh-word.
+
+  ROUTES \u2014 rows from the ended population, each carrying how it ended:
+    `has anything we relied on been withdrawn`
+    `what ended`
+    `is the onboarding flow retired?`
+    `list what we retired`
+
+  DOES NOT ROUTE \u2014 you get relevance rows, and only the rows differ:
+    `what has ended recently`  (trailing adverb; ask `what ended`)
+    `which of our withdrawn claims affected pricing`
+        (the ending word MODIFIES `claims`; ask `which claims were withdrawn`)
+
+\u26d4 SO A STATE QUESTION THAT DOES NOT ROUTE BEHAVES EXACTLY LIKE A NORMAL
+SEARCH. There is no second attempt and no fallback: you get the rows the words
+match, which may be empty or unrelated, and an EMPTY ANSWER HERE IS NOT EVIDENCE
+THAT NOTHING HAS ENDED. This tool takes no argument that forces the ended read,
+so the wording is the only way in. \u26d4 AND A ROUTED READ IS NOT ANNOUNCED IN THE
+ROW LIST either \u2014 this reply is the rows alone, with no field saying a state
+question was recognised. The `state_question` report (`{routed, population, cue,
+reason, hint}`) rides the HOSTED `GET /v1/search` response body, which is the one
+customer-facing channel for it; the same payload rides the private
+`TortoiseSDK._tortoise_fts_query(..., _state_question_out=...)` sink, so the
+line is: this MCP tool cannot report the distinction, the hosted route can.
+"""
+
+#: What a caller is told when a state CUE was seen and no shape applied. ONE
+#: string, owned here, so the read path, the served description and the routing
+#: test cannot describe the boundary differently — the drift #14033 is about.
+#:
+#: ⛔ THE FIRST CLAUSE SAYS WHAT WAS SEEN, NOT WHAT THE QUESTION IS. An attributive
+#: row (`which archived report has the Q3 numbers`) carries an ending CUE while the
+#: question's predicate is `has the Q3 numbers`, and the served ``ROUTING_NOTE``
+#: files that phrasing under DOES NOT ROUTE. So the hint reports the cue and the
+#: last sentence is the branch that tells such a caller the relevance read is the
+#: right one — a notice that told them the population is what they wanted would be
+#: a wrong answer with a citation.
+MISSED_ROUTE_HINT = (
+    "a strong ENDING cue was seen in this question, but no state-question shape "
+    "applied to it, so it was answered by the RELEVANCE read \u2014 an empty or "
+    "unrelated reply here is NOT evidence that nothing has ended. If the ENDING is "
+    "what you are asking about, ask it as a whole question (\"what ended\", \"is "
+    "<record> retired?\", \"list what we retired\") or as an unqualified set "
+    "(\"which <records> were withdrawn\"); every row of the ended population "
+    "states how it ended (status, successorId/successorName, stage+outcome, "
+    "endedAt). If a QUALIFIER is what you are asking about (\"in v3\", \"by "
+    "legal\", \"in Q3\"), this relevance read is the right one and the population "
+    "cannot apply it."
+)
+
+#: The FAMILY arm needs its own sentence: there a shape DID apply and the remedy
+#: is NOT "ask the whole question" — the caller already did, and it would be
+#: refused again for the same family.
+MISSED_ROUTE_FAMILY_HINT = (
+    "this IS a state question, but the ended population has no arm for this "
+    "entity_type: that family has no lifecycle (an Event does not \u2014 design \u00a78), "
+    "so the relevance read answered instead. Re-read it with a family that has "
+    "one (entity_type='point', 'object' or 'subject'); every row of the ended "
+    "population states how it ended (status, successorId/successorName, "
+    "stage+outcome, endedAt)."
+)
+
+#: The reasons a strong cue can be seen without the population being served.
+#: CLOSED, because a caller branches on the value: ``shape`` is no shape applying
+#: (an appended constraint, an attributive participle), ``family`` is a shape that
+#: DID fire on a family the ended population does not exist for (``ended.py``'s
+#: own refusal).
+MISSED_ROUTE_REASONS = ("shape", "family")
+
+#: The frame a state CUE has to sit in before it counts as one. ⛔ This is the
+#: ENDING-SIDE analogue of the shape table's start anchors, not a new vocabulary:
+#: the cue words are :data:`_ENDING_WORDS` exactly, and what is added is the
+#: minimal evidence that the sentence is a QUESTION or an IMPERATIVE rather than a
+#: statement — a wh-word or auxiliary or imperative verb at the front, or a
+#: trailing `?`. A statement (`the meeting was cancelled`) therefore carries no
+#: cue, which is the property #13558's precision rounds were about: a note about an
+#: ending is a note.
+_QUESTION_FRAME = re.compile(
+    r"^(?:what|which|who|whom|whose|when|where|why|how"
+    r"|is|are|was|were|has|have|had|do|does|did"
+    r"|can|could|should|would|will|shall|may|might|must"
+    r"|list|show|tell|give|name|any|anything)\b")
+
+#: The cue itself — an ENDED-STATE word, the same closed family the shapes use.
+_ENDING_CUE = re.compile(rf"\b(?:{_ENDING_WORDS})\b")
+
+
+def _normalise_query(text: str) -> str:
+    """The ONE normalisation, shared by every shape and by the cue signal.
+
+    ⛔ ONE PLACE, because two copies of a normalisation are two chances to
+    disagree: a cue read on a raw string would fire on `is the plan` + U+00AD +
+    `cancelled` while the shapes, seeing the folded form, declined \u2014 a notice
+    for a question the detector does not even read the same way. The order is
+    TRANSFORM -> LOWER -> NORMALISE, for the reasons :func:`detect_state_question`
+    states at its call site (full-width input, NFD accents and the U+2044 fraction
+    are all decided there, not here).
+    """
+    return " ".join(
+        unicodedata.normalize("NFC", _fold_typography(str(text)).lower()).split())
+
+
+def state_cue(text: str | None) -> str | None:
+    """The ENDING cue this QUESTION carries, or ``None`` (#14033).
+
+    This is the SIGNAL half of the detector, and it is deliberately wider than the
+    shapes: it answers "did the caller ask about an ending at all", where a shape
+    answers "is the asking an anchored one". The two are used for different jobs
+    \u2014 a shape selects a population, this decides whether the read owes the
+    caller a REPORT that no population was served \u2014 so this must fire on the
+    states the shapes refuse, or the notice it feeds could never be emitted.
+
+    \u26d4 IT IS NOT A ROUTER, and using it as one would re-open the whole hijack
+    class: `which archived report has the Q3 numbers` and `which features are
+    deprecated in v3` both carry the cue, and neither is a question the ended
+    population can answer. The cue only ever adds a sentence to a reply; the
+    shapes alone decide what the reply's rows are.
+
+    Returns the matched word, so a caller can say WHICH word it saw.
+    """
+    if not text or not str(text).strip():
+        return None
+    t = _normalise_query(text)
+    m = _ENDING_CUE.search(t)
+    if m is None:
+        return None
+    # the frame: a QUESTION or an IMPERATIVE, never a statement. `t` is already
+    # whitespace-collapsed, so `.endswith("?")` is only true when the question mark
+    # is the last thing the caller typed.
+    if _QUESTION_FRAME.match(t) or t.endswith("?"):
+        return m.group(0)
+    return None
+
+
+def missed_route_payload(cue: str, reason: str) -> dict:
+    """The report a read owes the caller when it declined to serve the population.
+
+    One shape for every reason, so a caller branches on ``reason`` rather than on
+    which fields happen to be present. ``routed`` is always ``False`` here: a read
+    that DID route publishes ``routed: True`` through
+    :func:`routed_payload`, and keeping the two constructors apart is what stops a
+    caller reading a decline as a success.
+
+    ``reason`` must be a member of :data:`MISSED_ROUTE_REASONS` \u2014 an open string
+    would let a new arm ship a value no caller was told to expect, which is the
+    same "documented term, invented value" defect ``read_status`` exists to prevent.
+    """
+    if reason not in MISSED_ROUTE_REASONS:
+        raise ValueError(
+            f"unrecorded missed-route reason {reason!r}; the closed set is "
+            f"{MISSED_ROUTE_REASONS!r}")
+    return {
+        "routed": False,
+        "population": None if reason == "shape" else ENDED,
+        "reason": reason,
+        "cue": cue,
+        "hint": MISSED_ROUTE_HINT if reason == "shape" else MISSED_ROUTE_FAMILY_HINT,
+    }
+
+
+def routed_payload(state_question: StateQuestion) -> dict:
+    """The report a read publishes when it DID serve a state population.
+
+    Additive to the decline payload rather than a separate channel: a caller who
+    sees ``state_question`` at all has ONE key to branch on (``routed``), and the
+    case that must never be silent \u2014 a routed read whose rows a caller might
+    mistake for relevance hits — is stated rather than inferred.
+    """
+    return {
+        "routed": True,
+        "population": state_question.population,
+        "shape": state_question.shape,
+        "cue": state_question.cue,
+    }
+
+
 @dataclass(frozen=True)
 class StateQuestion:
     """What state population a query asks about.
@@ -1222,8 +1431,7 @@ def detect_state_question(text: str | None) -> StateQuestion:
     # composition means a decomposed accent still composes afterwards. The
     # transform is idempotent on its own output, so a caller that already sent
     # ASCII passes through unchanged.
-    folded = _fold_typography(str(text))
-    t = " ".join(unicodedata.normalize("NFC", folded.lower()).split())
+    t = _normalise_query(text)
     for shape, pattern in _ENDING_SHAPES:
         m = pattern.search(t)
         if m:
@@ -1246,7 +1454,14 @@ def detect_state_question(text: str | None) -> StateQuestion:
 __all__ = [
     "COMMITMENTS",
     "ENDED",
+    "MISSED_ROUTE_FAMILY_HINT",
+    "MISSED_ROUTE_HINT",
+    "MISSED_ROUTE_REASONS",
     "POPULATIONS",
+    "ROUTING_NOTE",
     "StateQuestion",
     "detect_state_question",
+    "missed_route_payload",
+    "routed_payload",
+    "state_cue",
 ]

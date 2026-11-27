@@ -46204,6 +46204,18 @@ class TortoiseSDK:
         # read-status term. Default None = not computed, so every existing
         # caller is byte-identical (and pays nothing).
         _truncation_out: dict | None = None,
+        # #14033: PRIVATE — the STATE-QUESTION sink, the same caller-owned pattern
+        # ``_truncation_out`` uses. The state router either SERVES a state population
+        # (`ended` / `commitments`) or declines and lets the relevance read answer, and
+        # a declined state question is otherwise indistinguishable from an honest
+        # empty: the caller reads rows and cannot tell "the route did not engage" from
+        # "nothing has ended". When a cue was seen this sink carries ``state_question``
+        # (``tortoise/state_intent.py`` is the payload's ONE home). Always written when
+        # a cue was seen — NOT flag-gated, for the same reason #8447's truncation marker
+        # is not: gating it off would preserve exactly the defect it fixes. Default
+        # None = not computed, so every existing caller is byte-identical (and pays
+        # nothing).
+        _state_question_out: dict | None = None,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -46682,7 +46694,9 @@ class TortoiseSDK:
         _commitment_scope = False
         if (query is not None and not ended_scope and not include_terminal
                 and not [k for k in _retrieval_knobs() if k != "query"]):
-            from .state_intent import COMMITMENTS, ENDED, detect_state_question
+            from .state_intent import (
+                COMMITMENTS, ENDED, detect_state_question, missed_route_payload,
+                routed_payload, state_cue)
 
             _state_q = detect_state_question(query)
             if _state_q.population == ENDED:
@@ -46695,6 +46709,19 @@ class TortoiseSDK:
                 if entity_type in _ENDED_FAMILIES:
                     ended_scope = True
                     _scope_from_question = query
+                    # #14033: a ROUTED read says so. The population is served, and a
+                    # caller who mistook the rows for relevance hits has no other way
+                    # to know the words selected a population rather than ranked them.
+                    if _state_question_out is not None:
+                        _state_question_out["state_question"] = routed_payload(_state_q)
+                elif _state_question_out is not None:
+                    # #14033: a shape DID fire and the family refusal below is what
+                    # declined it. That is a different remedy from "no shape applied"
+                    # (the caller already asked a recognised question, so telling them
+                    # to ask one would be a runaround), which is why the reason is its
+                    # own closed token rather than the generic hint.
+                    _state_question_out["state_question"] = missed_route_payload(
+                        _state_q.cue or "", "family")
             elif _state_q.population == COMMITMENTS:
                 # The commitment kinds are OBJECT kinds (ONTOLOGY §5), and the
                 # arm below intersects them with the caller's own `kind` — so a
@@ -46705,6 +46732,20 @@ class TortoiseSDK:
                 if entity_type == "object":
                     _commitment_scope = True
                     _scope_from_question = query
+                    if _state_question_out is not None:
+                        _state_question_out["state_question"] = routed_payload(_state_q)
+            elif _state_question_out is not None:
+                # #14033: NO shape applied. The relevance read below answers, and
+                # that answer is silent about the fact that the caller's state cue
+                # was seen and declined — so an empty or unrelated page reads as
+                # "nothing has ended". `state_cue` is deliberately WIDER than the
+                # shapes (it is a signal, not a router), so re-opening the hijack
+                # class is impossible here: it only adds a sentence to a reply whose
+                # rows the relevance read already decided.
+                _cue = state_cue(query)
+                if _cue:
+                    _state_question_out["state_question"] = missed_route_payload(
+                        _cue, "shape")
 
         if ended_scope:
             _refused_ended = _retrieval_knobs()

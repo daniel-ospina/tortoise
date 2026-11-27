@@ -67,6 +67,7 @@ not a constant, and it is not a regression (epic #1647 P4).
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -1269,3 +1270,283 @@ def test_the_dash_guard_splits_only_a_predicate_shaped_tail():
         assert got.population is not None, (
             f"{routed!r} keeps the relevance read — its segments are not stop "
             f"words, so the guarded token must not refuse it")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Acceptance 3 — A CALLER READING ONLY THE SERVED DESCRIPTION CAN PREDICT IT
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# #14033's third acceptance item is a REACHABILITY requirement, and the shape of
+# the failure it exists to catch is on the record: the closed re-cut of #14140
+# added the routing block to `tortoise_search.__doc__`, and FastMCP never serves a
+# docstring when `ToolDefinition.description` is supplied — so the note reached NO
+# caller while a test that read the docstring passed. The pins below therefore read
+# the SERVED string, and they parse its rows rather than counting characters: a row
+# that goes stale reds here instead of quietly misleading a caller.
+
+#: The two headings `ROUTING_NOTE` is allowed to be written with. The note is a
+#: SERVED contract, so its own format is pinned rather than left to prose taste.
+_ROUTE_HEADING = "ROUTES"
+_DECLINE_HEADING = "DOES NOT ROUTE"
+
+
+def _routing_rows(note: str) -> tuple[list[str], list[str]]:
+    """Parse ``ROUTING_NOTE`` into (routes, does-not-route) question rows.
+
+    A row is the note's own spelling — four spaces, then a backticked question.
+    A row's PARENTHETICAL continuation (the next line, indented, not backticked and
+    starting with ``(``) belongs to it and is skipped; a blank line closes the
+    section, so prose can follow a section without being read as rows.
+    """
+    routes: list[str] = []
+    declined: list[str] = []
+    section: str | None = None
+    for line in note.splitlines():
+        if _DECLINE_HEADING in line:
+            section = "declined"
+            continue
+        if f"{_ROUTE_HEADING} —" in line or f"{_ROUTE_HEADING} -" in line:
+            section = "routes"
+            continue
+        row = re.match(r"^\s{4}`([^`]+)`", line)
+        if row is not None and section is not None:
+            (routes if section == "routes" else declined).append(row.group(1))
+        elif line.strip():
+            if line.strip().startswith("("):
+                continue          # a row's own continuation
+            section = None        # anything else ENDS the row block, never joins it
+        else:
+            section = None
+    return routes, declined
+
+
+def test_the_served_description_predicts_every_row_of_the_issue_table():
+    """The note's rows ARE the behaviour — parsed and re-measured, not trusted.
+
+    #14033's six measured phrasings must each be predictable from the served text
+    alone, so the note states a status per phrasing and this test holds each status
+    against the real detector. A phrasing whose routing changes without the note
+    moving reds here, which is the direction the defect class actually fails.
+    """
+    from tortoise.state_intent import ENDED, ROUTING_NOTE, detect_state_question
+
+    routes, declined = _routing_rows(ROUTING_NOTE)
+    assert len(routes) == 4, f"the ROUTES block parsed to {routes!r} — the issue's " \
+        "table names four phrasings this read serves (three behaviours, one of them " \
+        "two spellings of the same shape); a parser or format change must keep the " \
+        "rows machine-readable or this pin stops being a contract"
+    assert len(declined) == 2, f"the DOES NOT ROUTE block parsed to {declined!r}"
+
+    for question in routes:
+        got = detect_state_question(question)
+        assert got.population == ENDED, (
+            f"the served description lists {question!r} under {_ROUTE_HEADING}, but "
+            f"the detector answers {got.population!r} (shape {got.shape!r}) — the "
+            f"note now promises a route that does not exist (#14033 acceptance 3)")
+
+    for question in declined:
+        got = detect_state_question(question)
+        assert got.population is None, (
+            f"the served description lists {question!r} under {_DECLINE_HEADING}, but "
+            f"the detector routes it to {got.population!r} (shape {got.shape!r}) — "
+            f"the note now denies a route that DOES exist, which sends the caller "
+            f"away from an answer they could have had")
+
+    # …and the note is the ISSUE's own table, not a re-collected sample: the four
+    # rows the issue measured as misses-or-hits by name are all in it.
+    for named in (
+        "has anything we relied on been withdrawn",
+        "what ended",
+        "what has ended recently",
+        "is the onboarding flow retired?",
+        "list what we retired",
+        "which of our withdrawn claims affected pricing",
+    ):
+        assert named in routes + declined, (
+            f"#14033's table names {named!r} and the served note does not — the "
+            f"caller cannot predict a phrasing the note does not list")
+
+
+def test_the_served_note_rides_the_live_search_door_and_stays_inside_the_budget():
+    """The note must REACH a caller: served, on the tool that actually routes.
+
+    Two independent ways this pin can fail, both measured failures before it:
+
+    * served from a docstring — FastMCP uses an explicit `ToolDefinition.description`
+      INSTEAD of the docstring, so the note must be in the description. This asserts
+      the served string, never `__doc__`.
+    * served on a door that does not route — `tortoise_search` is a RETIRED name
+      (its replacement is `tortoise_search_knowledge`), and on the retired shim the
+      note would reach only callers who are being told to stop using the tool. The
+      LIVE door is the one a caller reads, and its `mode="hybrid"` arm is what
+      forwards to the state router, so BOTH halves are pinned here.
+
+    ⛔ AND THE LENGTH IS PART OF THE CONTRACT (#14203): a client that loads this tool
+    upfront shows the first 4096 characters, so a description that runs past that
+    budget is served-cut and the tail reaches nobody. The number is the primary
+    source's, not a preference.
+    """
+    from tortoise.state_intent import ROUTING_NOTE
+    from tortoise.tool_registry import TOOL_REGISTRY, RETIRED_TOOL_REGISTRY
+
+    live = {t.name: t for t in TOOL_REGISTRY}
+    retired = {t.name: t for t in RETIRED_TOOL_REGISTRY}
+    assert "tortoise_search_knowledge" in live, (
+        "the live search door moved — this pin, the served note's own text and "
+        "`ROUTING_NOTE`'s home all name it")
+    assert "tortoise_search" in retired, (
+        "`tortoise_search` is live again — then the note belongs on it too (it is "
+        "the door this issue's measurements were taken through)")
+
+    served = live["tortoise_search_knowledge"].description
+    assert ROUTING_NOTE.strip() in served, (
+        "the routing note is NOT in the served description of the live search door, "
+        "so no caller can read it (#14033 acceptance 3 — the whole item)")
+    assert len(served) < 4096, (
+        f"the served description is {len(served)} chars and Claude Code shows only the "
+        f"first 4096 for a tool that loads upfront (#14203) — the tail, including "
+        f"this note's closing paragraph, would reach nobody")
+
+    # The live door's default mode reaches the state router. Without this the note
+    # would describe a route the serving tool never takes.
+    import inspect
+
+    from tortoise.sdk import TortoiseSDK
+
+    body = inspect.getsource(TortoiseSDK.search_knowledge)
+    assert "_tortoise_fts_query" in body, (
+        "`search_knowledge`'s hybrid arm no longer forwards to `_tortoise_fts_query`, "
+        "which is where `detect_state_question` is consulted — the served note would "
+        "then promise the ended population on a door that cannot serve it")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Acceptance 4 — A NON-FIRING STATE CUE IS DISTINGUISHABLE FROM AN EMPTY ANSWER
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# The read path's report rides `_tortoise_fts_query`'s private sink and the hosted
+# `GET /v1/search` body (the MCP row list has no field to carry it, and the served
+# note says so). What is pinned HERE is the half that is pure: the signal fires
+# exactly where a cue was seen, the payload is a closed vocabulary, and neither can
+# change what the read returns.
+
+#: State questions the SHAPES decline and a cue must therefore report. Every one is
+#: a phrasing from this issue's thread or its table, measured against the detector.
+CUED_BUT_NOT_ROUTED = [
+    "what has ended recently",                          # the deferral (adverb tail)
+    "what was retired this quarter",                    # an appended WINDOW
+    "which of our withdrawn claims affected pricing",   # attributive participle
+    "which archived report has the Q3 numbers",         # attributive, pinned row
+    "has the onboarding flow been retired?",            # present-perfect yes/no
+    "what has legal archived",                         # third-party subject
+    "is our plan retired this quarter",                  # determiner-led qualifier
+]
+
+#: Statements and non-questions. A cue word inside one of these is a NOTE about an
+#: ending, not a question about state — the property the first cut of the whole
+#: feature lost, and the reason the signal has a frame at all. The last row is the
+#: BARE-VERB boundary the module's precision contract draws: `archive` is not an
+#: ended STATE, it is what a policy DOES, so it raises no cue (the same reason the
+#: shapes matched only participles after the round-1 P0).
+NOT_A_QUESTION = [
+    "the meeting was cancelled",
+    "legal retracted the claim yesterday",
+    "pricing decision Q3 Q4",
+    "launch event",
+    "do we archive customer emails",
+]
+
+
+def test_a_state_cue_that_does_not_fire_is_reported_not_silent():
+    """The signal fires on what the shapes refuse, and only inside a question frame."""
+    from tortoise.state_intent import detect_state_question, state_cue
+
+    for question in CUED_BUT_NOT_ROUTED:
+        got = detect_state_question(question)
+        assert got.population is None, (
+            f"{question!r} now ROUTES to {got.population!r} — good, but then it "
+            f"belongs in `ROUTING_NOTE`'s ROUTES block and in this list's sibling, "
+            f"not here: a routing change and the served note move together")
+        cue = state_cue(question)
+        assert cue, (
+            f"{question!r} is a state question the relevance read answers silently: "
+            f"no shape applied AND no cue was reported, which is exactly the outcome "
+            f"#14033 acceptance 4 forbids — an empty result here is indistinguishable "
+            f"from an honest 'nothing has ended'")
+
+    for statement in NOT_A_QUESTION:
+        assert state_cue(statement) is None, (
+            f"{statement!r} is not a question about state, so it must not raise a cue "
+            f"— a notice on every note that mentions an ending would be noise, and "
+            f"noise is how a caller learns to ignore the real one")
+
+
+def test_the_cue_is_a_signal_not_a_router():
+    """The cue is WIDER than the shapes on purpose, and cannot select a population.
+
+    `which features are deprecated in v3` is a content lookup the module pins as
+    NOT SELECTED; it carries the cue. That is the correct pair — the read owes the
+    caller a sentence saying no population was served, and owes it no different
+    rows. A later round that "fixed" the cue into a router would re-open the whole
+    hijack class this feature spent its precision rounds removing.
+    """
+    from tortoise.state_intent import detect_state_question, state_cue
+
+    for content_question in (
+        "which features are deprecated in v3",
+        "have any customers cancelled this month",
+        "which claims were retracted by legal",
+    ):
+        assert state_cue(content_question), (
+            f"{content_question!r} carries an ending cue (it names one) — the notice "
+            f"is what tells the caller the population was NOT served")
+        assert detect_state_question(content_question).population is None, (
+            f"{content_question!r} must keep the relevance read: it is one of the "
+            f"four content questions #14033 pins, and only the notice may change")
+
+
+def test_the_report_is_a_closed_vocabulary():
+    """`reason` is a recorded term, and a routed read says so.
+
+    A caller branches on `reason`, so an unrecorded value is the same defect as a
+    fifth read-status term: a documented enum whose members a caller cannot know.
+    The construction-time refusal is what keeps it closed, rather than a docstring.
+    """
+    from tortoise.state_intent import (
+        ENDED,
+        MISSED_ROUTE_FAMILY_HINT,
+        MISSED_ROUTE_HINT,
+        MISSED_ROUTE_REASONS,
+        StateQuestion,
+        missed_route_payload,
+        routed_payload,
+    )
+
+    assert MISSED_ROUTE_REASONS == ("shape", "family")
+
+    shape_addressed = missed_route_payload("retired", "shape")
+    assert shape_addressed["routed"] is False
+    assert shape_addressed["population"] is None
+    assert shape_addressed["cue"] == "retired"
+    assert shape_addressed["hint"] == MISSED_ROUTE_HINT
+
+    family_addressed = missed_route_payload("retired", "family")
+    assert family_addressed["routed"] is False
+    assert family_addressed["population"] == ENDED, (
+        "a FAMILY refusal means a shape DID fire on a family the ended population "
+        "does not exist for — reporting `population: None` would misdescribe the "
+        "question the caller asked")
+    assert family_addressed["hint"] == MISSED_ROUTE_FAMILY_HINT
+    assert family_addressed["hint"] != MISSED_ROUTE_HINT, (
+        "the two reasons exist because the REMEDY differs: 'ask a recognised form' "
+        "is a runaround for a caller whose recognised question the family refused")
+
+    with pytest.raises(ValueError):
+        missed_route_payload("retired", "adverb")
+
+    routed = routed_payload(StateQuestion(ENDED, "wh_whole_question", "what ended"))
+    assert routed["routed"] is True
+    assert routed["population"] == ENDED
+    assert routed["shape"] == "wh_whole_question"
+    assert "hint" not in routed, (
+        "a routed read needs no remedy — a hint there would read as a problem")
