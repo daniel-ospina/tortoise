@@ -2551,6 +2551,14 @@ def test_a_confirmed_no_manifest_org_that_HAS_state_is_not_called_never():
     # close the code cannot deliver for a restarted watcher (#9938 round 8).
     assert "IN-PROCESS register" in body, body
     assert "MANUAL close" in body, body
+    # The two-mechanism split at the end of that clause is drawn on the UNION
+    # surface, not on census membership alone: `compute_status` loops over
+    # `set(orgs + r2_orgs)`, so a departed org whose R2 prefix outlives it is
+    # still classified `not_eligible` and DOES carry a key. Pinned separately
+    # because "no `per_team` key at all" already appears in the TRUE arm-(i)
+    # sub-case above, so the old pin could not tell the two clauses apart.
+    assert "EITHER surface" in body, body
+    assert "absent from BOTH surfaces" in body, body
 
 
 def test_watcher_arm_ii_missing_set_closes_when_its_state_disappears():

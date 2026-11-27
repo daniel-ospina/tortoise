@@ -1361,11 +1361,16 @@ class BackupWatcher:
                 "(ii) becomes arm (i) once its prefix goes, so the subject stays "
                 "in this kind's set and the incident stays open. (Leaving the "
                 "ELIGIBLE set is the exception that does close it, by one "
-                "of two mechanisms: an org STILL IN THE CENSUS reads "
-                "`not_eligible` — a `per_team` key, resolved by that "
-                "branch, which is why the cross-poll diff excludes it — "
-                "while an org that has also LEFT the census has no key "
-                "at all and the diff resolves it.)"),
+                "of two mechanisms: a subject still carried on EITHER surface "
+                "reads `not_eligible` — the census (`orgs`) or the R2 listing "
+                "(`r2_orgs`), because `compute_status` walks their UNION, so a "
+                "departed org whose prefix outlives it is still classified — and "
+                "that IS a `per_team` key, resolved by the `not_eligible` "
+                "branch, which is why the cross-poll diff excludes it; only a "
+                "subject absent from BOTH surfaces (the arm-(i) shape: state "
+                "present, no prefix, gone from the census — or any org while the "
+                "eligibility gate is off) has no key at all, and THAT is the one "
+                "the cross-poll diff resolves.)"),
         }
 
     def _measured_fresh(self, org: str,
