@@ -3836,6 +3836,28 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
         "Satisfies #13036: V2\n", 500, {13036: _scope(rows)})
     assert stats["finding"] == 1 and stats["clean"] == 0, stats
     assert findings[0].evidence["claimed"] == ["V2"], findings[0].as_dict()
+    # ⛔ AND THE DISCLOSURE IS THE SAME SENTENCE WHEREVER IT IS WRITTEN (review round 21, F1). The
+    # own-line path set `disclaimed` from `_DISCLAIMER_RE` alone while the closing-line path consulted
+    # `_DISCLAIMER_RE or _ELSEWHERE_RE` — so `V1, V3-V6 landed in later PRs` was a disclaimer inside a
+    # parenthetical and a CLAIM on its own line, and beside a complete `Satisfies` it reported `clean`
+    # (the arm's headline false PASS) rather than this module's UNANSWERABLE. The spelling below is
+    # `_ELSEWHERE_RE`-only on purpose: it is the one that reddens if the own-line predicate is
+    # narrowed back to `_DISCLAIMER_RE`, i.e. the row that makes the extension reachable under test.
+    # Pre-fix at ce13ca3c2: `clean == 1` (measured across all seven `_ELSEWHERE_RE` spellings).
+    for elsewhere in ("landed in later PRs", "are separate PRs", "are covered by other PRs",
+                      "were proved in the predecessor PR", "ship in a separate PR",
+                      "are tracked elsewhere", "are covered by #14715"):
+        body = (f"Closes #13036\n\nV1, V3, V4, V5, V6 {elsewhere}.\n\n"
+                "Satisfies #13036: V1, V2, V3, V4, V5, V6\n")
+        findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
+        assert findings == [] and stats["clean"] == 0 and stats["ambiguous"] == 1, (elsewhere, stats)
+        # CONTROL for the loop: the same sentence in the closing line's parenthetical already read
+        # this way, and must keep reading it — the fix equalises the two paths, it does not move the
+        # verdict for the spelling that was already right.
+        findings, stats = L.classify_partial_close(
+            f"Closes #13036 (V1, V3, V4, V5, V6 {elsewhere}).\n\n"
+            "Satisfies #13036: V1, V2, V3, V4, V5, V6\n", 500, {13036: _scope(rows)})
+        assert findings == [] and stats["clean"] == 0 and stats["ambiguous"] == 1, (elsewhere, stats)
 
 
 def test_naming_every_row_ANYWHERE_is_a_complete_close():

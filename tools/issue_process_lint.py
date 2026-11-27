@@ -1802,7 +1802,17 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # report `clean` on a close that disclaimed five. A row-naming line with a negative cue
             # therefore refuses the fallback too; over-detecting here costs an `ambiguous` (never a
             # pass), while under-detecting costs a false PASS on the arm's headline question.
-            if _ids_in(line, rows) and _DISCLAIMER_RE.search(line):
+            # ⛔ AND IT IS THE SAME PREDICATE PAIR THE CLOSING-LINE PATH USES (review round 21, F1).
+            # Consulting only `_DISCLAIMER_RE` here made the SAME sentence two different verdicts
+            # depending on where it was written: `V1, V3–V6 landed in later PRs` in the closing
+            # line's parenthetical set `disclaimed` (via `_ELSEWHERE_RE`, per the round-12 rule at
+            # the clause loop below), while the identical sentence on its OWN line set only
+            # `_DISCLAIMER_RE` — so beside a complete `Satisfies #N: V1 … V6` it reported `clean`,
+            # the false PASS this arm exists for, through the pronunciation a careful author
+            # actually uses. All seven `_ELSEWHERE_RE` spellings measured that way; the round-12
+            # comment below states the rule this line was violating.
+            if _ids_in(line, rows) and (_DISCLAIMER_RE.search(line)
+                                        or _ELSEWHERE_RE.search(line)):
                 disclaimed = True
             continue
         # ⛔ THE LINE IS THE UNIT, the clause is the polarity boundary: the range read needs the whole
