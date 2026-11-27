@@ -130,9 +130,10 @@ version: 1
 # driver, the same failure — and this time NEITHER copy described this tree: both stated the
 # 827.2/827.3 partition, against the 827.4/827.5 the verb emitted at that rebase. ⛔ No POOL COUNT is
 # written for that fold here, on purpose: a file count is a measurement of exactly ONE tree, so it
-# belongs in the fence above bound to the sha it was measured at, and the spelling those copies used
-# (`a `fast_pool()` of N`) is one this block's guard cannot read — writing it here would be a live
-# claim no arm grades. Neither copy was picked either; the paragraph above is a third fresh
+# belongs in the fence above bound to the sha it was measured at. A count written here would be a
+# figure bound to no single sha, which is the rot the fence exists to stop — the guard grades the
+# census FORM (`test_the_fast_shards_header_states_no_live_pool_census`), not the value, so it is no
+# warrant for carrying one. Neither copy was picked either; the paragraph above is a third fresh
 # re-derivation.
 # ⛔ THIS BLOCK ARRIVES SPLICED, REPEATEDLY, and that is mechanical rather than mysterious:
 # `config/ci-surfaces.yml` carries a `merge=union` driver, so a fold applies BOTH parents'
