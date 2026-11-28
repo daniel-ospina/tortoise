@@ -105,22 +105,29 @@ version: 1
 # reader of the prose can see. On THIS tree — the LAST `origin/main` fold on this branch, plus THIS
 # lane's own row (`tests/test_14691_structure_evidence.py`, `core`, at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) — the verb packs five shards at 828.2 s (a, g, i, j, k) and six at
+# reader of the prose can see. On THIS tree — the LAST `origin/main` fold on this branch, plus this
+# PR's own REGISTRATION (`tests/test_14198_contradiction_closure.py`, `core`; no `durations` row, so
+# the flat `DEFAULT_FAST_WEIGHT`) — the verb packs five shards at 828.2 s (a, g, i, j, k) and six at
 # 828.1 s (b, c, d, e, f, h), so `ceil(828.2/60 x 2)` = 28 m governs (a shard's job-level wall clock
 # is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
 # `watchdog_headroom: 2.03` (1680 / 828.2 = 2.0285) on every one of the eleven shards, so the two
 # agree by construction rather than by a hand re-read.
-# ⛔ #14723 RE-DERIVED THIS SENTENCE, and names the move rather than leaving it unattributed: this
-# lane registers one `core` row at the flat 2.0 s, which puts ONE more file in `fast_pool()` and
-# re-packs the bins — `main` at this base splits nine and two, while THIS tree's own emission is
-# quoted above (re-derived with `--emit-push-matrix` after #14198 registered its row); the MINUTE
-# (28 m) and the headroom (2.03) are the same on BOTH sides. That is why the
-# PARTITION is stated and not only the minute: an arithmetic check on `28 m` cannot see a carried
+# ⛔ THE MOVE IS NAMED AS A PARTITION, not by the minute alone (#14723's rule, re-derived here): the
+# SAME verb at the merge base with `origin/main` (`3f134560b6c`) packs SEVEN shards
+# (a, f, g, h, i, j, k) and FOUR (b, c, d, e). So the ONE registration this PR adds moved the
+# partition 7/4 -> 5/6 while the MINUTE (28 m) and the headroom (2.03) are identical on BOTH sides —
+# which is exactly why the partition is stated: an arithmetic check on `28 m` cannot see a carried
 # figure, and a reader comparing only minutes would call this move cosmetic.
 # ⛔ THE POOL DELTA IS RE-COUNTED ON THE RESOLVED TREE AND STATED AS THE OPERATION — never carried,
-# and never as a pair of counts: `set(fast_pool(head)) - set(fast_pool(main))` returns exactly ONE
-# entry, `tests/test_14691_structure_evidence.py` (`core`, flat 2.0 s), the row this lane registers,
-# and the reverse difference is empty — measured by loading each tree's OWN manifest
-# (`git show origin/main:config/ci-surfaces.yml`) through `fast_pool()`.
+# and never as a pair of counts: `set(fast_pool(head)) - set(fast_pool(<merge base>))` returns
+# exactly ONE entry, `tests/test_14198_contradiction_closure.py` (`core`, the flat
+# `DEFAULT_FAST_WEIGHT`), the registration this PR adds, and the reverse difference is empty — measured by loading each tree's OWN manifest
+# (`git show 3f134560b6c:config/ci-surfaces.yml`) through `fast_pool()`.
+# ⚠️ `tests/test_14691_structure_evidence.py` is NOT this branch's delta row, although an earlier
+# revision of this block said so: it is on BOTH sides at this base (it landed on `main`), so it adds
+# nothing to the pool here. `origin/main` already carries that correction; this block now states it
+# too, because two sentences attributing one move to different files is the drift this comment exists
+# to stop.
 # ⛔ No pool SIZE is restated BY THIS RE-DERIVATION, and the reason is a recorded ruling rather
 # than a preference (#14691 review, round 15, finding 4): the repo's own doctrine is at
 # `tests/test_ci_selection.py` — "a pool size is a measurement with several independent reasons to
