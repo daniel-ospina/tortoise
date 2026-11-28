@@ -325,13 +325,15 @@ def is_stale_entry(entry: dict, *, question_date: str | None = None) -> bool:
     Stale when any of:
 
     * ``superseded_by`` is present (a CORRECTS successor exists), or
-    * ``live.is_terminal_status(status)`` — the SINGLE shared status
-      predicate, never re-declared here (the legacy ``outdated`` boolean is
-      NOT consulted: the eval's annotated surface does not carry it, and it
-      is redundant — ``invalidate_point`` writes the window alongside it,
-      which the clause below already catches). This is the clause that
-      catches ``retract_point``, which writes ``status='retracted'`` and no
-      window, or
+    * ``live.is_terminal_status(...)`` — the SINGLE shared predicate, never
+      re-declared here, asked of BOTH axes and of all four of its inputs
+      (#14796): the lifecycle word, ``isClosed`` and the resolved pipeline slot
+      — but still NOT the legacy ``outdated`` flag, which has its own pin and
+      its own reason (below). The two position markers are read now because the
+      state map this entry IS carries them (`fetch_point_epistemic_state`'s
+      RETURN), and a claim ended on the position axis otherwise kept its page
+      slot as CURRENT. This is the clause that catches ``retract_point``, which
+      writes ``status='retracted'`` and no window, or
     * a validity window has closed: ``valid_to``/``expired_at`` CASTS to a
       date ``<= question_date``, or is PRESENT but names no instant at all.
       When ``question_date`` is missing or unparseable, the presence of the
@@ -361,7 +363,26 @@ def is_stale_entry(entry: dict, *, question_date: str | None = None) -> bool:
 
     if entry.get("superseded_by"):
         return True
-    if is_terminal_status(entry.get("status")):
+    # #14796: BOTH axes, from the state map this entry IS
+    # (`search_engine.fetch_point_epistemic_state`, whose RETURN now carries
+    # `isClosed` / `pipelineSlot`). Read off the word alone, a claim ended on the
+    # position axis kept its page slot as CURRENT — and `prefer_latest_ids`
+    # decides page slots before any hit dict is built, so the stale claim had
+    # already consumed the slot by the time any other surface could notice.
+    # `.get` is correct and not a tolerance: the eval lane hands bare annotated
+    # dicts that were never this state map (see the docstring above), and "no
+    # position key" means the same thing as "no position stored".
+    # ⛔ The legacy ``outdated`` flag is DELIBERATELY still not consulted, and
+    # the pin that keeps it that way is
+    # `tests/test_time_aware_2520.py::test_legacy_outdated_flag_alone_is_not_stale`:
+    # on this path ``invalidate_point`` writes the window alongside the flag, so
+    # the clause below already catches it, and passing it again here would be a
+    # second spelling of one signal. The POSITION markers have no such substitute
+    # — nothing in this entry's window closes because the record was `isClosed` —
+    # so they are read.
+    if is_terminal_status(entry.get("status"),
+                          is_closed=entry.get("isClosed"),
+                          stage_slot=entry.get("pipelineSlot")):
         return True
     qd = _as_date(question_date) if question_date else None
 
