@@ -46697,12 +46697,12 @@ class TortoiseSDK:
             from .state_intent import (
                 COMMITMENTS,
                 ENDED,
+                MISSED_ROUTE_KIND_HINT,
                 detect_state_question,
                 missed_route_payload,
                 routed_payload,
                 state_cue,
             )
-
             _state_q = detect_state_question(query)
             if _state_q.population == ENDED:
                 # The ended population exists for the families with a lifecycle
@@ -47342,10 +47342,14 @@ class TortoiseSDK:
             elif _state_question_out is not None:
                 # The caller's `kind` filter excludes every commitment kind, so
                 # this arm cannot serve the population. Report the refusal rather
-                # than a route that was abandoned: it is the same decline the
-                # `entity_type` check above records, on the axis `kind` narrows.
+                # than a route that was abandoned. ⛔ It refuses on a DIFFERENT
+                # AXIS than `entity_type` above, so it serves that axis's own
+                # sentence: the entity_type hint would assert a cause that is
+                # false here (this read IS `object`) and prescribe a re-read that
+                # returns a byte-identical payload.
                 _state_question_out["state_question"] = missed_route_payload(
-                    _state_q.cue or "", "family", COMMITMENTS)
+                    _state_q.cue or "", "family", COMMITMENTS,
+                    remedy=MISSED_ROUTE_KIND_HINT)
 
         # C6 (#2520): resolve the freshness intent ONCE and derive the
         # DENSE-leg query. The anchor touches the embedding only — the

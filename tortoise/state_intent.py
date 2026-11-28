@@ -1224,6 +1224,14 @@ MISSED_ROUTE_FAMILY_HINT = (
 #: refusal there is the read's ``entity_type``, not the family's lifecycle \u2014 the
 #: commitment kinds ARE Object kinds (ONTOLOGY \u00a75) \u2014 so the remedy is
 #: ``entity_type='object'``, not "pick a family with a lifecycle".
+#:
+#: \u26d4 ``entity_type`` IS NOT THE ONLY AXIS THAT REFUSES THIS POPULATION, so this
+#: sentence is only true of the axis it names (#14780 review, cycle 3 finding 3).
+#: The caller's ``kind`` filter narrows the enumeration too, and a `kind` that is
+#: not a commitment kind empties it on the arm where ``entity_type`` was ALREADY
+#: `object` \u2014 so serving this string there asserts a false cause and prescribes a
+#: remedy the caller already satisfies (:data:`MISSED_ROUTE_KIND_HINT` is that
+#: axis's own sentence, and it is chosen by AXIS, never by population alone).
 MISSED_ROUTE_COMMITMENTS_HINT = (
     "this IS a commitment question, but the commitment kinds are OBJECT kinds "
     "(ONTOLOGY \u00a75) and this read's entity_type has no arm for them, so the "
@@ -1236,12 +1244,33 @@ MISSED_ROUTE_COMMITMENTS_HINT = (
     "Every row then carries the kind and the stage it stands on."
 )
 
+#: The KIND arm of the same population: the caller's ``kind`` filter excludes
+#: every commitment kind, so the refusal is the FILTER's \u2014 and ``entity_type`` is
+#: already `object`, which is why :data:`MISSED_ROUTE_COMMITMENTS_HINT` cannot be
+#: served here: it would assert a cause that is false and prescribe a re-read
+#: that returns a byte-identical payload (#14780 review, cycle 3 finding 3).
+MISSED_ROUTE_KIND_HINT = (
+    "this IS a commitment question, but none of your `kind` filter's values is a "
+    "commitment kind, so the RELEVANCE read answered instead. The commitment "
+    "kinds are OBJECT kinds (ONTOLOGY \u00a75) named strategy, plan, goal and "
+    "target: re-read with `kind` omitted (or one of those) and "
+    "entity_type='object' through the `tortoise_search_knowledge` tool or the "
+    "SDK's `search_knowledge(entity_type='object')`; the hosted `GET /v1/search` "
+    "route takes neither entity_type nor kind, so asking again there returns "
+    "this same notice. Every row then carries the kind and the stage it stands on."
+)
+
 #: The reasons a strong cue can be seen without the population being served.
 #: CLOSED, because a caller branches on the value: ``shape`` is no shape applying
 #: (an appended constraint, an attributive participle), ``family`` is a shape that
-#: DID fire on a family the SERVED population does not exist for \u2014 either the
-#: ended population has no arm for the entity_type (``ended.py``'s own refusal) or
-#: the commitment kinds (Object kinds) have no arm for a non-object read.
+#: DID fire on a population this read has no arm for \u2014 the ended population has
+#: no arm for the entity_type (``ended.py``'s own refusal), or the commitment
+#: kinds (Object kinds) have no arm for a non-object read, or the caller's
+#: ``kind`` filter excludes every commitment kind. \u26d4 THE CAUSES ARE NOT ONE
+#: AXIS: the LAST one refuses a read that IS ``object``, which is why the reason
+#: is the same token but the HINT is chosen per axis (#14780 review, cycle 3
+#: finding 3), and why the set of causes is stated here once rather than
+#: re-enumerated beside each string.
 MISSED_ROUTE_REASONS = ("shape", "family")
 
 #: The frame a state CUE has to sit in before it counts as one. ⛔ This is the
@@ -1310,7 +1339,8 @@ def state_cue(text: str | None) -> str | None:
 
 
 def missed_route_payload(
-        cue: str, reason: str, population: str | None = None) -> dict:
+        cue: str, reason: str, population: str | None = None, *,
+        remedy: str | None = None) -> dict:
     """The report a read owes the caller when it declined to serve the population.
 
     One shape for every reason, so a caller branches on ``reason`` rather than on
@@ -1329,6 +1359,17 @@ def missed_route_payload(
     because that was the only family refusal when this arm was written; the
     COMMITMENTS refusal passes its own, or a caller would be told the wrong
     population was declined.
+
+    ``remedy`` overrides the default sentence for the ``family`` arm's
+    (reason, population) pair.
+    The pair is NOT always one cause or one remedy: the commitments population is
+    refused on ``entity_type`` AND on ``kind``, and telling a caller to re-read
+    with an ``entity_type`` it already passed is a false cause with a no-op fix
+    (#14780 review, cycle 3 finding 3). Arms that refuse on a second axis pass
+    that axis's own sentence here rather than reusing the first one's. It is
+    REFUSED on the ``shape`` arm rather than ignored: that arm has one cause and
+    one sentence, so an override there would be a field a caller could pass and
+    never see \u2014 the same reason a ``population`` with ``shape`` is refused.
     """
     if reason not in MISSED_ROUTE_REASONS:
         raise ValueError(
@@ -1339,11 +1380,18 @@ def missed_route_payload(
             raise ValueError(
                 f"a 'shape' decline refused no population ({population!r}): no "
                 f"shape applied, so there was nothing to refuse")
+        if remedy is not None:
+            raise ValueError(
+                f"a 'shape' decline has one cause and one sentence; an override "
+                f"({remedy[:40]!r}...) would be silently ignored")
         population, hint = None, MISSED_ROUTE_HINT
     else:
         population = ENDED if population is None else population
-        hint = (MISSED_ROUTE_COMMITMENTS_HINT if population == COMMITMENTS
-                else MISSED_ROUTE_FAMILY_HINT)
+        if remedy is not None:
+            hint = remedy
+        else:
+            hint = (MISSED_ROUTE_COMMITMENTS_HINT if population == COMMITMENTS
+                    else MISSED_ROUTE_FAMILY_HINT)
     return {
         "routed": False,
         "population": population,
@@ -1500,8 +1548,10 @@ def detect_state_question(text: str | None) -> StateQuestion:
 __all__ = [
     "COMMITMENTS",
     "ENDED",
+    "MISSED_ROUTE_COMMITMENTS_HINT",
     "MISSED_ROUTE_FAMILY_HINT",
     "MISSED_ROUTE_HINT",
+    "MISSED_ROUTE_KIND_HINT",
     "MISSED_ROUTE_REASONS",
     "POPULATIONS",
     "ROUTING_NOTE",

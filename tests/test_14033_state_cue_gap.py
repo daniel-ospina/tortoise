@@ -1476,9 +1476,17 @@ def test_the_served_note_describes_cue_on_both_arms():
     "the ending word that was SEEN" for EVERY payload, while a ROUTED read
     publishes the whole matched question (`detect_state_question` returns
     `m.group(0)`). A caller encoding `cue in ENDING_WORDS` from that served
-    sentence reads False on every routed read. BOTH arms are measured below
-    against the payload builders the read itself uses, so the note can only
-    describe what they actually emit.
+    sentence reads False on every routed read.
+
+    \u26d4 WHAT THIS ROW DOES AND DOES NOT PROVE (#14780 review, cycle 3 finding 4).
+    It measures the PAYLOAD BUILDERS \u2014 which string each shape emits \u2014 and it
+    pins the note's sentences. It does NOT prove which string the READ passes to
+    them: a builder handed an argument by the test cannot see a call site that
+    passes something else, which is how the family clause was wrong while this
+    row was green. That half is pinned on the read itself, in
+    `tests/test_13557_13558_reachable_reads.py`
+    (`test_a_family_decline_reports_the_question_as_its_cue`,
+    `test_a_kind_filter_with_no_commitment_kind_does_not_publish_a_route`).
     """
     from tortoise.state_intent import (
         ENDED,

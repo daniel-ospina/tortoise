@@ -1302,7 +1302,11 @@ def test_a_kind_filter_with_no_commitment_kind_does_not_publish_a_route(sdk):
     forwards `kind` to this read (`sdk.py`, the hybrid arm), and the MCP search
     tool forwards it to `search_knowledge`.
     """
-    from tortoise.state_intent import COMMITMENTS
+    from tortoise.state_intent import (
+        COMMITMENTS,
+        MISSED_ROUTE_COMMITMENTS_HINT,
+        MISSED_ROUTE_KIND_HINT,
+    )
 
     out: dict = {}
     rows = sdk._tortoise_fts_query("what are we currently committed to",
@@ -1322,6 +1326,24 @@ def test_a_kind_filter_with_no_commitment_kind_does_not_publish_a_route(sdk):
         "a shape DID fire; this is a refusal, not 'no shape applied'")
     assert report["population"] == COMMITMENTS
 
+    # ⛔ THE HINT MUST NAME THIS AXIS (#14780 review, cycle 3, finding 3). The
+    # refusal here is the caller's `kind` filter — the read ALREADY is `object` —
+    # so the entity_type sentence asserts a false cause and prescribes a re-read
+    # that returns a byte-identical payload.
+    assert report["hint"] == MISSED_ROUTE_KIND_HINT, (
+        "the kind-caused decline served another axis's remedy: "
+        f"{report['hint'][:90]!r}")
+    assert report["hint"] != MISSED_ROUTE_COMMITMENTS_HINT, (
+        "the `entity_type` sentence is false here: the caller passed "
+        "entity_type='object', which is exactly what its remedy prescribes")
+    follow_up: dict = {}
+    sdk._tortoise_fts_query("what are we currently committed to",
+                            entity_type="object", _state_question_out=follow_up)
+    assert follow_up != out, (
+        "the emitted remedy must CHANGE the report when followed — dropping the "
+        "kind filter does, which is what makes it a remedy rather than a "
+        "restatement of the refusal")
+
     # …and a kind that IS a commitment kind still routes (the fix must not
     # silence the arm it is protecting).
     ok_out: dict = {}
@@ -1331,6 +1353,36 @@ def test_a_kind_filter_with_no_commitment_kind_does_not_publish_a_route(sdk):
     ok_report = ok_out.get("state_question")
     assert ok_report is not None and ok_report["routed"] is True, (
         f"a `plan`-narrowed commitment question must still ROUTE, got {ok_report!r}")
+
+
+@_docker_only
+def test_a_family_decline_reports_the_question_as_its_cue(sdk):
+    """The served note's second clause, MEASURED on the read (#14780 cycle 3).
+
+    The note says `cue` is "the matched question on a ROUTED read AND on a
+    `reason: family` decline", and the ending word only on a `reason: shape`
+    decline. This asserts the READ's payload rather than a payload builder handed
+    an argument by the test: a builder row cannot see a call site that passes a
+    different string, and that is exactly how the sentence was wrong before.
+    """
+    from tortoise.state_intent import state_cue
+
+    question = "is the onboarding flow retired?"
+    assert state_cue(question) == "retired", (
+        "the row is only meaningful while the ending word and the matched "
+        "question differ")
+    out: dict = {}
+    sdk._tortoise_fts_query(question, entity_type="event",
+                            _state_question_out=out)
+    report = out.get("state_question")
+    assert report is not None and report["reason"] == "family", (
+        f"this read must DECLINE on the family axis, got {report!r}")
+    assert report["cue"] == question, (
+        f"a family decline publishes the matched question as `cue`; got "
+        f"{report['cue']!r}, and the note says it is the question")
+    assert report["cue"] != state_cue(question), (
+        "if this arm ever passes `state_cue(query)` the note's second clause "
+        "becomes false again — the note and this payload move together")
 
 
 @_docker_only
