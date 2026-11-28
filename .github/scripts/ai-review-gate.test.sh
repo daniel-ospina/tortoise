@@ -2394,9 +2394,13 @@ else
     # that invites aligning the consumer to a broken producer (final review, measured
     # with a stub producer that is empty for f.md and normal for the shape probe).
     # `wc -c` ALWAYS prints a count, so no `|| echo 0` — that appended a second 0 on the
-    # failed-command path and made the comparison `[ "0|0" -gt 0 ]` (final review: log
-    # noise, "integer expression expected", verdict unaffected but confusing).
-    _pp_rev_out="$(python3 "$_pp_producer" --patch-only < "$REVIEWED_DIFF_FILE" 2>/dev/null | wc -c)"
+    # failed-command path and made the comparison `[ "0|0" -gt 0 ]` (log noise,
+    # "integer expression expected"). ⛔ BUT THE `|| true` MUST STAY: under
+    # `set -euo pipefail` the pipeline's status is the PRODUCER's, so a producer that
+    # crashes on this fixture aborts the whole harness AT THIS LINE — killing the
+    # `LOCAL producer … FAILED` row below, which is the named non-pass the docs promise
+    # for exactly that case (measured: pre-fix PASS=249, post-abort rc=1 with no summary).
+    _pp_rev_out="$(python3 "$_pp_producer" --patch-only < "$REVIEWED_DIFF_FILE" 2>/dev/null | wc -c || true)"
     _pp_rev_out="${_pp_rev_out//[!0-9]/}"
     [ "${_pp_rev_out:-0}" -gt 0 ] || _pp_out=0
     if [ "$_pp_rc" -ne 0 ] || [ "$_pp_rc2" -ne 0 ]; then

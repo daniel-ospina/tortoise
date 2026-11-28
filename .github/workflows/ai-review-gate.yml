@@ -1233,8 +1233,8 @@ jobs:
           # (`candidates_acceptable`) exists to serve, the operator was told "HMAC
           # mismatch" and never saw the reason the carry was refused. Measured: decoy +
           # wrong-key stale `diff=` marker printed 0 of these lines.
-          # The three, in the order they print: the STALE-sha key diagnosis (written for
-          # 3 above), the HEAD-BOUND key diagnosis (for a marker whose `@ sha` IS this
+          # The three, in the order they print: the STALE-sha key diagnosis (class 1
+          # above), the HEAD-BOUND key diagnosis (class 2, a marker whose `@ sha` IS this
           # head), and the legacy/shape refusal (no anchorable digest). All three carry
           # the SAME requirement — they explain a refusal, so they must precede the
           # generic exit — which is why they sit under one guard.
