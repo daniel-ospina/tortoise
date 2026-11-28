@@ -1649,16 +1649,24 @@ cp "$T/gate.out" "$T/gate-t10b-decoy.out"
 # The anti-vacuity half: a VALID stale record carries, and must NOT print that error.
 {
     printf '%s sig=%s\n' "$DECOY_HEAD" "$BAD_SIG_T10B"
+    # one marker per remainder class, each with a bad signature, so BOTH absence rows
+    # below can actually fail: a stale+diff= one (key class) and a legacy one (shape).
+    printf 'review recorded: reviews/%s.json verdict=clean @ %s diff=%s (%s) sig=%s\n' \
+        "$PR_NUMBER" "$STALE" "$PB_REVIEWED" "$REPO_NAME" "$BAD_SIG_T10B"
+    printf 'review recorded: reviews/%s.json verdict=clean @ %s (%s) sig=%s\n' \
+        "$PR_NUMBER" "$STALE" "$REPO_NAME" "$BAD_SIG_T10B"
     diff_marker "$STALE" "$PB_REVIEWED"
 } > "$T/body-t10b-carry"
 STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
     STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t10b-carry"
 assert_rc 0 "(t10b) a decoy beside a VALID stale record still carries"
-# ⛔ WHICH DIAGNOSTIC CAN A CARRY EVEN PRINT? Only the HEAD-BOUND one — the decoy in
-# this fixture is head-bound with a bad signature, and `patch_sig_rejected` cannot be
-# non-zero on a carry by construction (the probe loop runs only when
-# `candidates_acceptable -eq 0`, and a carry contradicts that). An earlier revision of
-# this row asserted the KEY diagnostic's absence, which was unfalsifiable (final review).
+# ⛔ WHICH DIAGNOSTIC CAN A CARRY EVEN PRINT? All three classes can, so the absence rows
+# below are falsifiable — but an earlier revision of the KEY row was not, and the reason
+# is worth keeping: in THAT fixture the only bad-signature marker was head-bound, so
+# `patch_sig_rejected` was 0 under any mutation and the assertion could never fail. The
+# carry body now also carries a LEGACY stale bad-signature marker, so the shape class is
+# genuinely present, and a third marker with a stale sha + `diff=` + bad signature makes
+# the key class present too. What keeps a green run clean is the `[ -z "$marker" ]` guard.
 assert_not_contains "(t10b) …and prints NO diagnostic for its head-bound decoy on a carry (the empty-marker guard)" \
     "are HEAD-BOUND"
 assert_not_contains "(t10b) …and no shape-error either (the third class the same guard covers)" \
@@ -1694,8 +1702,22 @@ else
     if printf '%s' "$GATE_OUT" | grep -q "are HEAD-BOUND"; then
         ok "(t10b) the MUTANT annotates a GREEN run with a head-bound key error — so the guard is load-bearing"
     else
-        bad "(t10b) the mutant printed no key error on the carry — the not_contains assertion above attributes nothing"
+        bad "(t10b) the mutant printed no head-bound key error on the carry — the not_contains assertion above attributes nothing"
     fi
+    # …and the OTHER two absence rows are falsifiable too: with the guard dropped, the
+    # key and shape diagnostics must ALSO appear on this green run (one marker of each
+    # class is in the body precisely so this can be checked).
+    _miss=""
+    printf '%s' "$GATE_OUT" | grep -q "STALE-sha evidence marker(s) carried BOTH" \
+        || _miss="${_miss} key"
+    printf '%s' "$GATE_OUT" | grep -q "failed the signature check AND lack the shape" \
+        || _miss="${_miss} shape"
+    if [ -z "$_miss" ]; then
+        ok "(t10b) …and the key and shape absence rows are both falsifiable (both classes print on the mutant)"
+    else
+        bad "(t10b) the mutant did not print:${_miss} — those absence rows cannot fail and pin nothing"
+    fi
+    unset _miss
 fi
 
 
@@ -2371,9 +2393,11 @@ else
     # still produced `sha256("")`, which would be reported as DRIFT — the one message
     # that invites aligning the consumer to a broken producer (final review, measured
     # with a stub producer that is empty for f.md and normal for the shape probe).
-    _pp_rev_out=$(
-        python3 "$_pp_producer" --patch-only < "$REVIEWED_DIFF_FILE" 2>/dev/null | wc -c || echo 0
-    )
+    # `wc -c` ALWAYS prints a count, so no `|| echo 0` — that appended a second 0 on the
+    # failed-command path and made the comparison `[ "0|0" -gt 0 ]` (final review: log
+    # noise, "integer expression expected", verdict unaffected but confusing).
+    _pp_rev_out="$(python3 "$_pp_producer" --patch-only < "$REVIEWED_DIFF_FILE" 2>/dev/null | wc -c)"
+    _pp_rev_out="${_pp_rev_out//[!0-9]/}"
     [ "${_pp_rev_out:-0}" -gt 0 ] || _pp_out=0
     if [ "$_pp_rc" -ne 0 ] || [ "$_pp_rc2" -ne 0 ]; then
         echo "  ⏭  (t) the LOCAL producer at $_pp_producer FAILED (rc=${_pp_rc}/${_pp_rc2}) — cross-repo agreement NOT measured (this is not a pass, NOT the pre-#4261 shape, and NOT drift)"

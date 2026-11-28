@@ -1116,13 +1116,21 @@ jobs:
               # ⛔ SIGNATURE BEFORE THE PROBE (the fan-out bound above). A marker
               # that cannot verify is not evidence and must cost ZERO API calls.
               if ! marker_sig_ok "$line"; then
-                # ⛔ TWO DIFFERENT DIAGNOSES — do not conflate them. Only a marker
-                # carrying BOTH the 40-hex `@ sha` and the 64-hex `diff=` is one a
-                # probe could ever anchor on, so only for THAT marker is a correct
-                # key the thing that would have made it probed. A legacy marker has
-                # no digest to anchor on (no key helps: it must be re-recorded), and
-                # a HEAD-BOUND one is rule (a)'s, not rule (c)'s. Counting either as
-                # a key failure sends the operator to re-mint a key that is fine.
+                # ⛔ THREE DIAGNOSES, ONE PER CLASS — do not fold them together. The
+                # classes differ in WHAT THE OPERATOR MUST DO, which is the only thing
+                # this text is for:
+                #   1. stale sha + `diff=`  -> rule (c) would have PROBED it, so a
+                #      correct key is what was missing: fix the KEY.
+                #   2. HEAD-BOUND (`@ sha` IS this head) -> rule (a) would have CARRIED
+                #      it with a correct key: fix the KEY, and no fresh review may be
+                #      needed. (Counting this as the class below — which is what the
+                #      code did until the final review of #4255 — printed "its sha is
+                #      NOT this head … no recording key would have made them
+                #      probeable", false in every clause.)
+                #   3. LEGACY (no anchorable digest: no `diff=`, or a sha that is
+                #      neither this head nor an anchorable stale one) -> NO key helps;
+                #      it must be re-recorded. Telling the operator to fix the key here
+                #      costs a key rotation and leaves the gate red.
                 p_sha_bad="$(printf '%s' "$line" | sed -nE 's/^.* @ ([0-9a-f]{40}).*$/\1/p')"
                 p_diff_bad="$(printf '%s' "$line" | sed -nE 's/^.* diff=([0-9a-f]{64}) \(.*$/\1/p')"
                 if [ "${#p_sha_bad}" -eq 40 ] && [ "${#p_diff_bad}" -eq 64 ] \
@@ -1219,13 +1227,17 @@ jobs:
             fi
           done <<< "$candidates"
 
-          # ⛔ THESE TWO DIAGNOSTICS MUST PRECEDE THE HMAC-MISMATCH BRANCH (final
-          # review). They were written for the case where a STALE `diff=` marker carries
-          # an unverifiable signature, but when ANY decoy candidate exists the
-          # HMAC-mismatch branch below exits first — so in the very population the
-          # entry condition (`candidates_acceptable`) exists to serve, the operator was
-          # told "HMAC mismatch" and never saw the reason the carry was refused. Measured:
-          # decoy + wrong-key stale diff= marker printed 0 of these lines.
+          # ⛔ THESE THREE DIAGNOSTICS MUST PRECEDE THE HMAC-MISMATCH BRANCH (final
+          # review). When ANY decoy candidate exists the HMAC-mismatch branch below
+          # exits first, so in the very population the entry condition
+          # (`candidates_acceptable`) exists to serve, the operator was told "HMAC
+          # mismatch" and never saw the reason the carry was refused. Measured: decoy +
+          # wrong-key stale `diff=` marker printed 0 of these lines.
+          # The three, in the order they print: the STALE-sha key diagnosis (written for
+          # 3 above), the HEAD-BOUND key diagnosis (for a marker whose `@ sha` IS this
+          # head), and the legacy/shape refusal (no anchorable digest). All three carry
+          # the SAME requirement — they explain a refusal, so they must precede the
+          # generic exit — which is why they sit under one guard.
           if [ -z "$marker" ]; then
             if [ "${patch_sig_rejected:-0}" -gt 0 ]; then
               # Rule (c) probes SIGNED markers only (the fan-out bound above), so
