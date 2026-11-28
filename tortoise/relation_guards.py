@@ -65,6 +65,51 @@ outcome          when                                             reported?
                  reasons below
 ===============  ===============================================  ============
 
+⛔ THERE IS A SECOND, NARROWER LEG IN THIS MODULE — THE ORIENTATION LEG
+(``orient_declared_pair``, ``#14304``) — and it is not a wider version of this
+one. This leg answers *is this predicate declared for these two KINDS?*; the
+other answers *which SIDE do the declarations put each of these ENDS on?*.
+⛔ THE ORIENTATION LEG ANSWERS FROM **TWO** PREMISES, and a reader sizing it must
+count both (they are stated here because an earlier spelling of this paragraph
+claimed the leg fires "exactly where this leg abstains or reports
+``undeclared``", which is false and understates where a correction can land):
+
+  (a) the EXACT declared pair asked in REVERSE. Every declaration whose pair is
+      asked the other way round is corrected here, and the pair leg calls that
+      same state ``reversed`` — this leg performs the swap that message already
+      prescribes. Measured at `#14304`'s head, and split the way a REACHABLE ask
+      reaches it: **33 pairs across 24 predicates** are CORRECTED on a reverse ask
+      with ``evidence="declared-pair"`` (``causes``, ``hasPart``, ``addresses``,
+      ``decomposesInto``, …) — the 34th label-free row, ``blocks``
+      ``pm:card -> pm:card``, asks identically in reverse, so it is ``as_asked``
+      and needs no correction; the 4 label-spelled rows
+      (``ownedBy``, ``assignedTo`` ×2, ``holds``) cannot be asked as a declared
+      pair by any write — a ``Subject`` is a LABEL, not a kind — so they are
+      premise (b)'s, with ``evidence="declared-endpoint-label"``. Both counts
+      move with the packs, so they measure that head and are not constants. ⚠️ On
+      a DIRECT-arm predicate this is where a PRICED belief moves: a reversed
+      ``causes`` now writes ``IMPL(bug -> incident)``, so the expectation it
+      raises moves between the two endpoints — that IS the declared correction,
+      and it is stated rather than left to be discovered. ⚠️ And the other priced
+      verbs are NOT reached: ``supports``, ``refutes``, ``produces``,
+      ``mutuallyExclusive`` and ``mutuallySupportive`` declare no pair row at all,
+      so the leg abstains ``predicate-not-declared`` on every one of them
+      (measured) — as it does on the non-priced ``related``, ``transacts`` and
+      ``managedBy`` (the fix there is a pack declaration, not a verb list here).
+  (b) the LABEL-SPELLED side, which is the only premise that can orient a pair
+      the packs declare for OTHER kinds, and where this leg does fire exactly
+      when the pair leg abstains or reports ``undeclared``.
+
+The measured case: **8 ``ownedBy`` rows written
+``Subject -> Object`` on a fresh corpus** (``#14592``), i.e. `Marta Reyes
+--ownedBy--> the cold-chain temperature log`, which under `ownedBy`'s documented
+sense (§3.6, ``pack_registry.SEMANTICS_DIRECTIONS``) asserts the LOG owns MARTA.
+No pack declares ``ownedBy`` for ``core:naturalPerson``↔``Object`` in either
+orientation, so this leg said ``undeclared_pair`` — true, and silent about the
+inversion. The orientation leg reads the LABEL-SPELLED side of the declarations
+(``packs/dev``: ``ownedBy | core:goal -> Subject``) and repairs it. The two legs
+share the declarations read and nothing else; the write path calls both.
+
 The seven abstention reasons, each with its own stable id so a test (and a
 future counter) can tell which premise was missing rather than reading one
 label for seven facts (§2's no-flattening rule applies to abstentions too):
@@ -96,17 +141,26 @@ edit, which is not a write-time correction. So the write lands as asked and the
 reply carries the honest state. ``tests/test_relation_guards_14263.py`` asserts
 no input can reach a refusal.
 
-⛔ **AND NO ``redirect`` IS PRODUCIBLE — stated, because the absence is a
-decision.** ``#12060``'s contract prefers a redirect over a refusal *when the
-right home is known*. Substituting the caller's predicate for another one the
-pack declares between the same kinds is NOT "a known home": the predicate is the
-edge's MEANING, and swapping it silently rewrites what EP prices (``#9963``
-measured exactly that class — an ``IMPL`` spelling over a relation declared
-``NAND`` raised the target where the declaration lowered it). A predicate
-substitution table would also be a pack-schema addition, which is out of
-scope. What the guard can do instead is name the declared alternatives in the
-reply (``declaredBetweenTheseKinds``), which is the actionable half of a
-redirect without the semantic guess.
+⛔ **AND NO ``redirect`` IS PRODUCIBLE *BY THIS LEG* — stated, because the
+absence is a decision.** ``#12060``'s contract prefers a redirect over a refusal
+*when the right home is known*. Substituting the caller's predicate for another
+one the pack declares between the same kinds is NOT "a known home": the
+predicate is the edge's MEANING, and swapping it silently rewrites what EP
+prices (``#9963`` measured exactly that class — an ``IMPL`` spelling over a
+relation declared ``NAND`` raised the target where the declaration lowered it).
+A predicate-substitution table would also be a pack-schema addition, which is out
+of scope. What the guard can do instead is name the declared alternatives in the
+reply (``declaredBetweenTheseKinds``), which is the actionable half of a redirect
+without the semantic guess.
+
+⛔ **The ORIENTATION leg below DOES redirect, and it does not reverse that
+decision** — the distinction is the one the paragraph above draws. A predicate
+substitution swaps the MEANING; the orientation leg swaps the two ENDS of the
+same predicate, which is the correction this module's own ``reversed_pair``
+message already tells the caller to make by hand (*"re-issue with from/to
+swapped"*) and which ``docs/ax/ax-principles.md`` §1 requires to be DECLARED
+whenever it is applied. The declaration decides the ends; nothing about the
+predicate, the mechanism or the priced meaning changes.
 
 ## The AX contract (``docs/ax/ax-principles.md`` §1)
 
@@ -782,6 +836,351 @@ def relation_pair_verdict(
                        from_kind=from_kind, to_kind=to_kind, payload=payload)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# The ORIENTATION of a declared pair (#14304)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# `relation_pair_verdict` above answers *is this predicate declared for these two
+# ends, in this order?* — and it reports a reversal only when the pack declares
+# the EXACT reverse pair (`pm:card -> Subject`, asked as `Subject -> pm:card`).
+# That leaves the measured #14592 defect unreported: a relation
+# `Subject("Marta Reyes", core:naturalPerson) --ownedBy--> Object("cold-chain
+# temperature log")` is `undeclared_pair` in BOTH orientations, because no pack
+# declares `ownedBy` for `core:naturalPerson`↔`Object` at all — yet the write is
+# a legal pair with the ends the WRONG WAY ROUND, which is the class of defect
+# that makes a graph untrustworthy (`#14304`).
+#
+# The declarations do answer it, just not pair-by-pair. Every shipped row for a
+# verb whose one end is a node LABEL says which SIDE that class belongs on:
+#
+#   packs/dev                `ownedBy:    core:goal -> Subject`
+#   packs/project-management `assignedTo: pm:card   -> Subject`
+#   packs/venture            `holds:      venture:investment -> Subject`
+#
+# So the orientation leg reads the LABEL-SPELLED side of the declarations — as
+# its SECOND premise, consulted only when the exact declared pair (either
+# orientation, step (1) of `orient_declared_pair`) could not answer. ⛔ It is NOT
+# "and only that side": an exact declared pair asked in reverse is corrected by
+# step (1) with ``evidence="declared-pair"``, which is a wider population than
+# the three label-spelled rows below and reaches the PRICED direct-arm
+# predicates (``causes`` → ``IMPL``; NOT ``supports``, which declares no pair row
+# and therefore abstains ``predicate-not-declared``). ⛔ IT IS A PLACEMENT RULE, NOT
+# AN OWNERSHIP CLAIM: it puts the labelled end where the declaration spells it
+# and never asks which end OWNS which. That distinction is load-bearing on a
+# `direction: "<-"` row, and
+# `packs/venture`'s `holds` is one (`venture:investment -> Subject`, `<-`,
+# #11083): there the labelled `Subject` is the company the investment is a stake
+# IN — the OWNED end, not the accountable owner — and the leg still places it on
+# the TO side, because that is the side the row spells. Its `direction` token is
+# untouched, so the sense the row records (`<-`: the source is the ownership
+# interest) survives the redirect intact. Reading the label as "the owner" is
+# the mistake this paragraph exists to prevent: it is true of the `->` rows
+# (`ownedBy`, `assignedTo`) and false of `holds`, and the leg does not need it
+# to be true either way. Pinned by
+# `tests/test_relation_orientation_14304.py::test_a_reverse_row_places_the_labelled_end_by_the_SPELLING_and_keeps_its_direction`.
+#
+# …and ONTOLOGY §3.5/§3.6 and the graph's own writers agree with all three: the
+# canonical row is `(:Object)-[:ownedBy]->(:Subject)`,
+# `projection.edges.create_owned_by(entity_id, subject_id)` writes entity→subject,
+# and `SDK._get_owned_entities(subject_id)` traverses `(s:Subject)<-[:ownedBy]-(e)`
+# — so an `ownedBy` edge whose SOURCE is the Subject does not merely look odd, it
+# is invisible to the read door that answers "what does this person own?".
+#
+# It is deliberately narrow, and every narrowing is a residual
+# stated below rather than a guess:
+#
+#   * it fires only when the packs name a label on EXACTLY ONE side of the pair
+#     (a predicate whose ends are both kinds — `hasPart: dev:theme -> dev:epic`,
+#     `dependsOn: dev:api -> dev:database` — is left entirely to the pair leg);
+#   * it fires only when the labelled end sits on the wrong side in the ask and
+#     NOT also on the right one (both ends `Subject`, or neither, abstains —
+#     "Dev manages Marta" is not a pair this leg can orient);
+#   * the endpoint test is `is_subject_kind` for the `Subject` label, which is
+#     the ONE answer to "is this a Subject-layer kind" (`kind_layers.
+#     declares_subject`, `#9964`). ⚠️ RESIDUAL: for any OTHER label a pack might
+#     spell (`Object`, `Event`, `Point`, `Source`, `Document`) this leg has no
+#     kind-level test and abstains — closing it means reading the node's own
+#     label, which the planner does not have (it holds `(id, kind)` only).
+#     No shipped row spells any of those as a relation endpoint today.
+#
+# ⛔ THIS IS NOT A PREDICATE SUBSTITUTION and it does not refuse anything. It
+# REWRITES THE ENDS of an edge the caller already asked for, which `#12060`'s
+# contract names a REDIRECT — and `docs/ax/ax-principles.md` §1 requires a
+# redirect to be DECLARED, so the payload below is the echo the write path
+# carries (`relation_write` writes it on the receipt AND warns).
+
+#: The ask already puts each end on the side the declarations put it.
+ORIENTATION_AS_ASKED = "as_asked"
+#: The ask is a legal pair with the two ends SWAPPED relative to the pairs the
+#: packs declare for this predicate. A separate outcome from `reversed_pair`
+#: on purpose: that one means "the pack declares this exact pair, reversed";
+#: this one means "the pack declares this END CLASS on the other side".
+#: `docs/ax/ax-principles.md` §2 forbids flattening two facts into one label.
+ORIENTATION_REVERSED = "reversed_orientation"
+
+#: Stable rule id, so a client branches on data rather than on our prose.
+RULE_ORIENTATION = "relation-orientation-reversed"
+
+#: Abstention reasons — separate ids from the pair leg's, because "the pair leg
+#: could not judge" and "the orientation leg could not judge" are different
+#: premises and a counter reading one label for both learns nothing.
+ABSTAIN_NO_LABEL_SIDE = "no-label-endpoint"
+ABSTAIN_ORIENTATION_AMBIGUOUS = "orientation-undecidable"
+
+
+def declared_label_sides(
+    predicate: object,
+    declared: dict[str, tuple[tuple[str, str], ...]] | None = None,
+) -> tuple[frozenset[str], frozenset[str]] | None:
+    """``(from-side labels, to-side labels)`` the packs name for ``predicate``.
+
+    A declaration may spell an endpoint as a node LABEL rather than a kind
+    (``ownedBy | core:goal -> Subject``), and that spelling is the only place a
+    pack says WHICH SIDE an endpoint class belongs on. ``None`` = the
+    declarations could not be read; two empty sets = no declared row spells a
+    label on either side, so this predicate has no declared orientation beyond
+    its exact pairs.
+    """
+    if declared is None:
+        declared = declared_relation_pairs()
+    if declared is None:
+        return None
+    canonical = canonical_predicate(predicate, declared)
+    if canonical is None:
+        return frozenset(), frozenset()
+    from_labels: set[str] = set()
+    to_labels: set[str] = set()
+    for from_kind, to_kind in declared.get(canonical, ()):
+        if from_kind in LABEL_ENDPOINTS:
+            from_labels.add(from_kind)
+        if to_kind in LABEL_ENDPOINTS:
+            to_labels.add(to_kind)
+    return frozenset(from_labels), frozenset(to_labels)
+
+
+def _endpoint_is_label(kind: str, label: str, node_label: str | None) -> bool:
+    """Is this ENDPOINT of the class the declaration spells as ``label``?
+
+    The node's own label settles it when the caller has one. Without one, only
+    ``Subject`` is decidable, through ``is_subject_kind`` — the ONE answer to
+    "is this a Subject-layer kind" (``#9964``; a second vocabulary here is how
+    the write path and the classifier came to disagree before). Any other
+    label, and any error in that read, answers ``False``: this leg abstains
+    rather than orients on a premise it does not have.
+    """
+    if isinstance(node_label, str) and node_label:
+        return node_label == label
+    if label != "Subject":
+        return False
+    try:
+        from .subject_binding import is_subject_kind
+
+        return bool(is_subject_kind(kind))
+    except Exception:  # noqa: BLE001, RUF100 — a gate read must not raise
+        return False
+
+
+@dataclass(frozen=True)
+class OrientationVerdict:
+    """Which way round the declarations put these two ends (#14304).
+
+    ``outcome`` is :data:`ORIENTATION_AS_ASKED`, :data:`ORIENTATION_REVERSED`
+    or :data:`ABSTAIN`. ``payload`` is the AX block and is present exactly when
+    the ask is REVERSED — the one outcome a caller must act on, and the one it
+    must declare.
+    """
+
+    outcome: str
+    predicate: str
+    from_kind: str | None = None
+    to_kind: str | None = None
+    payload: dict | None = None
+    reason: str | None = None
+
+    @property
+    def reversed(self) -> bool:
+        return self.outcome == ORIENTATION_REVERSED
+
+    @property
+    def reportable(self) -> bool:
+        return self.payload is not None
+
+
+def _orientation_abstain(reason: str, predicate: str, from_kind, to_kind,
+                         ) -> OrientationVerdict:
+    return OrientationVerdict(
+        outcome=ABSTAIN, predicate=predicate,
+        from_kind=from_kind if isinstance(from_kind, str) else None,
+        to_kind=to_kind if isinstance(to_kind, str) else None,
+        reason=reason)
+
+
+def orient_declared_pair(
+    predicate: object,
+    from_kind: object,
+    to_kind: object,
+    *,
+    from_label: str | None = None,
+    to_label: str | None = None,
+    declared: dict[str, tuple[tuple[str, str], ...]] | None = None,
+) -> OrientationVerdict:
+    """Which side each end belongs on, per the packs' declared pairs.
+
+    Three answers, and the abstention is the common one — a predicate whose
+    declared ends are both KINDS says nothing about orientation beyond its exact
+    pairs, so the leg stays out of the way:
+
+    =========================  ==================================================
+    ``as_asked``               the exact declared pair, or the labelled end
+                               already on the declared side
+    ``reversed_orientation``   the exact declared pair REVERSED, or the labelled
+                               end on the WRONG side (and not on the right one)
+    ``abstain``               the declarations cannot answer (see the reasons)
+    =========================  ==================================================
+
+    ⛔ NEVER REFUSES and never drops. A reversal is a REDIRECT: the caller keeps
+    its edge, with the ends the declaration puts them in, and the payload is the
+    DECLARED correction `docs/ax/ax-principles.md` §1 requires.
+    """
+    raw_predicate = predicate.strip() if isinstance(predicate, str) else ""
+    if not raw_predicate:
+        return _orientation_abstain(ABSTAIN_NO_PREDICATE, "", from_kind, to_kind)
+    if declared is None:
+        declared = declared_relation_pairs()
+    if declared is None:
+        return _orientation_abstain(
+            ABSTAIN_UNREADABLE, raw_predicate, from_kind, to_kind)
+    canonical = canonical_predicate(raw_predicate, declared)
+    if canonical is None:
+        return _orientation_abstain(
+            ABSTAIN_NOT_DECLARED, raw_predicate, from_kind, to_kind)
+    if not (isinstance(from_kind, str) and from_kind.strip()
+            and isinstance(to_kind, str) and to_kind.strip()):
+        return _orientation_abstain(ABSTAIN_NO_KINDS, canonical, from_kind, to_kind)
+    from_kind = from_kind.strip()
+    to_kind = to_kind.strip()
+    pairs = declared.get(canonical, ())
+    if not pairs:
+        return _orientation_abstain(
+            ABSTAIN_NO_DECLARED_PAIR, canonical, from_kind, to_kind)
+
+    declared_for = [{"fromKind": one, "toKind": two} for one, two in pairs]
+    # (1) the exact pair, in either orientation — the strongest evidence there is.
+    matched, ambiguous = _pair_matches(
+        pairs, from_kind, to_kind, from_label, to_label)
+    if ambiguous:
+        return _orientation_abstain(
+            ABSTAIN_AMBIGUOUS_PAIR, canonical, from_kind, to_kind)
+    if matched is not None:
+        return OrientationVerdict(outcome=ORIENTATION_AS_ASKED,
+                                  predicate=canonical, from_kind=from_kind,
+                                  to_kind=to_kind, reason="declared-pair")
+    reverse_match, reverse_ambiguous = _pair_matches(
+        pairs, to_kind, from_kind, to_label, from_label)
+    if reverse_ambiguous:
+        return _orientation_abstain(
+            ABSTAIN_AMBIGUOUS_PAIR, canonical, from_kind, to_kind)
+    evidence = "declared-pair" if reverse_match is not None else None
+    labelled: str | None = None
+    labelled_where = ""
+
+    # (2) the LABEL-SPELLED side — what makes a pair the packs declare for OTHER
+    # kinds still orientable (`ownedBy` for ANY person/thing, not only a goal).
+    if evidence is None:
+        sides = declared_label_sides(canonical, declared)
+        if sides is None:
+            return _orientation_abstain(
+                ABSTAIN_UNREADABLE, canonical, from_kind, to_kind)
+        from_labels, to_labels = sides
+        label: str | None = None
+        labelled_side = ""
+        if to_labels and not from_labels and len(to_labels) == 1:
+            label, labelled_side = next(iter(to_labels)), "to"
+        elif from_labels and not to_labels and len(from_labels) == 1:
+            label, labelled_side = next(iter(from_labels)), "from"
+        elif not from_labels and not to_labels:
+            return _orientation_abstain(
+                ABSTAIN_NO_LABEL_SIDE, canonical, from_kind, to_kind)
+        else:
+            # a label on BOTH sides, or several on one — the declarations do not
+            # name a single side, so there is nothing to redirect to.
+            return _orientation_abstain(
+                ABSTAIN_ORIENTATION_AMBIGUOUS, canonical, from_kind, to_kind)
+        from_is = _endpoint_is_label(from_kind, label, from_label)
+        to_is = _endpoint_is_label(to_kind, label, to_label)
+        if labelled_side == "to":
+            right, wrong = to_is, from_is
+        else:
+            right, wrong = from_is, to_is
+        if right and not wrong:
+            return OrientationVerdict(outcome=ORIENTATION_AS_ASKED,
+                                      predicate=canonical, from_kind=from_kind,
+                                      to_kind=to_kind,
+                                      reason="declared-endpoint-label")
+        if wrong and not right:
+            evidence = "declared-endpoint-label"
+            labelled, labelled_where = label, labelled_side
+        else:
+            # both ends are the labelled class, or neither is — the declaration
+            # cannot say which of two Subjects owns which.
+            return _orientation_abstain(
+                ABSTAIN_ORIENTATION_AMBIGUOUS, canonical, from_kind, to_kind)
+
+    payload = {
+        "outcome": ORIENTATION_REVERSED,
+        "predicate": canonical,
+        "stated": {"from": from_kind, "to": to_kind},
+        "written": {"from": to_kind, "to": from_kind},
+        "rule": RULE_ORIENTATION,
+        "declaredFor": declared_for,
+        "evidence": evidence,
+        "message": _orientation_block(
+            predicate=canonical, from_kind=from_kind, to_kind=to_kind,
+            declared_for=declared_for, evidence=evidence,
+            reverse_match=reverse_match,
+            labelled=labelled, labelled_where=labelled_where),
+    }
+    return OrientationVerdict(outcome=ORIENTATION_REVERSED, predicate=canonical,
+                              from_kind=from_kind, to_kind=to_kind,
+                              payload=payload)
+
+
+def _orientation_block(*, predicate: str, from_kind: str, to_kind: str,
+                       declared_for: list[dict], evidence: str | None,
+                       reverse_match: tuple[str, str] | None,
+                       labelled: str | None = None,
+                       labelled_where: str = "") -> str:
+    """The AX echo for a REDIRECT — what was stated, what is written, and why.
+
+    `docs/ax/ax-principles.md` Rule 1: a change the caller did not ask for is a
+    claim about what the graph now contains, so it is DECLARED, not silently
+    applied. The block says the three things Rule 2 requires of a correction:
+    the state, the reason, and what IS declared.
+    """
+    if evidence == "declared-pair" and reverse_match is not None:
+        why = (f"the packs declare {predicate!r} for {reverse_match[0]} -> "
+               f"{reverse_match[1]}, not for {from_kind} -> {to_kind}")
+    elif labelled:
+        why = (f"every pair the packs declare for {predicate!r} puts its "
+               f"label-spelled end ({labelled}) on the {labelled_where.upper()} "
+               f"side, and this ask has it on the "
+               f"{'FROM' if labelled_where == 'to' else 'TO'} side")
+    else:
+        why = (f"the packs declare {predicate!r} for the pairs above, and none "
+               f"of them has {from_kind} as its source")
+    rendered = ", ".join(
+        f"{row['fromKind']} -> {row['toKind']}" for row in declared_for)
+    return "\n".join([
+        f"relation {predicate!r} was STATED with its ends the other way round "
+        f"({from_kind} -> {to_kind}); it is WRITTEN as {to_kind} -> {from_kind}",
+        f"  why: {why}",
+        f"  this predicate IS declared for: {rendered}",
+        "  the ends were swapped, not the predicate, and nothing was dropped — "
+        "the edge's meaning is unchanged, its orientation now matches the "
+        "declaration (#14304)",
+    ])
+
+
 def warning_shape(payload: dict) -> dict:
     """The ``warnings[]`` entry for a reported verdict (``#1934``'s shape).
 
@@ -820,18 +1219,26 @@ __all__ = [
     "ABSTAIN_NOT_DECLARED",
     "ABSTAIN_NO_DECLARED_PAIR",
     "ABSTAIN_NO_KINDS",
+    "ABSTAIN_NO_LABEL_SIDE",
     "ABSTAIN_NO_PREDICATE",
+    "ABSTAIN_ORIENTATION_AMBIGUOUS",
     "ABSTAIN_OUTSIDE_SCOPE",
     "ABSTAIN_UNREADABLE",
     "ACCEPT",
     "NORMALISED",
+    "ORIENTATION_AS_ASKED",
+    "ORIENTATION_REVERSED",
     "REVERSED_PAIR",
+    "RULE_ORIENTATION",
     "RULE_REVERSED",
     "RULE_UNDECLARED",
     "UNDECLARED_PAIR",
+    "OrientationVerdict",
     "PairVerdict",
     "canonical_predicate",
+    "declared_label_sides",
     "declared_relation_pairs",
+    "orient_declared_pair",
     "relation_pair_verdict",
     "warning_shape",
 ]
