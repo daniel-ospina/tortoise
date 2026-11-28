@@ -562,11 +562,10 @@ class TestAnEndedOnPositionRecordIsNotServedAsMeasured:
     #: same two shapes `tests/test_13450_ep_position_axis_participation.py`
     #: parameterises for the EP input arm, plus the WORD-axis control that
     #: already worked, so a regression in either direction is visible.
-    _ENDINGS: ClassVar[tuple[tuple[str, str], ...]] = (
-        ("isClosed", "SET n.isClosed = true"),
-        ("terminal slot",
-         "SET n.pipelineSlot = 'terminal'"),
-        ("word axis (control)", "SET n.status = 'superseded'"),
+    _ENDINGS: ClassVar[tuple[tuple[str, dict], ...]] = (
+        ("isClosed", {"isClosed": True}),
+        ("terminal slot", {"pipelineSlot": "terminal"}),
+        ("word axis (control)", {"status": "deprecated"}),
     )
 
     @staticmethod
@@ -575,15 +574,30 @@ class TestAnEndedOnPositionRecordIsNotServedAsMeasured:
         sfx = uuid.uuid4().hex[:8]
         pid = sdk._create_point("statement", f"pos-{sfx}",
                                status="live")["id"]
-        sdk._get_proj().g.query(
-            "MATCH (n:Point {id:$id}) SET n.posterior_alpha = 9.0, "
-            "n.posterior_beta = 1.0", params={"id": pid})
+        sdk._update_entity(pid, posterior_alpha=9.0, posterior_beta=1.0)
         return pid
 
     @staticmethod
-    def _end(sdk, pid: str, write: str) -> None:
-        sdk._get_proj().g.query(f"MATCH (n:Point {{id:$id}}) {write}",
-                                params={"id": pid})
+    def _end(sdk, pid: str, props: dict) -> None:
+        # ⛔ THROUGH THE SDK'S WRITE DOOR, NOT `proj.g.query`: the raw cypher these
+        # fixtures used to write is exactly the untyped receiver `tools/sdk_privatise.py`
+        # ratchets, and this file added two of them (#14801 review, finding 4).
+        #
+        # ⛔ AND THE CONTROL'S WORD IS `deprecated`, NOT `superseded` (#14801 review,
+        # round 2, measured). `_update_entity` is the apply-first door (the one
+        # `update_knowledge` relays into), and it calls
+        # `_assert_supersession_names_a_successor` (ONTOLOGY §5), which REFUSES a bare
+        # `status='superseded'` on a Point with no successor — measured through BOTH
+        # doors, `ValueError: update_knowledge refused status='superseded' … with no
+        # successor`. So the raw `SET n.status = 'superseded'` this fixture used to run
+        # was writing a state the product refuses to create, and no SDK door can
+        # reproduce it. `deprecated` is the terminal word that needs NO successor
+        # (`live.TERMINAL_STATUS_VALUES` ∪ `LEGACY_NON_CURRENT_STATUS_VALUES`), so the
+        # control keeps its subject — a terminal WORD alone, with neither position
+        # marker, stops the record being served as measured — while the write is legal.
+        # What is NOT identical to the raw statement: the word, and the journal record
+        # the door writes. Both are stated rather than glossed.
+        sdk._update_entity(pid, **props)
 
     @staticmethod
     def _surfaces(sdk, pid: str) -> dict:
@@ -618,8 +632,8 @@ class TestAnEndedOnPositionRecordIsNotServedAsMeasured:
             "subgraph_node": node,
         }
 
-    @pytest.mark.parametrize("axis,write", _ENDINGS)
-    def test_every_reader_stops_calling_it_measured(self, axis, write):
+    @pytest.mark.parametrize("axis,props", _ENDINGS)
+    def test_every_reader_stops_calling_it_measured(self, axis, props):
         sdk = _fresh_sdk()
         try:
             pid = self._measured_claim(sdk)
@@ -635,7 +649,7 @@ class TestAnEndedOnPositionRecordIsNotServedAsMeasured:
                     f"{surface} did not reach `measured` before the ending: "
                     f"{before[surface]}")
 
-            self._end(sdk, pid, write)
+            self._end(sdk, pid, props)
             after = self._surfaces(sdk, pid)
 
             # (a) `why` — the customer-visible one. `has_ep` false ⇒ no

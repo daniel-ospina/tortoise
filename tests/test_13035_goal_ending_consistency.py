@@ -1100,11 +1100,11 @@ def test_the_SWEEP_clears_a_goal_retired_by_the_LEGACY_outdated_flag(sdk):
     assert sdk.get_entity(goal["id"]).get("goalState") in (None, "")
 
 
-@pytest.mark.parametrize("write", [
-    "SET n.isClosed = true",
-    "SET n.pipelineSlot = 'terminal'",
+@pytest.mark.parametrize("axis,props", [
+    ("isClosed", {"isClosed": True}),
+    ("pipelineSlot", {"pipelineSlot": "terminal"}),
 ])
-def test_the_SWEEP_clears_a_goal_retired_on_the_POSITION_axis(sdk, write):
+def test_the_SWEEP_clears_a_goal_retired_on_the_POSITION_axis(sdk, axis, props):
     """#14796 — the THIRD input of the same predicate, and the one nothing read.
 
     `_retired_by_status` answered from the lifecycle word (`status` in the
@@ -1120,7 +1120,7 @@ def test_the_SWEEP_clears_a_goal_retired_on_the_POSITION_axis(sdk, write):
     """
     from tortoise.derived_invalidation import reconcile_goal_states
 
-    goal = _goal(sdk, tag=f"sweep-position-{write[-12:]}")
+    goal = _goal(sdk, tag=f"sweep-position-{axis}")
     indicator = sdk._create_object("CI pipeline duration [pos]",
                                  objectKind="workflow")
     target = sdk._create_object("CI <= 10m [pos]", objectKind="target",
@@ -1134,8 +1134,9 @@ def test_the_SWEEP_clears_a_goal_retired_on_the_POSITION_axis(sdk, write):
     assert made["goalState"] == "met", made        # the cache word STANDS
     # ...and the goal is then ENDED on the position axis only: `status` stays
     # live and the legacy flag stays unset, so the word-axis read cannot see it.
-    sdk._get_proj().g.query(f"MATCH (n {{id:$id}}) {write}",
-                            params={"id": goal["id"]})
+    # ⛔ THROUGH THE SDK'S PROPS DOOR — the raw `proj.g.query` receiver is the
+    # untyped residue `tools/sdk_privatise.py` ratchets (#14801 review, finding 4).
+    sdk._update_entity_any(goal["id"], **props)
     assert sdk.get_entity(goal["id"]).get("status") in (None, "live")
     out = reconcile_goal_states(sdk)
     assert out["counts"]["consistent"] == 0, out["counts"]
@@ -1166,8 +1167,7 @@ def test_a_goal_closed_on_the_POSITION_axis_is_NOT_judged(sdk):
                              target=Target.from_node(target))
     assert first["goalState"] == "met", first
 
-    sdk._get_proj().g.query(
-        "MATCH (n {id:$id}) SET n.isClosed = true", params={"id": goal["id"]})
+    sdk._update_entity_any(goal["id"], isClosed=True)
     made = judge_and_record(sdk, goal_id=goal["id"],
                             indicator_id=indicator["id"],
                             target=Target.from_node(target))

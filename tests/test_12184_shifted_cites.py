@@ -118,14 +118,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `:Document`; `grep -nF 'D10: a document is a ``:Source``, not a'` returns the line ABOVE the
     # `:Document` one, which is how the +35-instead-of-+36 arithmetic was introduced and never caught).
     # Pinned by CONTENT on the line that carries `:Document`, so the next re-measure by that phrase reds.
-    (_SUBSTRATE, 'tortoise/sdk.py:37983', _SDK, 37983, "``:Document`` node)."),
-    (_SUBSTRATE, '`:38025` in `_file_human_approval`', _SDK, 38025, "``:Document`` node)."),
+    (_SUBSTRATE, 'tortoise/sdk.py:37999', _SDK, 37999, "``:Document`` node)."),
+    (_SUBSTRATE, '`:38041` in `_file_human_approval`', _SDK, 38041, "``:Document`` node)."),
     # ⛔ The SAME sentence pair carries a SECOND number that nothing graded: §5's `:38024` (since fixed
     # to `:38025`) was the `:Source` line above the second `:Document` line, so the pair was one high on
     # one side while every neighbouring row stayed green — the file's own "green pins over a wrong
     # sentence" shape. The row below grades the pair AS A PAIR (its token spans both the owner and the
     # number), because two unpinned mentions in one sentence is how the first one survived review.
-    (_SUBSTRATE, "`_file_human_approval`'s `:38025`", _SDK, 38025, "``:Document`` node)."),
+    (_SUBSTRATE, "`_file_human_approval`'s `:38041`", _SDK, 38041, "``:Document`` node)."),
     # ⛔ And §5's #11928 move names `tortoise/live.py` with NO row at all, which is how the cites drifted
     # +58 past a re-point that was correct when it was written (`:1313,1323` -> `:1371,1381`).
     (_SUBSTRATE, 'tortoise/live.py:1371', _LIVE, 1371, "``epistemic_disjunction``. A ``:Document``/``:Source`` kind read through"),
@@ -138,20 +138,20 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `:Document`") and both were stale by +357 / +148 while the sentence asserted they had been
     # "re-measured at this head" (`:37126` -> `:37483`, `:37366` -> `:37514`). A negative claim is not
     # weaker than a positive one: a reader sent to the wrong line cannot check it at all.
-    (_SUBSTRATE, '`sdk.py:37483` is a', _SDK, 37483, "`[a, a, b]` was answered with the `[a, b, b]` operator"),
-    (_SUBSTRATE, '`:37514`', _SDK, 37514, 'conds.append("o.label IS NULL")'),
+    (_SUBSTRATE, '`sdk.py:37499` is a', _SDK, 37499, "`[a, a, b]` was answered with the `[a, b, b]` operator"),
+    (_SUBSTRATE, '`:37530`', _SDK, 37530, 'conds.append("o.label IS NULL")'),
     # ⛔ Review cycle 2 (P1): these were RE-POINTED and left with no content pin, so a one-line
     # regression shipped green — MEASURED by mutating each destination by one line and watching the
     # whole suite stay at `31 passed`. A re-point nobody grades is the `#13854` class this file exists for.
-    (_INDEX, 'sdk.py:22203', _SDK, 22203, '"stats": _capture_stats_with_step_witness('),
-    (_SUBSTRATE, 'opening `:37963`', _SDK, 37963, "def record_decision(self, approver_id: str, artifact_id: str,"),
+    (_INDEX, 'sdk.py:22212', _SDK, 22212, '"stats": _capture_stats_with_step_witness('),
+    (_SUBSTRATE, 'opening `:37979`', _SDK, 37979, "def record_decision(self, approver_id: str, artifact_id: str,"),
     # ⛔ ADOPTED at the `origin/main` rebase (`#14416`'s fold): `main` added this row for the `:Source`
     # line BETWEEN the two `opening` defs, after a merge resurrected the `+21`-era siblings
     # (`(opening :37548` = a kwarg line) while the two graded headlines stayed right — green pins over
     # a wrong sentence (`#14038` review, cycle 2). It grades a SURVIVING document, so this cut keeps
     # it: only the `_AUDIT` rows go. Re-verified by content at the rebased head, not carried.
-    (_SUBSTRATE, '`:37982` is the `:Source` line', _SDK, 37982, "D10: a document is a ``:Source``, not a"),
-    (_SUBSTRATE, 'opening `:38003`', _SDK, 38003, "def _file_human_approval(self, approver_id: str, artifact_id: str,"),
+    (_SUBSTRATE, '`:37998` is the `:Source` line', _SDK, 37998, "D10: a document is a ``:Source``, not a"),
+    (_SUBSTRATE, 'opening `:38019`', _SDK, 38019, "def _file_human_approval(self, approver_id: str, artifact_id: str,"),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2945", _SE, 2945, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2787", _SE, 2787, "def recency_tie_clause"),
@@ -177,9 +177,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # tokens and still hold. They are the SAME `sdk.py` pair `00_index.md` and
     # `ENTITY-VERDICT-BANDS.md` each cite, plus the merge call below it; re-resolved at this head
     # before being restored, not assumed.
-    ("docs/00_index.md", '`sdk.py:28711` at this head', _SDK, 28711, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
-    ("docs/architecture/ENTITY-VERDICT-BANDS.md", '(`sdk.py:28711`), so any non-NULL', _SDK, 28711, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
-    ("docs/architecture/ENTITY-VERDICT-BANDS.md", 'called at `sdk.py:29075`', _SDK, 29075, "result = apply_entity_merge("),
+    ("docs/00_index.md", '`sdk.py:28727` at this head', _SDK, 28727, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
+    ("docs/architecture/ENTITY-VERDICT-BANDS.md", '(`sdk.py:28727`), so any non-NULL', _SDK, 28727, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
+    ("docs/architecture/ENTITY-VERDICT-BANDS.md", 'called at `sdk.py:29091`', _SDK, 29091, "result = apply_entity_merge("),
     # --- docs/plans/2026-09-25-4997-vector-index-parity.md — the reader table cites
     # `hosted_backup.py:2732` for `_index_has_is_operator()`, and that document had NO pin at all,
     # so nothing would have reddened the next rotation of it. ⛔ RE-DERIVED BY CONTENT at the
