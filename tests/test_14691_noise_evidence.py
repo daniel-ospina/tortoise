@@ -55,6 +55,20 @@ def _report() -> str:
     return (BUNDLE / "REPORT.md").read_text()
 
 
+def _corpus_tokens() -> set[str]:
+    """Every content token in the corpus, through the SCORER's own tokenizer.
+
+    Using the module's tokenizer (not a local copy) is what makes the stopword filter the
+    thing under test: if function words creep back into `tokens()`, this set gains them and
+    the arm below loses its meaning.
+    """
+    module = _score_module()
+    out: set[str] = set()
+    for text in module.doc_texts(_corpus()).values():
+        out |= module.tokens(text)
+    return out
+
+
 def _module(name: str, filename: str):
     """Import a bundle script by path (they are not package modules)."""
     path = BUNDLE / filename
@@ -401,15 +415,15 @@ def test_t1_the_second_ingestion_numbers_are_the_artifacts_numbers():
     assert row["entities"]["object_delta"] == 4
     restated = row["restated_points_pass_2"]
     assert restated["pass_2_points"] == 61
-    assert restated["restating_a_pass_1_point"] == 38
+    assert restated["restating_a_pass_1_point"] == 40
     dedups = [r["dedup"] for r in restated["rows"]]
-    assert dedups.count("new") == 26
+    assert dedups.count("new") == 28
     assert dedups.count("content_hash_hit") == 12
     # Event-kind POINTS re-mint in lockstep — the cleanest single witness.
     assert after_1["points_by_kind"].get("event") == 40
     assert after_2["points_by_kind"].get("event") == 80
     report = _report()
-    for figure in ("**+109 Points", "+14 Events", "+4 Objects", "38 of the 61 Points", "26 carry"):
+    for figure in ("**+109 Points", "+14 Events", "+4 Objects", "40 of the 61 Points", "28 carry"):
         assert figure in report, f"REPORT.md no longer quotes {figure!r}"
 
 
@@ -418,8 +432,13 @@ def test_t2_the_two_wordings_landed_as_two_points():
     assert row["goal_point_ids"]["shared"] == [], \
         "T2 fails because the two wordings share no point id; a merge would change this"
     # BOTH graded legs are recorded, not just the one that happens to fail first.
-    assert row["legs"] == {"entity_delta_zero": False,
-                           "exactly_one_shared_point": False, "shared_count": 0}
+    legs = row["legs"]
+    assert legs["entity_delta_zero"] is False
+    assert legs["exactly_one_shared_point"] is False and legs["shared_count"] == 0
+    # Event is excluded on purpose — RULE_T1 declares one Event per capture expected, so
+    # counting it here would fail T2 on an axis the bundle calls clean.
+    assert "Event excluded" in legs["entity_axes"]
+    assert row["delta_across_doc_06_ingest"]["taxonomy.Object"] == 1
     # …and the leg the door cannot answer is disclosed, not silently implied.
     assert row["source_link_leg"]["graded"] is False
     assert "D7" in row["source_link_leg"]["why"]
@@ -487,15 +506,26 @@ def test_t5_every_sampled_relation_is_traced_and_the_tiers_are_separate():
         "T5 must sample every relation the receipts say was written (26 pass 1 + 21 "
         "pass 2); sampling one pass hides the pass where invention happens")
     assert {s["pass"] for s in row["rows"]} == {1, 2}
-    assert row["tiers"] == {"verbatim": 34, "paraphrase": 12, "none": 1}
+    assert row["tiers"] == {"verbatim": 34, "paraphrase": 10, "none": 3}
     # One invented edge, named — and its name is the point: doc-04 says Priya *reports*
     # the count monthly, and pass 2 minted an entity for the reporting act.
-    assert len(row["unsupported"]) == 1, (
-        "T5's FAIL rests on exactly one unsupported edge; a rescored run must move this "
+    assert len(row["unsupported"]) == 3, (
+        "T5's FAIL rests on exactly three unsupported edges; a rescored run must move this "
         "number deliberately")
-    bad = row["unsupported"][0]
-    assert bad["pass"] == 2 and bad["src"] == "monthly account count report"
-    assert bad["support"] == "none"
+    assert {(u["doc_id"], u["pass"], u["predicate"], u["src"], u["dst"])
+            for u in row["unsupported"]} == {
+        ("doc-05", 1, "related", "ColdPath Logistics", "the wholesale push"),
+        ("doc-05", 1, "related", "NordicFreight", "the wholesale push"),
+        ("doc-04", 2, "ownedBy", "monthly account count report", "Priya Nair"),
+    }, "the invented edges changed — re-derive T5 rather than relaxing this set"
+    for u in row["unsupported"]:
+        assert u["support"] == "none"
+    # ⛔ Content tokens exclude function words: `the wholesale push` is 0.67 WITH them and
+    # 0.50 without, and the corpus never says `push`. This is the arm that keeps a
+    # function word from carrying an invented name over the paraphrase band.
+    assert "push" not in _corpus_tokens(), (
+        "the token `push` is in the corpus now — re-derive T5 rather than leaving two "
+        "unsupported edges pinned to a name the corpus does say")
     for sample in row["rows"]:
         assert sample["support"] in ("verbatim", "paraphrase", "none")
         if sample["support"] != "none":
@@ -571,6 +601,11 @@ def is_t4_decision_graded(score: dict) -> bool:
     return score["tests"]["T4"]["decision_leg"].get("graded") is True
 
 
+def module_build() -> dict:
+    """A fresh build of the whole artifact, from the committed inputs."""
+    return _score_module().build_result()
+
+
 def test_the_artifact_is_byte_identical_under_a_different_hash_seed():
     """Re-running the scorer must reproduce the committed bytes, not merely the values.
 
@@ -606,7 +641,118 @@ def test_the_artifact_is_byte_identical_under_a_different_hash_seed():
     assert len(set(outputs)) == 1, (
         "the scorer's output is not byte-stable across PYTHONHASHSEED — a set-ordered "
         "dict build has crept back in, so a reviewer re-running it gets a spurious diff")
-    # …and the committed artifact really is what that run produces, for the `tests` block.
-    committed = json.dumps(_score()["tests"], indent=2, default=str)
-    assert json.loads(committed) == json.loads(json.dumps(
-        json.loads(outputs[0])["tests"], indent=2, default=str))
+    # ⛔ EXACT BYTES, not a parsed round-trip. Comparing `json.loads` on both sides is blind
+    # to dict KEY ORDER, so an artifact re-sorted in place stayed green while a reviewer's
+    # re-run produced a diff — the one property this arm is named for (measured: rewriting
+    # the committed file with `sort_keys=True` left the earlier version of this test green).
+    fresh = json.dumps(module_build(), indent=2, default=str) + "\n"
+    committed = (BUNDLE / "out" / "t1-t5-score.json").read_text()
+    assert fresh == committed, (
+        "the committed artifact is not byte-for-byte what the scorer writes — re-run "
+        "`python docs/evidence/14691-noise-validation/score_t1_t5.py` and commit its output")
+
+
+def test_the_conjuncts_that_never_decide_on_this_run_are_still_pinned():
+    """Three rule conjuncts are TRUE on the committed data, so no fixture in this run can
+    red them — and a prior round measured all three as freely deletable with the suite
+    green. Each is driven here with the OTHER legs held true, so the conjunct under test is
+    the only thing that can decide, in both directions.
+
+    - T2's `exactly ONE shared point` (two shared ids is FAIL, one is PASS). The scorer's
+      own comment sells this property and nothing exercised it.
+    - T4's `at least one Source per document ingested`.
+    - T1's `no Point whose text re-states an existing Point`, which is the only thing
+      keeping T1 red once the entity layers hold.
+    """
+    import copy
+
+    module = _score_module()
+    corpus = _corpus()
+
+    # ── T1: entity deltas zero + no duplicate names, so `restated` alone decides.
+    receipt_t1 = copy.deepcopy(_receipt())
+    p2 = receipt_t1["passes"][1]
+    for doc in p2["documents"]:
+        after = copy.deepcopy(doc["overview_after"])
+        before = doc["overview_before"]
+        # Hold each entity layer at its pre-document value: no Object/Subject/Event growth.
+        for layer in ("taxonomy",):
+            after[layer] = dict(before.get(layer) or {})
+        doc["overview_after"] = after
+    receipt_t1["passes"][1]["overview_after"] = copy.deepcopy(
+        receipt_t1["passes"][1]["overview_before"])
+    row = module.t1(receipt_t1)
+    assert row["entities"]["object_delta"] == 0 and row["entities"]["subject_delta"] == 0
+    assert row["same_name_entities_after_both_passes"] == {}
+    assert row["restated_points_pass_2"]["restating_a_pass_1_point"] > 0, (
+        "the fixture must leave restatements in place, so this conjunct is the only one "
+        "that can fail")
+    assert row["verdict"] == "FAIL", (
+        "T1 PASSes a re-ingestion whose only defect is that Points re-state earlier Points "
+        "— the restatement conjunct is dropped")
+    # …and with the restatements removed it must PASS, so the arm is not satisfied by
+    #   making T1 fail unconditionally.
+    for doc in p2["documents"]:
+        for pt in ((doc.get("result") or {}).get("points") or []):
+            pt["text"] = "zzz nothing in common zzz"
+    assert module.t1(receipt_t1)["verdict"] == "PASS", (
+        "T1 fails a re-ingestion that adds no entity and re-states nothing — the "
+        "restatement conjunct is not reading the detector")
+
+    # ── T2: the entity delta is forced to zero, so `exactly ONE shared point` decides.
+    cands = _score()["tests"]["T2"]["goal_point_candidates"]
+    ids3 = [c["point_id"] for c in cands if c["doc_id"] == "doc-03"]
+    ids6 = [c["point_id"] for c in cands if c["doc_id"] == "doc-06"]
+    assert len(ids3) == 2 and len(ids6) == 2, "the fixture needs two goal points per document"
+
+    def t2_with(mapping: dict) -> dict:
+        """A fresh receipt each time: a rebind is not idempotent, so reusing one would
+        silently apply the SECOND mapping to the FIRST mapping's output."""
+        receipt = copy.deepcopy(_receipt())
+        doc6 = next(d for d in receipt["passes"][0]["documents"]
+                    if d["doc_id"] == "doc-06")
+        doc6["overview_after"] = copy.deepcopy(doc6["overview_before"])
+        for doc in receipt["passes"][0]["documents"]:
+            for pt in ((doc.get("result") or {}).get("points") or []):
+                if pt.get("point_id") in mapping:
+                    pt["point_id"] = mapping[pt["point_id"]]
+        return module.t2(receipt, corpus)
+
+    # TWO shared ids: the product believes the fact is two things, which the rule fails.
+    two = t2_with({ids3[0]: ids6[0], ids3[1]: ids6[1]})
+    assert two["legs"]["entity_delta_zero"] is True, "the entity leg must be held true here"
+    assert two["legs"]["shared_count"] == 2
+    assert two["verdict"] == "FAIL", (
+        "T2 PASSes with TWO shared goal points — `len(shared) == 1` has been relaxed to "
+        "`>= 1`, which is the property the scorer's own comment claims")
+    # …and exactly one shared id (with a non-zero entity delta removed) must PASS.
+    one = t2_with({ids3[1]: ids6[0]})
+    assert one["legs"]["shared_count"] == 1, "the single-shared-id control did not rebind"
+    assert one["verdict"] == "PASS", (
+        "T2 fails with one shared point and no entity growth — the shared-id leg is "
+        "over-strict or another leg is misfiring")
+
+    # ── T4: Sources below one-per-document must FAIL, everything else true.
+    readback = copy.deepcopy(_readback())
+    readback["overview"]["taxonomy"] = {"Point": 100, "Event": 26, "Subject": 10,
+                                        "Object": 25, "Source": 5}
+    readback["overview"]["sources"] = {"total": 5, "with_points": 5}
+    readback["entities"] = [
+        {"id": "s1", "name": "Sales Lead", "layer": "subject", "kind": "core:role"},
+        {"id": "s2", "name": "the delivery partner decision", "layer": "object",
+         "kind": "core:decision"},
+    ]
+    import unittest.mock as mock
+    with mock.patch.object(module, "load", return_value=readback):
+        short = module.t4({}, corpus)
+        assert short["flat_distribution"]["Source"] == 5, "the fixture must be short one Source"
+        assert short["decision_leg"]["graded"] is True
+        assert short["role_leg"]["graded"] is True
+        assert short["verdict"] == "FAIL", (
+            "T4 PASSes with fewer Sources than ingested documents — its "
+            "`Source >= documents` conjunct is dropped")
+        readback["overview"]["taxonomy"]["Source"] = 6
+        readback["overview"]["sources"] = {"total": 6, "with_points": 6}
+        assert module.t4({}, corpus)["verdict"] == "PASS", (
+            "T4 fails at one Source per document — the conjunct is not reading the "
+            "taxonomy, or is over-strict")

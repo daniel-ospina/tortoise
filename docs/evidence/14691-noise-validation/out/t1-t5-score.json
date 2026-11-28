@@ -108,8 +108,8 @@
       },
       "restated_points_pass_2": {
         "pass_2_points": 61,
-        "restating_a_pass_1_point": 38,
-        "share": 0.623,
+        "restating_a_pass_1_point": 40,
+        "share": 0.656,
         "rows": [
           {
             "point_id": "pt_67e9fa97ecdff2a945959a1563f6dcc299e55eddeb03da4a80ba3318f50362",
@@ -131,7 +131,7 @@
             "point_id": "pt_e5893ddc5d1cbf3544bdfd6d8ab4b3585b17e4c7f3de4203b43c3aff05e036",
             "doc_id": "doc-01",
             "dedup": "new",
-            "overlap": 0.91,
+            "overlap": 0.9,
             "text": "ColdPath Logistics offers a 9pm order cutoff and a validated cold-chain certificate",
             "restates": "ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots and holds a validated cold-chain certificate"
           },
@@ -139,7 +139,7 @@
             "point_id": "pt_c45f0aed1a75b1e4165fd7ca53520183a6e1502d0f0327935e363c19585991",
             "doc_id": "doc-01",
             "dedup": "new",
-            "overlap": 0.89,
+            "overlap": 0.88,
             "text": "The own-van option requires 48,000 pounds of capital spending",
             "restates": "The own refrigerated van option needs 48,000 pounds of capital spending, which is more than our current cash buffer allows"
           },
@@ -187,7 +187,7 @@
             "point_id": "pt_59e6984a6e3a90d2a3ac361a40deb445ae77597c5195f20a4b3547bf8a0af6",
             "doc_id": "doc-02",
             "dedup": "new",
-            "overlap": 0.87,
+            "overlap": 0.8,
             "text": "The cold chain must stay below 4 degrees Celsius at all times from the loading bay to the customer's door.",
             "restates": "Chilled goods must stay below 4 degrees Celsius at all times from our loading bay to the customer's door."
           },
@@ -211,7 +211,7 @@
             "point_id": "pt_201d78948fdff3589241e16f65f0bf4f97d85604dfbc2376d01dbd3b013eeb",
             "doc_id": "doc-03",
             "dedup": "new",
-            "overlap": 0.86,
+            "overlap": 0.83,
             "text": "The growth goal is to reach 40 restaurant accounts by December",
             "restates": "The goal is to reach 40 restaurant accounts by December."
           },
@@ -219,7 +219,7 @@
             "point_id": "pt_6f25611384ef4dde7ba428621b1743ec47a2859f901696e10d2aa5f12b2666",
             "doc_id": "doc-03",
             "dedup": "new",
-            "overlap": 0.89,
+            "overlap": 0.86,
             "text": "Delivery capacity limits how fast restaurant accounts can be added",
             "restates": "Delivery capacity is the binding constraint on how fast restaurant accounts can be added, not demand or sales throughput."
           },
@@ -235,9 +235,17 @@
             "point_id": "pt_58eddc71e9334671db3c71aed7c0b3ab37d99eb265d55d1eb449b013e68f05",
             "doc_id": "doc-03",
             "dedup": "new",
-            "overlap": 0.81,
+            "overlap": 0.8,
             "text": "Cold-chain rules mean an account cannot be added unless the cold chain can be held below 4 degrees for that slot",
             "restates": "An account cannot be added unless the cold chain can be held below 4 degrees for its morning delivery slot."
+          },
+          {
+            "point_id": "pt_9fdcc9ef8846340dffa4bb7dc3bb05f21510d20234672bd7f6e67407c4861f",
+            "doc_id": "doc-03",
+            "dedup": "new",
+            "overlap": 0.83,
+            "text": "Each new restaurant account needs a signed supply agreement and a first delivery with a temperature log before it counts as an account",
+            "restates": "A new restaurant account does not count until it has a signed supply agreement and a first delivery with a temperature log."
           },
           {
             "point_id": "pt_7edb80e1eea7f2823ef5bf22e5ce291a760c5855da86514a297d1d0a417655",
@@ -315,17 +323,25 @@
             "point_id": "pt_c4ecca383881ae5ba21163564b0b21cecc7b640b9d72bf9b8ce33cb8271e09",
             "doc_id": "doc-05",
             "dedup": "new",
-            "overlap": 0.9,
+            "overlap": 0.88,
             "text": "We believed ColdPath Logistics was a viable delivery partner for chilled goods",
             "restates": "ColdPath Logistics was believed to be a viable chilled-delivery partner for the wholesale push"
+          },
+          {
+            "point_id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+            "doc_id": "doc-05",
+            "dedup": "new",
+            "overlap": 0.8,
+            "text": "Two of ColdPath's vehicles could not show a validated cold-chain certificate, so ColdPath does not hold a validated cold-chain certificate for our routes",
+            "restates": "ColdPath Logistics failed its cold-chain audit: two of its vehicles could not show a validated cold-chain certificate"
           },
           {
             "point_id": "pt_94b2d0840c239501d3d8ae75090bc92300499a7ca9abe94d585f2a6eb600ca",
             "doc_id": "doc-05",
             "dedup": "new",
-            "overlap": 0.92,
+            "overlap": 1.0,
             "text": "Our wholesale licence forbids subcontracting chilled goods to a partner without a validated cold-chain certificate",
-            "restates": "Our wholesale licence forbids subcontracting the delivery of chilled goods to a partner that does not hold a validated cold-chain certificate."
+            "restates": "The wholesale licence forbids subcontracting chilled goods to a partner without a validated cold-chain certificate"
           },
           {
             "point_id": "pt_d1008a76210e80dc8ba9805fea4d5c6105e1648293f57eaba9cbc7fc613ee8",
@@ -403,7 +419,7 @@
             "point_id": "pt_c9d643e1545786c2bd58f87b7526aac325d134f10d4aadc1f7760b71f985be",
             "doc_id": "doc-06",
             "dedup": "new",
-            "overlap": 0.93,
+            "overlap": 1.0,
             "text": "Every restaurant account requires a morning delivery slot with the cold chain held below four degrees.",
             "restates": "Each restaurant account requires a morning delivery slot with the cold chain held below four degrees."
           },
@@ -443,7 +459,7 @@
     },
     "T2": {
       "test": "T2",
-      "rule": "PASS iff the restatement (doc-06) adds 0 entities AND the goal fact resolves to exactly ONE point id shared across the two wordings; a second same-meaning entity (an unlinked second point) is FAIL. \u26d4 The rule's \"carrying two sources\" leg is NOT graded: the sources door answers per-Source POINT COUNTS, not point-to-Source links, so \"does this point carry two sources\" cannot be asked of the committed readback at all \u2014 recorded as gap D7 rather than assumed.",
+      "rule": "PASS iff the restatement (doc-06) adds 0 new ENTITIES and the goal fact resolves to exactly ONE point id shared across the two wordings; a second same-meaning entity (an unlinked second point) is FAIL. 'Entities' here is Object + Subject, NOT Event: doc-06's first ingest is one capture, and RULE_T1 states that one Event per capture is expected rather than noise, so counting it here would fail T2 on an axis this bundle declares clean. Overlap is content-token overlap (lowercased alphanumeric tokens of >2 characters, common English function words removed). \u26d4 The rule's \"carrying two sources\" leg is NOT graded: the sources door answers per-Source POINT COUNTS, not point-to-Source links, so \"does this point carry two sources\" cannot be asked of the committed readback at all \u2014 recorded as gap D7 rather than assumed.",
       "pair": [
         "doc-03",
         "doc-06"
@@ -503,7 +519,7 @@
           "kind": "statement",
           "dedup": "new",
           "text": "The goal is to reach 40 restaurant accounts by December.",
-          "overlap": 0.83
+          "overlap": 1.0
         },
         {
           "doc_id": "doc-03",
@@ -511,7 +527,7 @@
           "kind": "statement",
           "dedup": "new",
           "text": "The company currently holds 18 restaurant accounts, so 22 more are needed to reach 40 by December.",
-          "overlap": 0.6
+          "overlap": 0.62
         },
         {
           "doc_id": "doc-06",
@@ -519,7 +535,7 @@
           "kind": "statement",
           "dedup": "new",
           "text": "The restaurant-account goal is forty restaurant accounts by the end of December.",
-          "overlap": 0.75
+          "overlap": 0.71
         },
         {
           "doc_id": "doc-06",
@@ -527,7 +543,7 @@
           "kind": "statement",
           "dedup": "new",
           "text": "Eighteen restaurant accounts are held today, leaving twenty-two outstanding against the goal of forty.",
-          "overlap": 0.71
+          "overlap": 0.67
         }
       ],
       "goal_point_ids": {
@@ -543,6 +559,7 @@
       },
       "legs": {
         "entity_delta_zero": false,
+        "entity_axes": "Object + Subject (Event excluded \u2014 RULE_T1 declares one Event per capture expected)",
         "exactly_one_shared_point": false,
         "shared_count": 0
       },
@@ -616,13 +633,13 @@
       "corpus_overlap": {
         "wording_a_vs_doc03_text": 1.0,
         "wording_b_vs_doc06_text": 1.0,
-        "wording_b_vs_wording_a": 0.21
+        "wording_b_vs_wording_a": 0.24
       },
       "verdict": "FAIL"
     },
     "T3": {
       "test": "T3",
-      "rule": "Reported as a share, with an explicit population. PASS iff the majority of created entities are NOT orphans AND every orphan named is standalone in the corpus text \u2014 graded as: its NAME is stated in one document, verbatim or at >= 0.8 of the name's own >4-character tokens (the same near-match band T1 uses for a restatement); otherwise FAIL, with the door's own answer reported beside the write receipt's so a door defect cannot be laundered as an extractor defect.",
+      "rule": "Reported as a share, with an explicit population. PASS iff the majority of created entities are NOT orphans AND every orphan named is standalone in the corpus text \u2014 graded as: its NAME is stated in one document, verbatim or at >= 0.8 content-token overlap with that document (content tokens are lowercased alphanumeric tokens of >2 characters with common English function words removed; the same near-match band T1 uses for a restatement); otherwise FAIL, with the door's own answer reported beside the write receipt's so a door defect cannot be laundered as an extractor defect.",
       "population": {
         "entities_enumerated_by_full_scan": 30,
         "note": "population is every ENTITY the typed full scan resolves; Points are excluded because a Point's edges are epistemic bindings the write receipt does not enumerate \u2014 recorded as a gap (REPORT \u00a78)"
@@ -1185,15 +1202,75 @@
     },
     "T5": {
       "test": "T5",
-      "rule": "PASS iff every sampled relation is stated or directly implied by the corpus text: both ENDPOINTS named in one document \u2014 verbatim, or the extractor's re-wording at >= 0.6 content-token overlap with that document. The POPULATION is every relation either pass's write receipt says it wrote: pass 2 is where re-extraction invents names (\u00a74), so excluding it would be sampling away the defect. One relation whose endpoints are never co-stated fails the test. \u26d4 The PREDICATE axis is NOT graded: the corpus is prose and the graph's predicates are ontology names (`ownedBy`, `related`, \u2026), so a wording test would score a correct normalisation as an invention \u2014 the count of rows whose predicate wording appears in its co-stated documents is reported as gap D6 instead of being passed silently.",
+      "rule": "PASS iff every sampled relation is stated or directly implied by the corpus text: both ENDPOINTS named in one document \u2014 verbatim, or the extractor's re-wording at >= 0.6 content-token overlap with that document. 'Content-token overlap' is lowercased alphanumeric tokens of >2 characters with common English function words removed. The POPULATION is every relation either pass's write receipt says it wrote: pass 2 is where re-extraction invents names (\u00a74), so excluding it would be sampling away the defect. One relation whose endpoints are never co-stated fails the test. \u26d4 The PREDICATE axis is NOT graded: the corpus is prose and the graph's predicates are ontology names (`ownedBy`, `related`, \u2026), so a wording test would score a correct normalisation as an invention \u2014 the count of rows whose predicate wording appears in its co-stated documents is reported as gap D6 instead of being passed silently.",
       "sampled": 47,
       "tiers": {
         "verbatim": 34,
-        "paraphrase": 12,
-        "none": 1
+        "paraphrase": 10,
+        "none": 3
       },
-      "supported": 46,
+      "supported": 44,
       "unsupported": [
+        {
+          "doc_id": "doc-05",
+          "pass": 1,
+          "predicate": "related",
+          "stated_predicate": "related",
+          "write_path": "structural",
+          "src": "ColdPath Logistics",
+          "dst": "the wholesale push",
+          "src_kind": "core:organization",
+          "dst_kind": "core:Project",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [],
+            "best_overlap": 0.5
+          },
+          "co_stated_verbatim": [],
+          "co_stated_paraphrase": [],
+          "support": "none"
+        },
+        {
+          "doc_id": "doc-05",
+          "pass": 1,
+          "predicate": "related",
+          "stated_predicate": "related",
+          "write_path": "structural",
+          "src": "NordicFreight",
+          "dst": "the wholesale push",
+          "src_kind": "core:organization",
+          "dst_kind": "core:Project",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [],
+            "best_overlap": 0.5
+          },
+          "co_stated_verbatim": [],
+          "co_stated_paraphrase": [],
+          "support": "none"
+        },
         {
           "doc_id": "doc-04",
           "pass": 2,
@@ -1245,7 +1322,7 @@
             "paraphrase_docs": [
               "doc-01"
             ],
-            "best_overlap": 0.75
+            "best_overlap": 0.67
           },
           "dst_trace": {
             "verbatim_docs": [
@@ -1281,10 +1358,9 @@
           "src_trace": {
             "verbatim_docs": [],
             "paraphrase_docs": [
-              "doc-01",
-              "doc-04"
+              "doc-01"
             ],
-            "best_overlap": 0.8
+            "best_overlap": 0.75
           },
           "dst_trace": {
             "verbatim_docs": [
@@ -1301,8 +1377,7 @@
           },
           "co_stated_verbatim": [],
           "co_stated_paraphrase": [
-            "doc-01",
-            "doc-04"
+            "doc-01"
           ],
           "support": "paraphrase"
         },
@@ -1470,7 +1545,7 @@
               "doc-03",
               "doc-04"
             ],
-            "best_overlap": 0.67
+            "best_overlap": 0.75
           },
           "co_stated_verbatim": [],
           "co_stated_paraphrase": [
@@ -1502,7 +1577,7 @@
               "doc-02",
               "doc-05"
             ],
-            "best_overlap": 0.8
+            "best_overlap": 0.75
           },
           "co_stated_verbatim": [],
           "co_stated_paraphrase": [
@@ -1674,7 +1749,7 @@
               "doc-03",
               "doc-04"
             ],
-            "best_overlap": 0.67
+            "best_overlap": 0.75
           },
           "co_stated_verbatim": [],
           "co_stated_paraphrase": [
@@ -2131,17 +2206,12 @@
           },
           "dst_trace": {
             "verbatim_docs": [],
-            "paraphrase_docs": [
-              "doc-02",
-              "doc-05"
-            ],
-            "best_overlap": 0.67
+            "paraphrase_docs": [],
+            "best_overlap": 0.5
           },
           "co_stated_verbatim": [],
-          "co_stated_paraphrase": [
-            "doc-05"
-          ],
-          "support": "paraphrase"
+          "co_stated_paraphrase": [],
+          "support": "none"
         },
         {
           "doc_id": "doc-05",
@@ -2166,17 +2236,12 @@
           },
           "dst_trace": {
             "verbatim_docs": [],
-            "paraphrase_docs": [
-              "doc-02",
-              "doc-05"
-            ],
-            "best_overlap": 0.67
+            "paraphrase_docs": [],
+            "best_overlap": 0.5
           },
           "co_stated_verbatim": [],
-          "co_stated_paraphrase": [
-            "doc-05"
-          ],
-          "support": "paraphrase"
+          "co_stated_paraphrase": [],
+          "support": "none"
         },
         {
           "doc_id": "doc-05",
@@ -2193,7 +2258,6 @@
               "doc-05"
             ],
             "paraphrase_docs": [
-              "doc-01",
               "doc-05"
             ],
             "best_overlap": 1.0
@@ -2217,7 +2281,6 @@
             "doc-05"
           ],
           "co_stated_paraphrase": [
-            "doc-01",
             "doc-05"
           ],
           "support": "verbatim"
@@ -2485,7 +2548,7 @@
               "doc-03",
               "doc-04"
             ],
-            "best_overlap": 0.67
+            "best_overlap": 0.75
           },
           "dst_trace": {
             "verbatim_docs": [],
@@ -2516,7 +2579,7 @@
               "doc-02",
               "doc-05"
             ],
-            "best_overlap": 0.8
+            "best_overlap": 0.75
           },
           "dst_trace": {
             "verbatim_docs": [],
@@ -2549,17 +2612,14 @@
               "doc-02",
               "doc-05"
             ],
-            "best_overlap": 0.8
+            "best_overlap": 0.75
           },
           "dst_trace": {
             "verbatim_docs": [],
             "paraphrase_docs": [
               "doc-01",
               "doc-02",
-              "doc-03",
-              "doc-04",
-              "doc-05",
-              "doc-06"
+              "doc-05"
             ],
             "best_overlap": 1.0
           },
@@ -3181,7 +3241,6 @@
               "doc-05"
             ],
             "paraphrase_docs": [
-              "doc-01",
               "doc-05"
             ],
             "best_overlap": 1.0
@@ -3205,7 +3264,6 @@
             "doc-05"
           ],
           "co_stated_paraphrase": [
-            "doc-01",
             "doc-05"
           ],
           "support": "verbatim"
@@ -3562,9 +3620,9 @@
   },
   "rules": {
     "T1": "PASS iff the second ingestion adds no RE-STATED knowledge: 0 new Objects, 0 new Subjects, 0 same-name entities, and no Point whose text re-states an existing Point (>= 0.8 content-token overlap with a pass-1 Point). Events are reported SEPARATELY and are not counted as noise on the object axis: a re-ingestion IS an occurrence, so one Event per capture is expected \u2014 but an event-kind POINT re-minted for a sentence that was already stated is noise, and is counted.",
-    "T2": "PASS iff the restatement (doc-06) adds 0 entities AND the goal fact resolves to exactly ONE point id shared across the two wordings; a second same-meaning entity (an unlinked second point) is FAIL. \u26d4 The rule's \"carrying two sources\" leg is NOT graded: the sources door answers per-Source POINT COUNTS, not point-to-Source links, so \"does this point carry two sources\" cannot be asked of the committed readback at all \u2014 recorded as gap D7 rather than assumed.",
-    "T3": "Reported as a share, with an explicit population. PASS iff the majority of created entities are NOT orphans AND every orphan named is standalone in the corpus text \u2014 graded as: its NAME is stated in one document, verbatim or at >= 0.8 of the name's own >4-character tokens (the same near-match band T1 uses for a restatement); otherwise FAIL, with the door's own answer reported beside the write receipt's so a door defect cannot be laundered as an extractor defect.",
+    "T2": "PASS iff the restatement (doc-06) adds 0 new ENTITIES and the goal fact resolves to exactly ONE point id shared across the two wordings; a second same-meaning entity (an unlinked second point) is FAIL. 'Entities' here is Object + Subject, NOT Event: doc-06's first ingest is one capture, and RULE_T1 states that one Event per capture is expected rather than noise, so counting it here would fail T2 on an axis this bundle declares clean. Overlap is content-token overlap (lowercased alphanumeric tokens of >2 characters, common English function words removed). \u26d4 The rule's \"carrying two sources\" leg is NOT graded: the sources door answers per-Source POINT COUNTS, not point-to-Source links, so \"does this point carry two sources\" cannot be asked of the committed readback at all \u2014 recorded as gap D7 rather than assumed.",
+    "T3": "Reported as a share, with an explicit population. PASS iff the majority of created entities are NOT orphans AND every orphan named is standalone in the corpus text \u2014 graded as: its NAME is stated in one document, verbatim or at >= 0.8 content-token overlap with that document (content tokens are lowercased alphanumeric tokens of >2 characters with common English function words removed; the same near-match band T1 uses for a restatement); otherwise FAIL, with the door's own answer reported beside the write receipt's so a door defect cannot be laundered as an extractor defect.",
     "T4": "PASS iff none of the ontology's types is collapsed: the flat (Point/Event/Subject/Object/Source) distribution is non-degenerate (Event, Subject and Object all non-zero, and at least one Source per document ingested), a decision is represented by a decision-kind ENTITY, roles land as Subject-layer role entities, and documents land as Sources. \u26d4 The decision's SENTENCES are Points and land as `statement` kind; this rule grades the decision ENTITY, and the Points' kinds are reported beside the verdict rather than graded.",
-    "T5": "PASS iff every sampled relation is stated or directly implied by the corpus text: both ENDPOINTS named in one document \u2014 verbatim, or the extractor's re-wording at >= 0.6 content-token overlap with that document. The POPULATION is every relation either pass's write receipt says it wrote: pass 2 is where re-extraction invents names (\u00a74), so excluding it would be sampling away the defect. One relation whose endpoints are never co-stated fails the test. \u26d4 The PREDICATE axis is NOT graded: the corpus is prose and the graph's predicates are ontology names (`ownedBy`, `related`, \u2026), so a wording test would score a correct normalisation as an invention \u2014 the count of rows whose predicate wording appears in its co-stated documents is reported as gap D6 instead of being passed silently."
+    "T5": "PASS iff every sampled relation is stated or directly implied by the corpus text: both ENDPOINTS named in one document \u2014 verbatim, or the extractor's re-wording at >= 0.6 content-token overlap with that document. 'Content-token overlap' is lowercased alphanumeric tokens of >2 characters with common English function words removed. The POPULATION is every relation either pass's write receipt says it wrote: pass 2 is where re-extraction invents names (\u00a74), so excluding it would be sampling away the defect. One relation whose endpoints are never co-stated fails the test. \u26d4 The PREDICATE axis is NOT graded: the corpus is prose and the graph's predicates are ontology names (`ownedBy`, `related`, \u2026), so a wording test would score a correct normalisation as an invention \u2014 the count of rows whose predicate wording appears in its co-stated documents is reported as gap D6 instead of being passed silently."
   }
 }

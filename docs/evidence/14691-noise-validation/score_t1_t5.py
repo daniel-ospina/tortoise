@@ -39,9 +39,14 @@ RULE_T1 = ("PASS iff the second ingestion adds no RE-STATED knowledge: 0 new "
            "noise on the object axis: a re-ingestion IS an occurrence, so one "
            "Event per capture is expected — but an event-kind POINT re-minted for "
            "a sentence that was already stated is noise, and is counted.")
-RULE_T2 = ("PASS iff the restatement (doc-06) adds 0 entities AND the goal fact "
-           "resolves to exactly ONE point id shared across the two wordings; a second "
-           "same-meaning entity (an unlinked second point) is FAIL. ⛔ The rule's "
+RULE_T2 = ("PASS iff the restatement (doc-06) adds 0 new ENTITIES and the goal "
+           "fact resolves to exactly ONE point id shared across the two wordings; a "
+           "second same-meaning entity (an unlinked second point) is FAIL. 'Entities' "
+           "here is Object + Subject, NOT Event: doc-06's first ingest is one capture, "
+           "and RULE_T1 states that one Event per capture is expected rather than "
+           "noise, so counting it here would fail T2 on an axis this bundle declares "
+           "clean. Overlap is content-token overlap (lowercased alphanumeric tokens "
+           "of >2 characters, common English function words removed). ⛔ The rule's "
            "\"carrying two sources\" leg is NOT graded: the sources door answers "
            "per-Source POINT COUNTS, not point-to-Source links, so \"does this point "
            "carry two sources\" cannot be asked of the committed readback at all — "
@@ -49,10 +54,12 @@ RULE_T2 = ("PASS iff the restatement (doc-06) adds 0 entities AND the goal fact 
 RULE_T3 = ("Reported as a share, with an explicit population. PASS iff the "
            "majority of created entities are NOT orphans AND every orphan named "
            "is standalone in the corpus text — graded as: its NAME is stated in one "
-           "document, verbatim or at >= 0.8 of the name's own >4-character tokens "
-           "(the same near-match band T1 uses for a restatement); otherwise FAIL, "
-           "with the door's own answer reported beside the write receipt's so a "
-           "door defect cannot be laundered as an extractor defect.")
+           "document, verbatim or at >= 0.8 content-token overlap with that document "
+           "(content tokens are lowercased alphanumeric tokens of >2 characters with "
+           "common English function words removed; the same near-match band T1 uses "
+           "for a restatement); otherwise FAIL, with the door's own answer reported "
+           "beside the write receipt's so a door defect cannot be laundered as an "
+           "extractor defect.")
 RULE_T4 = ("PASS iff none of the ontology's types is collapsed: the flat "
            "(Point/Event/Subject/Object/Source) distribution is non-degenerate "
            "(Event, Subject and Object all non-zero, and at least one Source per "
@@ -64,7 +71,9 @@ RULE_T4 = ("PASS iff none of the ontology's types is collapsed: the flat "
 RULE_T5 = ("PASS iff every sampled relation is stated or directly implied by the "
            "corpus text: both ENDPOINTS named in one document — verbatim, or the "
            "extractor's re-wording at >= 0.6 content-token overlap with that "
-           "document. The POPULATION is every relation either pass's write receipt "
+           "document. 'Content-token overlap' is lowercased alphanumeric tokens of "
+           ">2 characters with common English function words removed. The POPULATION "
+           "is every relation either pass's write receipt "
            "says it wrote: pass 2 is where re-extraction invents names (§4), so "
            "excluding it would be sampling away the defect. One relation whose "
            "endpoints are never co-stated fails the test. ⛔ The PREDICATE axis is "
@@ -179,12 +188,40 @@ def doc_texts(corpus: dict) -> dict[str, str]:
             for d in corpus["documents"]}
 
 
+#: ⛔ Common English FUNCTION words, removed before any overlap is computed. Without
+#: this, `the wholesale push` scored 0.667 against doc-05 on `the` + `wholesale` alone and
+#: cleared T5's 0.6 paraphrase band — an endpoint name the corpus never says, declared
+#: supported on a function word. A `content-token` overlap that counts `the` is not a
+#: content-token overlap, and every band below (T5's 0.6, T1's 0.8, T3's 0.8, T2's 0.45)
+#: is stated in those terms.
+STOPWORDS = frozenset((
+    "a", "an", "the", "and", "or", "but",
+    "if", "then", "than", "so", "of", "to",
+    "in", "on", "at", "for", "with", "by",
+    "from", "as", "is", "are", "was", "were",
+    "be", "been", "being", "has", "have", "had",
+    "do", "does", "did", "not", "no", "nor",
+    "up", "out", "into", "onto", "about", "over",
+    "under", "above", "below", "more", "most", "less",
+    "least", "also", "just", "only", "all", "any",
+    "some", "each", "every", "per", "after", "before",
+    "between", "while", "when", "where", "which", "who",
+    "whom", "what", "how", "why", "its", "it",
+    "this", "that", "these", "those", "we", "our",
+    "you", "your", "they", "their", "he", "she",
+    "his", "her", "them", "us", "there", "here",
+    "can", "cannot", "could", "may", "might", "must",
+    "shall", "should", "will", "would",
+))
+
+
 def norm(text) -> str:
     return " ".join(str(text or "").lower().split())
 
 
 def tokens(text) -> set[str]:
-    return {t for t in re.findall(r"[a-z0-9]+", norm(text)) if len(t) > 2}
+    return {t for t in re.findall(r"[a-z0-9]+", norm(text))
+            if len(t) > 2 and t not in STOPWORDS}
 
 
 def overlap(text, reference: str) -> float:
@@ -376,8 +413,11 @@ def t2(receipt: dict, corpus: dict) -> dict:
     #     door answers per-Source POINT COUNTS, not point->Source links, so the
     #     question cannot be put to the committed readback at all. Recorded as gap
     #     D7 and reported beside the verdict instead of being silently implied.
-    entity_delta = (d.get("taxonomy.Object", 0) + d.get("taxonomy.Subject", 0)
-                    + d.get("taxonomy.Event", 0))
+    # ⛔ `taxonomy.Event` is deliberately NOT in this sum — see RULE_T2: one Event per
+    # capture is what RULE_T1 calls expected, and doc-06's window is a single capture. A
+    # fix that removed the duplicate Object and merged the points would otherwise still
+    # fail T2 on an axis this bundle declares clean.
+    entity_delta = (d.get("taxonomy.Object", 0) + d.get("taxonomy.Subject", 0))
     one_shared_point = len(shared) == 1
     verdict = "PASS" if (entity_delta == 0 and one_shared_point) else "FAIL"
     return {
@@ -392,6 +432,8 @@ def t2(receipt: dict, corpus: dict) -> dict:
         "goal_point_ids": {"doc_03": sorted(ids_a), "doc_06": sorted(ids_b),
                            "shared": sorted(shared)},
         "legs": {"entity_delta_zero": entity_delta == 0,
+                 "entity_axes": "Object + Subject (Event excluded — RULE_T1 declares one "
+                                "Event per capture expected)",
                  "exactly_one_shared_point": one_shared_point,
                  "shared_count": len(shared)},
         "source_link_leg": {
@@ -700,7 +742,15 @@ def t5(receipt: dict, corpus: dict) -> dict:
     }
 
 
-def main() -> int:
+def build_result() -> dict:
+    """The whole artifact, as a value — `main()` writes exactly this.
+
+    Split out so the bundle's suite can compare the committed file to a fresh build
+    BYTE for byte (`json.dumps(build_result(), indent=2, default=str) + "\n"` is what
+    `main()` writes). A test that compared parsed JSON round-trips was blind to dict KEY
+    ORDER, so an artifact re-sorted in place stayed green while a reviewer's re-run
+    produced a diff — the one property the bundle sells.
+    """
     receipt = load("ingest-receipt.json")
     corpus = json.loads((HERE / "corpus" / "noise-corpus.json").read_text())
 
@@ -723,6 +773,11 @@ def main() -> int:
                      ("T5", lambda: t5(receipt, corpus))):
         result["tests"][name] = fn()
 
+    return result
+
+
+def main() -> int:
+    result = build_result()
     (OUT / "t1-t5-score.json").write_text(
         json.dumps(result, indent=2, default=str) + "\n")
 
