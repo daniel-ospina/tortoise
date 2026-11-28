@@ -891,18 +891,38 @@ class TestProbeDbBoundedAcquisition:
         false-degrade, and the exact cold-embedded-acquisition scenario the
         retry exists for.
 
-        The acquisition budget is PATCHED UP to 4.0 so the 1.45s sleep keeps
-        >=2s of overshoot headroom. The test needs only ``slow >
-        PROBE_TIMEOUT - PROBE_RETRY_DELAY`` (proven by the assertion below,
-        not assumed), and racing a 2.0s deadline with a 1.45s sleep on a box
-        running a dozen agent lanes is how a guard becomes a flake.
+        BOTH deadlines this test races are PATCHED UP, and the reason is the
+        same for each: an absolute figure that leaves a phase ~1.4s of room is
+        a coin flip on a saturated runner. The acquisition keeps >=2s of
+        overshoot headroom against its own deadline; the RETRY keeps
+        ``budget - PROBE_RETRY_DELAY`` (3.9s here, 2.8x the shipped 1.4s),
+        because its two phases queue on the SAME single-slot probe worker every
+        other probe in the process uses (#3683). The retry window is the half
+        this test originally left thin, and it is the half that red-ed:
+        ``test-slow (b)`` at ``5fc0b5f38a`` failed this row with
+        ``{'ok': False, 'observed': True, 'latency_ms': 1776.7, 'error':
+        'transient connect refused'}`` — the dict shape the "retry's setup timed
+        out, keep the first error" arm produces, and ``latency_ms`` ~ the whole
+        consumed retry window is what PINS it to that arm: the no-retry arm
+        (``remaining <= 0``, the mutant below) reports the same keys but a
+        near-zero ``latency_ms`` and a probe count of 1, so the reading, not the
+        shape, discriminates them — on a
+        head that does not touch this file (#9431). The property under test is
+        that the acquisition consumes nearly ALL of the total budget, never any
+        absolute duration, so raising the budget and the sleep together keeps
+        the invariant and drops the race.
 
         LOAD-BEARING (mutation: measure ``remaining`` from ``start`` again
         instead of ``probe_start``): the retry never happens, ``ok`` is False
         and this reds.
         """
         calls = {"acquire": 0, "probe": 0}
-        slow = 1.45
+        # 50ms INSIDE the window the bug conflated, so the pre-fix remainder is
+        # negative BY CONSTRUCTION — ``time.sleep`` can only OVERSHOOT, so the
+        # measured elapsed is always >= ``slow``.
+        budget = 4.0
+        slow = 3.95
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", budget)
         # Derived from the constants, not hand-typed: this is the window the
         # bug conflated.
         conflated = monitoring.PROBE_TIMEOUT - monitoring.PROBE_RETRY_DELAY
@@ -910,7 +930,8 @@ class TestProbeDbBoundedAcquisition:
             f"this test only means something if the slow acquisition ({slow}s) "
             f"exceeds the probe's own remaining window ({conflated}s)"
         )
-        monkeypatch.setattr(monitoring, "PROBE_SDK_ACQUISITION_BUDGET", 4.0)
+        monkeypatch.setattr(
+            monitoring, "PROBE_SDK_ACQUISITION_BUDGET", slow + 2.0 + 0.05)
         assert slow < monitoring.PROBE_SDK_ACQUISITION_BUDGET - 2.0, (
             "keep >=2s of overshoot headroom against the acquisition deadline, "
             "or sleep jitter on a loaded box reds this test spuriously"

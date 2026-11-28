@@ -234,6 +234,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .cost_dimensions import by_name as _declared_dimension
+from .pricing import tier_display_name as _tier_display_name
 from .quota import (
     OrgNotFoundError,
     QuotaCheckError,
@@ -1764,6 +1765,40 @@ def _warn_at_cap(dim: AllowanceDimension, org_id: str, used: float,
         AT_CAP_WARNING, org_id, dim.dimension, used, allowance, refuse_at)
 
 
+def _plan_phrase(limits: Mapping[str, Any]) -> str:
+    """``" on the Builder plan"`` — the tier named as the CUSTOMER was sold it.
+
+    ⛔ THE IDENTIFIER IS NOT THE NAME (#4336, owner-filed, landed 2026-09-21):
+    *"The tier previously called **Pro** is presented to users as **Builder**.
+    The internal tier key stays ``pro``."* This refusal is the ONE sentence in
+    which a paying tenant reads its own plan's name, and it rendered the raw
+    identifier — measured on the deployed graph (#13526: *"102 MB **on the pro
+    plan**, used 329"*), i.e. exactly the drift
+    :func:`pricing.tier_display_name` exists to prevent. ``pro`` is a data value
+    in the control plane, not a word any customer bought.
+
+    ⚠️ A RESOLVER FAULT MUST NOT TURN THIS REFUSAL INTO A 500 (#3981). The
+    caller refuses the write either way; if the display-name map cannot be
+    resolved (``pricing.json`` declaring a tier that ``TIER_DISPLAY_NAMES`` does
+    not label, which ``tier_display_names`` raises for BY DESIGN so it cannot
+    ship as a rendered page), the plan clause is DROPPED and the fault is
+    reported to the operator — never a new user-facing failure over our own
+    artifact state, and never the raw identifier rendered as a plan name.
+    """
+    tier = limits.get("tier")
+    if not tier:
+        return ""
+    try:
+        name = _tier_display_name(str(tier))
+    except KeyError:
+        _logger.error(
+            "allowance refusal cannot name the plan: pricing declares a tier "
+            "with no display name (%r) — the plan clause is omitted (#4336)",
+            tier)
+        return ""
+    return f" on the {name} plan"
+
+
 def _reading(dim: AllowanceDimension, org_id: str,
              meters: Mapping[str, Callable[[str], MeterReading | None]] | None,
              *, observed_only: bool) -> MeterReading | None:
@@ -2195,8 +2230,7 @@ def _enforce_each_dimension(
                 # instrument measured its dispersion, the refusal states it and
                 # says why the threshold sits where it does; where it did not, the
                 # refusal says the error is UNMEASURED rather than inventing one.
-                tier = limits.get("tier")
-                plan = f" on the {tier} plan" if tier else ""
+                plan = _plan_phrase(limits)
                 if reading.low is None or reading.spread is None:
                     basis = ("this figure is an ESTIMATE whose sampling error is "
                              "UNMEASURED (the reading comes from a single "

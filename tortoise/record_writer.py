@@ -549,14 +549,20 @@ class RecordWrite:
     #: ``monitoring.metrics()["record_write_failures"]`` / ``["record_non_journal_skips"]``
     #: is counted under (``malformed_dsn``, ``no_durable_journal``, ``no_tenant``,
     #: ``no_tenant_carried``, ``circuit_open``, ``write_failed``,
-    #: ``journal_collision``), else ``None``.
+    #: ``plan_refused``, ``journal_collision``), else ``None``.
     #: The SAME vocabulary as the counters on purpose (#8447): a caller that
     #: reports the refusal and an operator reading the metric are naming one
     #: thing, and a second word list is a second thing to drift.
     #:
     #: ⛔ ``journal_collision`` IS THE ONE POST-WRITE CONFLICT TOKEN (#9318, #12904).
-    #: Every other value is decided before a socket is opened
-    #: (`_live_write_verdict`) or by a failed statement; this one is a VERDICT on
+    #: Every other value is one of three earlier shapes: decided before a socket is
+    #: opened (`_live_write_verdict` — `malformed_dsn`, `no_tenant*`, `circuit_open`,
+    #: `no_durable_journal`), decided by the projection before a statement ran with the
+    #: connection up (`plan_refused`, #11783), or decided by the write itself: the store
+    #: unreachable, a statement that executed and failed, an allocator/position guard, or a
+    #: STORE/CONFIG refusal after the connection came up (tenant-scope read-back, a role
+    #: that bypasses RLS, a non-READ-COMMITTED transaction, the cutover guard) — all
+    #: `write_failed`. This one is none of those: it is a VERDICT on
     #: a conflict: the position row holds a record this write cannot index —
     #: a different `event_type`, a different capture time, an identity the
     #: surviving row CONTRADICTS, or (with no `ts` for the capture time to be
@@ -576,24 +582,25 @@ class RecordWrite:
     #: the residual it cannot see is the pair that shares an instant AND whose
     #: identities do NOT contradict — `agrees`, `one_sided` (one side names no
     #: identity) or `none` — which keeps the silent repair path.
-    #: Nothing is lost (the
-    #: journal holds the record); what is refused is indexing it under a position
-    #: whose row this write does not CONTINUE (a different `event_type`, a
-    #: different capture time, an identity the surviving row contradicts, or — for
-    #: a write with no `ts` — a payload whose derivation moved),
-    #: which the record cannot fix while its key carries
-    #: no journal identity (#12894).
+    #: Nothing is lost (the journal holds the record); what is refused is indexing
+    #: it under a position this write does not CONTINUE (a different `event_type`,
+    #: a different capture time, an identity the surviving row contradicts, or —
+    #: for a write with no `ts` — a payload whose derivation moved), which the
+    #: record cannot fix while its key carries no journal identity (#12894).
     #:
     #: ⛔ ``no_tenant_carried`` IS A SEPARATE TOKEN ON PURPOSE (#10021 review P3).
     #: The live door splits the nil tenant from a MALFORMED CARRIED pair — one is
     #: "nobody said whose turns these are", the other is "the caller said, and
     #: the answer was unusable" — and both count on the ``no_tenant`` COUNTER.
     #: So the closed list above is the refusal vocabulary, and the counter is a
-    #: DIFFERENT set OF THE SAME SIZE — seven labels, not the same seven. The
-    #: door folds `no_tenant_carried` onto `no_tenant` and counts
-    #: `no_durable_journal` on the skip counter, while the counter separately
-    #: carries the SDK-only `no_journal` and `seam_unimportable`; deriving one
-    #: set from the other is wrong in BOTH directions. Listing only the
+    #: DIFFERENT set OF THE SAME SIZE — eight labels, not the same eight: it folds
+    #: `no_tenant_carried` onto `no_tenant`, it counts `no_durable_journal` on the
+    #: skip counter, and it separately carries the SDK-only
+    #: `no_journal`/`seam_unimportable`, while `no_tenant_carried` and
+    #: `no_durable_journal` are refusal words the counter never receives
+    #: (`plan_refused` is the one label BOTH sets gained with #11783, replacing
+    #: the `write_failed` half it split out of); deriving
+    #: one set from the other is wrong in BOTH directions. Listing only the
     #: counter words here is what made a consumer's closed list miss a value the
     #: door actually returns (:func:`write_live_record`'s ``LIVE_WRITE_REFUSALS``
     #: declares them together, and that set is authoritative).
@@ -606,13 +613,14 @@ class RecordWrite:
         The one check a caller needs. ``False`` means *nothing was written* —
         for ``NOT_ARMED`` it is not an error (an unarmed deployment is a
         supported state); a ``REFUSED`` call was armed and did not write, and
-        :attr:`refusal` says WHY, but the SEVEN refusal tokens are not one
+        :attr:`refusal` says WHY, but the EIGHT refusal tokens are not one
         severity: ``malformed_dsn`` / ``no_tenant`` / ``no_tenant_carried`` /
-        ``circuit_open`` / ``write_failed`` / ``journal_collision`` are
-        FAILURES, all six counted on ``record_write_failures`` (BOTH
-        ``no_tenant`` arms count — the nil tenant and the malformed CARRIED
-        pair, which is why the token list is one longer than the counter set),
-        while ``no_durable_journal`` is a
+        ``circuit_open`` / ``write_failed`` / ``plan_refused`` /
+        ``journal_collision`` are FAILURES, all SEVEN counted on
+        ``record_write_failures`` (BOTH ``no_tenant`` arms count — the nil tenant
+        and the malformed CARRIED pair, which is why the token list is one longer
+        than the counter set, and ``plan_refused`` (``#11783``) counts under
+        its own label there), while ``no_durable_journal`` is a
         healthy-armed DECLINE counted on ``record_non_journal_skips`` — that lane
         has no journal by design, so nothing a replay could restore is missing
         (#9231 review P2, and the vocabulary note in
@@ -636,10 +644,14 @@ class RecordWrite:
             return status_vocabulary.classify(configured=False, reached=False)
         if self.outcome is RecordWriteOutcome.REFUSED:
             # ARMED and nothing written. Only `circuit_open` is LITERALLY
-            # "configured, not reached" ⇒ `degraded`. The other six are near
+            # "configured, not reached" ⇒ `degraded`. The other seven are near
             # misses, and NOTHING here has its own term: `write_failed` covers an
-            # unreachable record AND a record that WAS reached and refused the
-            # projection; `journal_collision` (#9318) is a record that WAS reached
+            # unreachable record OR a failed statement; `plan_refused`
+            # (#11783) is a record the projector could not BUILD a plan for at
+            # all — no statement ran, so the cause is the record's shape or its
+            # producer (a record schema that is not on disk lands here too, and
+            # that one is fixed by a REDEPLOY, not by the producer);
+            # `journal_collision` (#9318) is a record that WAS reached
             # and refused to file itself under a journal position it cannot index
             # (a different `event_type`, a different capture time, an identity the
             # surviving row contradicts, or — for a write with no `ts` to compare
@@ -650,7 +662,7 @@ class RecordWrite:
             # and `no_durable_journal` (the healthy M2 capture lane) never asks
             # the store at all. So `degraded` — which `status_vocabulary` defines
             # as "off by OUTAGE" — is the NEAREST of the four RECORDED terms for
-            # all seven, not a measured outage for the other six. There is
+            # all eight, not a measured outage for the other seven. There is
             # deliberately no fifth RECORDED term ("do not add a fifth term… a
             # condition the four do not cover is a contract change") — the count
             # above is the REFUSAL set, which is one longer than the recorded
@@ -679,7 +691,7 @@ class RecordWrite:
 def _refused(refusal: str, seq: int | None) -> RecordWrite:
     """The LIVE door's refusal report for an ARMED call that did not write.
 
-    ONE constructor for all seven refusal arms (#8447), for two reasons:
+    ONE constructor for all eight refusal arms (#8447), for two reasons:
 
     * the ARM decides the outcome, so no arm can drift back to ``return None``
       — the value this module reserves for NOT ARMED — by accident;
@@ -1881,8 +1893,10 @@ def derived_embedding_columns(
       `_upsert_object`/`_upsert_subject` call `encode_for_row(name)`
       unconditionally, so the record derives from `name`; the split REFUSES a
       carried `embedding` (`DERIVED_COLUMNS`) and `_declared_mutations` BINDS the
-      derived value into its column after the split (`record_projection.py:6031-6032`:
-      "Bound AFTER the split and not merged into `props`") — the derived value is
+      derived value into its column after the split (``_declared_mutations`` in
+      ``record_projection.py``: "Bound AFTER the split and not merged into
+      ``props``" — the quoted FRAGMENT is the citation, never a line number);
+      the derived value is
       what the row holds, and it gets there by binding, never by overriding the
       snapshot;
     * nothing is derived where the graph suppresses the write — an `EventRecorded`
@@ -1955,8 +1969,10 @@ def derived_embedding_columns(
     derives nothing, so every row it CREATES lands `embedding` NULL. ⚠️ NOT
     "every row it folds", which an earlier cut said: `embedding` is absent from
     the node UPSERT's column list AND from `ON CONFLICT … DO UPDATE SET` (both
-    name only the BOUND columns — the SET list is built from `col_values`,
-    `record_projection.py:3446`), so a row that already HAS a vector keeps it
+    name only the BOUND columns — the SET list is `_upsert_statement`'s
+    `", ".join(f"{c} = EXCLUDED.{c}" for c in col_values)`, cited by SYMBOL since
+    a line number here had already rotted on `origin/main`, #11783 round 29),
+    so a row that already HAS a vector keeps it
     through a no-derived re-fold (measured: `payload_SURVIVED=t vec_SURVIVED=t`).
     The scope matters — it is the difference between "the backfill mints blank
     rows" and "the backfill wipes the population". The long form, with the
@@ -3353,6 +3369,71 @@ def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
     )
 
 
+#: How long ONE statement of the creation hook may run, in milliseconds.
+#:
+#: ⛔ THE OTHER HALF OF THE CREATION BUDGET (#14587 review P3-2).
+#: :data:`PROVISION_CONNECT_TIMEOUT_SECONDS` bounds the CONNECT; this bounds each
+#: STATEMENT the hook issues. They are different failures: a record whose TCP
+#: accepts and whose `SELECT` then never returns is not bounded by
+#: `connect_timeout` at all, and this hook runs on a graph-creation REQUEST
+#: (`hosted_api` calls a SYNC function from an `async` endpoint), so an unbounded
+#: statement parks the worker's event loop — including a co-located `/health`.
+#:
+#: 3 s, the same budget as the connect: the two halves bound the SAME request, and
+#: a budget generous to the connect but unlimited afterwards is the shape that
+#: made the "bounded pause" claim false before this landed. `0` is not a value
+#: here — Postgres reads `statement_timeout = 0` as NO TIMEOUT AT ALL.
+#:
+#: ⛔ DECLARED NEXT TO ITS ONLY CONSUMER, not beside the connect constant at the
+#: top of the module, ON PURPOSE: this file's addresses are cited as `file:line`
+#: across the tree (75 of them), and an insertion in the constants block moves
+#: every one below it. Appending here moves none of them.
+#:
+#: ⛔ SCOPE, STATED BECAUSE IT IS WIDER THAN THE HOOK'S OWN STATEMENTS (#14587
+#: review P3-3). `_bound_provision_statements` scopes the GUC on the hook's
+#: TRANSACTION, so it bounds EVERY statement that transaction issues — including
+#: the allocator's `JOURNAL_COUNT_SQL` (`COUNT(*) FROM public.journal_event` for
+#: this org/graph), which `provision_graph_record` reaches whenever
+#: `enumerated_floor is None`, i.e. the re-provision path this hook documents for
+#: a graph that predates it (`set_graph_name` / `set_graph_recording`'s mint).
+#: `tortoise.record_allocator`'s own contract warns about exactly that shape — a
+#: bound short enough to protect a request also bounds a legitimate counting
+#: statement. THAT IS ACCEPTED HERE RATHER THAN EXCLUDED, and the residual is
+#: named instead of hidden: on a journal large enough for `COUNT(*)` to exceed 3 s
+#: the hook FAILS LOUDLY (`provision_failed` is counted, WARNed with the remedy,
+#: and published to `/health`) — the graph is still created and the user's write
+#: still succeeds, because the wrapper never raises. The alternative (unbound
+#: counting) trades that loud, visible refusal for an unbounded statement parked
+#: on a request's event loop, which is the failure this constant exists to close.
+#: No measured worst-case journal size is quoted here: it would be a reading of
+#: ONE deployment's data and would rot as that deployment grows.
+PROVISION_STATEMENT_TIMEOUT_MS = 3000
+
+
+def _bound_provision_statements(connection: Any) -> None:
+    """Scope :data:`PROVISION_STATEMENT_TIMEOUT_MS` on the hook's transaction.
+
+    ⛔ TRANSACTION-LOCAL (``set_config(..., true)``), NEVER a session-level
+    ``SET``: :func:`_default_connect` is POOLED (#9558) and hands out handles
+    other callers borrow, so a session bound would follow the handle into a live
+    write's transaction and impose a creation-sized budget on a record write.
+    ``set_config`` is used rather than ``SET LOCAL`` because it takes a bind
+    parameter (``SET`` does not), which is the same reason
+    :func:`tortoise.record_serve.open_record` uses it.
+
+    ⛔ IT IS SCOPED BY THE CALLER, NOT INSIDE `record_allocator`: that module's
+    contract is "NO GLOBAL ``statement_timeout`` … A caller that wants a bound
+    scopes it locally", and the number here is the CALLER's budget (a
+    graph-creation request, not an allocator operation).
+    """
+    cursor = connection.cursor()
+    try:
+        cursor.execute("SELECT set_config('statement_timeout', %s, true)",
+                       (str(PROVISION_STATEMENT_TIMEOUT_MS),))
+    finally:
+        cursor.close()
+
+
 def provision_graph_record(*, org_id: str, graph_id: str,
                            enumerated_floor: int | None = None
                            ) -> dict[str, Any]:
@@ -3433,6 +3514,11 @@ def provision_graph_record(*, org_id: str, graph_id: str,
     try:
         connection = _default_connect(
             dsn, connect_timeout=PROVISION_CONNECT_TIMEOUT_SECONDS)
+        # ⛔ THE CONNECT BOUND IS NOT THE STATEMENT BOUND (#14587 review P3-2):
+        # scope the statement half on THIS transaction, before the allocator runs,
+        # so a hung SELECT cannot park the create (and the worker's event loop)
+        # with no bound at all.
+        _bound_provision_statements(connection)
         outcome = ra.provision_graph_record(
             connection, org_id=org_id, graph_id=graph_id,
             enumerated_floor=enumerated_floor)
@@ -3824,6 +3910,97 @@ def _journal_collision_cause(
     return None
 
 
+def _plan_refusal_cause(
+        exc: BaseException | None,
+        depth: int = 4,
+) -> BaseException | None:
+    """The PLAN-BUILD refusal buried in a wrapped failure, or ``None`` (#11783).
+
+    `RecordWriter.write` wraps every projection failure in `RecordWriteError`
+    (``from exc``), so this door cannot tell *the record did not answer* from
+    *the projector could not build a plan for this record* by the exception it
+    holds — and it counted both on the same ``write_failed`` label. That is why
+    the production signal for a refused-by-shape write was indistinguishable
+    from a transport outage: 182 of them accumulated on the hosted app while
+    every database probe read healthy (2.5–3.6 ms), and the only thing that
+    could have said which was the log line nobody had a reason to read.
+
+    A SEPARATE TOKEN, the way ``journal_collision`` is separate (#9318): the
+    counter answers *what kind of failure is this* and an operator's next move
+    differs completely — ``plan_refused`` means the RECORD could not be turned
+    into a plan at all (fix the producer or the record shape; a replay of the
+    same record re-refuses), while ``write_failed`` means the store could not
+    be reached or a STATEMENT failed while executing.
+
+    ⛔ THE CLASSIFICATION IS THE PHASE, NOT THE CLASS — and this docstring is the
+    one that had to be corrected, so read the reason rather than the shape. The
+    first version of this function tested
+    ``isinstance(cause, RecordProjectionError)`` minus two subclasses, and that
+    test FOLDED STORE AND CONFIG REFUSALS INTO THE PRODUCER'S BUCKET, because
+    the base class is overloaded: the tenant-GUC read-back, a role that bypasses
+    RLS and the cutover guard's own failed `SELECT` are plain
+    ``RecordProjectionError`` raised AFTER statements ran — a measured
+    fake-connection run returned ``plan_refused`` for "the record's scope could
+    not be verified — the read-back returned no row", i.e. the operator was told
+    to check the producer about a broken role. So the marker is
+    :data:`record_projection.PLAN_BUILD_PHASE_ATTR`, stamped by
+    :func:`record_projection.replay` at the ONE call that builds the plan; the
+    statement-execution and store/config refusals are raised on the far side of
+    that call and are never stamped.
+    ⚠️ AND THE PHASE IS NOT ONE CLASS EITHER (review round 2, measured): the
+    marker is stamped on ANY exception raised inside the plan build, because the
+    plan builders call ``json.dumps`` and a payload carrying an un-serializable
+    value raises ``TypeError`` there — before a statement, and re-raising on
+    every replay. So this walker requires the MARKER, not a
+    ``RecordProjectionError``; the exclusion below is the only type test left.
+    ⚠️ ONE CAUSE HERE IS A DEPLOYMENT FACT: a record SCHEMA that is not on disk
+    raises inside the plan build (``table_columns()`` → the ``CREATE TABLE``
+    scan), so it is stamped and counted on this token — the operator line names
+    the redeploy for it, because one bucket cannot tell every cause apart.
+
+    ⛔ ``RecordStatementError`` IS EXCLUDED on top of that, and the exclusion is
+    not redundant: it means one PLAN statement failed to EXECUTE — the store was
+    reached and the write was attempted — which is a STORE failure however it is
+    caused (a constraint the record's own data violates, a driver error, a
+    connection dropped mid-transaction). Keeping it on ``write_failed`` keeps an
+    execution failure from being re-labelled as a plan refusal.
+    ⛔ AND THIS EXCLUSION IS NOT WHAT HOLDS THAT PIN (measured): every
+    ``RecordStatementError`` raise site is on the far side of the stamped call,
+    so it is never stamped, and
+    ``test_9318_journal_collision.py::test_a_write_that_failed_for_another_
+    reason_is_still_write_failed`` monkeypatches ``replay`` wholesale — deleting
+    the exclusion here AND at the stamp leaves it GREEN. What holds it is the
+    marker's ABSENCE. ⛔ AND THE EXCLUSION BELOW IS DEFENCE IN DEPTH THAT CANNOT
+    FIRE WHILE THE STAMP'S OWN EXCLUSION STANDS (measured): the stamp refuses a
+    ``RecordStatementError`` (``record_projection.replay``'s plan-build stamp —
+    the ``if not isinstance(exc, (RecordStatementError,
+    JournalPositionCollision))`` guard; cited by SYMBOL because a line number
+    here ROTS: the two attempts this parenthetical has carried were both off by
+    one by the time they shipped, #11783 round 29), so a raise that
+    moved INSIDE ``replay_plan`` would be unstamped rather than exempted here, and
+    this type test does work only once THAT one is removed or narrowed. The pin
+    that exercises this boundary is ``test_record_searchkeys_10620.py::
+    test_a_store_refusal_after_the_plan_was_built_stays_write_failed``.
+
+    ``__cause__`` first, ``__context__`` second, bounded with a visited set —
+    the same walk, and the same reason, as :func:`_journal_collision_cause`
+    (this runs inside the failure path, where an exception would replace the
+    failure being reported). ``JournalPositionCollision`` is excluded too
+    because it has its own arm one step earlier.
+    """
+    seen: set[int] = set()
+    while exc is not None and depth > 0 and id(exc) not in seen:
+        if (getattr(exc, record_projection.PLAN_BUILD_PHASE_ATTR, False)
+                and not isinstance(
+                    exc, (record_projection.JournalPositionCollision,
+                          record_projection.RecordStatementError))):
+            return exc
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+        depth -= 1
+    return None
+
+
 def write_live_record(record: Mapping[str, Any], *,
                       durable: bool = True,
                       seq: int | None = None,
@@ -4128,8 +4305,10 @@ def write_live_record(record: Mapping[str, Any], *,
     is a REFUSAL of a mis-armed deployment rather than a lost row to be healed
     by replay. ⛔ THE DIFFERENCE IS **NOT** VISIBLE IN ``refusal``: all of these
     carry ``refusal="write_failed"``, the same token as a genuine record-write
-    failure, because the vocabulary is closed and a new token would be a
-    surface change. What distinguishes them is the WARNING the door emits
+    failure, because these two allocator refusals stay ONE bucket BY CHOICE —
+    not because the vocabulary cannot grow (it did: ``plan_refused``, #11783,
+    split out for the one refusal whose remedy is the producer rather than a
+    replay). What distinguishes them is the WARNING the door emits
     (``_allocator_refusal_cause`` names the counter's state and the remedy —
     ``arm``/``reopen`` — instead of "a replay heals the record", which cannot
     apply) plus `record_allocator.metrics()`. An earlier cut of this docstring
@@ -4243,9 +4422,17 @@ def write_live_record(record: Mapping[str, Any], *,
         # ⛔ THE CUTOVER INVARIANT (#12894): while BOTH allocators exist they must
         # AGREE, and a disagreement is a REFUSAL — never a silent renumbering.
         #
-        # ⛔ THIS ARM IS UNREACHABLE WHEN THE APPEND WAS SKIPPED (#14002) — not
-        # because the check was relaxed, but because `seq` is then `None` and
-        # there is no second reading in existence. The guard below stays exactly
+        # ⛔ UNREACHABLE FROM `live_write` WHEN THE APPEND WAS SKIPPED, WHICH IS
+        # NOT THE SAME AS UNREACHABLE — an ARMED deployment reaches this arm
+        # from `live_write` on a real `seq` (the paragraph below names those
+        # states).
+        # The chokepoint passes `seq=None` whenever it sets `journal_skipped`
+        # (`live_write.py:650`), so there is no second reading in existence on
+        # that path. ⛔ BUT THE DOOR ITSELF DOES NOT ENFORCE THAT PAIRING: a
+        # DIRECT caller can pass `seq` AND the flag (the suite does), and then
+        # this arm really is reached with no journal line — which is why the
+        # WARN below selects its whole message on the flag rather than assuming
+        # a line. The guard stays exactly
         # as it is for every ordinal a caller DOES hold (a direct caller, a
         # pre-cutover graph, a `backfill_copy_turns` batch): removing the second
         # allocator is the fix, weakening the comparison is not.
@@ -4356,6 +4543,37 @@ def write_live_record(record: Mapping[str, Any], *,
                             _bounded_cause(rollback_exc),
                         )
                 _count_write_failure("write_failed")
+                # ⛔ FLAG-CONDITIONED, not exempt — and the WHOLE message, not
+                # just its first clause: `live_write` never passes this
+                # combination, but a DIRECT caller can (`seq=9` with
+                # `journal_skipped=True` is what the suite drives, and the leg
+                # below pins it), and on that write the journal holds nothing.
+                # Conditioning only the provenance clause left the SAME false
+                # instruction in the sentence after it — "compare the two
+                # readings", `seed --journal`, "RESTORE THE JOURNAL" all
+                # presuppose a line this write never had, so the repair path has
+                # to be selected by the flag too. The journaled message is
+                # unchanged (byte-for-byte), which is why the clause is written
+                # out twice rather than parameterised.
+                if journal_skipped:
+                    _logger.warning(
+                        "the record write was REFUSED (position_divergence) — "
+                        "the write reached NEITHER store (the caller did not "
+                        "append: this graph was cut over), so the position %s "
+                        "it passed is not a journal position, and the ORDINAL "
+                        "ALLOCATOR issued %s for this record. There is NO "
+                        "journal line to disagree with, so there is no journal "
+                        "reading to compare and nothing to seed or restore — "
+                        "those remedies belong to the journaled arm and are "
+                        "dead ends here. The allocation was rolled BACK, so "
+                        "nothing was burned or renumbered. Re-emit the record "
+                        "with NO caller-supplied position: on a cut-over graph "
+                        "the allocator numbers it, and a position that DISAGREES "
+                        "with the allocator's refuses this same way. record=%s %s",
+                        seq, allocated_first, record.get("type"),
+                        _record_identity(record),
+                    )
+                    return _refused("write_failed", seq)
                 _logger.warning(
                     "the record write was REFUSED (position_divergence) — the "
                     "journal holds the record at position %s and the ORDINAL "
@@ -4465,11 +4683,27 @@ def write_live_record(record: Mapping[str, Any], *,
             # collision refusal. Named and counted the same way (one counter, the
             # closed `write_failed` token), but with the READING that applies.
             _count_write_failure("write_failed")
+            # ⛔ THE FIFTH COPY OF THE RECORD-ONLY CLAIM (#14002, round-4 review
+            # F3). On a cut-over graph `journal_skipped` is set and the caller
+            # did NOT append, so "the journal holds the record" is false here
+            # too. The REMEDY beside it is journal-independent and correct
+            # (`_ALLOCATOR_REMEDY` names the counter's state, not a replay), so
+            # what was wrong is the PROVENANCE clause — still enough to send an
+            # operator looking for a line that does not exist. This arm is
+            # reached BEFORE the generic one below, so its fix does not cover it.
+            allocator_journal_clause = (
+                "the record reached NEITHER store (the caller did not append: "
+                "this graph was cut over, so the journal holds no line)"
+                if journal_skipped
+                else "the journal holds the record"
+            )
             _logger.warning(
-                "the record write was REFUSED (%s) — the journal holds the "
-                "record; the ORDINAL ALLOCATOR refused to issue a position. %s: "
+                "the record write was REFUSED (%s) — %s; the ORDINAL ALLOCATOR "
+                "refused to issue a position. %s: "
                 "record=%s %s: %s",
-                allocator_state, _ALLOCATOR_REMEDY.get(
+                allocator_state,
+                allocator_journal_clause,
+                _ALLOCATOR_REMEDY.get(
                     allocator_state, "check record_allocator.metrics()"),
                 record.get("type"), _record_identity(record), exc,
             )
@@ -4479,6 +4713,82 @@ def write_live_record(record: Mapping[str, Any], *,
             # cost of the rest of the capture. A totality or statement failure
             # deliberately does NOT trip it — the connection was fine.
             _trip_live_breaker()
+        projection_cause = _plan_refusal_cause(exc)
+        if projection_cause is not None:
+            # ⛔ THE PROJECTOR COULD NOT BUILD A PLAN (#11783) — not
+            # the same fact as `write_failed`, and counted apart since. Measured
+            # on the hosted app (2026-11-26): 182 refusals read as `write_failed`
+            # while every database probe was healthy, because a value SHAPE was
+            # taking whole records out of the store — the plan build is a
+            # producer/record-shape fact an operator fixes at its source, while
+            # `write_failed` is a store fact. Same counter, own label, own
+            # remedy; the specific column/statement attribution rides the
+            # exception text below, never this token.
+            _count_write_failure("plan_refused")
+            # ⛔ ON THE RECORD-ONLY ARM THERE IS NO LINE TO CLAIM (#14002, the
+            # rule the sibling module states at `live_write.py:709`).
+            # `journal_skipped` means the CALLER did not append — a cut-over
+            # graph — so "the journal holds the record" and "a replay of the
+            # same record re-refuses" are BOTH false there: the write reached
+            # NEITHER store and has no position row to re-refuse. Saying it
+            # anyway sends the operator to a repair path with no line to replay,
+            # which is the exact misdirection splitting this token out of
+            # `write_failed` exists to end. ⛔ EVERY arm REACHABLE ON THE
+            # RECORD-ONLY ARM branches on this flag — the ALLOCATOR arm above
+            # (`allocator_journal_clause`), the generic `write_failed` arm below,
+            # and this one — so it is the FLAG, not the arm, that selects the
+            # sentence; an unqualified copy left behind in any of them is the
+            # defect this note exists to stop. ⛔ THE OTHER ARMS that name the
+            # journal's provenance, each for its own reason: `journal_collision`
+            # cannot fire on this arm at all — the flag is one of the THREE terms
+            # of the `allocate` fold (`allocate = allocate or
+            # record_live_allocate() or journal_skipped`); an allocated plan writes
+            # the position through `ALLOCATION_SQL` rather than the journal INSERT
+            # the collision guard keys on (``replay``'s ``_JOURNAL_INSERT_PREFIX``
+            # call site — by SYMBOL, not a line number: the number that stood here
+            # was off by one on arrival, #11783 round 29); `position_unverifiable`
+            # is exempt by its OWN guard (`and not journal_skipped`) rather than by
+            # reachability; and `position_divergence` is unreachable FROM
+            # `live_write` only WHEN IT SETS THIS FLAG, which passes `seq=None`
+            # (`live_write.py:650`) — but NOT from a direct caller that passes
+            # both, which the suite itself does and now pins, so its WHOLE
+            # message is selected by the flag rather than being exempt — on that
+            # write the enumerated-repair path it prints (`status --journal`,
+            # `seed --journal`, restore) has no line to point at. grep for arms
+            # that BOTH name the provenance AND are reachable on this flag.
+            journal_clause = (
+                "the record reached NEITHER store (the caller did not append: "
+                "this graph was cut over, so the journal holds no line); "
+                "re-emit the record"
+                if journal_skipped
+                else "the journal holds the record"
+            )
+            remedy_clause = (
+                "A re-emit of the same record re-refuses until the cause is "
+                "fixed"
+                if journal_skipped
+                else "A replay of the same record re-refuses until the cause is "
+                "fixed"
+            )
+            _logger.warning(
+                "the record write did not happen (plan_refused) — %s; the "
+                "PROJECTION could not BUILD a plan "
+                "for it, so NO statement ran (a record type it does not declare, "
+                "a carrier with no snapshot, an unusable key or endpoint, a "
+                "caller watermark it refuses, a value the plan cannot serialize, "
+                "or a record schema that is not on disk — that last one is fixed "
+                "by a REDEPLOY, not by the producer). ⛔ This is "
+                "NOT `write_failed`: no statement was executed, so "
+                "there is no statement fault to look for — check "
+                "the cause: a producer or record-shape fact, or (for a schema "
+                "that is not on disk) a DEPLOYMENT fact. %s: "
+                "record=%s %s: %s",
+                journal_clause,
+                remedy_clause,
+                record.get("type"), _record_identity(record),
+                projection_cause,
+            )
+            return _refused("plan_refused", seq)
         _count_write_failure("write_failed")
         # ⛔ THE REMEDY MUST MATCH THE ARM (#12894 review). On the ALLOCATED arm
         # (`TORTOISE_RECORD_ALLOCATE=1`, which this change makes reachable in
@@ -4488,9 +4798,44 @@ def write_live_record(record: Mapping[str, Any], *,
         # is false exactly where it now gets read most; the sibling allocator and
         # `position_unverifiable` arms were fixed for this, and this arm is the
         # one that catches every remaining failure on that path.
-        _logger.warning(
-            "the record write did not happen (write_failed) — the journal has "
-            "the record; %s: record=%s %s: %s",
+        # ⛔ AND ON THE RECORD-ONLY ARM THERE IS NOTHING TO REPLAY (#14002).
+        # `journal_skipped` means the CALLER did not append — a cut-over graph —
+        # so "the journal has the record" is false AND every replay remedy below
+        # is a dead end: there is no line, and therefore no enumerated record to
+        # re-refuse. `live_write.py:709` states the rule for its own arm
+        # ("a raise here means the write reached NEITHER store"); this arm is the
+        # pre-existing copy of that shape, and the `plan_refused` arm above
+        # applies it too. `journal_skipped` is checked FIRST because it implies
+        # `allocate`, so the two `allocate` sentences would otherwise both claim a
+        # journal this write never had. The remedy on this arm is a RE-EMIT, which
+        # is what the sibling module already prescribes.
+        journal_clause = (
+            "the record reached NEITHER store (the caller did not append: this "
+            "graph was cut over, so the journal holds no line)"
+            if journal_skipped
+            else "the journal has the record"
+        )
+        if journal_skipped:
+            # ⛔ THE REMEDY IS JOURNAL-NEUTRAL ON PURPOSE. This arm's population is
+            # whatever generic `write_failed` is left after the allocator, the
+            # `position_unverifiable` and the `position_divergence` arms have
+            # taken theirs — the tenant-GUC read-back, a bypassing role, a refused
+            # `IsolationRefused`, the cutover guard, a store/config failure. On
+            # most of those the allocator is HEALTHY, so naming it as the thing to
+            # wait on sends the operator to a subsystem that cannot be the cause
+            # (the TWO refusals that arm maps — `CursorNotActive` and
+            # `PositionCollision` — are intercepted one arm earlier by
+            # `_allocator_refusal_cause`, and `plan_refused` takes the build-time
+            # ones; ⛔ NOT every allocator-module refusal is: `IsolationRefused`
+            # and `RetryableAllocationFailure` are raised under `allocate` but are
+            # not in that map, so they land HERE); the `%s` cause already names the
+            # failure that actually occurred. Only the statement that provably
+            # holds here is made.
+            remedy = (
+                "re-emit the record once the cause the message names is fixed — "
+                "with no journal line there is nothing to replay"
+            )
+        elif not allocate:
             # ⛔ THE DISCRIMINATOR IS THE CURSOR ROW, NOT THE ARM. `allocate`
             # says which write arm ran; `_refuse_an_enumerated_replay` refuses by
             # the ROW, and the two are INDEPENDENT — a graph cut over and then
@@ -4502,17 +4847,205 @@ def write_live_record(record: Mapping[str, Any], *,
             # now true in BOTH states instead of wrong in one: it names the row
             # as the condition, so an operator on either arm can tell which case
             # they are in. `record_allocator_cli.py status` reports the row.
-            "a replay heals the record UNLESS this graph has a `record_cursor` "
-            "row (cut over), in which case an enumerated replay is refused — "
-            "and the remedy is the one the refusal below names for the row's "
-            "MODE, not a chain that assumes `active`: `replay(allocate=True)` "
-            "needs mode='active' (and is a CODE call — no CLI verb ships), "
-            "`halt` is scoped to 'active', `reopen` to "
-            "'halted'. Run `record_allocator_cli.py status` for the mode"
-            if not allocate else
-            "repair it with an ALLOCATING replay (`replay(allocate=True)`, a "
-            "CODE call — no CLI verb ships), not "
-            "a plain one, which a cut-over graph refuses",
+            remedy = (
+                # ⛔ NOT "a replay heals the record": this arm's population is
+                # every `write_failed` left after the statement stores — an
+                # OUTAGE (replay heals it), a STATEMENT that executed and failed
+                # on the record's own data (a replay RE-EXECUTES and re-fails
+                # until the data or the constraint is fixed), and the
+                # STORE/CONFIG refusals raised on the far side of the plan build
+                # (`_apply_tenant_scope`'s read-back and the role posture — a
+                # replay re-raises until the DSN/role is fixed — and the cutover
+                # guard's own SELECT, which is a MISSING MIGRATION and healed by
+                # applying it, not by a DSN or a role; see the split below).
+                # Those are THREE causes; the cursor row is
+                # an INDEPENDENT axis across all of them, not a fourth. ⛔ EACH
+                # CAUSE IS NAMED IN THE SHIPPED SENTENCE, not only here — a
+                # comment does not reach the operator (round 28 P2).
+                # ⛔ THE HEAL IS NOT UNCONDITIONAL ON THIS ARM EITHER (round-38
+                # P2). The last clause of THIS SAME sentence refuses an
+                # enumerated replay that carries a position on a cut-over
+                # graph, so a bare "an outage is healed by a replay" promised
+                # what the sentence itself then withheld. The ARMED twin was
+                # qualified for exactly this reason rounds ago; this one kept
+                # the unconditional form.
+                "an OUTAGE is healed by a replay, but which FORM follows the "
+                "cursor ROW (see the last clause); a statement that EXECUTED "
+                "and failed re-fails until its own cause (its data or a "
+                "constraint) "
+                "is fixed; a STORE/CONFIG refusal (the tenant scope, a role that "
+                "bypasses RLS) re-raises until the DSN or the role is fixed; "
+                # ⛔ THE CUTOVER GUARD'S READ IS ITS OWN REMEDY AND IT IS NOT THE
+                # DSN OR THE ROLE (review pass at `0c98eb0ea6`, P3). This
+                # parenthetical used to include it alongside the two
+                # `scope_connection` causes, which made one remedy cover three
+                # members that need two different fixes. MEASURED at source: the
+                # only shape that reaches that read on a real deployment is a
+                # database the counter migration has not reached (`42P01`), and
+                # `record_projection.py:8382-8390` names the remedy itself —
+                # "Apply the ordinal-allocator migration
+                # (20261116000001_record_cursor_allocator.sql) to this database"
+                # — with the code's own comment at `:8375-8377` stating that the
+                # remedy is a MIGRATION, not a retry. A correct DSN and a correct
+                # role change neither of them. And when the read SUCCEEDS, the
+                # remedy is the row's MODE, which the next clause states. So the
+                # member is split out here rather than left under a remedy that
+                # matches none of its shapes.
+                "the cutover guard's own read re-raises until the ordinal-"
+                "allocator migration is applied to this database (a `42P01` is "
+                "a MISSING MIGRATION, not a DSN or a role); the tenant scope "
+                "and the role are asked on every replay, the cutover guard only "
+                "on one that carries a position; "
+                "and an ENUMERATED replay that carries a position is "
+                "refused when this graph "
+                "has a `record_cursor` row (cut over) — the remedy is then the "
+                "one that refusal names for the row's MODE, not a chain that "
+                "assumes `active`: `replay(allocate=True)` needs mode='active' "
+                "(a CODE call — no CLI verb ships), `halt` is scoped to "
+                "'active', `reopen` to 'halted'. Run "
+                "`record_allocator_cli.py status` for the mode"
+            )
+        else:
+            # ⛔ THIS ARM'S POPULATION IS NOT THREE CAUSES, IT IS FOUR, AND THE
+            # REMEDY'S FORM IS THE CURSOR ROW'S, NOT THIS ARM'S (round 31 P3,
+            # corrected by the round-32 review). `allocate` says which WRITE ARM
+            # ran, not which CAUSE failed. The four populations that reach here:
+            #  1. an OUTAGE — replay heals it, but WHICH FORM depends on the
+            #     cursor ROW: with NO row it replays unchanged; with a row the
+            #     plain (enumerated) replay is REFUSED by
+            #     `_refuse_an_enumerated_replay`, so it takes the ALLOCATING
+            #     form; and a `seeded`/`halted` row takes re-seed (`halted` after
+            #     `reopen`) and then `arm` FIRST, or the allocation itself
+            #     refuses — `UNCUT_GRAPHS_SQL` is `no row OR mode <> active`, so
+            #     `journal_skipped=False` does NOT imply an active row.
+            #  2. a `40001`/`40P01`/`57014` on the allocation —
+            #     `RetryableAllocationFailure` is raised UNDER `allocate` and is
+            #     not in the allocator map, so it lands HERE; the server aborted
+            #     the transaction and the counter rolled back WITH it, so a
+            #     replay of the same record starts from the SAME NUMBER.
+            #     ⛔ WHICH OF THESE MEMBERS THE RETRY THEN HEALS IS NOT ONE
+            #     ANSWER, and each half of that cost a review finding:
+            #       * `40001`/`40P01` are CONFLICTS — the same statement wins an
+            #         uncontended retry, so the retry is the whole remedy and
+            #         "nothing to fix" is TRUE for them;
+            #       * `57014` is `query_canceled`, which the allocator's own
+            #         class table defines as "a local timeout, OR AN OPERATOR
+            #         CANCEL" (`record_allocator.py:46-48`), and `classify()`
+            #         keys on the SQLSTATE alone (`:404-412`) — so this arm
+            #         cannot tell those two apart. An operator/driver cancel is
+            #         ONE-SHOT and the retry simply runs (measured by the
+            #         round-35 review: `pg_cancel_backend` yields
+            #         `pgcode == "57014"`, and with no timeout and no lock
+            #         holder the IDENTICAL replay SUCCEEDED); a local
+            #         `statement_timeout` this write does not fit, or a lock
+            #         still held, makes the identical replay re-fail until that
+            #         budget or that holder changes.
+            #     So "SUCCEEDS — nothing to fix" was FALSE for one member (round
+            #     34) and a class-wide "re-fails" was FALSE for another (round
+            #     35) — the same defect mirrored. The SHIPPED sentence therefore
+            #     states the retry, the one-shot member and the persisting-cause
+            #     member SEPARATELY, and this paragraph must keep that same
+            #     mapping rather than summarising it (round-36 review P3: an
+            #     earlier revision of this paragraph got the two halves exactly
+            #     backwards while the shipped sentence was right).
+            #  3. a statement that EXECUTED and failed on its own data or a
+            #     constraint — re-executes and re-fails until that cause is
+            #     fixed (#13207's `chk_point_baseline_complete`).
+            #  4. a STORE/CONFIG refusal — re-raises until the DSN or the role
+            #     is fixed, and WHICH replays re-raise depends on the member
+            #     (round-34 review P3): the tenant scope and the role gate run
+            #     unconditionally, so any replay meets them; the isolation
+            #     guard is asked only under `allocate`, so a NON-allocating
+            #     replay is not refused by it. ⛔ THE ISOLATION GUARD BELONGS HERE, not
+            #     in 2: `IsolationRefused` is raised by `require_read_committed`,
+            #     which runs only when `allocate` is set and BEFORE any statement
+            #     — nothing was aborted and nothing rolled back, so every replay
+            #     that must ALLOCATE (and every armed live write) RE-RAISES until
+            #     the transaction isolation is fixed; the guard requires exactly
+            #     READ COMMITTED, so REPEATABLE READ is refused identically. A
+            #     NON-allocating replay is never asked the isolation question
+            #     (`if allocate: ra.require_read_committed(...)`), so population
+            #     1's no-row clause still applies to it. An earlier revision put
+            #     this class in 2 ("nothing to fix"), which would have told an
+            #     operator on a REPEATABLE READ/SERIALIZABLE deployment to do
+            #     nothing while every armed write is refused indefinitely.
+            #     Population 4's "until the DSN ... is fixed" clause covers it,
+            #     and the shipped sentence names the isolation member and
+            #     qualifies which replays re-raise — a comment that reasons
+            #     correctly while the operator sentence does not is the defect
+            #     this block's own rule (`EACH CAUSE IS NAMED IN THE SHIPPED
+            #     SENTENCE`) exists to stop.
+            # The earlier revision of this block named only three, asserted a
+            # cut-over graph unconditionally, and therefore told population 2 a
+            # replay re-fails (false) and population 1's no-row/seeded/halted
+            # half a remedy that raises. The convergent external shape is a
+            # `transient` / `correctable` / `permission-terminal` split with the
+            # retry named for the FIRST class only (Azure Well-Architected,
+            # Temporal, AdCP's `recovery modes`).
+            remedy = (
+                "an OUTAGE is healed by a replay, but which FORM follows the "
+                "cursor ROW, not this arm: with NO `record_cursor` row a plain "
+                "replay writes unchanged; with mode='active' an ALLOCATING "
+                "replay (`replay(allocate=True)`, a CODE call — no CLI verb "
+                "ships), because a cut-over graph REFUSES a plain one; a "
+                "`seeded`/`halted` row takes re-seed (`halted` after `reopen`) "
+                "and then `arm` FIRST, or the allocation itself refuses; a "
+                "`40001`/`40P01`/`57014` on the allocation ABORTED the "
+                "transaction and rolled the counter back WITH it, so a replay "
+                "of the same record starts from the same number: retry it — "
+                "a `40001`/`40P01` conflict, and a `57014` CANCEL that was an "
+                "operator or driver cancel, both succeed on that retry, while "
+                "a `57014` re-fails on the identical replay only while its "
+                "cause persists (a `statement_timeout` this write does not fit, "
+                "a lock still held), so the budget or the holder is what "
+                "changes; a statement "
+                "that EXECUTED and failed on its own data or a constraint "
+                "re-fails on that replay until that cause is fixed; a "
+                # ⛔ THE EXAMPLES MUST BE REACHABLE ON *THIS* ARM (round-33 P3).
+                # The enumerated arm's copy of this parenthetical names "the
+                # cutover guard's own read", and that SELECT cannot run here:
+                # `record_projection.py:9105` gates `_refuse_an_enumerated_replay`
+                # on `position and not allocate and records`, and this arm exists
+                # precisely because `allocate=True` was passed. Naming it as a
+                # cause on the arm that makes it unreachable is the SAME class of
+                # defect this PR exists to fix — a sentence whose claim does not
+                # match its arm's population — reappearing in the CAUSE half
+                # instead of the remedy half. The three examples kept here ARE
+                # reachable: `scope_connection` (the tenant GUC + role gate) runs
+                # unconditionally, before the guards, on both arms, and
+                # `IsolationRefused` is raised on THIS arm by construction
+                # (`require_read_committed` is gated on `allocate`,
+                # `record_projection.py:9093`) — which is also why the clause
+                # qualifies WHICH replays re-raise rather than saying "any":
+                # a non-allocating REPLAY is not asked the isolation question.
+                # ⛔ BUT "ONLY AN ALLOCATING WRITE IS ASKED IT" WAS FALSE, and
+                # the sentence named the verbs that falsify it (round-34 P3 /
+                # delta review P3, measured 2026-11-27 on `pgvector/pg16` at
+                # REPEATABLE READ): the guard is asked UNCONDITIONALLY by the
+                # allocator's own entry points — `seed()`
+                # (`record_allocator.py:486`), `_transition()` i.e.
+                # `arm`/`halt`/`reopen` (`:690`) and `execute_allocation()`
+                # (`:816`) — while just ONE call site is gated (`allocate`,
+                # `record_projection.py:9093`). This sentence tells a
+                # `seeded`/`halted` operator to run `re-seed` then `arm`, so the
+                # unscoped universal sent a REPEATABLE-READ operator to two
+                # verbs that refuse with the SAME `IsolationRefused`. Measured:
+                # `seed()` -> `IsolationRefused`, `arm()` -> `IsolationRefused`.
+                # The quantifier is therefore scoped to REPLAYS and the verb
+                # exception is named, so the claim matches its population.
+                "STORE/CONFIG refusal (the tenant scope, a role that bypasses "
+                "RLS, a transaction isolation this arm refuses) re-raises "
+                "until the DSN or the role is fixed; only a REPLAY that "
+                "allocates is asked the isolation question, so a "
+                "non-allocating replay is not refused by it — `seed`/`arm`/"
+                "`halt`/`reopen` ask it unconditionally, so they refuse "
+                "identically "
+                "at REPEATABLE READ"
+            )
+        _logger.warning(
+            "the record write did not happen (write_failed) — %s; %s: "
+            "record=%s %s: %s",
+            journal_clause, remedy,
             record.get("type"), _record_identity(record), exc,
         )
         return _refused("write_failed", seq)

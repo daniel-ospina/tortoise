@@ -9151,9 +9151,19 @@ def supersede_allowed(a: str, b: str) -> bool:
     A differing NUMBER or DATE is a new value for one attribute, which is what
     UPDATE is for — the boundary does not block it.  A differing NEGATION,
     CONDITION, marker SCOPE, LANGUAGE or substituted content means the two are
-    RIVAL claims: a rival may be neither folded nor superseded, so both
-    survive.  This asks the full identity set, so a value difference elsewhere
-    in the claim cannot mask it.
+    RIVAL claims: a rival may be neither folded nor superseded **by this
+    boundary's verdict**, so a caller that consults it keeps both.  This asks
+    the full identity set, so a value difference elsewhere in the claim cannot
+    mask it.
+
+    ⛔ SCOPE — the sentence above governs THIS predicate, NOT the automatic
+    pipeline (#14198). A rival can still be CLOSED by an explicitly DECLARED
+    contradiction: `execute_embed`'s cross-capture NAND arm records a
+    supersession for a claim an earlier capture emitted, and that arm never
+    consults `_boundary` / `fold_allowed` / this predicate — the model declared
+    the contradiction and code does the interval arithmetic, which is the split
+    #14198 requires. So "both claims survive" is the LEXICAL classifier's
+    verdict, not a promise about what the pipeline may do with a declaration.
     """
     return not _boundary(a, b)[1]
 
@@ -12345,6 +12355,348 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             continue
         _dropped_ids.add(_oid)
         _all_ops.append(_held_op)
+    # ── #14198: a DECLARED contradiction whose OLDER side is in a PRIOR
+    # capture CLOSES that claim's interval. ────────────────────────────────
+    # The model has already made the call the ontology assigns to it (#14198:
+    # "the model labels, code does the arithmetic"): a NAND is its declared
+    # contradiction (#2552), not a lexical verdict, so no `_boundary` rule is
+    # involved. The arithmetic rides the SAME channel a declared point-level
+    # `supersedes` ref uses (above): a `supersessions` record, whose consumer
+    # `commit_ops.apply_supersessions` → `sdk._supersede_point` writes the
+    # CORRECTS edge, stamps the older claim's `validTo` from the successor's
+    # window start and its `expiredAt` from ingestion time, and RETAINS the
+    # older claim as terminal (§2.0: the record is truth — a closed interval,
+    # never a deletion, never a merge).
+    #
+    # WHY IT IS NEEDED AT ALL (measured, #14592): a NAND whose older side lives
+    # in a prior capture cannot resolve through `_resolve`, which reads only
+    # THIS capture's `point_ids`/`event_ids` — so doc-05's refutation of
+    # doc-01's certificate claim was HELD (#10997: the lookup was `partial`, and
+    # `hold_store` is None on the shipping path so nothing was persisted) and
+    # then dropped, and the two rival claims sat in the graph with no interval
+    # closed between them (`supersessions: 0`).
+    #
+    # ⛔ NOTHING IS INVENTED, and the arm's reach is deliberately narrow:
+    #   * `NAND` only — an IMPL or MITIGATES naming a prior claim is support /
+    #     edge-relevance, not a reversal, and still drops;
+    #   * the NEWER side must be a point of THIS capture (a contradiction is
+    #     closed by the claim that supersedes, never by one it merely cites);
+    #   * the older side must be a point this capture did NOT emit;
+    #   * the ref resolves through the never-guess `_resolve_point_supersede`
+    #     discipline (unique id / exact content / edge-trimmed equality; 0 or
+    #     2+ candidates warn and fail open).
+    # A corpus that declares no contradiction therefore gains none, and a
+    # same-capture NAND (the ordinary two-rivals-in-tension shape) is untouched.
+    _capture_ids: set[str] = {str(p.get("id") or "") for p in payload_points}
+    for _ev in payload_events:
+        _capture_ids.add(str(_ev.get("id") or ""))
+    _capture_ids.discard("")
+    #: The points of THIS capture, and each one's WORLD-TIME start. The
+    #: supersession's direction is decided from these, never from capture
+    #: membership alone — see `_close_prior_contradiction`.
+    _capture_point_when: dict[str, str] = {
+        str(p.get("id") or ""): str(p.get("when") or "")
+        for p in payload_points if p.get("id")}
+    #: The points this capture will actually WRITE as superseders: real `points`
+    #: entries MINUS the `#2552` mint-before-wire materializations.
+    #:
+    #: ⛔ THE MINT IS LOAD-BEARING AND WAS A LIVE P1 (review of #14794). When
+    #: the newer side is named only inside the edge, the mint pre-pass
+    #: materializes it — and the prune below deletes every minted endpoint that
+    #: no surviving payload operator references. This arm SUPPRESSES the
+    #: operator, so in that shape the minted successor is pruned, the record
+    #: then names a point that was never written, `apply_supersessions` skips
+    #: it ("No point …"), and the document's OWN claim — the only thing it
+    #: asserted — is gone from the payload while the extractor's warning claims
+    #: the interval was closed. Silent destruction reported as success. So the
+    #: precondition is "will the successor EXIST in the write", never "did this
+    #: capture mention the id", and the arm DECLINES otherwise (today's
+    #: behaviour: the mint, the edge, no closure). ⚠️ Deliberately CONSERVATIVE
+    #: in one direction: a minted endpoint that SURVIVES the prune (another
+    #: surviving operator still references it) is excluded here too, so a
+    #: closable closure is declined. Safe direction — a lost closure shows up as
+    #: two live claims, a lost claim does not — and narrowing it needs the
+    #: prune's own reachability computation, which runs after this pass.
+    _minted_point_ids: frozenset[str] = frozenset(minted_endpoints)
+    _written_point_ids: set[str] = {
+        str(p.get("id") or "") for p in payload_points
+        if str(p.get("id") or "") not in _minted_point_ids}
+    _written_point_ids.discard("")
+    #: One closure per older claim. A second refuter is still EVIDENCE:
+    #: `apply_supersessions` treats a terminal target as an idempotent no-op and
+    #: skips it SILENTLY, so suppressing its operator too would erase that
+    #: attack from the graph with nothing said (review of #14794).
+    _closed_prior_ids: set[str] = set()
+    #: Every id the PRIOR SET actually names. "Not an id this capture emits" is
+    #: NOT this property — see the guard in `_close_prior_contradiction`.
+    _prior_graph_ids: set[str] = {
+        str(r.get("id") or "").strip()
+        for r in (search or {}).get("points") or []
+        if isinstance(r, dict) and str(r.get("id") or "").strip()
+    }
+
+    def _instant_key(value: str) -> tuple:
+        """The ORDER the write path itself uses (``search_engine._created_sort_key``).
+
+        Imported lazily and degrading to the unparseable bucket: this helper
+        exists to AGREE with `sdk._supersede_window_end`, and an import that
+        failed would otherwise turn an ordering question into a raise. A
+        ``(1, …)`` bucket means "no instant", which the caller reads as "this
+        pair cannot be ORDERED here" and DECLINES on — never as a licence to
+        fall back to arrival order, which the write path can contradict (see the
+        gate in `_close_prior_contradiction`).
+        """
+        try:
+            from tortoise.search_engine import _created_sort_key
+            return _created_sort_key(value)
+        except Exception:  # ordering must not raise here
+            return (1, str(value or ""))
+
+    def _prior_start(prior_id: str, prior_row: dict | None) -> str:
+        """The prior claim's world-time window start, '' when unknown.
+
+        On the DROP route the resolved row already carries it (S3's
+        `_enrich_point_priors` copies the stored `p.when`), so no read is
+        added. On the WIRING route the older id is the fold's own graph id and
+        the row was not kept — but the same prior set is in `search`, so the
+        start is read from there rather than re-queried. Both are best-effort:
+        an empty answer is a fact about the input, and the caller DECLINES on it
+        rather than ordering by capture membership.
+        """
+        if isinstance(prior_row, dict) and prior_row.get("when"):
+            return str(prior_row.get("when") or "")
+        for _row in (search or {}).get("points") or []:
+            if isinstance(_row, dict) and str(_row.get("id") or "") == prior_id:
+                return str(_row.get("when") or "")
+        return ""
+
+    def _close_prior_contradiction(new_id: str, older_id: str,
+                                   older_content: str, where: str,
+                                   older_row: dict | None = None) -> bool:
+        """Append the supersession that closes the older claim; True when one
+        was recorded (or already was). The older claim is never deleted.
+
+        ⛔ THREE GATES, each measured against a corpus shape (review of #14794):
+        * the EMITTED side must be a point THIS CAPTURE WILL WRITE
+          (`_written_point_ids` — the authority; a `pt_` test here would be
+          inert because every payload point id starts with `pt_`). `_resolve`
+          hands back `event_ids` as readily as `point_ids`, and an Event is a
+          legal NAND endpoint — but there is no point-supersede channel to an
+          Event successor: the consumer dispatches on the `pt_` prefix of the
+          OLD id and then refuses the successor (`_assert_lifecycle_guard`), so
+          emitting the record would lose the closure *and* claim it was
+          recorded. An event side falls through to the drop warning instead.
+        * the direction is decided by WORLD TIME, not by which side happened to
+          be in this capture (#14198's recorded decision: "Facts are compared
+          on world-time dates, not arrival order", which is also what
+          Zep/Graphiti do — the edge with the earlier `valid_at` is retired).
+          Capture membership alone emitted `superseded = prior,
+          supersedes_by = new` for a BACKFILL (a later capture carrying an
+          earlier world date); `sdk._supersede_point` refuses that inverted
+          window (#4021), so the fold failed and BOTH claims stayed live — the
+          #14198 defect through the backfill door, warned as a generic failure.
+          With no instant established on BOTH sides there is nothing this
+          pass can order on, and ARRIVAL ORDER IS NOT A SAFE FALLBACK: the
+          write path resolves the successor's start from sources this pass
+          cannot see (an asserted date in the content, or a dedup hit keeping
+          the canonical's stored start), so arrival order can emit a window
+          the consumer refuses as inverted — and because the operator is
+          suppressed, that loses the declaration from BOTH representations
+          while the receipt claims a closure (#14794 review, P2). So that
+          shape DECLINES too, and says so; a tie still closes, since a
+          zero-length predecessor window is legal.
+          ⛔ The backfill DIRECTION is now DECLINED rather than emitted (see the
+          branch below): the record's `superseded` side must already be a graph
+          id, so this channel cannot carry it, and emitting it anyway produced a
+          fail-open skip with a warning that claimed success.
+        """
+        if not new_id or not older_id or new_id == older_id:
+            return False
+        if older_id in _capture_ids:
+            return False
+        # …and it must name a row of the PRIOR SET, not merely something this
+        # capture did not emit (#14198 review 3, P2). "Not in this capture" is
+        # NOT the same property: consolidation step 1 folds onto a content-
+        # addressed PAYLOAD id when a prior row carries no `id` (:9321-9346
+        # iterates `for p in priors` with no id filter, while the UPDATE loop
+        # below it skips id-less priors — the ladder is asymmetric), so a
+        # fallback id would land on `superseded` and `apply_supersessions` would
+        # skip the record fail-open. `:11626` already names this id class: it
+        # "names NO graph point — never emit a record onto it".
+        if older_id not in _prior_graph_ids:
+            return False
+        # The superseder must be a point this capture will WRITE — and this ONE
+        # guard is the authority (review of #14794, cycle 3). `_written_point_ids`
+        # is `payload_points` minus the `#2552` mints, so it already implies
+        # every shape the arm must refuse: an EVENT is not in it (no point
+        # lifecycle), a MINTED endpoint is not in it (the prune can delete it),
+        # and a folded PRIOR id is not in it (a claim that predates this capture
+        # can never be its successor — a supersession between two prior ids can
+        # carry a successor window that sorts before its predecessor's, the
+        # #4021 refusal).
+        # ⛔ The earlier cut ALSO carried `new_id not in _capture_ids` and a
+        # `startswith("pt_")` test. Both were INERT: every payload point id is in
+        # `_capture_ids` and starts with `pt_`, so neither could ever be the
+        # operative refusal (measured: deleting either left every case green),
+        # and the comment between them claimed a failure mode the guard below
+        # already refuses. An inert guard reads as protection while protecting
+        # nothing, so they are gone and the comment names the live one.
+        if new_id not in _written_point_ids:
+            return False
+        if older_id in _closed_prior_ids:
+            # SILENT on purpose: this ARM already closed the prior in this
+            # payload, so the pair's NAND is kept as the evidence of the second
+            # refutation and saying it twice would be noise.
+            return False
+        # ⛔ BUT A PRIOR CLOSED BY *ANOTHER* PRODUCER IS NOT THIS ARM'S BUDGET
+        # (#14198 review 4, P1 — measured, silent loss of evidence). The
+        # payload's `supersessions` already holds records from the UPDATE fold
+        # and from a `supersedes` ref, and `apply_supersessions` treats a
+        # terminal target as a bare `continue` — no warning, not even a
+        # `skipped` entry. So appending a SECOND record for the same prior and
+        # then `continue`ing (suppressing the operator) deleted the declared
+        # contradiction from BOTH representations: no NAND edge, no CORRECTS
+        # edge to this claim, nothing in the census to notice it, and a warning
+        # that attributed the closure to this pair. Measured: payload
+        # `supersessions` gained (CERT, AUDIT), `operators` went `[NAND]` → `[]`,
+        # while the graph's CORRECTS predecessor was the OTHER producer's
+        # successor. Declining instead keeps the NAND as evidence and says who
+        # closed the claim — the second-refuter rationale, one producer over.
+        closed_by = {str(r.get("superseded") or ""): str(r.get("supersedes_by") or "")
+                     for r in supersessions}
+        if older_id in closed_by:
+            warnings.append(
+                f"operator endpoint is an EARLIER-CAPTURE claim (#14198): {where} "
+                f"resolved to prior point {older_id[:20]!r}, whose interval is "
+                f"ALREADY closed by {closed_by[older_id][:20]!r} in this capture "
+                "— so no second supersession is recorded (the consumer would "
+                "skip it as an idempotent no-op, silently). The declared edge "
+                "is handled exactly as it would be WITHOUT this arm: emitted "
+                "when the older side resolves (the wiring route), dropped with "
+                "the line below when it does not (the hold route) — this arm "
+                "neither keeps nor consumes it")
+            return False
+        new_when = str(_capture_point_when.get(new_id) or "")
+        older_when = _prior_start(older_id, older_row)
+        # ⛔ THE SAME MEASURE THE WRITE PATH REFUSES ON (review of #14794, P2).
+        # The DATE-PREFIX comparison this gate first used disagreed with
+        # `sdk._supersede_window_end`, which decides the #4021 inverted window on
+        # INSTANTS (`search_engine._created_sort_key`): a same-day pair
+        # (`18:00Z` vs `09:00Z`) TIES on the date, and a cross-offset pair
+        # (`2026-03-05T23:00:00-05:00` = 04:00Z on 03-06 vs
+        # `2026-03-06T01:00:00Z`) compares BACKWARDS. Both errors land on THIS
+        # gate, and it is now the gate that DECLINES: a date-prefix tie sent a
+        # genuine backfill down the arrival branch, which emitted a record whose
+        # successor start precedes its predecessor — refused by the consumer,
+        # both claims live, warning claiming closure; and a date-prefix
+        # inversion DECLINED a closure that was perfectly carryable. Ordering on
+        # the consumer's own instants removes both.
+        k_new = _instant_key(new_when)
+        k_old = _instant_key(older_when)
+        if k_new[0] != 0 or k_old[0] != 0:
+            # ⛔ NO INSTANT ON (AT LEAST) ONE SIDE — and ARRIVAL ORDER IS NOT A
+            # SAFE SUBSTITUTE (#14794 review, P2, MEASURED). This used to fall
+            # through to the arrival branch, on the reasoning that "with no
+            # parseable start there is no instant to compare". That premise is
+            # false about the WRITE side: `sdk._supersede_window_end` compares
+            # the predecessor's STORED `validFrom` against the successor's
+            # RESOLVED start, and two documented routes give the successor a
+            # start this arm cannot see —
+            #   * `sdk.py` `_asserted = asserted_date(content)`: a payload point
+            #     with NO `when` whose content says "as of 2026-01-01 …" is
+            #     created with `validFrom = 2026-01-01`;
+            #   * a dedup hit (in-capture fold or graph-level resolution) writes
+            #     NONE of those props — the `validFrom` fold rides the CREATE
+            #     branch only — so a restated claim keeps its OLDER stored start.
+            # In both shapes the arm emitted the record on arrival order, the
+            # consumer's window check then refused it as inverted (#4021), and
+            # because the operator is suppressed below the declaration survived
+            # in NO representation at all: 0 NAND edges, 0 CORRECTS edges, both
+            # claims live, while the receipt beside them claimed the interval
+            # was closed. That was WORSE than the pre-arm behaviour on the same
+            # payload (which kept the NAND), so this gate DECLINES instead —
+            # the same "a truthful non-closure beats a false closure" rule the
+            # backfill branch below states. The declared edge is handled exactly
+            # as it would be without this arm.
+            warnings.append(
+                "NAND contradiction ACROSS CAPTURES not closed (#14198): this "
+                "arm can order the two rivals by world time only when BOTH "
+                f"starts name an instant ({new_when!r} vs the prior's "
+                f"{older_when!r}; this capture's point {new_id[:20]!r} against "
+                f"prior {older_id[:20]!r}), and the write path resolves the "
+                "successor's start from sources this pass cannot see (an "
+                "asserted date in the content, or a dedup hit that keeps the "
+                "canonical's stored start). Closing on arrival order there "
+                "emits a window the consumer refuses as inverted, which would "
+                "leave the declaration in NO representation while this receipt "
+                "claimed a closure. No interval is closed; the declared edge "
+                "is emitted when the older side resolves (the wiring route) "
+                "and dropped with the active decision when it does not "
+                "(the hold route)")
+            return False
+        if k_new < k_old:
+            # BACKFILL, and this channel CANNOT express it (#14198 review 2).
+            # World time says the PRIOR is the newer fact, so the closure would
+            # have to read `superseded = <this capture's claim>, supersedes_by =
+            # <prior>`. `superseded` is a GRAPH id BY CONTRACT —
+            # `commit_ops.remap_supersession_point_refs` remaps only
+            # `supersedes_by`, and says why ("`superseded` … is already a graph
+            # id"; it is also the record's LANE DISCRIMINATOR, so mapping a
+            # `pt_` payload id onto a non-`pt_` node would flip the record into
+            # the entity fold). A payload id on that side therefore names NO
+            # node: `apply_supersessions` skips it fail-open
+            # (`point supersession ref … not found — skipped (fail-open)`),
+            # both claims stay live, and — measured on the capture seam — the
+            # extractor's own warning would still have claimed the interval was
+            # closed. That is the false-success class this arm exists to
+            # remove, so the arm DECLINES and says so instead: the declared
+            # NAND is emitted (or dropped) exactly as before, and no interval
+            # is closed. A truthful non-closure beats a false closure; the
+            # backfill direction needs a producer of the other shape (a
+            # graph-id `superseded`), which is a different change.
+            warnings.append(
+                "NAND contradiction ACROSS CAPTURES not closed (#14198): world "
+                f"time says the prior point {older_id[:20]!r} is the NEWER fact "
+                f"({older_when!r} vs this capture's {new_when!r}), and "
+                "the point-supersede channel cannot express that direction — "
+                "`superseded` must already be a graph id, so this capture's "
+                "claim cannot be the closed side. No interval is closed; the "
+                "declared edge is handled exactly as it would be without this "
+                "arm — emitted when the older side resolves, dropped when it "
+                "does not, which the adjacent warning states")
+            return False
+        # ⛔ THE BUDGET IS SPENT ONLY BY A RECORD THAT IS ACTUALLY WRITTEN
+        # (#14198 review 3, P1): this used to run before the backfill test, so a
+        # DECLINED pair consumed the one-closure-per-prior slot — and a LATER,
+        # closable refuter of the same prior then returned above with no record
+        # AND no warning, leaving the #14198 defect (two live truths) in a shape
+        # where everything needed to close it was present. The only line in the
+        # payload about that prior was the decline's, which asserts the prior is
+        # the newer fact — false for the refuter it silently skipped.
+        _closed_prior_ids.add(older_id)
+        # Only ONE direction reaches here, so the record is written once and
+        # says exactly that: no `order` variable, because a field that can only
+        # ever hold one value reads as if the other direction existed.
+        if (older_id, new_id) not in pt_record_pairs:
+            pt_record_pairs.add((older_id, new_id))
+            supersessions.append({
+                "superseded": older_id, "supersedes_by": new_id,
+                "evidence": "declared NAND contradiction across captures — "
+                            "the older claim's interval is closed (retained, "
+                            "never deleted)"})
+            link_before_create.append({
+                "searched_for": f"prior claim '{older_content[:60]}'",
+                "found": True,
+                "note": f"contradicted by point {new_id} — the older claim's "
+                        "interval is closed (CORRECTS, retained)"})
+        warnings.append(
+            f"operator endpoint is an EARLIER-CAPTURE claim (#14198): {where} "
+            f"resolved to prior point {older_id[:20]!r} outside this capture — "
+            f"the contradiction is recorded as a supersession (closed interval "
+            f"{older_id[:20]!r} ← {new_id[:20]!r}), so the older claim is "
+            "retained and closed rather than left as a second live truth")
+        return True
+
     for op in _all_ops:
         if not isinstance(op, dict):
             warnings.append(f"non-dict operator entry {op!r} skipped")
@@ -12357,9 +12709,94 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         src = _resolve(str(o.get("src", "")))
         dst = _resolve(str(o.get("dst", "")))
         if not src or not dst or src == dst:
+            # ── #14198: a DECLARED contradiction whose OLDER side is in a PRIOR
+            # capture CLOSES that claim's interval instead of being dropped.
+            # `_resolve` reads only THIS capture's ids, so the older side of a
+            # cross-capture NAND cannot resolve here.
+            #
+            # ⛔ SYMMETRIC (review F3 of #14794): EXACTLY ONE side resolved, and
+            # the unresolved side is the prior candidate. The first cut keyed on
+            # `src` alone, so the model's other emission order (older claim
+            # first) left `src` empty, the guard was false, and the operator
+            # fell through to `operator dropped: src/dst did not resolve` — the
+            # contradiction lost on a corpus whose only difference is emission
+            # order. `_canonicalize_nand_direction` cannot repair it (it returns
+            # None for an existing-graph endpoint, which a cross-capture NAND
+            # always has), and the receipt this PR replays carries two
+            # `NAND direction canonicalized` lines from the same corpus.
+            if op_type == "NAND" and bool(src) != bool(dst):
+                prior_side = "dst" if src else "src"
+                prior_ref = str(o.get(prior_side, "") or "")
+                # ⛔ A LOCAL SINK (#14198 review 3, P2): `_resolve_point_supersede`
+                # writes "point supersedes=… matches no S3 prior — skipped
+                # (fail-open)", and the eval runner counts that marker as the
+                # REPLACE channel dropping a CORRECTS/supersession record. Here
+                # the model declared a NAND, not a `supersedes` ref, so letting
+                # it through mints a replace-channel loss that did not happen —
+                # on the very corpus this PR measures, 2 of doc-05's 3 drops
+                # would be re-attributed. The NAND-shaped fall-through warning
+                # below (`operator dropped: …`) already says what happened.
+                # ⚠️ The sink must NOT swallow the resolver's SUCCESS line too
+                # (review 4, P2): `#8503`'s recall-band disclosure says a closure
+                # was decided on a NON-EXACT match ("the same claim once frame
+                # words at its edges are disregarded"), and that is the only
+                # audit trail for terminalising a live belief — in a module whose
+                # own docstring notes there is no un-supersede API. Its line is
+                # `point-supersede recall band (#8503): ref …` — a DIFFERENT
+                # shape from the `point supersedes=` refusals (hyphenated, no
+                # `=`), so it is forwarded by its own words; the refusals stay
+                # dropped, and this
+                # warning path's `0 or 2+ candidates` detail is therefore DROPPED
+                # deliberately — the fall-through drop warning is a fixed
+                # template (`operator dropped: src/dst did not resolve …`) that
+                # carries no candidate count, so an AMBIGUOUS prior (2+ tie) and
+                # an ABSENT one reach the receipt as the same line. Stated rather
+                # than implied: a mis-drop caused by ambiguity is not
+                # distinguishable from a legitimate fail-open here.
+                _resolver_said: list[str] = []
+                prior_row = _resolve_point_supersede(
+                    prior_ref, search, warnings=_resolver_said)
+                warnings.extend(w for w in _resolver_said
+                                if "recall band" in w)
+                if _close_prior_contradiction(
+                        src or dst,
+                        str((prior_row or {}).get("id") or "").strip(),
+                        str((prior_row or {}).get("content") or ""),
+                        f"NAND {prior_side} {prior_ref[:60]!r}",
+                        prior_row):
+                    continue
             warnings.append(f"operator dropped: src/dst did not resolve to an "
                             f"emitted point/event ({o.get('src')!r} → {o.get('dst')!r})")
             continue
+        if op_type == "NAND" and src != dst:
+            # The OTHER lookup state (measured on the same receipt): a RESOLVED
+            # lookup folds the older ref onto its graph id (#4716 mint-vs-E7),
+            # so the edge WIRES instead of dropping and both claims stay live.
+            # The declaration is not lost there, but the reader still gets two
+            # live truths, so the same closure applies (and, as on the drop
+            # route, the operator is not also emitted — see the `continue`).
+            _older = (dst if dst not in _capture_ids
+                      else src if src not in _capture_ids else "")
+            _newer = src if _older == dst else dst if _older else ""
+            # The EVIDENCE TRAIL must name the side the direction actually
+            # chose (review 2): the two orders put the prior in different
+            # fields, and labelling both `dst` reported the in-capture claim as
+            # the prior that was searched for — two audit rows in one payload
+            # then said the same text was "not found, created" AND "found as a
+            # prior", with a note that a claim was contradicted by itself.
+            _older_ref = (str(o.get("dst") or "") if _older == dst
+                          else str(o.get("src") or ""))
+            _older_side = "dst" if _older == dst else "src"
+            if _older and _newer and _close_prior_contradiction(
+                    _newer, _older, _older_ref[:120],
+                    f"NAND {_older_side} {_older_ref[:60]!r}"):
+                # The edge is NOT also emitted: `_supersede_point` re-points
+                # (or, for a self-edge, DELETES) the incident IMPL/NAND rows
+                # when the predecessor is terminalised — measured shape of the
+                # `tid == new_id` branch — so emitting it would declare an edge
+                # the commit then removes, and would hand the door a repoint it
+                # can refuse. The CORRECTS edge is the representation.
+                continue
         if op_type in ("IMPL", "NAND", "COHERENCE"):
             if op_type == "NAND":
                 # #2552 (op_02): canonicalize the NAND direction so the

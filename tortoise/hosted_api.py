@@ -8909,13 +8909,27 @@ def _record_health() -> dict:
         block["cache_leg_failures"] = cache_leg
         block["cache_write_targets"] = cache_targets
     # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
-    # this counter carries — SEVEN values, documented at
+    # this counter carries — EIGHT values, documented at
     # ``monitoring.record_record_write_failure`` — is not uniformly
     # replay-healable, and naming four of them here sent operators to a replay
     # that could not exist for two:
     #
-    #   ``write_failed``      the record was unreachable or the projection
-    #                         refused the row — a REPLAY heals it.
+    #   ``write_failed``      the record was UNREACHABLE, or the connection or
+    #                         its statement failed — a replay heals an OUTAGE.
+    #   ``plan_refused``      the PROJECTOR could not BUILD a plan for the record,
+    #                         so no statement ran (an undeclared/refused record
+    #                         type, a carrier with no snapshot, an unusable
+    #                         key/endpoint, a caller watermark it refuses) — a
+    #                         REPLAY RE-REFUSES until the cause is fixed, so the
+    #                         remedy is the producer or the record shape, never a
+    #                         replay (#11783: 182 of these read as `write_failed`
+    #                         while every database probe was healthy). ⛔ Not a
+    #                         store fact: a statement that RAN and failed (a CHECK
+    #                         constraint) stays `write_failed`.
+    #                         ⛔ ONE CAUSE IS A DEPLOYMENT FACT: a record schema
+    #                         that is not on disk raises INSIDE the plan build, so
+    #                         that reading is fixed by a REDEPLOY (a wheel with
+    #                         `record_migrations`), not by the producer.
     #   ``journal_collision`` the position row cannot be indexed by this write —
     #                         a different record type, a different capture time,
     #                         identities this write's payload CONTRADICTS, or (for
@@ -9577,7 +9591,7 @@ async def health():
     return {"status": "ok" if (db.get("ok") and watcher["ok"] and record["ok"])
             else "degraded",
             # ⛔ Its OWN key, not `degraded_reasons` — that name is taken by
-            # `record.degraded_reasons` (a documented seven-value vocabulary,
+            # `record.degraded_reasons` (a documented eight-value vocabulary,
             # `docs/infra-runbook.md`, pinned by `test_record_searchkeys_10620`).
             # Two schemas under one name is how a consumer reads the wrong one.
             "refusals": refusals,
