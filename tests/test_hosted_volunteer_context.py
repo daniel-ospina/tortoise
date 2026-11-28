@@ -12,8 +12,10 @@ parity, GET vs POST /v1/context non-collision, 429 backoff contract.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import tempfile
+import time
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
@@ -30,33 +32,111 @@ from tortoise.sdk import TortoiseSDK
 
 TEST_ORG_ID = "team-001"
 
+#: This module now pays a REAL-EMBEDDER cold load, in one module-scoped fixture
+#: (below), and that load is the reason for this budget. The suite's per-item
+#: default is 300 s (``--timeout=300`` in python-ci.yml); a measured
+#: ``bge-small``-class load is ~57 s on an idle runner and **135.59 s** on this
+#: project's own dev box — and on a box saturated by parallel lanes it crosses
+#: 300 s outright, which kills the WARM-UP inside setup and errors all sixteen
+#: tests before one of them runs (observed 2026-11-28 at load 26-34: `16 errors`,
+#: every one `Failed: Timeout (>300.0s)` at ``ERROR at setup of …``). 600 s is
+#: the budget the repository already gives real-embedder modules
+#: (``tests/eval/retrieval/test_integration.py``: `pytestmark =
+#: pytest.mark.timeout(600)  # real-embedder tests load bge-small`), and it is
+#: deliberately just 2x: ``EmbeddingModel.get()`` carries its own
+#: ``_LOAD_TIMEOUT_S`` = 300 s cap, so the loader's own bound still fires first
+#: and the fixture cannot outlive this one.
+#:
+#: ⛔ Not a licence for a hanging test: the assertions in this file are
+#: themselves wall-clock bounded (2.4 s ceiling, ``test_hard_ceiling_never_hangs_caller``),
+#: so a slower outer watchdog changes no outcome — it only stops the SETUP
+#: being mistaken for the failure.
+pytestmark = pytest.mark.timeout(600)
+
+
+# ── hermetic read-path warm-up (#3083) ────────────────────────────────────
+
+@pytest.fixture(scope="module", autouse=True)
+def _warm_read_path():
+    """Pay the embedder's cold load ONCE, outside every asserted request.
+
+    The read path's hard ceiling is ``SLO_MS * 8 / 1000`` = **2.4 s**
+    (``SLO_MS`` in ``tortoise/volunteer.py``, applied as
+    ``timeout=SLO_MS * 8 / 1000.0`` inside ``hosted_api.volunteer_context``;
+    a breach returns the fail-open empty block with
+    ``degraded_reason='timeout'``).  The suite pins
+    ``TORTOISE_EMBEDDER_WARMUP=0`` for the whole session
+    (``tests/conftest.py:86``), and under that declared opt-out the read
+    keeps the **pre-#13528 synchronous contract** — it blocks on
+    ``EmbeddingModel.get()`` instead of taking the non-blocking arm
+    (``tests/test_13528_read_never_blocks_on_embedder.py:428``).  So the
+    FIRST read in a process pays the whole model load INSIDE the 2.4 s
+    ceiling and degrades.
+
+    That made this file's two plain-read tests order-dependent, which is
+    exactly #3083: ``test_clean_empty_and_courtesy`` passes when a seeding
+    test ran first in the same process (it loads the model outside the
+    ceiling) and fails when it is the process's first read — a lone-file run,
+    a ``-k`` selection, a dev machine.  Measured at ``31a320e392``:
+
+      * isolated ``test_clean_empty_and_courtesy`` →
+        ``assert {'degraded_reason': 'timeout'} == {'degraded_reason': None}``;
+      * cold ``EmbeddingModel.get()`` **135.59 s**, then
+        ``sdk._volunteer_context(...)`` **0.19-0.21 s**, twice.
+
+    The model is class-cached (``cls._instance``), so ONE explicit load here
+    makes every later read fast and the assertions about the *contract* stop
+    being assertions about whose request happened to be first.  ``warm_up``
+    is the declared non-raising entry point (it returns False when the vector
+    leg cannot run — a keyword-only read is fast either way, so an absent
+    ``embeddings`` extra needs no special case).
+    """
+    from tortoise.embeddings import EmbeddingModel
+
+    EmbeddingModel.warm_up()
+    yield
+
 
 # ── fixtures (auth-override lane, mirrors test_hosted_api) ─────────────────
 
-@pytest.fixture
-def client():
+@contextlib.contextmanager
+def _sdk_lane(db_path: str):
+    """Pin every SDK the hosted path opens to one throwaway db (never the
+    developer's ambient graph), and hand back the module.
+
+    Shared by the ``client`` fixture and by tests that build their own
+    FastAPI app: a lane that does not take it opens whatever graph the box
+    happens to have, which makes the request cost — and its content — a
+    property of the machine (#3083).
+    """
     import tortoise.hosted_api as ha_mod
 
+    _orig_init = ha_mod.TortoiseSDK.__init__
+
+    def _patched_init(self, db_path_arg=None, *, namespace=None,
+                      graph_name=None, **kwargs):
+        _orig_init(self, db_path, namespace=namespace, graph_name=graph_name)
+
+    ha_mod.TortoiseSDK.__init__ = _patched_init
+    os.environ["TORTOISE_DB_PATH"] = db_path
+    ha_mod._FALLBACK_KEEPALIVE.clear()
+    try:
+        yield ha_mod
+    finally:
+        os.environ.pop("TORTOISE_DB_PATH", None)
+        ha_mod.TortoiseSDK.__init__ = _orig_init
+
+
+@pytest.fixture
+def client():
     with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = os.path.join(tmpdir, "test.db")
         app.dependency_overrides[get_current_org] = lambda: dict(
             {"org_id": TEST_ORG_ID, "tier": "free", "key_id": None})
-        _orig_init = ha_mod.TortoiseSDK.__init__
-
-        def _patched_init(self, db_path_arg=None, *, namespace=None,
-                          graph_name=None, **kwargs):
-            _orig_init(self, db_path, namespace=namespace,
-                       graph_name=graph_name)
-
-        ha_mod.TortoiseSDK.__init__ = _patched_init
-        os.environ["TORTOISE_DB_PATH"] = db_path
-        ha_mod._FALLBACK_KEEPALIVE.clear()
         try:
-            with TestClient(app) as tc:
+            with (_sdk_lane(os.path.join(tmpdir, "test.db")),
+                  TestClient(app) as tc):
                 yield tc
         finally:
-            os.environ.pop("TORTOISE_DB_PATH", None)
-            ha_mod.TortoiseSDK.__init__ = _orig_init
             app.dependency_overrides.clear()
 
 
@@ -87,6 +167,54 @@ def _window(text: str) -> list[dict]:
     return [{"role": "user", "content": text}]
 
 
+def _context(client, payload: dict, *, headers: dict | None = None,
+             attempts: int = 6):
+    """POST /v1/context, retrying a FAIL-OPEN degraded read (#3083).
+
+    The read path's hard ceiling is 2.4 s and a breach is the documented
+    fail-open shape — 200 with the empty block and ``degraded_reason='timeout'``
+    — so a content assertion made on ONE request is partly an assertion about
+    the box's speed. Measured on this file's own real-auth lane with a warm
+    embedder: **1.59 s** for the first read, **0.88-0.89 s** after, against that
+    2.4 s ceiling; a loaded box crosses it and empties a perfectly healthy
+    response (observed here: ``test_two_teams_two_keys_zero_cross_team`` →
+    ``assert a_claim in a_ids`` failing with ``[]``, and
+    ``test_sdk_http_deep_equal_parity`` degrading on the HTTP leg while the
+    direct SDK call on the same graph succeeded).
+
+    The retry is the caller's own documented remedy — the read path is
+    stateless (``re-POST the same session_id adds 0 graph nodes``) and a 429 is
+    "client backoff, not a hard failure" — and it is BOUNDED, so a genuinely
+    broken read still fails, on the last response, with its
+    ``degraded_reason`` in hand. The backoff GROWS (0.5 s doubling to 8 s,
+    ~15 s over six attempts) on purpose: the state being absorbed is a window —
+    a cold embedder load, or a box whose CPU is saturated by other lanes — so
+    an immediate re-POST lands inside the same window and buys nothing. 15 s
+    against the suite's 300 s per-item budget is safe.
+
+    Status-only assertions never need this: use the plain POST there, and use
+    the plain POST in the degrade tests, which ASSERT the degraded shape.
+
+    ⛔ A retry that ends degraded returns the EMPTY block (``pointers``/
+    ``why``/``surfaced`` = ``[]``, ``block`` = ``""``), and an empty response
+    satisfies any assertion of the form "it is 200", "both are equal", "no
+    nodes were written" or "X is not in the ids". So a caller whose assertions
+    an empty block would pass MUST also assert ``degraded_reason is None`` —
+    otherwise the retry turns a dead read into a vacuous pass (the false-PASS
+    class this repository classifies as A; a cross-team isolation assertion
+    reading ``assert a_claim not in []`` is the worst case of it).
+    """
+    delay = 0.5
+    r = client.post("/v1/context", json=payload, headers=headers)
+    for _ in range(attempts - 1):
+        if r.status_code != 200 or r.json().get("degraded_reason") != "timeout":
+            break
+        time.sleep(delay)
+        delay = min(delay * 2, 8.0)
+        r = client.post("/v1/context", json=payload, headers=headers)
+    return r
+
+
 def _count_nodes(sdk) -> int:
     rows = sdk._get_proj().g.query("MATCH (n) RETURN count(n)").result_set
     return int(rows[0][0]) if rows else 0
@@ -112,7 +240,7 @@ def test_post_v1_context_contested_content_and_shape(client):
         "Acme security review was due May 1 and has not shipped",
         "Acme security review shipped on April 30 per the release log",
     )
-    r = client.post("/v1/context", json={
+    r = _context(client, {
         "window": _window("What is the status of the Acme security review? "
                           "Has it shipped?"),
         "session_id": "sess_http_acme", "why": True,
@@ -132,12 +260,12 @@ def test_post_v1_context_contested_content_and_shape(client):
 
 
 def test_clean_empty_and_courtesy(client):
-    r = client.post("/v1/context", json={"window": _window(
+    r = _context(client, {"window": _window(
         "What is the status of the Orion migration?")})
     assert r.status_code == 200
     assert r.json() == {"pointers": [], "why": [], "surfaced": [],
                         "block": "", "degraded_reason": None}
-    r2 = client.post("/v1/context", json={"window": _window(
+    r2 = _context(client, {"window": _window(
         "Thanks, that helps a lot.")})
     assert r2.json()["degraded_reason"] is None and r2.json()["pointers"] == []
 
@@ -152,9 +280,13 @@ def test_repost_same_session_identical_and_zero_new_nodes(client):
                                  "allocation?"),
                "session_id": "sess_idem", "why": True}
     before = _count_nodes(sdk)
-    r1 = client.post("/v1/context", json=payload)
-    r2 = client.post("/v1/context", json=payload)
+    r1 = _context(client, payload)
+    r2 = _context(client, payload)
     assert r1.status_code == r2.status_code == 200
+    # A DEGRADED read is 200 + the empty block, and two identical empty blocks
+    # satisfy both assertions below (and write no nodes) — so the healthy-read
+    # precondition has to be named, or this test is green on a dead read.
+    assert r1.json()["degraded_reason"] is None, r1.json()
     assert r1.json() == r2.json()
     assert _count_nodes(sdk) == before  # 0 new graph nodes
 
@@ -167,7 +299,7 @@ def test_zero_llm_read_path(client, monkeypatch):
     sdk = _seed_team_sdk()
     _plant_contested(sdk, "Widget Co closes escrow Friday",
                      "Widget Co escrow slipped a week")
-    r = client.post("/v1/context", json={
+    r = _context(client, {
         "window": _window("When does the Widget Co escrow close?"),
         "session_id": "sess_zero_http", "why": True})
     assert r.status_code == 200
@@ -182,7 +314,7 @@ def test_sdk_http_deep_equal_parity(client):
     window = _window("Is the Lumen canary shipping to five percent yet?")
     sdk_r = sdk._volunteer_context(window, session_id="sess_par",
                                   prior_context=None, why=True)
-    http_r = client.post("/v1/context", json={
+    http_r = _context(client, {
         "window": window, "session_id": "sess_par", "why": True,
     }).json()
     assert http_r["degraded_reason"] is None
@@ -202,9 +334,11 @@ def test_get_vs_post_context_never_collide(client):
     assert g.status_code == 200
     # The GET digest shape (session_context) is NOT the reflex contract.
     assert "pointers" not in g.json()
-    p = client.post("/v1/context", json={"window": _window(
+    p = _context(client, {"window": _window(
         "What do you remember from last session?")})
     assert p.status_code == 200
+    # The shape is the same on a degraded 200, so name the healthy read.
+    assert p.json()["degraded_reason"] is None, p.json()
     assert set(p.json()) == {"pointers", "why", "surfaced", "block",
                              "degraded_reason"}
 
@@ -301,18 +435,16 @@ def test_sdk_validates_before_http(client):
 
 # ── 429 backoff contract (standard per-key limiter + Retry-After) ──────────
 
-def test_429_rate_limit_retry_after_backoff_safe(monkeypatch):
+def test_429_rate_limit_retry_after_backoff_safe(monkeypatch, tmp_path):
     """The endpoint rides the shared per-key RateLimitMiddleware: on limit it
     returns 429 + Retry-After (client backoff — not a hard failure).  A
     retry after the window is deterministic (the read path is stateless)."""
     import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import RateLimitMiddleware
-    # The shared test env disables the limiter; this test needs it armed —
-    # the middleware reads the flag at construction time.
-    monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
-
-    class _NoopAuth:
-        pass
+    # #3083: ARM the limiter by stating the value it needs, instead of
+    # inheriting whatever the session/ambient shell holds (the middleware
+    # reads the flag at CONSTRUCTION time, and `1` is what makes it inert).
+    monkeypatch.setenv("RATE_LIMIT_DISABLED", "0")
 
     mini = __import__("fastapi").FastAPI()
     mini.add_middleware(RateLimitMiddleware, max_per_minute=100,
@@ -325,13 +457,29 @@ def test_429_rate_limit_retry_after_backoff_safe(monkeypatch):
     mini.dependency_overrides[get_current_org_gated] = _org
     mini.add_api_route("/v1/context", ha_mod.volunteer_context,
                        methods=["POST"])
-    with TestClient(mini) as tc:
+    # The per-IP bucket key is derived from the client address
+    # (`_bucket_key` → `ip:<host>`), so pin it rather than inheriting the
+    # client library's default host name; and the lane keeps the request off
+    # the box's ambient graph.
+    with (_sdk_lane(os.path.join(str(tmp_path), "limited.db")),
+          TestClient(mini, client=("127.0.0.1", 40777)) as tc):
         payload = {"window": _window("What did Alice decide?"),
                    "session_id": "sess_429"}
         first = tc.post("/v1/context", json=payload)
-        assert first.status_code == 200
+        assert first.status_code == 200, first.text
+        # ⛔ The precondition that matters is a HEALTHY first request, not a
+        # fast one: `degraded_reason is None` is what goes RED when the
+        # read-path warm-up is removed on a box whose cold embedder load
+        # exceeds the 2.4 s ceiling. (An elapsed-time bound cannot play this
+        # role — the ceiling caps every request well inside the limiter's
+        # 60 s window by construction, so such an assertion would be dead
+        # weight that reads as a guard.)
+        assert first.json()["degraded_reason"] is None, first.json()
         limited = tc.post("/v1/context", json=payload)
-        assert limited.status_code == 429
+        assert limited.status_code == 429, (
+            "the limiter did not charge a second request "
+            f"(RATE_LIMIT_DISABLED={os.environ.get('RATE_LIMIT_DISABLED')!r}): "
+            f"{limited.text}")
         assert "Retry-After" in limited.headers
         # Deterministic read-only: the same request is safe to retry (no
         # state mutated by the 429'd attempt).
@@ -455,7 +603,7 @@ def test_two_teams_two_keys_zero_cross_team(provision_test_user, real_auth):
     client = real_auth.client()
     with client:
         # Team A asks about Acme's Harborlight allocation → sees its own.
-        r_a = client.post("/v1/context", json={
+        r_a = _context(client, {
             "window": _window("What is Harborlight's allocation from Acme "
                               "right now?"),
             "session_id": "sess_A"}, headers=auth_a)
@@ -463,15 +611,20 @@ def test_two_teams_two_keys_zero_cross_team(provision_test_user, real_auth):
         a_ids = [p["id"] for p in r_a.json()["pointers"]]
         assert a_claim in a_ids, a_ids
         # Team B asks the SAME question about Acme → never A's context.
-        r_b = client.post("/v1/context", json={
+        r_b = _context(client, {
             "window": _window("What is Harborlight's allocation from Acme "
                               "right now?"),
             "session_id": "sess_B"}, headers=auth_b)
         assert r_b.status_code == 200, r_b.text
         b_ids = [p["id"] for p in r_b.json()["pointers"]]
+        # ⛔ The isolation assertion below is `a_claim not in b_ids`, which a
+        # DEGRADED read satisfies vacuously (`not in []`). Name the healthy
+        # read first, or this test is a false PASS on the one assertion that
+        # must never be one.
+        assert r_b.json()["degraded_reason"] is None, r_b.json()
         assert a_claim not in b_ids, f"CROSS-TEAM LEAK: {b_ids}"
         # Sanity: B's key resolves B's graph (same window, own content).
-        r_b2 = client.post("/v1/context", json={
+        r_b2 = _context(client, {
             "window": _window("What is Harborlight's allocation from Beta "
                               "Corp right now?"),
             "session_id": "sess_B2"}, headers=auth_b)
