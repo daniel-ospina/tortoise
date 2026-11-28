@@ -1679,6 +1679,48 @@ def test_the_report_is_a_closed_vocabulary():
         "a routed read needs no remedy — a hint there would read as a problem")
 
 
+def test_the_commitments_remedy_names_a_door_that_actually_resolves():
+    """A remedy that names a name the caller cannot call is the same defect as no remedy.
+
+    #14780 review, cycle 3: the first fix for the hosted-route half said "re-read
+    with entity_type='object' through `tortoise_search_knowledge` or the SDK's
+    `tortoise_fts_query`" — and `tortoise_fts_query` is in
+    `tortoise.sdk_retired.REMOVED_SDK_METHODS` with an EMPTY destination tuple, so
+    following the second half raises a bare `AttributeError` while the notice says
+    the door exists. The hint is served text on the ONE publishing channel, so a
+    dead door there is worse than a missing one: the caller is told the route out.
+
+    Pinned as a PROPERTY (every `the SDK's `X`` the hint names must resolve on
+    `TortoiseSDK` and must take `entity_type`), not as a name, so the next rewrite
+    cannot swap one dead door for another.
+    """
+    import inspect
+    import re
+
+    from tortoise.sdk import TortoiseSDK
+    from tortoise.state_intent import MISSED_ROUTE_COMMITMENTS_HINT
+    from tortoise.tool_registry import TOOL_REGISTRY
+
+    named = re.findall(r"SDK's `([A-Za-z_][A-Za-z0-9_]*)", MISSED_ROUTE_COMMITMENTS_HINT)
+    assert named == ["search_knowledge"], (
+        f"the hint names SDK door(s) {named}; each one is a promise the caller will "
+        "act on, so the list is pinned rather than free-form")
+    door = getattr(TortoiseSDK, named[0], None)
+    assert callable(door), (
+        f"the hint names `TortoiseSDK.{named[0]}` but it does not resolve — a REMOVED "
+        "or renamed method is the #4282 retirement class, and a remedy may not point "
+        "at one")
+    assert "entity_type" in inspect.signature(door).parameters, (
+        "the hint's whole remedy is `entity_type='object'`, so the door it names must "
+        "accept that argument")
+    assert "tortoise_fts_query" not in MISSED_ROUTE_COMMITMENTS_HINT, (
+        "`tortoise_fts_query` is a REMOVED public SDK method (it sits in "
+        "sdk_retired.REMOVED_SDK_METHODS with an empty destination) — naming it is "
+        "the dead-door defect this test exists to stop")
+    assert any(t.name == "tortoise_search_knowledge" for t in TOOL_REGISTRY), (
+        "the MCP half of the remedy must be a registered tool too")
+
+
 def test_the_hosted_search_response_carries_the_report(monkeypatch):
     """The customer-facing channel: `GET /v1/search` publishes `state_question`.
 

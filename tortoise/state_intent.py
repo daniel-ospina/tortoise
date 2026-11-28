@@ -1227,10 +1227,10 @@ MISSED_ROUTE_COMMITMENTS_HINT = (
     "RELEVANCE read answered instead \u2014 a point-scoped commitment question already "
     "returns the live claims, so this may be the answer you wanted. For the "
     "commitment population itself, re-read with entity_type='object' through the "
-    "`tortoise_search_knowledge` tool or the SDK's `tortoise_fts_query`; the "
-    "hosted `GET /v1/search` route takes no entity_type, so asking again there "
-    "returns this same notice. Every row then carries the kind and the stage it "
-    "stands on."
+    "`tortoise_search_knowledge` tool or the SDK's "
+    "`search_knowledge(entity_type='object')`; the hosted `GET /v1/search` "
+    "route takes no entity_type, so asking again there returns this same notice. "
+    "Every row then carries the kind and the stage it stands on."
 )
 
 #: The reasons a strong cue can be seen without the population being served.
