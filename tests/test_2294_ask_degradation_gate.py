@@ -75,6 +75,41 @@ def test_flagged_hit_with_window_marker_is_not_degraded():
         [_hit(status="live", outdated=True, valid_to="2026-09-01")]) is False
 
 
+# ── #14796: the POSITION axis is a terminality too ──────────────────────────
+
+def test_a_hit_closed_on_the_position_axis_is_degraded():
+    """A hit ended ONLY by ``isClosed`` carries a LIVE status.
+
+    The gate read ``(status, outdated)``, so this shape was a silent success —
+    the same failure #2294 fixed for the legacy flag, one axis over: a closed
+    record whose supersession markers the decoration failed to attach was
+    served as current with ``retrieval_degraded=False``.
+    """
+    assert _ask_d8_decoration_unavailable(
+        [_hit(status="live", isClosed=True)]) is True
+
+
+def test_a_hit_parked_in_the_terminal_slot_is_degraded():
+    assert _ask_d8_decoration_unavailable(
+        [_hit(status="live", pipelineSlot="terminal")]) is True
+
+
+def test_a_hit_near_the_terminal_slot_is_NOT_degraded():
+    """The slot is compared EXACTLY (``live.ending_axes``): a padded or
+    differently-named slot is not an ending, so the gate must not fire."""
+    for slot in ("active", "entry", " terminal ", "terminal-ish"):
+        assert _ask_d8_decoration_unavailable(
+            [_hit(status="live", pipelineSlot=slot)]) is False, slot
+
+
+def test_a_position_closed_hit_WITH_a_marker_is_not_degraded():
+    """The healthy path: the reader WAS told the record ended."""
+    assert _ask_d8_decoration_unavailable(
+        [_hit(status="live", isClosed=True,
+              superseded_by={"id": "pt_new", "content_snippet": "new"})]
+    ) is False
+
+
 # ── the pre-existing status-terminal cases must stay pinned ─────────────────
 
 def test_superseded_status_without_markers_is_degraded():
