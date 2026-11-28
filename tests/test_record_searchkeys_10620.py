@@ -699,18 +699,22 @@ def test_an_unreadable_verdict_is_never_published_as_not_refusing(monkeypatch):
 @pytest.mark.parametrize("reason", [
     "write_failed", "no_tenant", "malformed_dsn", "circuit_open",
     "no_journal", "seam_unimportable", "journal_collision",
+    "plan_refused",
 ])
 def test_every_counter_reason_reaches_the_payload_with_its_own_identity(
         monkeypatch, reason):
-    """The runbook's SEVEN-row reason table has a code side (#10620 review, 2).
+    """The runbook's EIGHT-row reason table has a code side (#10620 review, 2).
 
     `no_journal` and `seam_unimportable` are the two the first cut omitted, and
     they are the two whose remedy is NOT a replay — a reason that never reaches
     the payload cannot name its own fix. `journal_collision` (#9318) is the
     third of that kind and the only POST-write one, so its omission would be
-    the same defect for the token where a replay actively re-raises. Driven
-    through the PUBLIC writer, so an allowlist hidden inside the window reader
-    fails here instead of silently dropping a reason from the operator's
+    the same defect for the token where a replay actively re-raises.
+    `plan_refused` (#11783) is the FOURTH non-replay-healable one and the
+    one whose absence cost the most: while it shared `write_failed`, 182
+    shape-refusals in production were indistinguishable from a transport outage.
+    Driven through the PUBLIC writer, so an allowlist hidden inside the window
+    reader fails here instead of silently dropping a reason from the operator's
     diagnosis.
     """
     from tortoise import monitoring
@@ -1124,14 +1128,668 @@ def test_content_columns_are_real_record_columns():
             f"{required!r} carries the user's own text and must be withheld")
 
 
-def test_a_mapping_valued_search_keys_is_refused_not_serialized():
-    """A dict is neither the graph's form nor a list — never JSON into `text`."""
-    with pytest.raises(record_projection.RecordProjectionError) as caught:
-        record_projection._record_column_value(
-            "point", "search_keys", {"k": "v"})
-    assert "second representation" in str(caught.value)
-    # The divergence is STATED: the graph leaves a dict as-is, the record refuses.
-    assert "leaves a dict as-is" in str(caught.value)
+def test_a_mapping_valued_search_keys_is_omitted_not_serialized(caplog):
+    """#11783 — a dict contributes NO column, and never refuses the record.
+
+    The old arm raised `RecordProjectionError` here, and that refusal took the
+    WHOLE record write with it: measured live (2026-11-26, hosted app) as
+    `record.degraded_reasons.write_failed` climbing 0 → 182 while the database
+    was healthy and `record_writes_applied` reached 3190. `_OMIT` is parity with
+    the graph's CREATE/UPSERT door, which filters a Mapping before
+    `SET n += $props` (`_is_persistable_prop_value` refuses it), so the node
+    stores no such property while the rest of the record lands.
+    ⛔ `patch=True` is the OTHER door and is asserted separately below — the
+    graph CLEARS there, so `_OMIT` would not be parity.
+
+    The declaration is asserted too: the WARNING names the COLUMN and the
+    value's TYPE, and never the value (a `quote` is the user's own text).
+    """
+    with caplog.at_level(logging.WARNING,
+                         logger=record_projection.__name__):
+        for column in ("search_keys", "quote"):
+            resolved = record_projection._record_column_value(
+                "point", column, {"k": "v"})
+            assert resolved is record_projection._OMIT, (
+                f"a Mapping-valued {column} must contribute NO column (the graph "
+                "stores no property for it either) — any OTHER value here is the "
+                "second representation #10620 exists to remove"
+            )
+            assert record_projection._record_column_value(
+                "point", column, {"k": "v"}, patch=True) is None, (
+                f"on the PATCH door the graph degrades the Mapping to null and a "
+                f"null in a map-merge REMOVES the property, so a Mapping-valued "
+                f"{column} must CLEAR the column (None), not keep it"
+            )
+
+    messages = [r.getMessage() for r in caplog.records
+                if r.levelno == logging.WARNING]
+    assert any("point.quote" in m and "dict" in m for m in messages), (
+        f"the omission of point.quote must DECLARE itself (column + shape): {messages}"
+    )
+    assert any("point.search_keys" in m for m in messages), messages
+    assert all(
+        m.startswith(f"record column point.{column} ")
+        for column in ("search_keys", "quote")
+        for m in messages
+        if f"point.{column}" in m
+    ), (
+        "the declaration must LEAD with the column and then the state word — a "
+        "message that opens `record column omitted (point.quote)` puts the STATE "
+        f"in the column's slot, so an operator grepping the column reads a verb: {messages}"
+    )
+    assert any("the column is left as it was" in m for m in messages), (
+        f"the CREATE door's tail must say where the column went: {messages}"
+    )
+    assert any("the column follows the node" in m for m in messages), (
+        "the PATCH door's tail must be grammatical English: the template is "
+        "`…and %s —`, so the argument carries its own clause. Measured mutant "
+        "(`d26e1d4ea86a`): binding `follows the node` against a "
+        "`…and the column is %s` template renders `and the column is follows the "
+        f"node` while every other leg stays green: {messages}"
+    )
+    assert not any("'k'" in m or '"k"' in m for m in messages), (
+        "the declaration must name the SHAPE, never the value: a quote is the "
+        f"user's own text and this line goes to the deployment's log: {messages}"
+    )
+
+
+def test_a_mapping_valued_property_cannot_drop_the_rest_of_the_row():
+    """#11783, the seam the issue names: `_split_properties`, CREATE direction.
+
+    Pre-fix this raised `RecordProjectionError` out of `mutations_for` — so the
+    point row, its identity row and the journal position all vanished while the
+    graph committed the same write. The row must land, with the offending
+    column ABSENT (the upsert builds its `INSERT` and `DO UPDATE` lists from the
+    same `col_values`, so an omitted key touches neither) and every other
+    column present.
+    """
+    for key in ("quote", "search_keys"):
+        record = {"type": "PointAdded",
+                  "point": {"eventId": "pt-11783", "id": "pt-11783",
+                            "content": "a claim",
+                            "point_kind": "statement", key: {"odd": "shape"}}}
+        statements = record_projection.mutations_for(
+            record, org_id="org-t", graph_id="graph-t")
+
+        point = [s for s in statements if "INSERT INTO public.point" in s.sql]
+        assert len(point) == 1, (
+            f"a Mapping-valued {key} dropped the point row (#11783): "
+            f"{len(statements)} statement(s) planned"
+        )
+        columns = point[0].sql.split("(", 1)[1].split(")", 1)[0]
+        assert key not in [c.strip() for c in columns.split(",")], (
+            f"{key} reached the record as a column: {columns}"
+        )
+        for landed in ("content", "point_kind", "node_key"):
+            assert landed in columns, (
+                f"{key}: the rest of the row must still land, and {landed!r} is "
+                f"missing from {columns}"
+            )
+
+
+def test_a_mapping_valued_property_cannot_drop_the_update_arm_either():
+    """#11783, UPDATE direction — where the column must CLEAR, not be kept.
+
+    ⛔ THIS TEST USED TO ASSERT THE OPPOSITE, and the reversal is measured, not
+    a preference. `update_point` does NOT go through the create fold that
+    filters a Mapping: it binds the caller's whole props bag into
+    `SET n += $props` (`sdk.py`), and the transport gate `_journal_safe_params`
+    DEGRADES the unwritable value to `null` — which a map-merge reads as
+    "REMOVE the property". Reproduced end-to-end on the lane's FalkorDB
+    (2026-11-26): `_create_point(…, quote="the stored span")` then
+    `_update_point(pid, quote={"a": 1})` logs `#7369: degraded 1 parameter
+    value(s) … (props.quote) to null before dispatch` and the node goes from
+    `quote='the stored span'` to `quote=None` (the key leaves `keys(n)`).
+    So the record's column must be CLEARED to match; omitting it (what this
+    test used to require) left the record holding a value the node no longer
+    had, i.e. the same divergence the other way round.
+    """
+    record = {"type": "PointRevised", "id": "pt-11783",
+              "new_content": "revised",
+              "quote": {"odd": "shape"},
+              "search_keys": {"odd": "shape"}}
+    statements = record_projection.mutations_for(
+        record, org_id="org-t", graph_id="graph-t")
+
+    patches = [s for s in statements if "UPDATE public.point" in s.sql]
+    assert len(patches) == 1, (
+        f"a Mapping-valued property dropped the point UPDATE (#11783): "
+        f"{len(statements)} statement(s) planned"
+    )
+    sql = patches[0].sql
+    bound = dict(zip(patches[0].param_columns, patches[0].params,
+                     strict=True))
+    for column in ("quote", "search_keys"):
+        assert f"{column} = %s" in sql, (
+            f"the update must SET {column} to NULL — the graph's own write "
+            f"removes the property when the transport degrades it: {sql}"
+        )
+        assert bound[column] is None, (
+            f"{column} must bind NULL (clear), the graph's measured outcome — "
+            f"got {bound[column]!r}"
+        )
+    assert "content = %s" in sql, (
+        f"the rest of the update must still land: {sql}"
+    )
+
+
+def test_a_mapping_valued_property_CLEARS_on_the_EntityMutated_patch_too():
+    """#11783 — the SECOND `_patch_statement` feed, pinned (review round 2, F3).
+
+    `EntityMutated` state ops end in the same `UPDATE … SET col = %s` the
+    `PointRevised` arm does, and the graph's own fold for that door writes
+    `MATCH … SET n += $s` — measured 2026-11-26: the Mapping degrades to null and
+    the property is REMOVED. So this feed passes `patch=True` for the same
+    reason, and it was unpinned: reverting only that argument left every mapping
+    test green (measured), because they all drive the `NodePatch` feed.
+    """
+    statements = record_projection.mutations_for(
+        {"type": "EntityMutated", "id": "pt-11783-ent",
+         "label": "Point", "op": "revise",
+         "state": {"quote": {"odd": "shape"},
+                   "search_keys": {"odd": "shape"},
+                   "content": "revised"}},
+        org_id="org-t", graph_id="graph-t")
+
+    patches = [s for s in statements if "UPDATE public.point" in s.sql]
+    assert len(patches) == 1, (
+        f"an EntityMutated patch was not planned: {[s.sql[:40] for s in statements]}"
+    )
+    sql = patches[0].sql
+    bound = dict(zip(patches[0].param_columns, patches[0].params, strict=True))
+    for column in ("quote", "search_keys"):
+        assert f"{column} = %s" in sql, (
+            f"the EntityMutated patch must SET {column} to NULL (the graph's fold "
+            f"removes the property) — this feed lost `patch=True`: {sql}"
+        )
+        assert bound[column] is None, f"{column} must bind NULL: {bound[column]!r}"
+    assert "content = %s" in sql, f"the rest of the patch must land: {sql}"
+
+
+def test_only_the_verbatim_patch_feeds_can_carry_a_mapping_flatten_key():
+    """#11783 round 28 P3 — the SCOPE of `patch=True`, made mechanical.
+
+    `_split_properties(patch=True)` is passed by the whole `NodePatch` feed, so
+    the docstring names EIGHT record types; the load-bearing claim is narrower —
+    a Mapping-valued ``_POINT_FLATTEN_COLUMNS`` key can only ARRIVE on the
+    feeds that copy arbitrary caller props verbatim (`from_payload is None`:
+    `PointRevised`, `OperatorAnnotated`) or on the `EntityMutated` arm, whose
+    `state` map is written as it stands. The other five NodePatch records
+    declare their keys — `from_payload`, `renames` **and `literals`**, the three
+    the `patch=True` docstring names — and if one ever declared a flatten column
+    as ANY of those this leg, not the prose, is what should redden. (A first
+    version graded `from_payload`/`renames` only, so a
+    `literals=(('quote', ...),)` was invisible while the docstring claimed
+    `literals` was covered.)
+    """
+    verbatim = []
+    for name, mutation in record_projection.RECORD_MUTATIONS.items():
+        effect = mutation.effect
+        if type(effect).__name__ != "NodePatch":
+            continue
+        if getattr(effect, "from_payload", None) is None:
+            verbatim.append(name)
+            continue
+        declared = (set(effect.from_payload)
+                    | {k for k, _ in effect.renames}
+                    | {k for k, _ in effect.literals})
+        assert not (declared & record_projection._POINT_FLATTEN_COLUMNS), (
+            f"{name} declares a flatten column as a typed patch key, so a "
+            "Mapping can reach the split from a DECLARED feed — the docstring's "
+            "'only the verbatim feeds' scope is now false for it; either widen "
+            "the rule or drop the key")
+    assert set(verbatim) == {"PointRevised", "OperatorAnnotated"}, (
+        "the verbatim (`from_payload is None`) NodePatch feeds moved: "
+        f"{sorted(verbatim)} — the `patch=True` docstring in "
+        "`record_projection._split_properties` names this set, and "
+        "`OperatorAnnotated` is the member whose fold writes annotator dims "
+        "only (so there the record CLEARS what the node keeps)")
+
+
+class _FakeConn:
+    """Enough of a connection for the door to open, fail and dispose of one."""
+
+    def close(self) -> None:  # pragma: no cover - recorded by the caller
+        self.closed = True
+
+    def commit(self) -> None:
+        pass
+
+    def rollback(self) -> None:
+        pass
+
+
+def test_a_plan_build_refusal_is_counted_apart_from_write_failed(monkeypatch):
+    """#11783 — the counter must say WHICH failure this is.
+
+    Both arms used to land on `write_failed`, so the 182 value-shape refusals the
+    hosted app accumulated read exactly like a transport outage while every
+    database probe was healthy (2.5–3.6 ms) — the reason the cause took a full
+    day to attribute. Driven through the LIVE door: the record is armed (a fake
+    DSN), the store is reached (a fake connection), and the PROJECTION refuses
+    the record before any statement runs.
+    """
+    from tortoise import monitoring, record_writer
+
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://fake")
+    monkeypatch.setattr(record_writer, "_default_connect",
+                        lambda dsn: _FakeConn())
+    record_writer._close_live_breaker()
+    before = dict(monitoring.record_write_failure_counts())
+
+    write = record_writer.write_live_record(
+        {"type": "NoSuchRecordType", "id": "pt-11783"},
+        seq=7, tenant=("org-t", "graph-t"))
+
+    after = dict(monitoring.record_write_failure_counts())
+    assert write is not None
+    assert write.outcome is record_writer.RecordWriteOutcome.REFUSED
+    assert write.refusal == "plan_refused", (
+        "the door must name the plan-build refusal as its OWN token — a consumer "
+        "branching on `write_failed` would replay a record that re-refuses"
+    )
+    assert after.get("plan_refused", 0) == before.get("plan_refused", 0) + 1
+    assert after.get("write_failed", 0) == before.get("write_failed", 0), (
+        "a projection refusal must NOT also count as `write_failed`: the whole "
+        "point of the split is that the two name different failures"
+    )
+
+
+class _ScopeBlindConn(_FakeConn):
+    """A connection that opens, scopes NOTHING, and says so (#11783 P1).
+
+    `_apply_tenant_scope` runs AFTER the plan is built: it sets the GUC and
+    reads it back in one statement, and refuses when the read-back returns no
+    row — a pooler that dropped the context, an autocommit connection, a
+    renamed GUC. Every one of those is a STORE/CONFIG fact, reached by
+    executing real statements.
+    """
+
+    def cursor(self):
+        return _ScopeBlindCursor()
+
+
+class _ScopeBlindCursor:
+    """Answers the ALLOCATOR's isolation gate, then blinds the SCOPE read-back.
+
+    ⛔ ORDER MATTERS, and the first cut of this fake got it wrong (#11783 round
+    27 P2): `journal_skipped=True` IMPLIES `allocate`, and the allocator's
+    isolation gate — `record_allocator.require_read_committed`, called from
+    `record_projection.replay`'s `if allocate:` arm, BEFORE the tenant scope —
+    opens its own cursor and `close()`s it in a `finally` before
+    `_apply_tenant_scope` runs. (An earlier version of this note cited
+    `record_allocator._assert_read_committed`, a symbol that exists NOWHERE —
+    #11783 round 28 P3 — and then a LINE NUMBER for the call, which was stale
+    on arrival and re-staled by the next commit above it. Cited by
+    SYMBOL/CONDITION here on purpose: nothing grades line numbers in these
+    two modules, so they rot.)
+    A fake with no `close()` therefore died in that `finally` with
+    `AttributeError: '_ScopeBlindCursor' object has no attribute 'close'` — so
+    the arm this leg claims to grade (a scope refusal, a STORE/CONFIG fact
+    raised after the plan was built) was never reached, and the leg graded an
+    `AttributeError` instead. Answering the isolation read with READ COMMITTED
+    and every LATER read with no row is what actually reaches the refusal.
+    """
+
+    def __init__(self) -> None:
+        self.statements = 0
+        self._row = None
+
+    def execute(self, sql, params=None):
+        self.statements += 1
+        # The allocator's gate asks for the transaction's isolation; the scope
+        # read-back is the only statement that must come back EMPTY.
+        self._row = (("read committed",) if "transaction_isolation" in sql
+                     else None)
+
+    def fetchone(self):
+        return self._row
+
+    def fetchall(self):
+        return []
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_a_store_refusal_after_the_plan_was_built_stays_write_failed(monkeypatch):
+    """#11783 review P1 — the classification is the PHASE, not the exception class.
+
+    `RecordProjectionError` is the base of BOTH the plan-build refusals and the
+    refusals raised after statements ran (the tenant-GUC read-back, a role that
+    bypasses RLS, the cutover guard's failed `SELECT`). ⚠️ A schema that is NOT
+    on disk is the one such refusal on the OTHER side of the boundary — it
+    raises inside the plan build, so it counts `plan_refused` and its remedy is
+    a redeploy (`test_a_missing_schema_is_plan_refused_because_it_raises_IN_the_
+    plan_build`, below) — which is why the rule is the PHASE and not a
+    hand-maintained list of classes. The first cut of this token
+    tested the CLASS, so a connection whose
+    scope could not be verified — a broken role or pooler — was counted as
+    `plan_refused`, i.e. the operator was told "check the producer" about a
+    store fact: MEASURED on a fake connection returning no row, whose refusal
+    read `the record's scope could not be verified — the read-back returned no
+    row`. That is the false diagnosis this test exists to prevent.
+    """
+    from tortoise import monitoring, record_writer
+
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://fake")
+    monkeypatch.setattr(record_writer, "_default_connect",
+                        lambda dsn: _ScopeBlindConn())
+    record_writer._close_live_breaker()
+    before = dict(monitoring.record_write_failure_counts())
+
+    write = record_writer.write_live_record(
+        {"type": "PointAdded",
+         "point": {"eventId": "pt-11783-scope", "id": "pt-11783-scope",
+                   "content": "a claim", "point_kind": "statement"}},
+        seq=8, tenant=("org-t", "graph-t"))
+
+    after = dict(monitoring.record_write_failure_counts())
+    assert write is not None
+    assert write.outcome is record_writer.RecordWriteOutcome.REFUSED
+    assert write.refusal == "write_failed", (
+        "a refusal raised AFTER the plan was built — statements already ran — "
+        f"must stay `write_failed`, got {write.refusal!r}"
+    )
+    assert after.get("write_failed", 0) == before.get("write_failed", 0) + 1
+    assert after.get("plan_refused", 0) == before.get("plan_refused", 0), (
+        "a store/config refusal must NOT be counted as a plan-build refusal: its "
+        "remedy is the DSN or the role, never the producer"
+    )
+
+
+def test_a_missing_schema_is_plan_refused_because_it_raises_IN_the_plan_build(
+        monkeypatch, tmp_path):
+    """#11783 review round 4 — the PIN behind twelve prose sites' claim.
+
+    `table_columns()` scans the migrations for `CREATE TABLE` and raises
+    "the record schema is not on disk" from INSIDE `replay_plan`, so a missing
+    migration is a plan-build refusal: no statement ran, counted `plan_refused`,
+    and its remedy is a REDEPLOY. Twelve sites state that (five modules —
+    `record_projection`, `record_writer`, `monitoring`, `status_vocabulary`,
+    `hosted_api` — plus the infra runbook and two test docstrings; counted, not
+    estimated: review round 5 found this sentence's earlier inventory of "nine,
+    four modules, the capability docs" off on all three numbers), and until this
+    test the only evidence was a measurement in a commit message — so a later
+    narrowing of the stamp, or `table_columns()` moving outside the `try`, would
+    have made every one of them false with every other gate green.
+    """
+    from tortoise import monitoring, record_projection, record_writer
+
+    empty = tmp_path / "no-migrations"
+    empty.mkdir()
+    monkeypatch.setattr(record_projection, "_migrations_dir", lambda: empty)
+    record_projection._release_schema_cache()
+    # ⛔ THE CLEAR RUNS AGAIN IN `finally`, and that is load-bearing rather than
+    # tidy: this test poisons the RESIDENT schema read with a MISSING tree, and
+    # the memo it takes would outlive `monkeypatch`'s restore of
+    # `_migrations_dir` — measured, without the `finally` every later leg in the
+    # same process fails with "the record schema is not on disk" (36 of them).
+    # `tests/test_4625_schema_reads_off_write_path.py` does the same, for the
+    # same reason.
+    try:
+        monkeypatch.setattr(record_writer, "record_dsn",
+                            lambda dsn=None: "postgresql://fake")
+        monkeypatch.setattr(record_writer, "_default_connect",
+                            lambda dsn: _FakeConn())
+        record_writer._close_live_breaker()
+        before = dict(monitoring.record_write_failure_counts())
+
+        write = record_writer.write_live_record(
+            {"type": "PointAdded",
+             "point": {"eventId": "pt-11783-schema", "id": "pt-11783-schema",
+                       "content": "a claim", "point_kind": "statement"}},
+            seq=12, tenant=("org-t", "graph-t"))
+
+        after = dict(monitoring.record_write_failure_counts())
+        assert write is not None
+        assert write.refusal == "plan_refused", (
+            "a missing record schema raises inside the plan build, so it must be "
+            f"`plan_refused` — got {write.refusal!r}"
+        )
+        assert after.get("plan_refused", 0) == before.get("plan_refused", 0) + 1
+        assert after.get("write_failed", 0) == before.get("write_failed", 0), (
+            "and NOT `write_failed`: no statement ever ran"
+        )
+    finally:
+        record_projection._release_schema_cache()
+
+
+class _UnserializableConn(_FakeConn):
+    """A connection that opens; the PLAN fails before it is used (#11783 F2)."""
+
+    def cursor(self):  # pragma: no cover - never reached
+        raise AssertionError("no statement may run for a plan-build failure")
+
+
+def test_a_plan_build_failure_that_is_not_a_projection_error_is_also_plan_refused(
+        monkeypatch):
+    """#11783 review round 2 (F2) — the PHASE is total over classes, or it is not.
+
+    The plan builders call `json.dumps(tail)` inside the plan build, so a payload
+    carrying an un-serializable value raises `TypeError` before any statement —
+    and replaying the same record re-raises it. Narrowing the marker to
+    `RecordProjectionError` left that one counted `write_failed`, i.e. the log
+    told an operator "a replay heals the record" about a record no replay can
+    heal (measured pre-fix).
+    """
+    from tortoise import monitoring, record_writer
+
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://fake")
+    monkeypatch.setattr(record_writer, "_default_connect",
+                        lambda dsn: _UnserializableConn())
+    record_writer._close_live_breaker()
+    before = dict(monitoring.record_write_failure_counts())
+
+    write = record_writer.write_live_record(
+        {"type": "PointAdded",
+         "point": {"eventId": "pt-11783-json", "id": "pt-11783-json",
+                   "content": "a claim", "point_kind": "statement",
+                   "custom": object()}},
+        seq=11, tenant=("org-t", "graph-t"))
+
+    after = dict(monitoring.record_write_failure_counts())
+    assert write is not None
+    assert write.refusal == "plan_refused", (
+        "a plan-build failure that is not a RecordProjectionError must still be "
+        f"`plan_refused` — the phase is the fact, not the class: {write.refusal!r}"
+    )
+    assert after.get("plan_refused", 0) == before.get("plan_refused", 0) + 1
+    assert after.get("write_failed", 0) == before.get("write_failed", 0)
+
+
+def test_a_plan_refusal_on_the_record_only_arm_does_not_claim_a_journal_line(
+        monkeypatch, caplog):
+    """#11783 review F1 — the remedy must match the arm, on the NEW line too.
+
+    `journal_skipped=True` is a REACHABLE state at this arm: `live_write` sets it
+    from `record_owns_position` on a CUT-OVER graph (#14002), where the chokepoint
+    deliberately does not append — so there is no `journal_event` line and no
+    position row. `write_live_record` still proceeds to the store on that arm
+    (`allocate = allocate or record_live_allocate() or journal_skipped`), so a
+    plan-build refusal here means the write reached NEITHER store.
+
+    The new `plan_refused` WARN used to assert "the journal holds the record ... a
+    replay of the same record re-refuses" unconditionally, which on this arm sends
+    the operator to a repair path that has no line to replay — the exact
+    misdirection splitting this token out of `write_failed` exists to end. The
+    sibling module already records the rule (`live_write.py:709`) and the door
+    already applies it one arm over (`position_unverifiable` is guarded by
+    `and not journal_skipped`).
+
+    Without this pin the branch is unobservable: reverting it reds nothing.
+    """
+    from tortoise import record_writer
+
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://fake")
+    monkeypatch.setattr(record_writer, "_default_connect",
+                        lambda dsn: _FakeConn())
+    record_writer._close_live_breaker()
+
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        write = record_writer.write_live_record(
+            {"type": "NoSuchRecordType", "id": "pt-11783-skipped"},
+            seq=7, tenant=("org-t", "graph-t"), journal_skipped=True)
+
+    assert write is not None
+    assert write.refusal == "plan_refused", (
+        "the record-only arm must still classify by PHASE, not by arm: "
+        f"{write.refusal!r}"
+    )
+    message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reached NEITHER store" in message, (
+        "on the record-only arm the WARN must say the write reached NEITHER "
+        f"store — got: {message}"
+    )
+    assert "the journal holds the record" not in message, (
+        "the record-only arm has NO journal line, so this claim is false and "
+        f"sends the operator to a replay that cannot exist: {message}"
+    )
+    assert "re-emit the record" in message, (
+        "the remedy on this arm is a RE-EMIT, which is what `live_write.py` "
+        f"already prescribes for it — got: {message}"
+    )
+    # ⛔ THE REMEDY CLAUSE, NOT JUST THE PROVIDER PHRASE (#14746 mutation pass,
+    # MEASURED): the pin above is satisfied by `journal_clause`'s own
+    # "re-emit the record", so `remedy_clause` could be collapsed to the
+    # replay-only branch and this row stayed GREEN. These two statements bind the
+    # RECORD-ONLY arm's remedy sentence specifically, and red if the flag stops
+    # selecting it.
+    assert "A re-emit of the same record re-refuses" in message, (
+        "on the record-only arm the REMEDY sentence must be the re-emit form — "
+        f"got: {message}"
+    )
+    assert "A replay of the same record re-refuses" not in message, (
+        "the record-only arm has no line to replay, so the replay-form remedy "
+        f"is false here: {message}"
+    )
+
+    # ⛔ DISCRIMINATING, not presence-only (the "membership is not the pin" rule
+    # the sibling arms already carry): the SAME door on the JOURNALED arm must
+    # still say the opposite, so this pin reds if the flag stops selecting the
+    # sentence — and it reds if the journaled sentence is dropped outright.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        journaled = record_writer.write_live_record(
+            {"type": "NoSuchRecordType", "id": "pt-11783-journaled"},
+            seq=7, tenant=("org-t", "graph-t"))
+
+    assert journaled is not None and journaled.refusal == "plan_refused"
+    journaled_message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "the journal holds the record" in journaled_message, (
+        "on the JOURNALED arm the line is TRUE and must still be stated — "
+        f"got: {journaled_message}"
+    )
+    assert "reached NEITHER store" not in journaled_message, (
+        "the journaled arm HAS a line, so claiming it reached neither store is "
+        f"the same falsehood in the other direction: {journaled_message}"
+    )
+
+
+def test_a_write_failure_on_the_record_only_arm_does_not_claim_a_journal_line(
+        monkeypatch, caplog):
+    """#11783 review F1, scope note — the SAME falsehood one arm down.
+
+    The review's F1 named the new `plan_refused` WARN and added, as its scope
+    note, that the pre-existing `write_failed` arm carries the same unqualified
+    claim ("the journal has the record") and that the cheap complete fix is to
+    condition THAT clause on the flag the door already holds. This is that fix's
+    pin.
+
+    `journal_skipped=True` is reachable at both arms: `live_write` sets it from
+    `record_owns_position` on a cut-over graph (#14002), where the chokepoint
+    deliberately does not append, so a `write_failed` there means the write
+    reached NEITHER store — and there is no line for a replay, enumerated or
+    allocating, to heal. It also IMPLIES `allocate`, so without this branch the
+    door would take an `allocate` sentence and prescribe a replay of a journal
+    that never received the record.
+
+    `_ScopeBlindConn` is the honest trigger: it makes the door execute the tenant
+    scope read-back and fail it, which is a STORE fact raised AFTER the plan was
+    built — the exact population of this arm. ⛔ AND THE LEG ASSERTS THE CAUSE,
+    not merely the clauses (#11783 round 27 P2): the first cut of this fake had
+    no `cursor.close()`, so `journal_skipped` (which implies `allocate`) died in
+    the allocator's isolation gate with an `AttributeError` and the scope refusal
+    it names was never reached — the two arms of this test then graded two
+    different failures, and this leg would have kept passing unchanged if the
+    scope-refusal path moved. The `scope could not be verified` assertion below
+    is what makes that impossible.
+    """
+    from tortoise import record_writer
+
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://fake")
+    monkeypatch.setattr(record_writer, "_default_connect",
+                        lambda dsn: _ScopeBlindConn())
+    record_writer._close_live_breaker()
+
+    record = {"type": "PointAdded",
+              "point": {"eventId": "pt-11783-wf-skipped",
+                        "id": "pt-11783-wf-skipped",
+                        "content": "a claim", "point_kind": "statement"}}
+
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        write = record_writer.write_live_record(
+            record, seq=9, tenant=("org-t", "graph-t"), journal_skipped=True)
+
+    assert write is not None and write.refusal == "write_failed", (
+        "a store fact raised after the plan was built stays `write_failed` "
+        f"whatever the arm — got {None if write is None else write.refusal!r}"
+    )
+    message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reached NEITHER store" in message, (
+        "the record-only arm has NO journal line, so the write reached neither "
+        f"store and the WARN must say so — got: {message}"
+    )
+    # ⛔ THE CAUSE, NOT JUST THE CLAUSES (#11783 round 27 P2). Without this the
+    # leg passes on ANY generic-arm failure — it passed on an `AttributeError`
+    # from the allocator's isolation gate — so the clause assertions above were
+    # grading a different failure than the one this docstring names.
+    assert "the record's scope could not be verified" in message, (
+        "this leg must reach the tenant-scope READ-BACK refusal (a store/config "
+        "fact raised after the plan was built); anything else — an allocator "
+        f"gate, a cursor close, a plan build — is a different population: {message}"
+    )
+    assert "the journal has the record" not in message, (
+        "this arm's pre-existing copy of the false claim must be gone too: "
+        f"{message}"
+    )
+    assert "re-emit the record" in message, (
+        "with no line to replay, the remedy is a RE-EMIT (what "
+        f"`live_write.py` prescribes) — got: {message}"
+    )
+
+    # ⛔ DISCRIMINATING: the same door on the JOURNALED arm must still claim the
+    # line it really has, so this pin reds if the flag stops selecting the
+    # sentence (rather than merely passing on a message nobody varies).
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        journaled = record_writer.write_live_record(
+            record, seq=9, tenant=("org-t", "graph-t"))
+
+    assert journaled is not None and journaled.refusal == "write_failed"
+    journaled_message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "the journal has the record" in journaled_message, (
+        "on the JOURNALED arm the line exists and must still be named — "
+        f"got: {journaled_message}"
+    )
+    assert "reached NEITHER store" not in journaled_message, (
+        f"the same falsehood in the other direction: {journaled_message}"
+    )
+    assert "re-emit the record" not in journaled_message, (
+        "the journaled arm has a line to replay, so a re-emit is not the "
+        f"prescribed remedy there — got: {journaled_message}"
+    )
 
 
 def test_a_string_passes_through_unchanged():
@@ -1279,6 +1937,104 @@ def test_a_list_valued_snapshot_lands_flattened_not_as_json():
         conn.close()
 
 
+def _column_row(conn, tenant: tuple[str, str], key: str, column: str):
+    org, graph = tenant
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {column}, content FROM public.point "
+            "WHERE org_id=%s AND graph_id=%s AND node_key=%s",
+            (org, graph, key))
+        return cur.fetchone()
+
+
+@pytest.mark.parametrize("key", ["search_keys", "quote"])
+def test_a_mapping_valued_property_LANDS_the_row_on_Postgres(key):
+    """#11783, the production drop, reproduced and closed on a real Postgres.
+
+    Pre-fix this replay raised `RecordProjectionError` and the row was ABSENT —
+    which is what `/health` reported as `write_failed` climbing to 182 while the
+    graph committed the same writes. The assertion is on the ROW (present, with
+    its content) and on the COLUMN (absent → NULL), never on the absence of an
+    exception: a projection that reports success while dropping the row is the
+    failure being fixed, and so is one that stores the dict as JSON.
+    """
+    conn = _record_schema_conn()
+    tenant = _tenant()
+    row_key = f"pt-{uuid.uuid4().hex[:10]}"
+    _seed(conn, tenant, [row_key])
+    org, graph = tenant
+    try:
+        replay_conn = _app_role_conn()
+        try:
+            record_projection.replay(
+                [{"type": "PointAdded",
+                  "point": {"eventId": row_key, "id": row_key,
+                            "content": "a claim", "point_kind": "statement",
+                            key: {"odd": "shape"}}}],
+                replay_conn, org_id=org, graph_id=graph, position=False)
+            replay_conn.commit()
+        finally:
+            replay_conn.close()
+
+        row = _column_row(conn, tenant, row_key, key)
+        assert row is not None, (
+            f"a Mapping-valued {key} dropped the whole point row from the record "
+            "(#11783) — this is the 182-write production drop"
+        )
+        assert row[0] is None, (
+            f"the record stored a Mapping as a second representation in {key}: "
+            f"{row[0]!r} — the graph stores NO property for that value"
+        )
+        assert row[1] == "a claim", (
+            f"the rest of the row must still land: {row!r}"
+        )
+    finally:
+        conn.close()
+
+
+def test_a_mapping_valued_update_CLEARS_the_column_like_the_node_does():
+    """#11783, the UPDATE arm on Postgres — a CLEAR, which is what the node does.
+
+    ⛔ REVERSED, and measured: the create fold filters a Mapping, but
+    `update_point` binds its props into `SET n += $props` and the transport
+    degrades the unwritable value to `null`, which a map-merge reads as "remove
+    the property". Reproduced on the lane's FalkorDB (2026-11-26): the node goes
+    from `search_keys='the stored span'` to no `search_keys` at all. So the
+    record's column must be cleared too. Keeping it (what this test used to
+    require) is the divergence in the opposite direction: a record-sourced
+    rebuild would re-materialise a property the live graph had removed.
+    """
+    conn = _record_schema_conn()
+    tenant = _tenant()
+    row_key = f"pt-{uuid.uuid4().hex[:10]}"
+    _seed(conn, tenant, [row_key])
+    org, graph = tenant
+    try:
+        replay_conn = _app_role_conn()
+        try:
+            record_projection.replay(
+                [_point_record(row_key, "the stored span")], replay_conn,
+                org_id=org, graph_id=graph, position=False)
+            record_projection.replay(
+                [{"type": "PointRevised", "id": row_key,
+                  "new_content": "revised",
+                  "search_keys": {"odd": "shape"}}],
+                replay_conn, org_id=org, graph_id=graph, position=False)
+            replay_conn.commit()
+        finally:
+            replay_conn.close()
+
+        row = _column_row(conn, tenant, row_key, "search_keys")
+        assert row is not None, "the update dropped the point row (#11783)"
+        assert row[0] is None, (
+            "the update must CLEAR the column: the graph's own write degrades "
+            f"the Mapping to null, which REMOVES the node's property: {row!r}"
+        )
+        assert row[1] == "revised", f"the rest of the update must land: {row!r}"
+    finally:
+        conn.close()
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 5. The migration's own array arm — the rows that ALREADY exist
 # ════════════════════════════════════════════════════════════════════════════
@@ -1331,11 +2087,11 @@ def _shipped_flatten_ddl() -> str:
     (["only"], "only"),
     ("err4032 release", "err4032 release"),
     # ⛔ The three arms BEYOND the write path (#10648 review P3). They are not
-    # reachable from a new record (`_record_column_value` refuses a dict and
-    # never emits a number/boolean), but a pre-existing row can hold one, and
-    # the conversion's job there is to PRESERVE the value — `ELSE NULL` would
-    # drop it. Pinned so a rewrite of any arm goes red instead of silently
-    # changing what an existing row becomes.
+    # reachable from a new record (`_record_column_value` contributes NO column
+    # for a dict and never emits a number/boolean), but a pre-existing row can
+    # hold one, and the conversion's job there is to PRESERVE the value —
+    # `ELSE NULL` would drop it. Pinned so a rewrite of any arm goes red instead
+    # of silently changing what an existing row becomes.
     # ⚠️ A NON-`str` ARRAY ELEMENT is the fourth divergence and it is deliberately
     # NOT a row here: the `assert actual == written` below holds `actual ==
     # written` for every list in this matrix, and that equality is FALSE for
@@ -1405,13 +2161,19 @@ def test_the_migration_converts_existing_rows_by_the_write_path_rule(value, expe
             f"path gives {written!r} — the two shapes diverge"
         )
     elif isinstance(value, dict):
-        # ⛔ The divergence IN THE OTHER DIRECTION, pinned (#10648 review P3):
-        # the conversion PRESERVES an object row, the write path REFUSES one.
-        # Both are deliberate — the record must not gain a second representation
-        # going forward, and a bootstrap must not drop a value that already
-        # exists — so the test states both rather than letting the arms drift.
-        with pytest.raises(record_projection.RecordProjectionError):
-            record_projection._record_column_value("point", "search_keys", value)
+        # ⛔ The two ends of the object shape, pinned (#10648 review P3, #11783):
+        # the conversion PRESERVES an object row (a bootstrap must not drop a
+        # value that already exists), while the WRITE path contributes NO column
+        # for one. Both are deliberate — the record must not gain a second
+        # representation going forward — and neither may drop the ROW, which is
+        # the #11783 defect: the write path used to raise here, taking the whole
+        # record write with it.
+        assert record_projection._record_column_value(
+            "point", "search_keys", value) is record_projection._OMIT, (
+            "a Mapping-valued search_keys must contribute NO column (the graph "
+            "stores no property for it either) — and must never raise, because "
+            "that refusal drops the whole record row"
+        )
 
 
 def test_the_array_arms_non_str_elements_are_the_stated_divergence():
@@ -1495,3 +2257,171 @@ def test_the_divergence_is_STATED_in_the_doc_the_next_lane_reads():
     assert "NON-`str` ELEMENT" not in MIGRATION_PATH.read_text(encoding="utf-8"), (
         "the landed migration's header must stay UNEDITED (append-only "
         "history); the statement belongs in the doc above")
+
+
+def test_the_allocator_refusal_does_not_claim_a_journal_line_on_the_record_only_arm(
+        monkeypatch, caplog):
+    """#11783 review round 4, F3 — the FIFTH copy of the same false claim.
+
+    The `plan_refused` arm and then the generic `write_failed` arm were taught to
+    branch on `journal_skipped` (round 1 F1 and its scope note). This arm was not,
+    and it is reached FIRST (`_allocator_refusal_cause` is tested above the
+    generic arm), so neither earlier fix covers it.
+
+    `journal_skipped=True` means the caller did not append — a cut-over graph
+    (#14002) — so a `CursorNotActive` arriving here means the write reached
+    NEITHER store. The remedy printed beside it is journal-independent and
+    correct, which is exactly why the false PROVENANCE clause is easy to miss: it
+    sends the operator looking for a journal line that does not exist.
+
+    Reachability is not only the in-process window: `projection_worker.py`
+    forwards a CAPTURED `journal_skipped` to the door later, so a halt (or a
+    deleted cursor row) between capture and write lands here.
+    """
+    from tortoise import record_allocator as ra
+    from tortoise import record_writer
+
+    def _boom(*args, **kwargs):
+        outer = record_writer.RecordWriteError("allocator refused")
+        outer.__cause__ = ra.CursorNotActive("cursor is halted")
+        raise outer
+
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://fake")
+    monkeypatch.setattr(record_writer, "_default_connect",
+                        lambda dsn: _FakeConn())
+    monkeypatch.setattr(record_writer, "write_records", _boom)
+    record_writer._close_live_breaker()
+
+    record = {"type": "PointAdded",
+              "point": {"eventId": "pt-11783-alloc-skipped",
+                        "id": "pt-11783-alloc-skipped",
+                        "content": "a claim", "point_kind": "statement"}}
+
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        write = record_writer.write_live_record(
+            record, seq=9, tenant=("org-t", "graph-t"), journal_skipped=True)
+
+    assert write is not None and write.refusal == "write_failed", (
+        "an allocator refusal stays on the closed `write_failed` token BY "
+        f"CHOICE — got {None if write is None else write.refusal!r}"
+    )
+    message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reached NEITHER store" in message, (
+        "on the record-only arm the allocator WARN must not claim a journal "
+        f"line this write never had — got: {message}"
+    )
+    assert "the journal holds the record" not in message, (
+        f"the fifth copy of the false claim must be gone: {message}"
+    )
+
+    # DISCRIMINATING: the journaled arm really does have the line, so the flag
+    # has to select the sentence rather than the sentence merely being absent.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        journaled = record_writer.write_live_record(
+            record, seq=9, tenant=("org-t", "graph-t"))
+
+    assert journaled is not None and journaled.refusal == "write_failed"
+    journaled_message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "the journal holds the record" in journaled_message, (
+        f"the journaled arm must still name the line — got: {journaled_message}"
+    )
+    assert "reached NEITHER store" not in journaled_message, (
+        f"and must not claim it reached neither store: {journaled_message}"
+    )
+
+
+def test_the_divergence_arm_prescribes_no_journal_repair_on_the_record_only_arm(
+        monkeypatch, caplog):
+    """#11783 — the divergence WARN's REPAIR PATH, not just its provenance.
+
+    `journal_skipped=True` means the caller did not append — a cut-over graph
+    (#14002) — so a position it also passes is not a journal position at all.
+    Conditioning only the provenance clause leaves the sentences after it
+    ordering an intervention that cannot run: "compare the two readings" with
+    `tools/record_allocator_cli.py status --journal`, `seed --journal`, and
+    "RESTORE THE JOURNAL" all presuppose the line this write never had. That is
+    the same misdirection the `plan_refused` / allocator / generic arms were
+    fixed for, in the last place it survived.
+
+    `live_write` passes `seq=None` whenever it sets the flag, so this combination
+    comes from a DIRECT caller — reachable, and driven below, which is why the
+    flag selects the message instead of the arm being declared exempt.
+
+    Non-vacuity: the journaled arm is driven through the same window and must
+    still print the compare-and-seed path, so neither assertion can pass by the
+    clause merely being absent from both messages.
+    """
+    from tortoise import record_writer
+    from tortoise.record_writer import RecordWrite, RecordWriteOutcome
+
+    report = RecordWrite(outcome=RecordWriteOutcome.APPLIED, events=1,
+                         statements=2, first_seq=5, last_seq=5)
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda dsn=None: "postgresql://fake")
+    monkeypatch.setattr(record_writer, "_default_connect",
+                        lambda dsn: _FakeConn())
+    monkeypatch.setattr(record_writer, "write_records", lambda *a, **k: report)
+    record_writer._close_live_breaker()
+
+    record = {"type": "PointAdded",
+              "point": {"eventId": "pt-11783-divergence-skipped",
+                        "id": "pt-11783-divergence-skipped",
+                        "content": "a claim", "point_kind": "statement"}}
+
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        write = record_writer.write_live_record(
+            record, seq=9, tenant=("org-t", "graph-t"), journal_skipped=True)
+
+    assert write is not None and write.refusal == "write_failed", (
+        "a divergence on the record-only arm stays on the closed token — got "
+        f"{None if write is None else write.refusal!r}"
+    )
+    message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reached NEITHER store" in message, (
+        f"the record-only arm must say the write reached neither store: {message}"
+    )
+    for dead_end in ("Compare the two readings", "seed --journal",
+                     "RESTORE THE JOURNAL", "the journal line and its position row"):
+        assert dead_end not in message, (
+            "there is no journal line on this arm, so this remedy is a dead "
+            f"end: {dead_end!r} in {message}"
+        )
+    assert "Re-emit the record with NO caller-supplied position" in message, (
+        f"and must replace it with the repair that CAN run here: {message}"
+    )
+
+    # ⛔ THE REFUSAL IS CONDITIONED ON DISAGREEMENT, not on the act of passing:
+    # the guard is `if allocated_first != seq` in this arm, so a direct caller that
+    # supplies the allocator's own next number APPLIES. "passing one again refuses"
+    # was a universal this arm's own guard falsifies, so the advice has to name the
+    # disagreement instead. (Cited by CONDITION, not by line: a neighbour landmark
+    # lands above it every round and moves the number — the fix is not to type one.)
+    assert "passing one again refuses" not in message, (
+        "this arm fires only when the two numbers disagree, so do not claim "
+        f"that any supplied position refuses: {message}"
+    )
+    assert "a position that DISAGREES with the allocator's refuses" in message, (
+        f"and must state the condition the guard actually applies: {message}"
+    )
+
+    # DISCRIMINATING: on the journaled arm the line EXISTS, so the enumerated
+    # repair path is right there and must still be printed.
+    monkeypatch.setenv("TORTOISE_RECORD_ALLOCATE", "1")
+    record_writer._close_live_breaker()
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        journaled = record_writer.write_live_record(
+            record, seq=9, tenant=("org-t", "graph-t"))
+
+    assert journaled is not None and journaled.refusal == "write_failed"
+    journaled_message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "the journal holds the record at position 9" in journaled_message, (
+        f"the journaled arm must still name the line: {journaled_message}"
+    )
+    assert "Compare the two readings" in journaled_message and (
+        "RESTORE THE JOURNAL" in journaled_message), (
+        "and must keep the enumerated-repair path, which is valid there — if "
+        f"this ever stops printing, the flag no longer selects: {journaled_message}"
+    )

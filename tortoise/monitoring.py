@@ -731,8 +731,28 @@ AUDIT_FALLBACK_DROP_COUNT = Counter(
 #                             on the journal-less lane);
 #   ``no_tenant``             armed with no tenant in scope — refused rather than
 #                             filed under a guessed tenant (#9192);
-#   ``write_failed``          the record was unreachable or the projection
-#                             refused the record;
+#   ``write_failed``          the record was UNREACHABLE, or the connection or
+#                             a statement failed — a replay heals an outage and
+#                             re-fails a CHECK on the record's OWN data till fixed;
+#   ``plan_refused``          the PROJECTOR could not BUILD a plan for this
+#                             record, so NO statement ran — an undeclared/refused
+#                             record type, a carrier that carries no snapshot, an
+#                             unusable key or endpoint, or a caller watermark it
+#                             refuses. ⛔ Unlike ``write_failed`` this is not a
+#                             store fact, so a REPLAY re-refuses until the CAUSE
+#                             is fixed: the producer or the record shape. ⛔ And
+#                             NOT every ``RecordProjectionError``: a statement
+#                             that EXECUTED and failed stays ``write_failed``, as
+#                             does a refusal raised after the plan was built (the
+#                             tenant-GUC read-back, a role bypassing RLS, the
+#                             cutover guard) — EXCEPT a record schema that is not
+#                             on disk, which raises INSIDE the plan build and so
+#                             lands here too: that one is a REDEPLOY, not a
+#                             producer change. Split out
+#                             because the two used to share ``write_failed`` and
+#                             182 plan-build refusals therefore read exactly like
+#                             a transport outage while every database probe was
+#                             healthy (#11783);
 #   ``journal_collision``     the position row cannot be indexed by this write —
 #                             a different record type, a different capture time,
 #                             an identity the surviving row contradicts, or (for
@@ -2720,11 +2740,12 @@ def record_record_write_failure(reason: str) -> None:
 
     ``reason`` is the vocabulary documented at ``RECORD_WRITE_FAILURE_COUNT``,
     restated here because THIS function is the definition site an operator
-    reads. SEVEN distinct values: FIVE emitted by ``tortoise/record_writer.py::
+    reads. EIGHT distinct values: SIX emitted by ``tortoise/record_writer.py::
     write_live_record`` (``malformed_dsn``, ``no_tenant``, ``write_failed``,
-    ``circuit_open``, ``journal_collision``) plus THREE SDK-only values —
-    ``malformed_dsn`` is shared, which is why the counts overlap
-    (5 + 3 − 1 = 7). The split is named because each value names a different
+    ``plan_refused``, ``circuit_open``, ``journal_collision``) plus THREE
+    SDK-only values — ``malformed_dsn`` is shared, which is why the counts
+    overlap (6 + 3 − 1 = 8). The split is named because each value names a
+    different
     fix:
 
     * ``malformed_dsn`` — the DSN is configured but unusable (the seam; and
@@ -2753,8 +2774,25 @@ def record_record_write_failure(reason: str) -> None:
       operator can be in: an env pair CONFIGURED but undeclared names the
       missing declaration, and a half-configured pair names the half; with
       neither set it names the graph-bound credential instead;
-    * ``write_failed`` — the record was unreachable or the projection refused
-      the record; ``replay`` heals it from the journal;
+    * ``write_failed`` — the record was UNREACHABLE, or its statement failed
+      (a CHECK over the record's own data included): a replay heals an outage;
+    * ``plan_refused`` — the PROJECTOR could not BUILD a plan for this record,
+      so NO statement ran even though the connection was up: an undeclared or
+      declared-refused record type, a carrier with no snapshot, an unusable key
+      or endpoint, a caller watermark it refuses — and the token a value shape
+      lands on when the shape cannot be projected at all (#11783). ⛔ NOT the
+      same remedy as ``write_failed``: a replay re-refuses until the CAUSE is
+      fixed (the producer or the record shape). ⛔ AND NOT A STORE FACT: a
+      STATEMENT that executed and failed (a CHECK constraint, a driver error, a
+      dropped connection) stays on ``write_failed``, and so does every refusal
+      raised AFTER the plan was built (the tenant-GUC read-back, a role that
+      bypasses RLS, the cutover guard's failed ``SELECT``) — which is why the
+      classification is the phase, not the exception class. ⚠️ One cause IS a
+      deployment fact and lands here anyway: a record schema that is not on disk
+      raises inside the plan build, so a ``plan_refused`` reading must consider a
+      redeploy, not only the producer. Split out of ``write_failed`` because 182
+      plan-build refusals read exactly like a transport outage while every
+      database probe was healthy;
     * ``journal_collision`` — the record WAS reached and refused to file this
       record under a journal position it cannot index (#9318): a different
       record TYPE, a different CAPTURE TIME, an identity the surviving row
@@ -2776,7 +2814,9 @@ def record_record_write_failure(reason: str) -> None:
       SILENTLY. "Alone" is load-bearing: a re-derivation whose identities DID
       move IS counted (every state OUTSIDE `_SILENT_IDENTITY_STATES` — `disagrees`,
       plus anything a later edit leaves unenumerated, #9318), and so is
-      a `ts`-less one, where there is no capture time to compare. ``replay`` heals every other failure; it cannot heal this
+      a `ts`-less one, where there is no capture time to compare. ``replay``
+      heals an OUTAGE and re-refuses a PLAN BUILD (the two bullets above); it
+      cannot heal THIS
       one, because the append-only row that owns the position carries that
       other content, and the key carries no journal identity — that is ``#12894``'s
       schema decision. A genuine REPLAY (same position, same content — and, when

@@ -161,6 +161,7 @@ __all__ = [
     "NARRATIVE_RECORD_TYPE",
     "NARRATIVE_TABLE",
     "PACKAGED_MIGRATIONS",
+    "PLAN_BUILD_PHASE_ATTR",
     "RECORD_MUTATIONS",
     "RECORD_ONLY_TIER",
     "ROLE_POSTURE_SQL",
@@ -756,6 +757,24 @@ JOURNAL_EVENT_TYPES: frozenset[str] = frozenset({
 
 class RecordProjectionError(Exception):
     """Base class — a record projection failure is loud, never a warning."""
+
+
+#: The attribute :func:`replay` stamps on an exception raised while the PLAN was
+#: being built — i.e. BEFORE any statement ran (#11783).
+#:
+#: It exists because the exception CLASS cannot answer that question: the base
+#: :class:`RecordProjectionError` is also what a STORE or CONFIG refusal raises
+#: after the connection is up (the tenant-GUC read-back, a bypassing role, the
+#: cutover guard), and :class:`RecordStatementError` covers a statement that
+#: executed and failed. ⚠️ A schema that is NOT ON DISK is the one such refusal
+#: that lands on the OTHER side (`table_columns()` runs inside the plan build),
+#: so it is stamped like any other plan-build refusal — the operator line names
+#: the redeploy for it rather than pretending one bucket fits every cause.
+#: `record_writer` counts a
+#: plan-build refusal apart from `write_failed`, and the phase is the fact that
+#: separates them — see the marking site in :func:`replay` for why it is an
+#: attribute set at ONE call site rather than a new class raised at many.
+PLAN_BUILD_PHASE_ATTR = "record_plan_phase"
 
 
 class RecordStatementError(RecordProjectionError):
@@ -3749,6 +3768,7 @@ def _split_properties(
     columns: Mapping[str, frozenset[str]],
     refused: Mapping[str, frozenset[str]],
     drop: frozenset[str] = frozenset(),
+    patch: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Split a journal property dict into `(columns, props_tail)`.
 
@@ -3771,6 +3791,23 @@ def _split_properties(
     An explicit ``drop`` set carries the RECORD-ONLY keys — journal keys that
     describe the record rather than the node (`previousContentHash`,
     `previousValidTo`, a snapshot's identity keys).
+
+    ``patch`` says the statement this split is FOR is a PATCH (`UPDATE … SET
+    col = %s`), not a create-or-update upsert. It reaches exactly one rule — a
+    Mapping-valued ``_POINT_FLATTEN_COLUMNS`` key, whose two graph doors differ
+    and whose record half must match the door it shares a record type with
+    (#11783, measured: see `_record_column_value`). ⛔ WHICH RECORDS IT CAN
+    REACH: `patch=True` is passed by the whole `NodePatch` feed and by the
+    `EntityMutated` patch arm, so EIGHT record types reach it — `PointRevised`,
+    `EntityMutated`, `OperatorAnnotated`, `BatchIdStamped`, `PointRetracted`,
+    `PointSuperseded`, `PointInvalidated`, `ObjectSuperseded`. Only THREE can
+    carry a MAPPING-valued flatten key: `PointRevised` and `OperatorAnnotated`
+    (both `from_payload=None`, so the caller's props ride verbatim) and
+    `EntityMutated` (the whole applied `state` map).
+    `OperatorAnnotated` rides the same `from_payload is None` branch but its
+    fold writes annotator dims by direct `SET`, so there this CLEARS what the
+    node keeps; the other five declare their keys (`from_payload` / `renames` /
+    `literals`) and none of them is a flatten column.
     """
     cols = columns[table]
     refused_here = refused.get(table, frozenset())
@@ -3807,7 +3844,7 @@ def _split_properties(
             # carried one would make a recomputed value authority (§2.4/§17.5).
             continue
         elif column in cols:
-            resolved = _record_column_value(table, column, value)
+            resolved = _record_column_value(table, column, value, patch=patch)
             if resolved is _OMIT:
                 # A blank derived form contributes no column — see `_OMIT`.
                 continue
@@ -3876,53 +3913,126 @@ _OMIT = _Omit()
 _POINT_FLATTEN_COLUMNS: frozenset = frozenset({"search_keys", "quote"})
 
 
-def _record_column_value(table: str, column: str, value: Any) -> Any:
+def _record_column_value(table: str, column: str, value: Any, *,
+                         patch: bool = False) -> Any:
     """The value the RECORD's column takes, for the properties that have a rule.
 
     Two rules, both about ONE datum having ONE representation: a list form of any
     ``_POINT_FLATTEN_COLUMNS`` key is space-joined exactly as the graph's
-    ``flatten_search_keys_prop`` joins it, and a MAPPING form of the same key is
-    refused rather than serialized into a text column.
+    ``flatten_search_keys_prop`` joins it, and a MAPPING form of the same key
+    contributes no column — never a JSON serialization of it — and, since
+    #11783, never a refusal that takes the whole record write with it.
+
+    ``patch`` selects which of the graph's TWO doors this record type shares a
+    write with, because they disagree about a Mapping and this module's whole
+    job is to hold the same value as the door that just wrote:
+
+    * ``patch=False`` — a CREATE/UPSERT record (`PointAdded`): the graph's fold
+      filters the Mapping out (`_is_persistable_prop_value` refuses it,
+      `_persist_extra_props` `continue`s), so `SET n += $props` never carries the
+      key and a map-merge leaves an existing property ALONE. Addressed here by
+      ``_OMIT`` (writes nothing, not NULL).
+    * ``patch=True`` — a PATCH record (`PointRevised`): `update_point` binds the
+      caller's whole props bag into `SET n += $props` (`sdk.py`), the transport
+      gate `_journal_safe_params` DEGRADES the unwritable Mapping to ``null``,
+      and a null inside a map-merge REMOVES the property. Addressed here by
+      ``None`` — the column is CLEARED, because the graph cleared its property.
+      ⛔ The two are not interchangeable: omitting on a patch would leave the
+      record holding a value the node no longer has, i.e. the same divergence in
+      the opposite direction.
+
+    ⚠️ THAT SECOND ARM MIRRORS THE LIVE DOOR — not the graph's `PointRevised` REPLAY
+    fold, which differs here for a PRE-EXISTING reason (`#2946`/`#2795`: that fold is an
+    explicit allow-list — annotator dims, `BELIEF_PROPS`, `tags`, validity, provenance,
+    embedding text — carrying NO generic props). Measured 2026-11-26: the live
+    `_update_point(pid, quote={...})` leaves no `quote`, while replaying
+    `PointRevised{quote: ...}` leaves the previous one intact. ⛔ `search_keys` is NOT
+    simply that case: with `new_content` and not `skip_content` (a superseding
+    creation sets it) the fold RE-DERIVES it (#10203, `identifier_tokens_enabled()`
+    ON by default), so a record-sourced NULL and a replayed alias differ by that
+    derivation. But a `search_keys`-only revision carries no content, so there the
+    fold keeps the old alias and this IS the missing-prop case. So the two stores
+    disagree — pre-existing WITHOUT this arm, and `#2946`'s question. This arm
+    guarantees the narrower thing: the record holds what the write left behind — for `PointRevised`/`EntityMutated`, NOT for `OperatorAnnotated`, which shares `patch=True` but folds annotator dims only (see `_split_properties`).
     """
     if table == "point" and column in _POINT_FLATTEN_COLUMNS and isinstance(
             value, Mapping):
-        # ⚠️ A DELIBERATE DIVERGENCE from the graph, and it is stated rather than
-        # hidden: `flatten_search_keys_prop` has no Mapping arm (it flattens only
-        # list/tuple), so the fold leaves a dict-valued flattened key in the PAYLOAD
-        # as-is while this boundary REFUSES the record — and the live write doors
-        # then degrade that value to null rather than storing it (`#7369`), so what
-        # diverges is the RECORD's fate, not the node's. The reasons are asymmetric
-        # on purpose — `_jsonb_or_scalar` would `json.dumps` the dict into the
-        # now-`text` column, which is the SECOND representation #10620 exists to
-        # remove, and this module's standing rule is that a disagreement stays
-        # visible rather than being coerced.
+        # ⛔ A MAPPING NEVER REFUSES THE RECORD (#11783), and WHICH COLUMN VALUE
+        # it produces depends on the door — see this function's docstring. The
+        # raise this replaced dropped the WHOLE RECORD WRITE, and that is
+        # measured, not hypothetical (2026-11-26, hosted `tortoise-y4mjjq`):
+        # `/health` reported `record.degraded_reasons.write_failed` climbing
+        # 0 → 34 → 46 → 182 in ~24 h while `record_writes_applied` reached 3190 and
+        # the database was healthy (2.5–3.6 ms). One property's VALUE SHAPE was
+        # taking its whole row — and every other property in it — out of the
+        # record, while the graph committed the same write. A value shape must not
+        # drop a write: store what can be stored, DECLARE what could not
+        # (docs/ax/ax-principles.md, #10183), and let the rest of the row land.
         #
-        # ⚠️ The Mapping form IS REACHABLE, and this comment said otherwise until
-        # the #11706 re-record review measured it: `update_point` carries its props
-        # into the journal VERBATIM and `flatten_search_keys_prop` flattens
-        # ``list``/``tuple`` only, so ``update_point(pid, quote={"a": 1})`` arrives
-        # here (as does a producer-supplied payload). ⛔ `create_point` does NOT
-        # reach this arm — its snapshot is built through
-        # `_journal_snapshot_from_create_map`, which runs every value through
-        # `_stored_prop_value` and OMITS a Mapping, so the create's record write
-        # SUCCEEDS without the key. What the GRAPH does with that value is NOT
-        # "keep it" —
-        # the writers filter a value the engine cannot persist before dispatch
-        # (`_is_persistable_prop_value` refuses a Mapping, `_persist_extra_props`
-        # skips it, and the `#7369` "degraded … to null" warning fires on the live
-        # doors), so the node carries no value. This boundary refuses the WHOLE
-        # record write instead (`write_failed`, warned, journaled — and a replay
-        # of the same snapshot meets the same refusal, so it heals only once this
-        # arm changes). Whether that bigger divergence is worth it, or the arm
-        # should instead OMIT the column (exact parity with a write that stores
-        # nothing), is a design decision tracked in #11783 — not taken here.
-        raise RecordProjectionError(
-            f"point.{column} arrived as a MAPPING — the graph's form is the flat "
-            "space-joined string (projection/entities.py::"
-            "flatten_search_keys_prop flattens list/tuple only and leaves a dict "
-            "as-is, which this boundary will not copy into a text column as JSON). "
-            "Refusing rather than serializing a second representation."
+        # ⛔ THE UPDATE ARM IS MEASURED, NOT ASSUMED (2026-11-26, the lane's own
+        # FalkorDB): `_create_point(…, quote="the stored span")` then
+        # `_update_point(pid, quote={"a": 1})` logs `#7369: degraded 1 parameter
+        # value(s) FalkorDB cannot write (props.quote) to null before dispatch;
+        # statement='MATCH (n:Point {id:$id}) SET n += $props …'` and the node
+        # goes from `quote='the stored span'` to `quote=None` (the key is gone
+        # from `keys(n)`). Its pre-fix record half KEPT the old value — `_OMIT` —
+        # which is why `patch` exists rather than a single `_OMIT` for both.
+        # ⚠️ The add/create half is the other way round and equally reachable:
+        # `EventAPI.add_point` splats `**fields` verbatim, and its graph fold
+        # SKIPS the Mapping (so the node keeps an existing value) — `_OMIT`
+        # matches it. ⛔ `create_point` reaches NEITHER: its snapshot is built
+        # through `_journal_snapshot_from_create_map`, which runs every value
+        # through `_stored_prop_value` and OMITS a Mapping, so a create's record
+        # write already succeeded without the key.
+        #
+        # THE DECLARATION is the WARNING below — the column and the value's TYPE,
+        # never the value itself (a `quote` is the user's own text). It is emitted
+        # per occurrence on purpose: the graph's own `#7369` warning fires once per
+        # STATEMENT (naming up to eight degraded keys), so neither store is
+        # silent about the key and the record's line stays attributable per write.
+        #
+        # ⛔ SUPERSESSION NOTE — `20261102000002_record_point_search_keys_text.sql`
+        # (#11783 review round 1, P2). That migration's header was written when
+        # this arm REFUSED the value, and it still says so in three places that
+        # this arm's change makes FALSE:
+        #
+        #   * its "WHERE THE CONVERSION IS DELIBERATELY BROADER THAN THE WRITE
+        #     PATH" section states that `_record_column_value("point",
+        #     "search_keys", <dict>)` REFUSES (`RecordProjectionError`);
+        #   * it concludes from that "the write path's refusal is what keeps that
+        #     lenience from becoming a second representation going forward";
+        #   * it says `tests/test_record_searchkeys_10620.py` "executes each one
+        #     (**plus the writer's refusal of the object shape**)".
+        #
+        # At this head the arm never refuses: it OMITS the column on a
+        # create/upsert (`_OMIT`) and CLEARS it on a patch (`None`), per the two
+        # doors' measured behaviour above, and that test asserts THE OUTCOME
+        # (omitted/cleared), not a refusal. The migration file CANNOT be
+        # corrected in place — `.github/scripts/check-migration-append-only`
+        # refuses any `M` of a base-tree migration ("migrations are append-only
+        # history"), which its own header repeats — so the correction lives HERE,
+        # at the write rule the header mis-describes and where a reader sent to
+        # that section lands. What survives of its reasoning unchanged: this arm
+        # is still why no NEW row can arrive as an object, and the value is still
+        # never serialized (no second representation, #10620). What changed is
+        # only the FATE of the rest of the row.
+        _LOGGER.warning(
+            "record column point.%s %s: the value arrived as a %s, which no "
+            "property can hold. The graph's %s, and %s — never "
+            "serialized into a text column as a second representation (#10620) "
+            "and never a reason to drop the rest of the row (#11783). Fix the "
+            "PRODUCER if this value is meant to persist.",
+            column, "CLEARED" if patch else "omitted",
+            type(value).__name__,
+            ("`SET n += $props` cannot carry it, so the transport degrades it to "
+             "null and a null in a map-merge REMOVES the property")
+            if patch else
+            ("fold SKIPS it (`_is_persistable_prop_value` refuses a Mapping, so "
+             "`SET n += $props` never carries the key), leaving any previous "
+             "value alone"),
+            ("the column follows the node" if patch else "the column is left as it was"),
         )
+        return None if patch else _OMIT
     if table == "point" and column in _POINT_FLATTEN_COLUMNS and isinstance(
             value, (list, tuple)):
         flat = " ".join(str(item).strip() for item in value if str(item).strip())
@@ -5322,6 +5432,12 @@ def _op_dispatch_statements(
             # replay strips it (`_META_KEYS`) — the two rebuild routes diverging
             # on a property, which is the class this change exists to close.
             drop=dispatch.never_store.get(table, frozenset()) | {"cache_tier"},
+            # This arm ends in `_patch_statement`, and the graph's
+            # `EntityMutated` fold writes `state` through the same
+            # `SET n += $props` an update does — so a Mapping-valued flatten
+            # column is CLEARED on both sides, not kept (#11783, measured: see
+            # `_record_column_value`).
+            patch=True,
         )
         # ⛔ A RENAME THAT APPLIES NO NAME IS THE SILENT-KEEP DEFECT (#9881).
         #
@@ -6859,7 +6975,16 @@ def _declared_mutations(
             if source_key in record:
                 props[column] = record[source_key]
         col_values, tail = _split_properties(node.table, props, columns=columns,
-                                            refused=refused)
+                                            refused=refused,
+                                            # The UPDATE door: `PointRevised` is
+                                            # what `update_point` journals, and
+                                            # its graph write binds the raw
+                                            # props into `SET n += $props` — a
+                                            # Mapping degrades to null there and
+                                            # a null in a map-merge REMOVES the
+                                            # property, so the column must
+                                            # clear too (#11783, measured). ⛔ `OperatorAnnotated` ALSO rides this branch but folds annotator dims only — on it the column clears while the node keeps its value (round 27 P3).
+                                            patch=True)
         return [_patch_statement(org_id, graph_id, node, key, col_values, tail)]
     if isinstance(effect, NodeDelete):
         node = effect.node
@@ -8914,11 +9039,50 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     if allocate:
         from . import record_allocator as ra
 
-    plan = replay_plan(records, org_id=org_id, graph_id=graph_id,
-                       start_seq=start_seq, position=position,
-                       allocate=allocate,
-                       carried_positions=carried_positions,
-                       derived=derived)
+    try:
+        plan = replay_plan(records, org_id=org_id, graph_id=graph_id,
+                           start_seq=start_seq, position=position,
+                           allocate=allocate,
+                           carried_positions=carried_positions,
+                           derived=derived)
+    except Exception as exc:
+        # ⛔ MARK THE PHASE, NOT THE TYPE (#11783). Everything `replay_plan`
+        # raises is raised BEFORE a single statement runs — that is what the
+        # call above IS — while the errors raised further down (`_apply_tenant_
+        # scope`, `_refuse_an_enumerated_replay`) come from statements that DID
+        # run, and the statement loop below raises `RecordStatementError` for the
+        # same reason. `record_writer` needs that distinction to count a refusal
+        # of the record apart from a store failure, and it must not derive it
+        # from the exception's CLASS: `RecordProjectionError` is the base of
+        # exactly those execution failures (`RecordStatementError`) AND of
+        # store/config refusals raised after the connection is up (the
+        # tenant-GUC read-back, a bypassing role, the cutover guard), so a class
+        # test would fold a broken role into "check the producer".
+        # ⚠️ A schema that is NOT ON DISK is the opposite case and is called out
+        # ABOVE, in `PLAN_BUILD_PHASE_ATTR`'s own note: `table_columns()` runs
+        # inside the plan build, so it is stamped like any other plan-build
+        # refusal and its remedy is a REDEPLOY.
+        #
+        # The marker is an ATTRIBUTE rather than a re-raise, deliberately: the
+        # concrete class carries meaning its own callers depend on
+        # (`UnknownJournalRecordType` / `RefusedJournalOperation` are asserted by
+        # type in `tests/` and by tools), and re-wrapping would erase it. It is
+        # set at the ONE call site instead of on ~24 `raise` sites because a
+        # phase boundary cannot be forgotten by a raise site added later — the
+        # next refusal to be added inside `replay_plan` is classified correctly
+        # with no edit at all.
+        # ⛔ `Exception`, NOT `RecordProjectionError` (review round 2, measured):
+        # the phase is not total over one class either. `_upsert_statement`/
+        # `_patch_statement` call `json.dumps(tail)` INSIDE the plan build, so a
+        # payload carrying an un-serializable value raises `TypeError` here —
+        # before any statement — and narrowing to the projection's own base left
+        # that one counted `write_failed`, i.e. told the operator a replay heals
+        # a record that re-raises. `KeyboardInterrupt`/`SystemExit` are not
+        # `Exception` and are never stamped.
+        if not isinstance(exc, (RecordStatementError,
+                                JournalPositionCollision)):
+            setattr(exc, PLAN_BUILD_PHASE_ATTR, True)
+        raise
     # ⛔ THE ISOLATION GUARD RUNS INSIDE THE CALLER'S TRANSACTION, before any
     # statement: the allocator's "allocation order = commit order" is a READ
     # COMMITTED property, and under REPEATABLE READ/SERIALIZABLE the counter's

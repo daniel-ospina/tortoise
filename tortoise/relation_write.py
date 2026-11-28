@@ -131,10 +131,40 @@ dropping it — so a structural Object→Object edge carries no direction proper
 and ``direction`` is ``None`` on those rows. That is the writer's contract, not
 a default chosen here: no EP belief flows along a structural edge.
 
+WHICH END GOES WHERE IS DECIDED BY THE DECLARATION, NOT BY WORD ORDER (#14304)
+----------------------------------------------------------------------------
+The stated relation arrives in the order the sentence was written in — ``src``
+is the sentence's subject — and that order is NOT the predicate's meaning. For
+``ownedBy`` the two disagree: §3.6 and ``SEMANTICS_DIRECTIONS`` read
+``x --ownedBy--> y`` as *y owns x*, and every shipped declaration puts the
+``:Subject`` (the owner) on the TARGET side (``packs/dev``: ``core:goal ->
+Subject``) — the same shape ``projection.edges.create_owned_by(entity_id,
+subject_id)`` writes and ``SDK._get_owned_entities`` traverses. This leg used to
+pass the stated order straight through, so a corpus sentence *"Marta owns the
+log"* became an assertion that the LOG owns MARTA — both endpoints legal, so
+``#11656``'s pair leg cannot see it, and nothing else asked.
+
+So before any arm is chosen, :func:`_declared_orientation` asks
+``relation_guards.orient_declared_pair`` — the ONE reader of the packs'
+declarations — which side each end belongs on. A pair the declarations put the
+other way round is **REDIRECTED, not dropped** (``docs/ax/ax-principles.md``
+§1): the edge is written with the declared orientation, the correction rides
+``RelationEdge.orientation`` onto the receipt row and the warnings channel, and
+``apply_relation_edges`` counts it in ``reoriented``. Nothing is refused, and no
+predicate is substituted — the ENDS move, the meaning does not.
+
+⛔ The abstention is the common case and is deliberate: a predicate whose
+declared ends are both KINDS (``hasPart: dev:theme -> dev:epic``) is left to the
+pair leg, and a pair with a ``:Subject`` on BOTH ends ("Dev manages Marta") is
+not something the declaration can orient. See that function's residuals.
+
 ACCOUNTING
 ----------
 ``written + dropped + folded`` reconciles with the stated population, on EVERY
-arm — including the four where it did not (#11548 round 3 P2 + review F3):
+arm — including the four where it did not (#11548 round 3 P2 + review F3) — with
+ONE disclosed exception, named in the last bullet and repeated here so the
+headline cannot be read as unqualified: two statements that the ORIENTATION leg
+folds into one edge report ``written=1`` for a stated population of ``2``.
 
 * a refused edge that carried a fold reports one drop per LOST MEANING (never a
   bare "1 drop" for two statements);
@@ -152,6 +182,25 @@ arm — including the four where it did not (#11548 round 3 P2 + review F3):
   arms used to append per repetition and report ``dropped=2`` for a population
   the landing arms call ``1``. :func:`_drop_once` applies the same identity to
   them.
+* ⚠️ TWO statements that become the SAME edge after the ORIENTATION leg ran
+  (``A owns B`` and ``B --ownedBy--> A``, #14304) are the same edge and count
+  once, exactly as a literal repeat does — the second one hits the plan's
+  identity key AFTER the ends were oriented, so it is deduped rather than
+  planned as a second, opposite edge. Before #14304 the two produced two
+  mutually-contradicting edges; that was the defect, not the accounting. Named
+  here because it is the one place a reader reconciling ``written + dropped +
+  folded`` against the STATED population can see ``1`` for ``2`` statements
+  without a fold or a drop to explain it, and the explanation is this bullet.
+  ⚠️ **THE DECLARATION IS ON THE FIRST STATEMENT OF A PAIR, so it is
+  ORDER-DEPENDENT** (measured, #14790 review): the same two statements stated
+  ``A owns B`` then ``B --ownedBy--> A`` and stated in the OTHER order write the
+  identical edge in the identical orientation, but only the first ordering
+  records ``orientation`` on the row (and the ``RE-ORIENTED`` warning / the
+  ``reoriented`` count); in the second, the already-correct spelling is kept and
+  the reversed one is deduped, so a redirect WAS computed and applied and is
+  nowhere in the receipt. Nothing is mis-written — the graph result is identical
+  — but a reader auditing "was every correction declared?" must read this
+  sentence, not the count.
 
 RESIDUALS THIS LEG DOES NOT CLOSE (measured, not assumed)
 ---------------------------------------------------------
@@ -272,6 +321,21 @@ class RelationEdge:
     #: ``create_edge`` (structural) is the only option: it records no direction
     #: property at all.
     direction: str | None = None
+    #: The DECLARED-ORIENTATION correction applied to this edge (#14304), or
+    #: ``None`` when this leg made NO correction. ⛔ ``None`` is NOT "verified
+    #: correct": it covers BOTH *the statement's own order already matched the
+    #: packs' declaration* AND *the leg abstained* — an undeclared predicate, no
+    #: label-spelled side, both ends the labelled class, several labels on one
+    #: side, a label on both sides, or an unreadable declaration set. A reader
+    #: counting ``orientation is None`` as coverage would overstate it; the
+    #: abstention reason is on `relation_guards`' verdict, not on this row, so a
+    #: count of *corrected* rows is what this field can answer and a count of
+    #: *checked* rows is not. ``src_id``/``dst_id`` above are what is WRITTEN; the
+    #: payload names what was STATED, so the redirect is provable from the receipt
+    #: rather than asserted in prose. `docs/ax/ax-principles.md` Rule 1 makes
+    #: carrying it mandatory: a correction the caller did not ask for is a change
+    #: to what the graph holds, so it is declared, never silently applied.
+    orientation: dict | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -607,6 +671,42 @@ def _direction_for(label: str | None, predicate: str,
     return _DIRECTION_STATED
 
 
+def _declared_orientation(predicate: str, src_kind: str | None,
+                          dst_kind: str | None,
+                          declared: dict | None = None) -> dict | None:
+    """The DECLARED-orientation correction for this stated pair, or ``None``.
+
+    ⛔ The step this closes (#14304): the statement arrives in the WORD ORDER it
+    was stated in — ``src`` is the sentence's subject — and every arm below used
+    to turn that order straight into the edge's direction. For ``ownedBy`` the
+    two disagree: `ONTOLOGY §3.6` and `pack_registry.SEMANTICS_DIRECTIONS` read
+    ``x --ownedBy--> y`` as *y owns x*, and every shipped declaration puts the
+    ``:Subject`` (the owner) on the TARGET side (`packs/dev`: `core:goal ->
+    Subject`), which is also what ``projection.edges.create_owned_by(entity_id,
+    subject_id)`` writes and what ``SDK._get_owned_entities(subject_id)``
+    traverses. So a corpus sentence *"Marta owns the log"* emitted as
+    ``src=Marta, dst=log`` landed as an assertion that the LOG owns MARTA — the
+    meaning inverted, both endpoints legal, and no endpoint check can see it
+    (``#11656`` passes on it by construction).
+
+    The decision itself is `relation_guards.orient_declared_pair`'s — ONE reader,
+    shared with the pair leg's declarations, so the two cannot disagree about
+    what a pack declares. This function only consumes it and never raises: an
+    unreadable declaration set answers ``None``, which keeps the caller's own
+    order (a write must not depend on a read this leg could not make).
+    """
+    try:
+        from .relation_guards import ORIENTATION_REVERSED, orient_declared_pair
+
+        verdict = orient_declared_pair(
+            predicate, src_kind, dst_kind, declared=declared)
+        if verdict.outcome == ORIENTATION_REVERSED:
+            return verdict.payload
+    except Exception:  # noqa: BLE001, RUF100 — a gate read must not raise
+        return None
+    return None
+
+
 def _fold_onto(
     edges: list[RelationEdge], kept_at: int, stated_predicate: str,
 ) -> None:
@@ -677,6 +777,14 @@ def plan_relation_edges(
     #: un-writable statement is one statement, exactly as it is on the landing
     #: arms (see :func:`_drop_once`).
     seen_drops: set[tuple[str, str, str, str | None]] = set()
+    #: The packs' declared relation pairs, read ONCE per plan (#14304) — the
+    #: same lazy read the pair leg makes per door write, hoisted so a capture
+    #: with thirty relations does not rebuild the table thirty times.
+    #: ``None`` = the declarations could not be read, in which case the
+    #: orientation leg abstains for EVERY relation rather than re-reading per
+    #: row and answering differently for two rows of one capture.
+    declared_pairs: dict | None = None
+    declared_pairs_read = False
     for rel in relations or ():
         if not isinstance(rel, dict):
             continue
@@ -695,6 +803,31 @@ def plan_relation_edges(
             continue
         src_id, src_kind = _entity_kind(entity_index, src)
         dst_id, dst_kind = _entity_kind(entity_index, dst)
+
+        # ── 0. the DECLARED orientation of the pair outranks the WORD ORDER
+        # (#14304). This is BEFORE the hierarchy arm on purpose: the declaration
+        # is the pack's statement about how the two ENDS relate, so it governs
+        # which pair the hierarchies below are even asked about. A reversed pair
+        # is REDIRECTED, never dropped (`docs/ax/ax-principles.md` §1) — the
+        # correction rides ``RelationEdge.orientation`` onto the receipt and the
+        # warnings channel, so it is DECLARED rather than silently applied.
+        # ``src``/``dst`` NAMES are deliberately left as STATED: they identify
+        # the statement (a drop row quotes them back to the caller), while
+        # ``src_id``/``dst_id`` are what the graph is asked to hold.
+        if not declared_pairs_read:
+            declared_pairs_read = True
+            try:
+                from .relation_guards import declared_relation_pairs
+
+                declared_pairs = declared_relation_pairs()
+            except Exception:  # noqa: BLE001, RUF100 — a gate read must not raise
+                declared_pairs = None
+        orientation = (_declared_orientation(predicate, src_kind, dst_kind,
+                                             declared_pairs)
+                       if declared_pairs is not None else None)
+        if orientation is not None:
+            src_id, dst_id = dst_id, src_id
+            src_kind, dst_kind = dst_kind, src_kind
 
         # ── 1. a DECLARED hierarchy over the stated pair wins ──────────────
         planned = plan_hierarchy_edges(
@@ -745,7 +878,7 @@ def plan_relation_edges(
                     src_id=src_id, dst_id=dst_id, predicate=edge.predicate,
                     write_path=RELATION_STRUCTURAL, declared_by=edge.pack,
                     stated_predicate=predicate,
-                    src_name=src, dst_name=dst))
+                    src_name=src, dst_name=dst, orientation=orientation))
                 landed = True
             if not landed:
                 _drop_once(drops, seen_drops, src=src, dst=dst,
@@ -821,7 +954,7 @@ def plan_relation_edges(
                 src_id=src_id, dst_id=dst_id, predicate=predicate,
                 write_path=RELATION_STRUCTURAL, declared_by=None,
                 stated_predicate=predicate,
-                src_name=src, dst_name=dst))
+                src_name=src, dst_name=dst, orientation=orientation))
             continue
         if mechanism in _DIRECT_MECHANISMS:
             # The operator-less half of the declared mechanism. The MEANING
@@ -851,6 +984,7 @@ def plan_relation_edges(
                 write_path=RELATION_DIRECT, declared_by=None,
                 stated_predicate=predicate, mechanism=mechanism,
                 label=label, src_name=src, dst_name=dst,
+                orientation=orientation,
                 # The meaning's RULED direction, not the writer's IMPL default
                 # and not a blanket one-way (see ``_direction_for``): the pack
                 # row's declared MEANING first, then the verb, and the record's
@@ -906,12 +1040,23 @@ def apply_relation_edges(
     """Write the planned edges through the ONE linking verb.
 
     Returns ``{"edges": [...], "drops": [...], "written": n, "dropped": n,
-    "collapsed": [...], "folded": n, "write_paths": {...}}`` — the counts ride
-    the capture receipt, the lists are the per-relation record. Every drop AND
+    "collapsed": [...], "folded": n, "write_paths": {...}, "reoriented": n}``
+    — the counts ride the capture receipt, the lists are the per-relation record.
+    ``reoriented`` is ADDITIVE and sits outside the reconciliation: an edge whose
+    ends were swapped to match the packs' declared orientation (#14304) is a
+    WRITE and is already counted in ``written``. Every drop AND
     every fold is reported through ``warn`` (the caller's warnings channel), so
     a stated relation that produced no edge of its own is never silent — and
     ``written + dropped + folded`` reconciles with the stated population
     (``folded`` counts MEANINGS, so one edge that absorbed two verbs counts 2).
+    ⚠️ ONE EXCEPTION, stated rather than left to be found: two statements that
+    become the SAME edge after the ORIENTATION leg ran (``A owns B`` and
+    ``B --ownedBy--> A``, #14304) are one edge and are deduped — silently, and
+    only the FIRST spelling's correction reaches ``orientation``/``warnings``/
+    ``reoriented``; the module header's order-dependence bullet is the full
+    disclosure. Two statements can therefore yield ``written=1, dropped=0,
+    folded=0`` with one of them unaccounted, and that is intended, not a lost
+    meaning.
     That holds on the REFUSAL arm too: a refused edge that had absorbed a
     meaning yields one drop row per lost MEANING, so a refused fold is counted
     as the loss it is rather than reported as ``written=0, dropped=1`` for a
@@ -1040,6 +1185,12 @@ def apply_relation_edges(
             # so a reader can tell a one-way stated claim from the writer's
             # IMPL default without re-deriving it (#11548 review, P2).
             "direction": edge.direction,
+            # The DECLARED-orientation correction (#14304): ``None`` when the
+            # statement's own order matched the packs' declaration, else the AX
+            # block naming what was STATED and what is WRITTEN. ``src_id``/
+            # ``dst_id`` above are the written pair, so a reviewer can verify the
+            # redirect from this row alone.
+            "orientation": edge.orientation,
             "folded": list(edge.folded),
         })
     by_path: dict[str, int] = {}
@@ -1055,6 +1206,22 @@ def apply_relation_edges(
                 f"narrative relation folded (#11237): "
                 f"{fold['folded']} {fold['src']!r} → {fold['dst']!r} — "
                 f"{fold['reason']}")
+        # ⛔ A REDIRECT IS DECLARED, NOT SILENT (#14304, `docs/ax/ax-principles.md`
+        # Rule 1). The edge was written with the ends the packs' declaration puts
+        # them in, which is not the order the caller stated — a change to what
+        # the graph now holds, so the caller is told, on the channel that already
+        # carries every other non-obvious outcome of this leg, and the AX block
+        # itself says why and what IS declared.
+        for row in written:
+            orientation = row.get("orientation")
+            if not orientation:
+                continue
+            warn(
+                f"narrative relation RE-ORIENTED (#14304): "
+                f"{orientation.get('predicate')} "
+                f"{orientation.get('stated', {}).get('from')!r} → "
+                f"{orientation.get('stated', {}).get('to')!r} — "
+                f"{orientation.get('message', '')}")
     return {
         "edges": written,
         "drops": [dataclasses.asdict(d) for d in drops],
@@ -1066,4 +1233,9 @@ def apply_relation_edges(
         # the stated population (#11548 review round 2, nit).
         "folded": sum(len(row["folded"]) for row in collapsed),
         "write_paths": by_path,
+        # Edges whose ends were SWAPPED to match the packs' declared orientation
+        # (#14304). Additive: it is not part of the `written + dropped + folded`
+        # reconciliation — a re-oriented edge is a WRITE and is counted there
+        # once — so a reader counting population must ignore this row.
+        "reoriented": sum(1 for row in written if row.get("orientation")),
     }
