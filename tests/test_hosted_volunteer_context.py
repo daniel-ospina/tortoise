@@ -12,8 +12,10 @@ parity, GET vs POST /v1/context non-collision, 429 backoff contract.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import tempfile
+import time
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
@@ -31,32 +33,88 @@ from tortoise.sdk import TortoiseSDK
 TEST_ORG_ID = "team-001"
 
 
+# ── hermetic read-path warm-up (#3083) ────────────────────────────────────
+
+@pytest.fixture(scope="module", autouse=True)
+def _warm_read_path():
+    """Pay the embedder's cold load ONCE, outside every asserted request.
+
+    The read path's hard ceiling is ``SLO_MS * 8 / 1000`` = **2.4 s**
+    (``tortoise/volunteer.py:100`` → ``tortoise/hosted_api.py:42574``; a
+    breach returns the fail-open empty block with
+    ``degraded_reason='timeout'``).  The suite pins
+    ``TORTOISE_EMBEDDER_WARMUP=0`` for the whole session
+    (``tests/conftest.py:86``), and under that declared opt-out the read
+    keeps the **pre-#13528 synchronous contract** — it blocks on
+    ``EmbeddingModel.get()`` instead of taking the non-blocking arm
+    (``tests/test_13528_read_never_blocks_on_embedder.py:428``).  So the
+    FIRST read in a process pays the whole model load INSIDE the 2.4 s
+    ceiling and degrades.
+
+    That made this file's two plain-read tests order-dependent, which is
+    exactly #3083: ``test_clean_empty_and_courtesy`` passes when a seeding
+    test ran first in the same process (it loads the model outside the
+    ceiling) and fails when it is the process's first read — a lone-file run,
+    a ``-k`` selection, a dev machine.  Measured at ``31a320e392``:
+
+      * isolated ``test_clean_empty_and_courtesy`` →
+        ``assert {'degraded_reason': 'timeout'} == {'degraded_reason': None}``;
+      * cold ``EmbeddingModel.get()`` **135.59 s**, then
+        ``sdk._volunteer_context(...)`` **0.19-0.21 s**, twice.
+
+    The model is class-cached (``cls._instance``), so ONE explicit load here
+    makes every later read fast and the assertions about the *contract* stop
+    being assertions about whose request happened to be first.  ``warm_up``
+    is the declared non-raising entry point (it returns False when the vector
+    leg cannot run — a keyword-only read is fast either way, so an absent
+    ``embeddings`` extra needs no special case).
+    """
+    from tortoise.embeddings import EmbeddingModel
+
+    EmbeddingModel.warm_up()
+    yield
+
+
 # ── fixtures (auth-override lane, mirrors test_hosted_api) ─────────────────
+
+@contextlib.contextmanager
+def _sdk_lane(db_path: str):
+    """Pin every SDK the hosted path opens to one throwaway db (never the
+    developer's ambient graph), and hand back the module.
+
+    Shared by the ``client`` fixture and by tests that build their own
+    FastAPI app: a lane that does not take it opens whatever graph the box
+    happens to have, which makes the request cost — and its content — a
+    property of the machine (#3083).
+    """
+    import tortoise.hosted_api as ha_mod
+
+    _orig_init = ha_mod.TortoiseSDK.__init__
+
+    def _patched_init(self, db_path_arg=None, *, namespace=None,
+                      graph_name=None, **kwargs):
+        _orig_init(self, db_path, namespace=namespace, graph_name=graph_name)
+
+    ha_mod.TortoiseSDK.__init__ = _patched_init
+    os.environ["TORTOISE_DB_PATH"] = db_path
+    ha_mod._FALLBACK_KEEPALIVE.clear()
+    try:
+        yield ha_mod
+    finally:
+        os.environ.pop("TORTOISE_DB_PATH", None)
+        ha_mod.TortoiseSDK.__init__ = _orig_init
+
 
 @pytest.fixture
 def client():
-    import tortoise.hosted_api as ha_mod
-
     with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = os.path.join(tmpdir, "test.db")
         app.dependency_overrides[get_current_org] = lambda: dict(
             {"org_id": TEST_ORG_ID, "tier": "free", "key_id": None})
-        _orig_init = ha_mod.TortoiseSDK.__init__
-
-        def _patched_init(self, db_path_arg=None, *, namespace=None,
-                          graph_name=None, **kwargs):
-            _orig_init(self, db_path, namespace=namespace,
-                       graph_name=graph_name)
-
-        ha_mod.TortoiseSDK.__init__ = _patched_init
-        os.environ["TORTOISE_DB_PATH"] = db_path
-        ha_mod._FALLBACK_KEEPALIVE.clear()
         try:
-            with TestClient(app) as tc:
+            with (_sdk_lane(os.path.join(tmpdir, "test.db")),
+                  TestClient(app) as tc):
                 yield tc
         finally:
-            os.environ.pop("TORTOISE_DB_PATH", None)
-            ha_mod.TortoiseSDK.__init__ = _orig_init
             app.dependency_overrides.clear()
 
 
@@ -301,18 +359,16 @@ def test_sdk_validates_before_http(client):
 
 # ── 429 backoff contract (standard per-key limiter + Retry-After) ──────────
 
-def test_429_rate_limit_retry_after_backoff_safe(monkeypatch):
+def test_429_rate_limit_retry_after_backoff_safe(monkeypatch, tmp_path):
     """The endpoint rides the shared per-key RateLimitMiddleware: on limit it
     returns 429 + Retry-After (client backoff — not a hard failure).  A
     retry after the window is deterministic (the read path is stateless)."""
     import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import RateLimitMiddleware
-    # The shared test env disables the limiter; this test needs it armed —
-    # the middleware reads the flag at construction time.
-    monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
-
-    class _NoopAuth:
-        pass
+    # #3083: ARM the limiter by stating the value it needs, instead of
+    # inheriting whatever the session/ambient shell holds (the middleware
+    # reads the flag at CONSTRUCTION time, and `1` is what makes it inert).
+    monkeypatch.setenv("RATE_LIMIT_DISABLED", "0")
 
     mini = __import__("fastapi").FastAPI()
     mini.add_middleware(RateLimitMiddleware, max_per_minute=100,
@@ -325,13 +381,33 @@ def test_429_rate_limit_retry_after_backoff_safe(monkeypatch):
     mini.dependency_overrides[get_current_org_gated] = _org
     mini.add_api_route("/v1/context", ha_mod.volunteer_context,
                        methods=["POST"])
-    with TestClient(mini) as tc:
+    # The per-IP bucket key is derived from the client address
+    # (`_bucket_key` → `ip:<host>`), so pin it rather than inheriting the
+    # client library's default host name; the lane keeps the request off the
+    # box's ambient graph (a slow open would spend the limiter's window).
+    with (_sdk_lane(os.path.join(str(tmp_path), "limited.db")),
+          TestClient(mini, client=("127.0.0.1", 40777)) as tc):
         payload = {"window": _window("What did Alice decide?"),
                    "session_id": "sess_429"}
+        t0 = time.monotonic()
         first = tc.post("/v1/context", json=payload)
-        assert first.status_code == 200
+        first_elapsed = time.monotonic() - t0
+        assert first.status_code == 200, first.text
+        # The bucket charge is stamped when the request ENTERS the
+        # middleware and expires 60 s later, so a first request slower
+        # than the window hands the second one a fresh budget — the
+        # second POST would 200 and read as "the limiter is inert"
+        # (#3083). This is a precondition with ~200x headroom once the
+        # read path is warm, not a latency assertion on the product.
+        assert first_elapsed < 60.0, (
+            f"the first request took {first_elapsed:.1f}s — longer than "
+            "the limiter's 60 s window, so its own charge has expired "
+            "before the retry; the 429 below would be measuring nothing")
         limited = tc.post("/v1/context", json=payload)
-        assert limited.status_code == 429
+        assert limited.status_code == 429, (
+            "the limiter did not charge a second request "
+            f"(RATE_LIMIT_DISABLED={os.environ.get('RATE_LIMIT_DISABLED')!r}, "
+            f"first_elapsed={first_elapsed:.2f}s): {limited.text}")
         assert "Retry-After" in limited.headers
         # Deterministic read-only: the same request is safe to retry (no
         # state mutated by the 429'd attempt).
