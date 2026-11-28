@@ -71,13 +71,28 @@ fifth term, renames none, and does not change the boundary's mapping.
 
 **One write-path dimension this vocabulary does not name.** ``record_writer``'s
 LIVE door reports an ARMED call that did not write as ``REFUSED`` (#8447), and
-its ``refusal`` token is one of seven. NONE of the seven is exactly a term here:
+its ``refusal`` token is one of eight. NONE of the eight is exactly a term here:
 
 * ``circuit_open`` is the only LITERAL fit — a connect to the record failed, so
   the store is configured and was not reached, which is ``degraded`` exactly;
-* ``write_failed`` covers two causes: the record was unreachable
-  (``degraded`` literally), OR the record was reached and refused the
-  projection — an impairment, not an outage;
+* ``write_failed`` is the record being UNREACHABLE, or the connection failing —
+  ``degraded`` literally FOR THAT HALF, not for the token as a whole: the other
+  half is a STATEMENT that ran and failed (a CHECK over the record's own data,
+  #13207) — a store that was REACHED and refused the row, i.e. an impairment and
+  not an outage, and one that a replay re-refuses rather than heals;
+* ``plan_refused`` (#11783) is the PROJECTOR being unable to build a plan for
+  this record at all — so NO statement ran, even though the connection was up:
+  an undeclared/refused record type, a carrier with no snapshot, an unusable
+  key/endpoint, a caller watermark it refuses. An impairment of the
+  producer/schema, not an outage — and, unlike the pre-#11783 shape that folded
+  it into ``write_failed``, it names its own remedy (fix the cause; a replay
+  re-refuses). ⛔ It is NOT "the store refused this record": a statement that
+  executed and failed (a CHECK constraint, a driver error, a dropped
+  connection) is ``write_failed``, and so is a refusal raised after the plan
+  was built (the tenant-GUC read-back, a role that bypasses RLS, the cutover
+  guard) — those are store/config facts. ⚠️ One deployment fact lands here
+  anyway: a record schema that is not on disk raises INSIDE the plan build, so
+  the fix for THAT ``plan_refused`` reading is a redeploy, not the producer;
 * ``malformed_dsn`` is a SET-UP defect, refused before any reach is attempted:
   closer to a policy/set-up gap than to an outage, but ``unconfigured`` is
   defined as *no value is configured*, and here a value IS set and is wrong;
@@ -107,7 +122,8 @@ its ``refusal`` token is one of seven. NONE of the seven is exactly a term here:
 
 ⛔ THE COUNT AND THIS LIST ARE INDEXED, NOT AUTHORITATIVE. The vocabulary is
 declared in ``record_writer`` — ``LIVE_WRITE_REFUSALS`` for the tokens the seam
-returns before any socket, plus ``write_failed`` for the attempt itself, and
+returns before any socket, plus the POST-WRITE tokens ``write_failed``,
+``plan_refused`` (#11783) and ``journal_collision`` (#9318), and
 ``RecordWrite.refusal``'s own docstring for the closed set a consumer branches
 on. This list said *five* while the door returned six (#10021 review P3): the
 new ``no_tenant_carried`` token was added at the producer and the module that
@@ -115,8 +131,8 @@ calls itself the vocabulary's ONE home was not, so a consumer reading this map
 was told a set one value too small. A reader that needs the set MUST read
 ``record_writer`` — and if the two ever disagree again, the code is the answer.
 
-So the write path carries all seven as ``degraded`` — the NEAREST recorded term
-for "not available", and not a measured outage for six of them — and keeps the
+So the write path carries all eight as ``degraded`` — the NEAREST recorded term
+for "not available", and not a measured outage for seven of them — and keeps the
 reason in ``RecordWrite.refusal``, which is authoritative: a consumer must read
 ``refusal`` before calling a refusal an outage, a set-up gap, or an error.
 Recorded here for the same reason as the read-path dimension above — this

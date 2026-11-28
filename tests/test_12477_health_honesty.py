@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -405,9 +406,13 @@ def test_the_probe_epoch_is_a_float_and_not_the_identity_string():
     source` is satisfied by that indented copy, so the module-level definition — the
     one the verdict reads, outside every `try` — could be deleted or renamed with this
     test still green. Measured: renaming only the module-level definition left
-    `pytest tests/test_12477_health_honesty.py` at 16 passed. A member of
-    `source.splitlines()` is a start-of-line match, so the indented assignment cannot
-    stand in for it.
+    this leg GREEN and the file's run moved by ZERO — stated as the per-mutant
+    delta, not as a whole-file total, because a total re-stales the moment any
+    round adds a leg to this file (the `journal_collision` pin BELOW — the one at
+    `test_the_journal_collision_bullet_names_what_a_replay_heals_and_re_refuses`
+    — did exactly that to the `16 passed` this note used to carry). A member of
+    `source.splitlines()` is a start-of-line match, so the indented assignment
+    cannot stand in for it.
     """
     import inspect
 
@@ -552,9 +557,8 @@ def test_health_reports_the_refusal_window_without_touching_status(monkeypatch):
     assert body["status"] == clean["status"], (
         "a refusal window is reported, never folded into `status` "
         "(#10185/#10620); the verdict lives on the 9090 listener")
-    assert "degraded_reasons" not in body
     # Its OWN key: `degraded_reasons` belongs to `record` (a documented
-    # seven-value vocabulary), and two schemas under one name is how a consumer
+    # eight-value vocabulary), and two schemas under one name is how a consumer
     # reads the wrong one.
     assert "degraded_reasons" not in body
     assert "loop_blocks" in body, (
@@ -583,6 +587,91 @@ def test_health_answers_with_the_full_refusals_shape_when_the_window_RAISES(
         "/health must still ANSWER, and must not derive `status` from a "
         "degraded monitoring read")
     assert body["refusals"]["share"] is None
+
+
+def test_the_journal_collision_bullet_names_what_a_replay_heals_and_re_refuses():
+    """The write-failure vocabulary is operator-facing, so its remedy is pinned.
+
+    #11783 round 28 measured this sentence with **no assertion behind it**: the
+    ``journal_collision`` bullet of
+    `monitoring.record_record_write_failure`'s docstring said *"``replay`` heals every other failure"*, and restoring that
+    wording reddened no row anywhere (``grep -rn "re-refuses a PLAN BUILD"``
+    matched only the sentence itself). A `journal_collision` is what an operator
+    reads on `/health`'s ``degraded_reasons``, so a wrong remedy here is a wrong
+    instruction on a page nobody's test would notice going stale.
+
+    "Every other failure" was false: the two bullets above split into THREE
+    ``write_failed`` populations (an outage a replay heals; a STATEMENT that
+    executed and failed, and the store/CONFIG refusals raised after the plan
+    build — both of which a replay RE-FAILS), plus ``plan_refused``. The sentence
+    is therefore pinned on all three of its claims at once, and on the two
+    blanket wordings it must never wear again.
+    """
+    doc = monitoring.record_record_write_failure.__doc__ or ""
+    assert doc, "the write-failure vocabulary lost its docstring"
+    tokens = re.findall(r"\n    \* ``([a-z_]+)``", doc)
+    assert "journal_collision" in tokens, (
+        f"the vocabulary no longer documents `journal_collision`: {tokens}")
+    index = tokens.index("journal_collision")
+    assert tokens[index - 2:index] == ["write_failed", "plan_refused"], (
+        "the sentence promises `(the two bullets above)`, so the two bullets "
+        "above `journal_collision` must be `write_failed` and `plan_refused` — "
+        f"got {tokens[index - 2:index]}; re-point the sentence, not this "
+        "assertion")
+    start = doc.find("* ``journal_collision``")
+    end = doc.find("\n    * ``", start + 1)
+    bullet = doc[start:end if end != -1 else len(doc)]
+    # ⛔ THE POINTER ITSELF, not only its referents (#14746, round 30). The order
+    # assertion above and the referent assertions below both LEAN ON this
+    # sentence promising "(the two bullets above)"; neither of them reads the
+    # promise. MEASURED before this assertion existed, each with the referents
+    # untouched: rewording it to `(the three bullets above)`, reversing it to
+    # `(the two bullets BELOW)` — a FALSE instruction in exactly the class this
+    # pin exists to prevent — and deleting it outright all left this leg GREEN.
+    # Whitespace is not normalised across the pointer's own line break:
+    # `(the two bullets above)` has never been re-wrapped, and a re-wrap here is
+    # a change to the sentence, which is what the pin is for.
+    assert "(the two bullets above)" in bullet, (
+        "the sentence must still NAME the two bullets it points at — the "
+        "order and referent assertions below are both justified by this "
+        f"promise — got: {bullet[-600:]!r}")
+    assert "heals an OUTAGE" in bullet, (
+        "the bullet must name the ONE `write_failed` population a replay heals "
+        f"(an outage) — got: {bullet[-600:]!r}")
+    assert "re-refuses a PLAN BUILD" in bullet, (
+        "`plan_refused` is a second population and a replay re-refuses it until "
+        f"the cause is fixed — got: {bullet[-600:]!r}")
+    assert "cannot heal THIS" in bullet, (
+        "the sentence exists to say a replay cannot heal a journal COLLISION "
+        f"— got: {bullet[-600:]!r}")
+    # ⛔ AND THE POINTER'S REFERENTS MUST SAY IT (#14746, fixer round 30). The
+    # order assertion above catches a bullet that MOVED or was renamed; it does
+    # not catch one that kept its name and lost its claim. The sentence promises
+    # "(the two bullets above)", so those two bullets must carry the claims it
+    # attributes to them — otherwise the pointer dangles and nothing reds.
+    # MEASURED: deleting `a replay re-refuses until the CAUSE is fixed` from
+    # `plan_refused`, or `a replay heals an outage` from `write_failed`, reds
+    # exactly its own row here and nothing else. Whitespace-normalized, because
+    # this docstring is re-wrapped routinely (round 29 re-wrapped one line).
+    for referred_reason, claim in (
+        ("write_failed", "a replay heals an outage"),
+        ("plan_refused", "a replay re-refuses until the CAUSE is fixed"),
+    ):
+        referred_start = doc.find(f"* ``{referred_reason}``")
+        referred_end = doc.find("\n    * ``", referred_start + 1)
+        referred = " ".join(
+            doc[referred_start:referred_end if referred_end != -1 else len(doc)]
+            .split())
+        assert claim in referred, (
+            f"`journal_collision`'s sentence points at `{referred_reason}` — "
+            f"'the two bullets above' — but that bullet no longer states "
+            f"{claim!r}: got {referred[:400]!r}; re-point the sentence or "
+            "restore the claim")
+    for stale in ("heals every other failure", "heals the record"):
+        assert stale not in bullet, (
+            f"the blanket claim {stale!r} is back: a replay re-fails a STATEMENT "
+            "that executed, re-raises a store/CONFIG refusal, and re-refuses a "
+            "plan build — it heals an outage, not `write_failed` as a whole")
 
 
 def test_a_historical_breach_does_not_appear_in_the_window():
