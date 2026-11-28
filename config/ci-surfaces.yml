@@ -113,13 +113,16 @@ version: 1
 # `watchdog_headroom: 2.03` (1680 / 828.2 = 2.0285) on every one of the eleven shards, so the two
 # agree by construction rather than by a hand re-read.
 # ⛔ THE MOVE IS NAMED AS A PARTITION, not by the minute alone (#14723's rule, re-derived here): the
-# SAME verb at the merge base with `origin/main` (`3f134560b6c`) packs SEVEN shards
+# SAME verb at the PRE-FOLD BASE this branch's `origin/main` fold started from (`3f134560b6c`, which is
+# `origin/main~1` here and NOT the merge base — the merge base is the fold's other parent, so naming
+# this one "the merge base" would be the same stale-base mislabel this block polices below) packs
+# SEVEN shards
 # (a, f, g, h, i, j, k) and FOUR (b, c, d, e). So the ONE registration this PR adds moved the
 # partition 7/4 -> 5/6 while the MINUTE (28 m) and the headroom (2.03) are identical on BOTH sides —
 # which is exactly why the partition is stated: an arithmetic check on `28 m` cannot see a carried
 # figure, and a reader comparing only minutes would call this move cosmetic.
 # ⛔ THE POOL DELTA IS RE-COUNTED ON THE RESOLVED TREE AND STATED AS THE OPERATION — never carried,
-# and never as a pair of counts: `set(fast_pool(head)) - set(fast_pool(<merge base>))` returns
+# and never as a pair of counts: `set(fast_pool(head)) - set(fast_pool(<PRE-FOLD base>))` returns
 # exactly ONE entry, `tests/test_14198_contradiction_closure.py` (`core`, the flat
 # `DEFAULT_FAST_WEIGHT`), the registration this PR adds, and the reverse difference is empty — measured by loading each tree's OWN manifest
 # (`git show 3f134560b6c:config/ci-surfaces.yml`) through `fast_pool()`.
@@ -305,19 +308,18 @@ version: 1
 # is false again, which is exactly why the reading is re-done rather than remembered). ⛔ NO POOL SIZE AND NO ROW COUNT IS STATED HERE as a claim about
 # nor the selector) and it was FALSE for as long as a lane that REGISTERS a row carried it (on that
 # tree the `core` surface list and the `durations` map each held an entry `main` did not). ⛔ IT IS
-# TRUE AGAIN AT THIS HEAD, and the reason is not a wording change: that lane's row landed on `main`
-# (#14723's `tests/test_14691_structure_evidence.py`), so a per-key parse of the two manifests now
-# gives ZERO entries the other side lacks — `surfaces`, `durations`, `durations_floors`, `tier1`,
-# `slow_files`, `on_demand` and `carve_out` all compare equal (measured at this head, #14587 review
-# cycle 10, P2). So the blanket word is right HERE — and the per-key reading stays the durable form,
-# because it is what settles which of the two a given head is (#14587 review cycle 10, P2).
-# ⛔ ON THIS HEAD the per-key reading is the one that holds, and it is measured: `surfaces` carries
-# exactly ONE entry `origin/main` lacks — this PR's `core` REGISTRATION at `:7733`, which has NO
-# `durations` row (the flat `DEFAULT_FAST_WEIGHT` applies) — while `durations`, `durations_floors`,
-# `tier1`, `slow_files`, `carve_out` and `on_demand` carry none. So "the surface map and the weights
-# are `main`'s" is FALSE here in its first half and TRUE in its second, and a blanket word cannot
-# say either. ⛔ And the row #14723 registered (`tests/test_14691_structure_evidence.py`) is no
-# longer a head-only entry at all: it landed on `main`.
+# NOT TRUE AT THIS HEAD EITHER, and the PER-KEY PARSE is what says so rather than a blanket word:
+# `surfaces` carries exactly ONE entry `origin/main` lacks — this PR's own `core` REGISTRATION
+# (`tests/test_14198_contradiction_closure.py`, which has NO `durations` row, so the flat
+# `DEFAULT_FAST_WEIGHT` applies) — while `durations`, `durations_floors`, `tier1`, `slow_files`,
+# `carve_out` and `on_demand` carry none (#14794 review, P2: this sentence said "ZERO entries the
+# other side lacks" and listed `surfaces` among the equal keys, which the pool-delta paragraph
+# above refutes in the same block — re-measure with the per-key parse on the head you are reading).
+# So "the surface map and the weights are `main`'s" is FALSE in its first half and TRUE in its
+# second, and no blanket word can state either. ⛔ THAT A HEAD WHICH REGISTERS IS THE ORDINARY CASE
+# is the durable half: #14723's own row is no longer a head-only entry either — it landed on `main`
+# — so "identical to `main`" is not a property this block may assert about a tree that adds a
+# registration, and the parse is what settles it.
 # ⛔ NO POOL SIZE AND NO ROW COUNT IS STATED HERE as a claim about
 # this head, on purpose: written as figures they owe a re-measurement to whoever next moves one and
 # nothing grades them, which is exactly the rot this block's own doctrine names. ⛔ THE DELTA IS A
