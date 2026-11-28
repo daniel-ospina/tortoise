@@ -9478,6 +9478,7 @@ class CollisionPreflightTest(unittest.TestCase):
         now = 1_800_000_000
         self.bare_origin()
         self.live_claim(now)
+        sha = self.claim_ref_sha()
         mod = _tool_module()
         holder = mod.StaleHolder("git", str(self.repo), ISSUE, 60, [], now=now)
         claimed, basis, unreadable = holder._claim_live()
@@ -9485,6 +9486,13 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertFalse(unreadable, basis)
         self.assertIn("LIVE claim", basis)
         self.assertIn("lease 0s left", basis)
+        # ⛔ THE SHA IS HALF THE PR'S CLAIM AND THE LIVE ARM'S WAS UNGUARDED (review round 6,
+        # F1). The body promises "the sha is named in BOTH arms", but the only row asserting a
+        # sha read a MOVED ref, whose `re-read after it moved a → b` note carries the sha
+        # independently of the arm — so deleting `(sha …)` from the LIVE arm left every test
+        # green. This read moves nothing, so the note is absent and the assertion can only be
+        # satisfied by the arm itself.
+        self.assertIn(f"(sha {sha[:9]})", basis)
 
         # ONE SECOND EARLIER the same lease IS expired — the discriminating direction.
         self.live_claim(now - 1)

@@ -3811,9 +3811,20 @@ class StaleHolder:
         The read is `claims.sh:claim_issue_preflight`'s, in the same order, for the same
         reason: `git ls-remote <ref>` exits 0 with EMPTY output when the ref does not
         exist and NON-ZERO only when the remote could not be consulted, so collapsing the
-        two would read an outage as "nobody holds it". The lease is DATA (the claim
-        commit's own message) and a claim is `--force-with-lease`-fenced on the ref's
-        SHA, so a temp ref is fetched to read the message and deleted immediately.
+        two would read an outage as "nobody holds it". The `ls-remote` exit-status
+        distinction IS `claims.sh:_claim_preflight_at`'s (`:1795-1797`): empty output means
+        the ref is ABSENT (demoted, `claims.sh` answers `no claim on #N` rc 0), non-zero
+        means the registry could not be consulted (LIVE).
+
+        ⛔ THE LEASE IS **NOT** READ THE WAY `_claim_preflight_at` READS IT (#13727). The
+        owner fetches into a temp ref and parses the message out of THAT (claims.sh:1799-1805),
+        which is the race this change exists to close: `claims.sh` renews by force-updating the
+        SAME ref, so the enumerated sha and the fetched commit can be two different commits and
+        the printed lease then describes neither. Here the lease is read BY THE ENUMERATED SHA
+        (`git cat-file commit <sha>`) after a `rev-parse --verify` compare-and-swap, and a ref
+        that moves is re-read (`CLAIM_READ_ATTEMPTS`) and then abstained. So do NOT "restore"
+        the owner's temp-ref read here as a parity fix — parity is on the PARSED VALUE
+        (`_lease_of`), never on the transport.
 
         ⛔ THE POLARITY IS COPIED FROM THE ONE FUNCTION THAT OWNS IT (`_lease_is_live`,
         claims.sh): absent, `0`, non-numeric and oversized leases are all LIVE. An
