@@ -238,10 +238,11 @@ name: ai-review-gate
 # base sha, the reviewed diff, and the branch-side commit list) while the marker list
 # comes from PR TEXT on a `pull_request_target` workflow — see the full rationale at
 # the loop itself. Removing either bound re-opens the availability defect they close.
-# ⛔ AND SAY WHICH CASES ACTUALLY PIN THEM — this sentence used to name four and was
-# wrong in both directions (measured by the #4255 cycle-2 review): deleting the
-# SIGNATURE-FIRST check reddens §(t9) twice, §(t10) twice and §(t21) — NOT (t6)/(t8)/(t22),
-# which are about other guards (measured: §(t9)x2, §(t10)x2, §(t21)x1).
+# ⛔ AND SAY WHICH CASES ACTUALLY PIN THEM — this sentence has now been wrong twice, so
+# the count below is the MEASURED one (2026-11-28, final review of #4255), not a recollection:
+# deleting the SIGNATURE-FIRST check reddens §(t9)x2, §(t10)x2, §(t10b)x4 and §(t21)x1 —
+# NINE rows, and NOT (t6)/(t8)/(t22), which are about other guards. (It said five rows before,
+# omitting (t10b)'s four; the cycle-2 revision had already fixed a wrong count once.)
 # And the DEDUP half is NOT pinned: deleting the in-loop (sha,diff) `case` leaves the
 # suite green. It is REACHABLE, but only by two DISTINCT SIGNED records sharing
 # (sha,diff) — a key-holder shape no fixture constructs — because `all_markers` is
@@ -979,7 +980,7 @@ jobs:
 
           patch_arm_ok() { # <marker line> -> 0 iff its reviewed PATCH == this PR's live PATCH
             local line="$1" p_sha="" p_diff="" p_base="" p_rel="" p_rt="" p_anchor="" p_patch=""
-            local p_row="" p_total="0" p_seen="0" p_added="" p_bside="" p_tok="" p_psha="" p_np=""
+            local p_row="" p_total="" p_seen="" p_added="" p_bside="" p_tok="" p_psha="" p_np=""
             p_sha="$(printf '%s' "$line" | sed -nE 's/^.* @ ([0-9a-f]{40}).*$/\1/p')"
             p_diff="$(printf '%s' "$line" | sed -nE 's/^.* diff=([0-9a-f]{64}) \(.*$/\1/p')"
             [ "${#p_sha}" -eq 40 ] && [ "${#p_diff}" -eq 64 ] || return 1
@@ -1003,13 +1004,29 @@ jobs:
             #       reachability ALONE is not enough either.
             #   ✅ the legal shape: the base was merged in. Then EVERY commit the branch
             #       gained after the review is a MERGE commit.
-            # Hence two questions, both answered from compare JSON (parsed here rather
-            # than with `--jq`, so the harness stub serves a document instead of
-            # emulating jq): (1) `ahead` — the reviewed commit is reachable from the
-            # head, which rules out a rewrite; (2) every head-side commit that is NOT
-            # reachable from the BASE is a merge commit — which rules out a new authored
-            # commit. Both refuse on anything unreadable or truncated, so a transient
-            # failure can only NARROW rule (c), never widen it.
+            # Hence two questions, answered from compare reads: (1) `ahead` — the
+            # reviewed commit is reachable from the head, which rules out a rewrite;
+            # (2) every head-side commit that is NOT reachable from the BASE is a merge
+            # commit — which rules out a new authored commit.
+            # ⛔ HOW THOSE ANSWERS ARE READ, STATED ACCURATELY (corrected 2026-11-28; the
+            # earlier wording claimed this was "parsed here rather than with `--jq`, so
+            # the harness stub serves a document instead of emulating jq" — FALSE on both
+            # halves: the fields come from a `--jq … | @tsv` expression, and the harness
+            # stub RENDERS that row itself from switches rather than serving a document).
+            # The consequence was a real fail-open: because the two counts DEFAULTED to
+            # `0`, a row of a different shape read as a consistent page (`0 == 0`) and,
+            # with `p_added` empty too, the branch-side read AND the authored-commit loop
+            # were SKIPPED SILENTLY — leaving rule (c) gated on `status=ahead` alone. A
+            # changed expression produces exactly that row in production, and the stub
+            # cannot tell it from a changed fixture (measured: swapping this expression
+            # for `.status | @tsv` left the suite green, PASS=259 FAIL=0). So PRESENCE AND
+            # ARITY ARE NOW CHECKED BEFORE MEANING: both counts must be present and
+            # numeric, and the status must be one of the four GitHub statuses. A short,
+            # absent or differently-shaped row is UNREADABLE — never a consistent page,
+            # and never a rewrite. `(t32)` pins each of those three directions, and
+            # `(t32b)` is the mutation control proving the guard is what refuses.
+            # Both reads therefore refuse on anything unreadable or truncated, so a
+            # transient (or a mis-shaped) answer can only NARROW rule (c), never widen it.
             p_base="$(gh api "repos/${REPO_NAME}/pulls/${PR_NUMBER}" --jq .base.sha 2>/dev/null || true)"
             [[ "$p_base" =~ ^[0-9a-f]{40}$ ]] || return 1
             p_row="$(gh api "repos/${REPO_NAME}/compare/${p_sha}...${expected}" \
@@ -1019,9 +1036,19 @@ jobs:
             # sent to buy a 20–40 minute review for an API blip.
             if [ -z "$p_row" ]; then patch_ancestry_unreadable=1; return 1; fi
             IFS="$(printf '\t')" read -r p_rel p_total p_seen p_added <<< "$p_row"
+            # ⛔ PRESENCE BEFORE MEANING (#4255 final review, `(t32)`). An EMPTY or
+            # unrecognised status is a READ failure, not a rewrite: reporting it as
+            # `REWRITTEN (force-push / rebase / amend)` sends the operator to buy a
+            # 20-40 minute re-review for an API blip — the same misdiagnosis class the
+            # empty-parse guard above already fixes. Allowlist, never a denylist.
+            [[ "$p_rel" =~ ^(ahead|behind|diverged|identical)$ ]] || { patch_ancestry_unreadable=1; return 1; }
+            # BOTH counts must be PRESENT and NUMERIC. `!~ ^[0-9]+$` covers the absent
+            # case (`""`), so a row that rendered fewer fields cannot be read as a
+            # consistent page the way the old `${x:-0}` defaults allowed.
+            [[ "$p_total" =~ ^[0-9]+$ && "$p_seen" =~ ^[0-9]+$ ]] || { patch_ancestry_unreadable=1; return 1; }
             if [ "$p_rel" != "ahead" ]; then patch_rewritten=1; return 1; fi
             # A truncated page could hide the commit this guard exists to find.
-            [ "${p_total:-0}" = "${p_seen:-0}" ] || { patch_ancestry_unreadable=1; return 1; }
+            [ "$p_total" = "$p_seen" ] || { patch_ancestry_unreadable=1; return 1; }
             if [ -n "$p_added" ]; then
               # `compare/<base>...<head>` lists ONLY head-side commits (base ones are
               # excluded by construction), so membership in it is what separates "the
@@ -1031,13 +1058,17 @@ jobs:
                 2>/dev/null || true)"
               if [ -z "$p_bside" ]; then patch_ancestry_unreadable=1; return 1; fi
               IFS="$(printf '\t')" read -r p_btotal p_bcount p_bshas <<< "$p_bside"
-              # ⛔ THE SAME RULE AS THE REVIEWED SIDE, EXACTLY (final review of #4255): a
-              # count that does not match the returned page means a sha is MISSING, and a
-              # missing branch-side sha makes the loop below `continue` — i.e. an AUTHORED
-              # commit would be treated as one the base brought in, which is the failure
-              # this whole guard exists to prevent. A bare `<= 250` was asymmetric with the
-              # reviewed-side check and could not catch it.
-              [ "${p_btotal:-0}" = "${p_bcount:-x}" ] || { patch_ancestry_unreadable=1; return 1; }
+              # ⛔ THE SAME RULE AS THE REVIEWED SIDE, EXACTLY (final review of #4255), and
+              # now LITERALLY the same: a count that does not match the returned page means
+              # a sha is MISSING, and a missing branch-side sha makes the loop below
+              # `continue` — i.e. an AUTHORED commit would be treated as one the base
+              # brought in, which is the failure this whole guard exists to prevent. A bare
+              # `<= 250` was asymmetric with the reviewed-side check and could not catch it.
+              # The `:-x` default made an ABSENT count fail closed and an absent TOTAL fail
+              # OPEN-by-accident (`0` vs `x` — refused, but for the wrong reason); presence
+              # is now asserted on both, so neither side depends on a default's value.
+              [[ "$p_btotal" =~ ^[0-9]+$ && "$p_bcount" =~ ^[0-9]+$ ]] || { patch_ancestry_unreadable=1; return 1; }
+              [ "$p_btotal" = "$p_bcount" ] || { patch_ancestry_unreadable=1; return 1; }
               for p_tok in $p_added; do
                 p_psha="${p_tok%%:*}"
                 p_np="${p_tok##*:}"

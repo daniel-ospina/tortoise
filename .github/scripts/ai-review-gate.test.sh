@@ -71,7 +71,7 @@
 #   (i3) verdict=clean-low on both acceptance paths (#4755)
 #   (t) acceptance rule (c) (#4255) — the PATCH projection survives a base advance:
 #       pinned projection vectors (reviewed/live/edited/whitespace/renamed/deleted),
-#       the anti-vacuity pairs, and (t1)-(t10)/(t20)-(t31), incl. (t10b), (t20b), (t29)-(t31) the end-to-end cases: the carry, the
+#       the anti-vacuity pairs, and (t1)-(t10)/(t20)-(t32), incl. (t10b), (t20b), (t29)-(t32) the end-to-end cases: the carry, the
 #       three fail-closed arms, the probe cost bounds, the ANCHOR, the ANCESTRY and
 #       authored-commit preconditions and their mutations, one HMAC verifier, the
 #       relocation refusal, and every refusal's operator-facing diagnostic
@@ -433,9 +433,15 @@ cat > "$T/bin/gh" <<'STUB'
 #   * `compare/<base>...<sha>` WITH the diff media type -> the reviewed DIFF bytes.
 #   * `compare/<p_sha>...<head>` and `compare/<base>...<head>` WITHOUT it -> the
 #     commit graph AS THE GATE'S OWN `--jq` WOULD RENDER IT (status, counts, a
-#     "sha:parent-count" list). The stub reproduces the jq EXPRESSION'S RESULT, not
-#     jq itself — so if the gate changes that expression, the shape assertion in the
-#     case that reads it reddens rather than the stub silently agreeing.
+#     "sha:parent-count" list).⛔ THE STUB CANNOT TELL A CHANGED `--jq` EXPRESSION
+#     FROM A CHANGED FIXTURE — it renders the row itself, so swapping the gate's
+#     expression for one that yields a SHORT row left this suite green (measured
+#     2026-11-28: PASS=259 FAIL=0, on a mutant that carries in production). What
+#     catches that class is the GATE's own presence/arity guard in `patch_arm_ok`
+#     — both counts must be present and numeric — and `(t32)` pins all three
+#     directions of it plus a mutation control, and the two expression emulations
+#     above redden every carry row the moment the gate's field set changes. Do not
+#     read this stub as an assertion about jq itself — it cannot evaluate jq.
 #
 # The JSON arms come FIRST: a `compare/` request that reached the diff arm would be
 # served diff bytes where the gate expects JSON (an unparseable answer => a
@@ -448,6 +454,23 @@ if grep -qE -- "/compare/" <<<"$*" && ! grep -qF -- "application/vnd.github.v3.d
         # the guard at `[ -z "$p_bside" ]` was unpinned for exactly that reason (measured:
         # removing it, and its `:x` default, reddened no row at all).
         [ "${STUB_BRANCH_FAIL:-0}" = "1" ] && exit 1
+        # ⛔ THE EXPRESSION IS PART OF THE CONTRACT (final review of #4255). The rows that
+        # pin it are the ones that EXPECT A CARRY, not a row of their own: measured
+        # 2026-11-28 on the fixed tree, mutating the reviewed-side expression to
+        # `.status | @tsv` reddens 29 assertions and the branch-side one to
+        # `.total_commits | @tsv` reddens 4 — before this emulation existed, both
+        # mutants were GREEN (PASS=259 FAIL=0).
+        # The gate reads this row by ARITY — a changed expression that renders fewer
+        # fields makes it REFUSE (a safe over-block), but a stub that keeps rendering
+        # the OLD field set would report a green suite while the gate has started
+        # refusing every carry. So a call whose expression is not the pinned one is
+        # served as a SHORT row — what such an expression actually yields — and the
+        # rows that expect a carry redden until the stub and the gate agree again.
+        # This is an EMULATION of the consequence, never a claim about jq itself.
+        if ! grep -qF -- '[(.total_commits // 0), ([.commits[]?] | length)' <<<"$*"; then
+            printf '%s\n' "${STUB_BRANCH_TOTAL:-0}"
+            exit 0
+        fi
         # The branch-side graph, post-`--jq`: <total_commits>\t<len(commits)>\t<s has>.
         # The middle field is the page length, so a case can reproduce a TRUNCATED
         # response (total > returned) and prove the gate refuses instead of treating a
@@ -457,6 +480,20 @@ if grep -qE -- "/compare/" <<<"$*" && ! grep -qF -- "application/vnd.github.v3.d
         exit 0
     fi
     # The reviewed→head graph, post-`--jq`: status, total, count, "sha:parents" list.
+    # `STUB_ANCESTOR_ROW` serves a LITERAL row instead, which is how `(t32)` reproduces
+    # a differently-shaped (short / absent / non-numeric) answer — the class a changed
+    # `--jq` expression produces in production. An empty value means "use the switches".
+    if [ -n "${STUB_ANCESTOR_ROW+set}" ]; then
+        printf '%s\n' "${STUB_ANCESTOR_ROW}"
+        exit 0
+    fi
+    # ⛔ THE EXPRESSION IS PART OF THE CONTRACT, for the reason spelled out
+    # on the branch-side arm above: a changed expression must redden the rows that
+    # expect a carry, not leave the suite green over an over-blocking gate.
+    if ! grep -qF -- '[.status, (.total_commits // 0), ([.commits[]?] | length)' <<<"$*"; then
+        printf '%s\n' "${STUB_ANCESTOR_STATUS:-ahead}"
+        exit 0
+    fi
     printf '%s\t%s\t%s\t%s\n' "${STUB_ANCESTOR_STATUS:-ahead}" "${STUB_ANCESTOR_TOTAL:-0}" \
         "${STUB_ANCESTOR_SEEN:-0}" "${STUB_ANCESTOR_COMMITS:-}"
     exit 0
@@ -2347,8 +2384,8 @@ fi
 
 
 # ── (t30) THE BRANCH-SIDE READ IS A GUARD, NOT A CONVENIENCE ────────────────
-# ⛔ THE SECOND UNPINNED PAIR (final review). `[ -z "$p_bside" ]` and the deliberate
-# `:x` default in `[ "${p_btotal:-0}" = "${p_bcount:-x}" ]` are what make an UNREADABLE
+# ⛔ THE SECOND UNPINNED PAIR (final review). `[ -z "$p_bside" ]` and the arity check
+# on the branch-side counts are what make an UNREADABLE
 # branch-side graph refuse instead of treating a missing sha as "the base brought it in".
 # Removing either alone reddened NO row, and removing BOTH let a single-parent AUTHORED
 # commit carry via PATCH match — a false pass of exactly the class this rule exists to
@@ -2368,11 +2405,18 @@ assert_not_contains "(t30) …and does NOT claim the branch was rewritten" "REWR
 # the false pass the pair prevents. This is what makes the class attributable even though
 # neither half can be pinned on its own.
 MUT_BSIDE="$T/mutant-no-bside-guards.sh"
-sed -E -e 's/^( *)(if \[ -z "\$p_bside" \]; then patch_ancestry_unreadable=1; return 1; fi)$/\1:/' \
-       -e 's/^( *)\[ "\$\{p_btotal:-0\}" = "\$\{p_bcount:-x\}" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \}$/\1:/' \
+# Three separate `-e`s, each with NO capture group used in the replacement: an
+# alternation across two patterns with different group counts silently mangles the
+# replacement (measured: it appended the original line and left the block unparseable,
+# which surfaced as a misleading `rc=2` instead of this row's own verdict).
+sed -E -e 's/^ *(if \[ -z "\$p_bside" \]; then patch_ancestry_unreadable=1; return 1; fi)$/:/' \
+       -e 's/^ *(\[\[ "\$p_btotal" =~ \^\[0-9\]\+\$ && "\$p_bcount" =~ \^\[0-9\]\+\$ \]\] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
+       -e 's/^ *(\[ "\$p_btotal" = "\$p_bcount" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
     "$RUN_BLOCK" > "$MUT_BSIDE"
 if cmp -s "$RUN_BLOCK" "$MUT_BSIDE"; then
     bad "(t30) the branch-side guard mutation did not apply — the guards changed shape, so this control proves NOTHING"
+elif ! bash -n "$MUT_BSIDE"; then
+    bad "(t30) the branch-side mutant does not PARSE — an unparseable mutant cannot attribute anything (fix the mutation, not the row)"
 else
     _saved_block="$RUN_BLOCK"; RUN_BLOCK="$MUT_BSIDE"
     STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
@@ -2388,11 +2432,70 @@ else
 fi
 
 
+# ── (t32) A DIFFERENTLY-SHAPED GRAPH ROW IS UNREADABLE, NEVER "CONSISTENT" ──
+# ⛔ THE FOURTH UNPINNED REGION (final review of #4255, 2026-11-28). The reviewed-side
+# counts used to DEFAULT to `0`, so a row that rendered FEWER fields read as a consistent
+# page (`0 == 0`) and — `p_added` being empty too — the branch-side read AND the
+# authored-commit loop were skipped SILENTLY. Rule (c) then reduced to `status=ahead`
+# alone, i.e. a post-review AUTHORED commit that relocates the reviewed `+`/`-` lines
+# inside one scope carries: the measured false pass (t23) this whole guard exists to stop.
+# It was invisible because the stub RENDERS the row itself, so a changed `--jq` expression
+# cannot be told from a changed fixture — measured: swapping it for `.status | @tsv` left
+# the suite green (PASS=259 FAIL=0). `STUB_ANCESTOR_ROW` (added above) serves a literal
+# row, which is how a differently-shaped answer is reproduced here.
+T32_BODY="$T/body-t32"
+printf '%s\n' "$(diff_marker "$STALE" "$SAME_SCOPE_ANCHOR")" > "$T32_BODY"
+# ── (t32a) status ONLY — the exact row a `.status | @tsv` expression produces.
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" STUB_ANCESTOR_ROW="ahead" run_gate "$T32_BODY"
+assert_rc 1 "(t32a) a SHORT graph row (status only) REFUSES — absent counts are not a consistent page"
+assert_contains "(t32a) …and names it a READ failure" "could not READ this PR's commit graph"
+assert_not_contains "(t32a) …and does NOT claim the branch was rewritten" "REWRITTEN (force-push"
+# ── (t32b) counts present but EMPTY — the same defect one shape over.
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" STUB_ANCESTOR_ROW="$(printf 'ahead\t\t')" run_gate "$T32_BODY"
+assert_rc 1 "(t32b) EMPTY counts refuse — `'' = ''` must not read as a consistent page"
+assert_contains "(t32b) …and says the graph could not be READ" "could not READ this PR's commit graph"
+# ── (t32c) an ABSENT status is a READ failure, not a force-push: the misdiagnosis arm.
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" STUB_ANCESTOR_ROW="$(printf '\t0\t0\t')" run_gate "$T32_BODY"
+assert_rc 1 "(t32c) an ABSENT status refuses"
+assert_contains "(t32c) …as UNREADABLE, not as a rewrite" "could not READ this PR's commit graph"
+assert_not_contains "(t32c) …so the operator is not sent to buy a 20-40 minute review for an API blip" "REWRITTEN (force-push"
+# ── (t32d) MUTATION: strip the presence guards → the short row CARRIES, the false
+# pass they prevent — so the class is attributable even though each guard alone
+# may be covered by other rows.
+MUT_T32="$T/mutant-no-arity-guards.sh"
+sed -E -e 's/^( *)(\[\[ "\$p_rel" =~ \^\(ahead\|behind\|diverged\|identical\)\$ \]\] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/\1:/' \
+       -e 's/^( *)(\[\[ "\$p_total" =~ \^\[0-9\]\+\$ && "\$p_seen" =~ \^\[0-9\]\+\$ \]\] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/\1:/' \
+       -e 's/^( *)(\[ "\$p_total" = "\$p_seen" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/\1:/' \
+    "$RUN_BLOCK" > "$MUT_T32"
+if cmp -s "$RUN_BLOCK" "$MUT_T32"; then
+    bad "(t32d) the arity-guard mutation did not apply — this control proves NOTHING"
+elif ! bash -n "$MUT_T32"; then
+    bad "(t32d) the arity mutant does not PARSE — an unparseable mutant cannot attribute anything"
+else
+    _saved_block="$RUN_BLOCK"; RUN_BLOCK="$MUT_T32"
+    STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+        STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" STUB_ANCESTOR_ROW="ahead" run_gate "$T32_BODY"
+    RUN_BLOCK="$_saved_block"
+    if [ "$GATE_RC" = "0" ]; then
+        ok "(t32d) with the presence guards removed the SHORT row CARRIES — so those guards are load-bearing"
+    else
+        bad "(t32d) the mutant still refused (rc=$GATE_RC) — something else refuses this, so the row above attributes nothing"
+    fi
+fi
+
+
 # ── (t26) REPEATED RECORDS COST ONE PROBE — AND WHAT IS NOT ATTRIBUTABLE ─────
 # The workflow header used to name four cases as pinning the two availability bounds;
 # the cycle-2 review measured that deleting the SIGNATURE-FIRST check reddens (t9)x2,
 # (t10)x2 and (t21) — not (t6)/(t8)/(t22) — and that deleting the in-loop (sha,diff)
-# `case` reddens NOTHING. This row pins the property that is reachable end to end:
+# `case` reddens NOTHING. ⛔ The cycle-2 figure was ITSELF under-counted: re-measured
+# 2026-11-28, the same mutant reddens NINE rows — (t9)x2, (t10)x2, (t10b)x4, (t21)x1 —
+# because (t10b)'s four absence rows also depend on the signature-first order. The
+# header now states the measured nine. This row pins the property that is reachable
+# end to end:
 # repeating one record costs ONE probe. ⛔ Which of the two dedups delivers it is NOT
 # attributable from here, and that is stated rather than implied: `all_markers` is
 # de-duplicated UPSTREAM on the whole line (`awk '!seen[$0]++'`) and filtered to the

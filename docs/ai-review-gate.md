@@ -133,9 +133,17 @@ entry condition closes that path.
      every head-side commit the **base does not already contain** — must be a **merge
      commit**. A `git commit` after the review is not a base advance, however
      reachable it is.
-  3. **If the graph cannot be read** (API failure, or a page that lists fewer commits
-     than it claims), the arm refuses and the log says the read FAILED and to re-run —
-     it does not guess.
+  3. **If the graph cannot be read** (API failure, a page that lists fewer commits
+     than it claims, or an answer of a different SHAPE — absent or non-numeric
+     counts, a status outside `ahead`/`behind`/`diverged`/`identical`), the arm
+     refuses and the log says the read FAILED and to re-run — it does not guess.
+     ⛔ The SHAPE half is checked **before** the answer is interpreted: the counts
+     used to default to `0`, so a differently-shaped answer read as a consistent
+     page (`0 == 0`) and skipped checks 1–2's dependants entirely, leaving a
+     post-review authored commit carrying on `status=ahead` alone. `presence, then
+     meaning` is what closes that, and an unrecognised status is reported as an
+     UNREADABLE graph — not as a rewrite, which would send you to buy a 20–40
+     minute re-review for an API blip (harness cases `(t32a)`–`(t32d)`).
 
   ⛔ Checks 1 and 2 are not decoration, and check 1 alone was not enough. Measured on
   this rule, end to end, each `passed via PATCH match` with the anchor reproducing
