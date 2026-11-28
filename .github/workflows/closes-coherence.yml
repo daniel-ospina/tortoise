@@ -1,4 +1,5 @@
-# closes-coherence — a `Closes #N` on a NON-default base is INERT (#10597)
+# closes-coherence — a `Closes #N` on a NON-default base is INERT (#10597), and a `Closes #N` that
+# claims only SOME of the issue's own rows still closes the whole issue (#13946)
 #
 # GitHub fires a closing keyword only on a merge into the DEFAULT branch, so a
 # stacked PR's `Closes #N` closes nothing and lands nothing while the PR reads
@@ -34,6 +35,10 @@ permissions:
   # The step reads the PR body and the PRs opened against its base branch.
   # Read-only, and it never writes (no comments, no labels, no closures).
   pull-requests: read
+  # #13946: the second step reads the CLOSED ISSUE's own body and comments (its row
+  # headings, its `## Satisfies` tick state), which is the `issues` resource, not
+  # `pull-requests`. Read-only for the same reason.
+  issues: read
 
 concurrency:
   group: closes-coherence-${{ github.ref }}
@@ -94,6 +99,50 @@ jobs:
           # closing refs". `rc` is named so 2 and 1 stay distinguishable.
           if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
             echo "::warning title=Closes-coherence UNMEASURED::rc=$rc — the closing-keyword check did not complete see the step log; this is NOT a pass"
+          fi
+          # The warnings above ARE the artifact; the step is deliberately green.
+          exit 0
+      # ⛔ #13946: A ROW-SCOPED `Closes` STILL CLOSES THE WHOLE ISSUE, AND NOTHING READ THE QUALIFIER.
+      #
+      # Measured 2026-11-20: PR #13886 opened with `Closes #13036 (row V2 only).` and GitHub closed
+      # the six-row capstone one second after the squash-merge (`bd020ff45b`, `closedAt
+      # 06:36:50Z`) with five rows never measured and the evidence document the issue requires
+      # absent from `origin/main`. It was reopened by hand. GitHub's closing grammar has no notion of
+      # partial scope, so the fix is a reader — `tools/issue_process_lint.py --arm pr-partial-close`
+      # compares the rows the PR CLAIMS against the rows the ISSUE declares (or its `## Satisfies`
+      # tick state), and names the ones that would be closed unmeasured.
+      #
+      # ⚠️ WARN-ONLY, ON THIS WORKFLOW, FOR THE REASONS STATED ABOVE FOR THE OTHER STEP: a `Closes`
+      # with a qualifier is the author's judgement (`#10597`: "Not a new gate"), and a step mounted on
+      # the `disabled_manually` `drift-guard.yml` would be inert while the PR read green.
+      # ⛔ `--arm pr-partial-close` AND NOT THE DEFAULT: the default runs BOTH PR-side arms, and
+      # arm 1's measured false-positive population (36 % of live open PRs) is exactly why it was never
+      # put on an every-PR surface. Mounting the default here would publish arm 1 too.
+      #
+      # ⛔ WHEN THE ISSUE DECLARES NOTHING THIS ARM CAN READ, IT SAYS SO IN A COUNT AND IS NOT A PASS.
+      # At this head 0 of the 30 newest open issues carry a `## Satisfies` checklist and 1 declares ≥2
+      # row headings, so `UNANSWERABLE` is the dominant outcome — the `::notice` line carries that
+      # number precisely so a green step is never read as "every close was checked and correct".
+      - name: Partial-close scope (warn only)
+        continue-on-error: true
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # `set +e` for the same reason as the step above: GitHub runs `bash -e`, so without it the
+          # tool's rc=3 (a finding) aborts the script before `rc=$?` and the UNMEASURED arm below
+          # becomes dead code.
+          set +e
+          python3 tools/issue_process_lint.py --pr "$PR_NUMBER" --arm pr-partial-close \
+            --annotate --repo "${{ github.repository }}"
+          rc=$?
+          set -e
+          # ANY code the tool did not define (0 = nothing flagged, 3 = findings) is UNMEASURED, not a
+          # pass: a traceback (rc=1) used to print nothing and go green, indistinguishable from "no
+          # partial close found". `rc` is named so 2 and 1 stay distinguishable.
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
+            echo "::warning title=Partial-close scope UNMEASURED::rc=$rc — the closing-scope check did not complete see the step log; this is NOT a pass"
           fi
           # The warnings above ARE the artifact; the step is deliberately green.
           exit 0

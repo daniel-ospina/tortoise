@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""issue_process_lint — two ADVISORY checks that make an issue's own process visible.
+"""issue_process_lint — three ADVISORY checks that make an issue's own process visible.
 
 The defect this exists for (measured 2026-11-05)
 ------------------------------------------------
@@ -12,30 +12,71 @@ They are produced by scoping, which happens *after* the issue is filed (owner ru
 So the design is two-stage — the **body** carries the process, and scoping posts a **`## Satisfies`
 comment** that is the finish line. See `docs/ops/ISSUE-WORKING-PROCESS.md`.
 
-Which makes exactly two shapes defects, and this tool flags only those:
+Which makes exactly three shapes defects, and this tool flags only those:
 
-=========================  =========================================================================
-arm                        flagged when
-=========================  =========================================================================
-``pr-unclaimed-issue``     a PR **claims** an issue (a ``#N`` — optionally ``owner/repo#N`` —
-                           attached to a **claiming word**: ``Refs`` / ``Part of`` / ``serves`` /
-                           ``addresses`` and the closing/satisfies words — ``Related`` and
-                           ``See also`` are NOT claiming words (they say the PR does NOT serve the
-                           issue, which is the form ``skills/code-review/SKILL.md`` mandates for a
-                           non-closing reference);
-                           a comma-continued list after that word is claimed in FULL, but only the
-                           **first** ref of a RESOLVING word resolves — GitHub's documented
-                           multi-issue form repeats the keyword (``Resolves #10, resolves #123``),
-                           so a continuation is CLAIMED, never resolved) and that issue is resolved
-                           by **neither** ``Satisfies #N`` **nor** a closing keyword
-                           (``Closes``/``Fixes``/``Resolves``). A bare ``#N`` with no claiming word
-                           is a MENTION and is never flagged — that distinction is what took the
-                           measured false-positive population from 68 % to 36 %. Measured (#10534):
-                           of 18 PRs naming a P0/P1, 18 used ``Refs`` and 5 of 29 used a closing
-                           keyword — so delivered work never closed and the count never moved.
-``wip-no-satisfies``       an issue has WIP but **no ``## Satisfies`` checklist** anywhere in its
-                           body or comments — work started before the completion criteria existed.
-=========================  =========================================================================
+===========================  =========================================================================
+arm                          flagged when
+===========================  =========================================================================
+``pr-unclaimed-issue``       a PR **claims** an issue (a ``#N`` — optionally ``owner/repo#N`` —
+                             attached to a **claiming word**: ``Refs`` / ``Part of`` / ``serves`` /
+                             ``addresses`` and the closing/satisfies words — ``Related`` and
+                             ``See also`` are NOT claiming words (they say the PR does NOT serve the
+                             issue, which is the form ``skills/code-review/SKILL.md`` mandates for a
+                             non-closing reference);
+                             a comma-continued list after that word is claimed in FULL, but only the
+                             **first** ref of a RESOLVING word resolves — GitHub's documented
+                             multi-issue form repeats the keyword (``Resolves #10, resolves #123``),
+                             so a continuation is CLAIMED, never resolved) and that issue is resolved
+                             by **neither** ``Satisfies #N`` **nor** a closing keyword
+                             (``Closes``/``Fixes``/``Resolves``). A bare ``#N`` with no claiming word
+                             is a MENTION and is never flagged — that distinction is what took the
+                             measured false-positive population from 68 % to 36 %. Measured (#10534):
+                             of 18 PRs naming a P0/P1, 18 used ``Refs`` and 5 of 29 used a closing
+                             keyword — so delivered work never closed and the count never moved.
+``wip-no-satisfies``         an issue has WIP but **no ``## Satisfies`` checklist** anywhere in its
+                             body or comments — work started before the completion criteria existed.
+``pr-partial-close``         a PR uses a **closing keyword** for an issue whose declared rows it does
+                             not claim — it is resolving a scope it has not finished. The declared rows
+                             come from the issue's ``## Satisfies`` checklist (tick state DECIDES where
+                             present) **or**, when the issue carries none, from its row HEADINGS (two or
+                             more, ``### V1 ·`` … ``### V6 ·``) — the latter is the only source present
+                             in the live population (0 of the 30 newest open issues carry the checklist,
+                             1 declares ≥2 row headings), so a table naming only the first source is a
+                             spec for the path that never fires. Flagged per issue, naming the rows the
+                             PR did not claim (or the unticked criteria, when the checklist decides).
+===========================  =========================================================================
+
+ARM 3 — the row-scoped PR that closes the programme-scoped issue (#13946)
+---------------------------------------------------------------------
+Measured 2026-11-20: PR #13886 opened with ``Closes #13036 (row V2 only).``, and GitHub closed the
+six-row capstone ``#13036`` one second after the squash-merge (``bd020ff45b``, ``closedAt
+06:36:50Z``) with five rows never measured and the evidence document the issue requires absent from
+``origin/main``. **GitHub's closing grammar has no notion of partial scope** — any qualifier
+surrounding a ``Closes`` still fires — and no surface read the qualifier, so a partial close was
+indistinguishable from a correct one until a human read the body.
+
+The fix this arm takes is **not** a fourth prose grammar over that parenthetical. The repo already
+recorded the machine-readable field the issue says is missing: SCOPING posts a ``## Satisfies``
+comment with one ``- [ ]`` per acceptance criterion, the lane TICKS each as it proves it, and
+``Closes`` is written only on the last one (``docs/ops/ISSUE-WORKING-PROCESS.md`` §4/§7/§9, #11077,
+2026-11-05). A tick state answers "which of this issue's rows are measured" exactly, so arm 3 reads
+THAT and reports the unticked criteria **by label** — the rows the PR did not claim, named.
+
+⛔ **IT ABSTAINS WHERE THE ISSUE DECLARES NO ROWS AT ALL — AND SAYS SO WITH A COUNT.** The arm has TWO
+sources, so a ``## Satisfies`` comment is not the only one: the issue's own row HEADINGS (``### V1 ·``)
+declare the same rows, and ``#13036`` carries six of them — which is why this arm DOES flag #13886's
+shape. What ``#13036`` did NOT carry is a ``## Satisfies`` comment (3 comments, none with the heading):
+it predates the checklist discipline, and an arm keyed ONLY on that field would have been an enforcer
+whose condition never fires. The abstention is therefore narrower than "no checklist", not wider:
+measured at this head, **0 of the 30 newest open issues** carry a checklist and **1** declares ≥2 row
+headings, so almost every closing ref still abstains. Every run of the arm therefore prints how many
+closing refs it could answer and how many it could not, because an abstention reported as health is the
+false PASS this module ranks worst. An issue that declares no rows is UNMEASURABLE for this question —
+never "finished".
+
+``--arm`` exists so a consumer mounts ONE arm. ``.github/workflows/closes-coherence.yml`` mounts
+``pr-partial-close`` on every PR; mounting ``all`` there would also publish arm 1, whose measured
+false-positive population is why it was never put on an every-PR surface.
 
 A CLAIM, NOT A MENTION — and why that distinction is the whole arm
 ------------------------------------------------------------------
@@ -60,12 +101,19 @@ defect. That is the whole reason this tool is advisory.
 
 ADVISORY, NEVER A GATE — and the exit codes say so honestly
 ------------------------------------------------------------
-``0`` nothing flagged · ``3`` findings · ``2`` unmeasurable. There is no ``--fail`` mode; nothing
-mounts it; it is not in ``python-ci-gate.needs`` and not in ``.mergify.yml``. Any workflow step that
-ever mounts it must carry ``continue-on-error: true`` — the shape of ``tools/closes_landing.py`` +
+``0`` nothing flagged · ``3`` findings · ``2`` unmeasurable. There is no ``--fail`` mode; it is not
+in ``python-ci-gate.needs`` and not in ``.mergify.yml``. Any workflow step that ever mounts it must
+carry ``continue-on-error: true`` — the shape of ``tools/closes_landing.py`` +
 ``.github/workflows/closes-coherence.yml`` (#10597: "not a new gate"), and
 ``tests/test_issue_process_lint.py`` parses the workflow YAML to enforce it per-step rather than
 trusting the string to appear somewhere in the file.
+
+⚠️ **ONE ARM IS NOW MOUNTED** (#13946): ``closes-coherence.yml`` runs ``--arm pr-partial-close`` on
+every PR, warn-only, under that same ``continue-on-error: true`` pin. That is not a gate — the step
+exits 0 whatever the arm says — but it does mean arm 3's silence is visible on every PR while arms 1
+and 2 remain unmounted. ⛔ **Which is why ``--arm`` exists**: mounting ``all`` there would publish
+arm 1's findings too, and arm 1's measured false-positive population is the reason it was never put
+on an every-PR surface. A selection the chosen mode cannot evaluate is REFUSED, never dropped.
 
 WHAT THIS TOOL DOES **NOT** CONSULT — declared, so its silence is not read as health
 ---------------------------------------------------------------------------------
@@ -112,6 +160,7 @@ sweeps, rather than only in the offline ones.
 Usage
 -----
     uv run python tools/issue_process_lint.py --pr 11027
+    uv run python tools/issue_process_lint.py --pr 13886 --arm pr-partial-close   # the #13946 arm alone
     uv run python tools/issue_process_lint.py --issue 4282
     uv run python tools/issue_process_lint.py --issue 4282 --wip        # issue arms only
     uv run python tools/issue_process_lint.py --sweep                  # newest 50 open PRs (a CAP)
@@ -635,6 +684,15 @@ SATISFIES_HEADING_RE = re.compile(
 # scoping). Not imported verbatim because that pattern also requires trailing whitespace after the
 # bracket, which would miss a bare `- [ ]` at end of line.
 CHECKBOX_RE = re.compile(r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[ xX]\]", re.MULTILINE)
+# The SAME task-list marker set as `CHECKBOX_RE`, plus the two groups arm 3 needs: the TICK STATE and
+# the criterion's own LABEL. `CHECKBOX_RE` is deliberately left alone — it answers "is this a task
+# item", which is arm 2's question, and widening it would let arm 2 start depending on a tick's
+# mark. This one is arm 3's: a tick is only meaningful next to the criterion it ticks, and the
+# label is what the finding has to NAME ("the rows it did not claim"), so a predicate with no label
+# would leave the reader unable to act on the finding.
+CRITERION_RE = re.compile(
+    r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[(?P<mark>[ xX])\][ \t]*(?P<label>.*)$",
+    re.MULTILINE)
 # ⛔ `TICKED_RE` USED TO SIT HERE and is deliberately NOT replaced (review round 26, P2). Its only
 # reader was `has_satisfies_checklist`'s "tick in a LATER comment" arm, which is where the false PASS
 # was: any finished task list anywhere after the heading cleared a `## Satisfies` with no criteria.
@@ -677,6 +735,8 @@ RELEASE_ANYWHERE_RE = re.compile(
 
 ARM_PR = "pr-unclaimed-issue"
 ARM_ISSUE = "wip-no-satisfies"
+ARM_PARTIAL = "pr-partial-close"
+ARM_NAMES = (ARM_PR, ARM_ISSUE, ARM_PARTIAL)
 
 
 @dataclass
@@ -979,7 +1039,8 @@ def _decline_targets(text: str) -> dict[int, set[int]]:
 
 def _claims_in(text: str, own_number: int | None = None,
                repo: str | None = None,
-               skipped: list[int] | None = None) -> dict[str, list[int]]:
+               skipped: list[int] | None = None,
+               foreign_closing: list[int] | None = None) -> dict[str, list[int]]:
     """`claims` over ALREADY-normalised text, so a caller that needs `hidden_lines` from the same
     pass does not strip the body twice (two passes of a pure function cannot disagree, but a caller
     that reported a count from one pass and classified from another would be reading two bodies).
@@ -988,9 +1049,16 @@ def _claims_in(text: str, own_number: int | None = None,
     UNKNOWN. Without that sink the drop is invisible: the same body then measures a SMALLER
     population offline than with `--repo`, and reports clean for content it did not read — which is
     the shape this module refuses everywhere else (`Unmeasurable`, never a pass).
+
+    `foreign_closing`, when supplied, receives the refs a CLOSING keyword bound that name a repo the
+    caller cannot prove is this one (`owner/repo#N`, resolved to a DIFFERENT repo, or with an
+    unresolvable repo). It is deliberately narrower than `skipped`: a `Refs other/repo#N` MENTION is
+    not a close (#10534), so only a closing-bound, non-continuation ref lands here — that is the set a
+    reader needs to decide "is this clause about another issue?", and treating a mention as one
+    downgraded a real partial-close finding to an abstention (review round 34, P2).
     """
     found: dict[str, list[int]] = {"closing": [], "satisfies": [], "weak": [], "declined": [],
-                                   "continued_resolving": []}
+                                   "continued_resolving": [], "closed_but_declined": []}
     decline_targets = _decline_targets(text)
     line_starts = [0]
     for line in text.splitlines(keepends=True):
@@ -1033,11 +1101,32 @@ def _claims_in(text: str, own_number: int | None = None,
                 # silently forgotten; the caller reports the narrower population (F3 of round 3).
                 if skipped is not None:
                     skipped.append(num)
+                if foreign_closing is not None and word in CLOSING_WORDS and not continued:
+                    foreign_closing.append(num)
                 continue
             if qual and qual.lower() != repo.lower():
+                # ⛔ A CLOSE OF ANOTHER REPO IS NOT A SILENT DROP FOR THE FOREIGN-CLAUSE READ (round 34,
+                # P2). `_foreign_closing_clauses` needs to know that this clause is about a DIFFERENT
+                # issue; without the sink it saw one closing ref and read the foreign qualifier as this
+                # issue's narrowing.
+                if foreign_closing is not None and word in CLOSING_WORDS and not continued:
+                    foreign_closing.append(num)
                 continue  # `owner/repo#N` for another repo is not this PR's business
             if num in declined_here:
                 found["declined"].append(num)
+                # ⛔ A DECLINED REF BOUND BY A CLOSING KEYWORD IS STILL A REF GITHUB WILL CLOSE
+                # (review round 32, P2). GitHub's parser does not read prose, so
+                # `Closes #N (row V2 only) — this does not close #N as a whole.` closes #N on merge.
+                # It lands in its OWN key, never in `closing`: arm 1's question is "did you answer the
+                # claim?", and moving the ref into `closing` would answer it wrongly. Arm 3 asks the
+                # vendor's question and reads both keys.
+                if word in CLOSING_WORDS and not continued:
+                    # ⛔ AND ONLY THE KEYWORD'S FIRST REF (review round 34, P2): a continuation of a
+                    # closing keyword is not resolved by GitHub (`closes_landing.parse_closing_refs`
+                    # credits one ref), so putting it in this population inflated `closes` and made a
+                    # wrong-claim-set finding reachable on a ref that will never close — the same
+                    # first-ref rule the non-declined branch applies.
+                    found["closed_but_declined"].append(num)
             elif word in CLOSING_WORDS:
                 (found["weak"] if continued else found["closing"]).append(num)
                 if continued:
@@ -1319,6 +1408,1519 @@ def classify_issue(comment_bodies: list[str], number: int | str,
                     evidence={**measured, "populations_not_consulted": populations})], measured
 
 
+# --- arm 3: a CLOSING keyword on an issue whose own criteria are not all ticked ----------------
+# A row id is a short capitalised group plus a number — `V2`, `R1`, `D5`, `E6`, `P7`. It is the token
+# `#13036` uses for its six rows (`### V1 · …`) and `#14715` for its three (`## R1 — …`), i.e. the
+# shape `#13946` calls "the row table". Grounded deliberately: an id only counts when the ISSUE itself
+# uses it as a heading, so the arm can never invent a row the issue does not declare.
+ROW_ID = r"[A-Z]{1,3}\d{1,2}"
+# The issue's own row DECLARATION: an ATX heading whose first token is a row id. `#` alone is a title
+# and is NOT accepted; `##` IS — `## R1 — …` is one of the measured shapes (`#14715`), so narrowing
+# this to `###` would silently drop that issue's rows.
+ROW_HEADING_RE = re.compile(rf"^[ \t]{{0,3}}#{{2,4}}[ \t]+(?P<id>{ROW_ID})(?![A-Za-z0-9])",
+                            re.MULTILINE)
+# The documented PARTIAL form, `Satisfies #<N>: <ids>` (`docs/ops/ISSUE-WORKING-PROCESS.md` §7) — the
+# one place the process already asks a lane to write the ids it claims.
+# `owner/repo#N` is accepted too (review round 17, F2): the mount passes `--repo`, and a fully-qualified
+# partial form was simply not MATCHED here, so the claim vanished and a real partial close read
+# `ambiguous` — a lost warning in the one form the docs tell a lane to write.
+SATISFIES_IDS_RE = re.compile(
+    r"Satisfies\s*(?:(?P<owner>[\w.-]+)/(?P<repo_name>[\w.-]+))?#(?P<num>\d{1,7})\s*:(?P<ids>[^\n]*)",
+    re.IGNORECASE)
+_CLOSING_WORD_RE = re.compile(r"\b(?:" + "|".join(CLOSING_WORDS) + r")\b", re.IGNORECASE)
+
+
+def row_ids(issue_bodies: list[str]) -> list[str]:
+    """The issue's own decomposable ROWS, in document order — the enumerable set #13946 says is absent.
+
+    ⛔ THE BODY ONLY, AND IT IS READ THROUGH `strip_code`. A row declaration is the issue AUTHOR's
+    structure; a `### R1` inside a fenced example in a comment is a quotation of some other issue's
+    layout, and reading it would let a comment manufacture rows the issue does not have.
+
+    ⛔ AND THIS IS *NOT* A NEW CONVENTION — IT IS THE ONE THE MEASURED ISSUES ALREADY USE. Measured at
+    this head over the 30 newest OPEN issues (`gh issue list --state open --limit 30`):
+    ``## Satisfies`` checklists **0 of 30**; a body with a task list **0 of 30**; **≥2 row headings
+    1 of 30** (`#14715`: `R1`, `R2`, `R3`). So the field that actually exists on a multi-row issue is
+    its row HEADINGS — `#13036`'s `### V1 ·` … `### V6 ·` are the same shape — and an arm keyed only
+    on ``## Satisfies`` would be an enforcer whose condition never fires. This reads the shape that is
+    there.
+
+    ⚠️ THE ``0 of 30`` IS THE HONEST HEADLINE, NOT A FOOTNOTE: adopt this arm and almost every closing
+    ref still abstains (see `classify_partial_close`), because most issues declare no rows at all. The
+    arm is designed to be quiet and to SAY it was quiet — never to look like coverage it does not have.
+    """
+    out: list[str] = []
+    for body in issue_bodies[:1]:
+        text = strip_code(body, indented_code=True)[0]
+        for match in ROW_HEADING_RE.finditer(text):
+            row = match.group("id")
+            if row not in out:
+                out.append(row)
+    return out
+
+
+# A RANGE SHORTHAND between two row ids — `V1–V6`, `V1-V6`, `V1—V6`, `V1..V6`, `V1 through V6`,
+# `V1 to V6` (and `from V1 to V6`). The en dash is the standard mark for a range and reads "to" or
+# "through" (The Punctuation Guide, *En dash*), which is how an author writes "all of them" without
+# spelling out six ids — the CORRECT complete close this arm must not flag.
+# `\.{2,}` covers BOTH the two-dot form and the three-dot ellipsis an author actually types for
+# "and so on through", and `…` is the single-character spelling: reading only `\.\.` left `V1...V6`
+# naming its two endpoints, so a COMPLETE close reported a finding on four rows it had claimed.
+_RANGE_JOIN = r"(?:\s*(?:--?|–|—|\.{2,}|…)\s*|\s+(?:through|to)\s+)"
+
+# ⛔ A RANGE SPANS ONLY WHEN IT IS THE WHOLE CLAIM — a POSITIVE marker, never a blocklist of prose.
+# `Closes #13036 (rows V1–V6)` claims six; `(row V2 of V1–V6)`, `(rows V1–V6, see the evidence doc)`
+# and `(rows V1–V6 are the capstone)` claim ONE and merely REFER to the set. Two rounds were spent
+# blocking "cue" words and each round the next spelling leaked through — `of`, `bar`, `unchanged` … —
+# so the rule is now the one that TERMINATES: the range must be the entire claim of its CLAUSE,
+# modulo a leading row noun (`rows`, `all six rows`, `rows from`). Everything else is a MENTION: its
+# ids are NOT claims at all — neither the span nor the two endpoints (counting the endpoints told a
+# complete close to "claim only V1, V6") — so the verdict falls to AMBIGUOUS, which this arm already
+# carries as a first-class, counted, printed answer. A non-answer is honest; a wrong `clean` (the
+# measured defect: #13036 is titled `## The bar — all six must be measured`, so naming the bar by its
+# id range is the natural sentence) and a wrong `finding` (on a complete close) are both not.
+_BARE_PREFIX = re.compile(
+    r"^(?:all\s+(?:\w+\s+)?)?(?:rows?|ids?|items?|criteria|row\s+ids?)(?:\s+from)?$",
+    re.IGNORECASE)
+_FILLER = " \t,;:.\u2013\u2014-()[]"
+
+
+def _range_matches(text: str, rows: list[str]) -> list[re.Match]:
+    """Every DECLARED range mention in `text` — both endpoints must be declared rows.
+
+    Grounded in the issue's own ORDER and membership, so a range can never invent a row: the span is a
+    slice of `rows`, not an arithmetic sequence. An endpoint the issue does not declare cannot anchor a
+    match at all (`rows V1..V9` on a six-row issue), which is how the read refuses to guess.
+    """
+    if len(rows) < 2:
+        return []
+    alternation = "|".join(re.escape(row) for row in sorted(rows, key=len, reverse=True))
+    pattern = re.compile(rf"(?<![A-Za-z0-9])(?P<a>{alternation}){_RANGE_JOIN}"
+                         rf"(?P<b>{alternation})(?![A-Za-z0-9])")
+    return list(pattern.finditer(text))
+
+
+_ID_LIST_FILLER_RE = re.compile(r"[\s,;/&+\-–—.()\[\]|]|\b(?:and|plus)\b", re.IGNORECASE)
+
+
+def _blank_declared_ids(text: str, rows: list[str]) -> str:
+    """`text` with every DECLARED row token and every RANGE mention replaced by spaces.
+
+    ⛔ ONE IMPLEMENTATION, TWO READERS (review round 35, P3). `_clause_is_a_pure_id_list` and the
+    rider's count read both need "what does this clause say, once the rows are set aside", and they
+    had grown two verbatim copies of the same five lines — the second-implementation drift this file
+    keeps removing. Ranges go first so a range's ENDPOINTS are not treated as bare ids; the ids are
+    bounded so `V1` is never found inside `V10`/`AV1`.
+    ⚠️ MEASURED SCOPE OF THAT CLAIM (review round 36, P3): with THIS helper applied there, neither the
+    ordering nor the bound is individually load-bearing for a verdict — deleting the range pass or the
+    lookarounds changes no verdict — is FALSE for the second half and is corrected here: the BOUND is
+    pinned by `test_a_mention_of_a_ten_plus_row_id_is_not_partially_blanked`, which reddens when the
+    lookarounds are dropped, because `_clause_states_a_partial_count` then reads the surviving `0` of a
+    `V10` mention as a row count and a correct close abstains. The RANGE pass is genuinely not
+    load-bearing for any verdict (`_ID_LIST_FILLER_RE` absorbs a leftover join); both are correctness
+    properties of the helper, and only one of them has a pin.
+    ⛔ RECORDED BECAUSE IT HAPPENED: the first draft of this paragraph claimed neither half mattered and
+    named "the count read's own lookbehind" as the reason — measured false, in the same commit that
+    added the pin. A comment that understates a guard is how the guard gets deleted.
+    """
+    blanked = text
+    for match in reversed(_range_matches(text, rows)):
+        blanked = blanked[:match.start()] + " " + blanked[match.end():]
+    for row in sorted(rows, key=len, reverse=True):
+        blanked = re.sub(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", " ", blanked)
+    return blanked
+
+
+def _clause_is_a_pure_id_list(clause: str, rows: list[str]) -> bool:
+    """Is this clause NOTHING BUT declared rows, ranges over them, and separators — no prose at all?
+
+    ⛔ THE STRUCTURAL TEST THAT SEPARATES AN ID LIST FROM A MENTION (review round 32, P1). The
+    whole-claim test below decides a range by its own PORTION of the clause, which is right for prose
+    (`rows V1–V6, see the evidence doc` is a mention) and wrong for a list: `(V1–V2, V3, V4–V6)`
+    spells a six-row claim one range at a time, and every range in it has a non-empty portion, so
+    none spanned — the claim collapsed to the one bare token `V3` and a COMPLETE close was accused of
+    claiming one row of six, with remediation telling its author to rewrite a correct close into a
+    partial one. Nothing about the words is guessed: the clause is an id list exactly when its
+    residue is empty once the declared rows, the RANGES (endpoints AND the join) and separators are
+    removed — **or is a leading row noun** (`rows`, `all six rows`, via `_BARE_PREFIX`, the same
+    allowance `_range_is_the_whole_claim` already gives a bare range). Everything else is residue:
+    `of`, `bar`, `see`, `landed` are all residue, and they are what makes a clause a MENTION.
+    ⛔ THE NOUN ALLOWANCE IS LOAD-BEARING AND WAS UNDESCRIBED HERE (review round 34, P3): deleting it
+    re-breaks `rows V1–V2, V3, V4–V6` — the headline false accusation, in the `rows`-prefixed
+    spelling — and the docstring six lines above the branch explained why it could not matter.
+    """
+    if not _range_matches(clause, rows) and not _explicit_ids(clause, rows):
+        return False
+    residue = _ID_LIST_FILLER_RE.sub(" ", _blank_declared_ids(clause, rows)).strip()
+    # ⛔ RESIDUE IS EMPTY **OR IS A LEADING ROW NOUN** — say it, because the branch is load-bearing and
+    # reads as redundant with "empty" (review round 32, P2, found by a fresh reviewer after deleting it
+    # left the suite green). `rows V1–V2, V3, V4–V6` leaves residue `rows`; refusing it reintroduces the
+    # exact headline defect this function exists for, in the `rows`-prefixed spelling. A noun is not
+    # prose: `_BARE_PREFIX` is the SAME allowance `_range_is_the_whole_claim` already gives a bare
+    # range, so `of`, `bar`, `see`, `landed` stay residue either way.
+    return residue == "" or bool(_BARE_PREFIX.match(residue))
+
+
+def _range_is_the_whole_claim(text: str, match: re.Match, rows: list[str],
+                              issue: int | None = None, repo: str | None = None) -> bool:
+    """Is this range the ENTIRE claim of the clause it sits in (see `_BARE_PREFIX`)?
+
+    ⛔ AND NOT WHEN A SIBLING CLAUSE ON THE SAME LINE NAMES ROWS: `Closes #N (rows V1–V6; V2 is what
+    this PR proves)` reaches a bare range clause, but the line as a whole says ONE row is what it
+    proves — the sentence a lane naturally writes while narrowing a partial close, and reading it as
+    complete would be the false PASS this arm ranks worst. A naming sibling makes the bare range a
+    MENTION, so the explicit ids decide the claim (safe: an understating finding, never a pass).
+
+    ⛔ AND A SIBLING THAT CLOSES A DIFFERENT ISSUE IS NOT A SIBLING AT ALL (review round 32, P1).
+    `Closes #13036 (V1–V6), closes #13037 (V2)` is ONE COMPLETE close of #13036 plus an unrelated
+    close; the foreign clause named `V2` — a declared row of #13036 too — so the bare range was
+    demoted, `_narrowing_ids` read the foreign qualifier as this issue's narrowing, and a COMPLETE
+    close was accused of claiming one row of six. The same exclusion `_narrowing_sibling_ids` and
+    `_a_clause_names_a_proper_subset` already make, applied at the one read that decides whether the
+    range spans: the three readers must agree about what a clause is ABOUT.
+    """
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    line_end = text.find("\n", match.end())
+    line = text[line_start:line_end if line_end != -1 else len(text)]
+    start, end = match.start() - line_start, match.end() - line_start
+    spans = _clause_spans(line, rows)
+    for c_start, c_end in spans:
+        if c_start <= start and end <= c_end:
+            pre = line[c_start:start].strip()
+            post = line[end:c_end].strip(_FILLER)
+            if (post != "" or not (pre == "" or bool(_BARE_PREFIX.match(pre)))) and not (
+                    # …UNLESS THE CLAUSE IS A PURE ID LIST (review round 32, P1): `(V1–V2, V3, V4–V6)`
+                    # claims the rows it spells, one range at a time, and the portion test alone
+                    # rejected EVERY range in it — leaving the bare `V3` as the whole claim on a
+                    # complete close.
+                    _clause_is_a_pure_id_list(line[c_start:c_end], rows)):
+                return False
+            own = (c_start, c_end)
+            break
+    else:
+        return False
+    # ⛔ A SIBLING THAT CLOSES A DIFFERENT ISSUE IS NOT THIS ISSUE'S ROWS (review round 32, P2).
+    # `Closes #13036 (V1-V6), closes #13037 (V2)` reaches this scan on the RANGE spelling, and without
+    # the exclusion the unrelated `closes #13037 (V2)` made the bare range a MENTION — so a COMPLETE
+    # close of a six-row issue fell through to `_narrowing_ids`, claimed V2 and raised a finding whose
+    # remediation tells the author to leave the capstone open. Its peer `_names_a_proper_subset` and
+    # `_narrowing_sibling_ids` already make this exclusion; `_narrowing_ids` did not, which is why the
+    # id-list spelling was pinned clean and the range spelling was not. Same predicate, both reads.
+    foreign = _foreign_closing_clauses(line, rows, issue, repo)
+    for i, (c_start, c_end) in enumerate(spans):
+        if (c_start, c_end) == own or i in foreign:
+            continue
+        other = line[c_start:c_end]
+        if any(re.search(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", other) for row in rows):
+            return False
+    # ⛔ AND A CONTRASTIVE RIDER IS NOT PART OF THE CLAIM (review of this change, P3). `but` is now a
+    # clause boundary (`_CLAUSE_SPLIT_RE`), so `Closes #N (rows V1–V6 but two are missing)` would
+    # otherwise see a bare range followed by a rowless clause, call it the WHOLE claim and read
+    # `clean` — a shape that was AMBIGUOUS before the boundary existed. A rider introduced by `but`
+    # qualifies the claim, so the range is a mention and the line abstains.
+    # ⛔ AND THE SAME RIDER RULE ENDS THE `but` VETO FOR A PURE ID LIST (review round 32, P2). The
+    # veto below was written before `_a_rowless_rider_understates_the_rows` existed, to stop
+    # `(rows V1–V6 but two are missing)` reading `clean`. It survived into a world where the rider read
+    # decides that question — and it vetoed the WHOLE LINE, unconditionally, so it silently overrode
+    # `_clause_is_a_pure_id_list`'s escape: `Closes #N (V1–V2, V3, V4–V6) but the evidence doc is
+    # attached` fell back to the bare `V3` and emitted the one-row accusation, with remediation telling
+    # a correct close to rewrite itself as a partial one — while the SAME sentence joined by `;` read
+    # `clean`. `;` and `but` do not get to disagree about one sentence: a pure id list is the whole
+    # claim, and the rider read (pointer ⇒ clean, count ⇒ UNANSWERABLE) decides the verdict.
+    if _clause_is_a_pure_id_list(line[own[0]:own[1]], rows):
+        return True
+    return not re.search(r"\bbut\b", line[own[1]:])
+
+
+def _all_range_spans(text: str, rows: list[str]) -> set[str]:
+    """Every DECLARED range's span in `text`, with NO whole-claim gate — the id-list read's expansion.
+
+    ⛔ THE ONE PLACE THIS IS SAFE, AND WHY (review round 32, P1). Expanding ranges unconditionally was
+    the round-8 defect (`(row V2 of V1–V6)` claimed all six, so the measured partial read `clean`),
+    which is why `_row_range_span` gates every span on `_range_is_the_whole_claim`. This helper is
+    reached ONLY behind `_naming_clauses_are_all_id_lists`, i.e. when every clause that names a row
+    is nothing but rows, ranges and separators — there is no sentence here for a range to be a mere
+    mention OF, so the union of what the list spells is its claim.
+    """
+    order = {row: i for i, row in enumerate(rows)}
+    spanned: set[str] = set()
+    for match in _range_matches(text, rows):
+        lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
+        spanned |= set(rows[lo:hi + 1])
+    return spanned
+
+
+def _naming_clauses_are_all_id_lists(unit: str, rows: list[str]) -> bool:
+    """Do the clauses of `unit` that name ANY row all consist of nothing but declared rows?
+
+    `unit` is a line or a single clause (the two granularities `_names_a_proper_subset_in` is asked
+    at). A unit whose naming clauses are all id lists is a CLAIM SPELLED OUT, so its ranges expand
+    and the union is judged as one candidate; a unit with any prose naming a row (a mention, a
+    disclosure, a narrowing) keeps the per-range reading, because there a subset range IS the claim.
+    """
+    naming = [line[a:b]
+              for line in unit.splitlines()
+              for a, b in _clause_spans(line, rows)
+              if _explicit_ids(line[a:b], rows) or _range_matches(line[a:b], rows)]
+    return bool(naming) and all(_clause_is_a_pure_id_list(c, rows) for c in naming)
+
+
+def _row_range_span(text: str, rows: list[str]) -> set[str]:
+    """The rows a BARE range claim in `text` spans — `V1–V6` over `#13036`'s six is all six, not two.
+
+    ⛔ GROUNDED IN THE ISSUE'S OWN ORDER, and only where BOTH endpoints are declared rows, so the
+    expansion can never invent a row.
+
+    ⛔ AND ONLY WHERE THE RANGE IS THE WHOLE CLAIM (`_range_is_the_whole_claim`): expanding
+    unconditionally made `(row V2 of V1–V6)` and `(the V1–V6 bar is unchanged)` claim all six, so the
+    measured defect read `clean` as soon as its author named the bar — the false PASS this arm ranks
+    worst. A mention is therefore not a claim on its endpoints either; `_ids_in` BLANKS it, because
+    counting the endpoints instead flagged the CORRECT close `(rows V1–V6, see the evidence doc)` with
+    remediation telling its author to claim two rows of six.
+    """
+    order = {row: i for i, row in enumerate(rows)}
+    spanned: set[str] = set()
+    for match in _range_matches(text, rows):
+        if not _range_is_the_whole_claim(text, match, rows):
+            continue
+        lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
+        spanned |= set(rows[lo:hi + 1])
+    return spanned
+
+
+def _explicit_ids(text: str, rows: list[str]) -> set[str]:
+    """The declared ids `text` names OUTSIDE any range mention — the TOKEN half of `_ids_in`.
+
+    Split out for the clause-masked closing-line read (`_closing_line_range_claim`), which needs the
+    tokens and the range SPANS decided against different views of the same line: only CLAIMABLE
+    clauses may contribute ids, while the range's whole-claim test must still see a narrowing sibling
+    clause that carries no positive marker of its own.
+    """
+    mentions = _range_matches(text, rows)
+    scanned = text
+    if mentions:
+        chars = list(text)
+        for match in mentions:
+            for i in range(match.start(), match.end()):
+                chars[i] = " "
+        scanned = "".join(chars)
+    return {row for row in rows
+            if re.search(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", scanned)}
+
+
+def _ids_in(text: str, rows: list[str]) -> set[str]:
+    """Which of `rows` this text CLAIMS — whole tokens (so `R1` is not found inside `R10`/`AR1`), plus
+    every row a bare range claim spans.
+
+    The range read is not cosmetic: `Closes #13036 (rows V1–V6)` is a COMPLETE close of all six, and
+    reading it as its two endpoints flagged it as a partial claim naming four unclaimed rows — a false
+    positive on the correct behaviour this arm exists to encourage, with remediation that told the
+    author to claim two rows of six.
+
+    ⛔ A RANGE THAT IS NOT THE WHOLE CLAIM IS A MENTION, AND ITS IDS ARE BLANKED (`_row_range_span`):
+    `(row V2 of V1–V6)` claims V2 ALONE — not V1 and V6 as well, which is what counting the endpoints
+    did, and not all six, which is what the bare span did.
+    """
+    return _explicit_ids(text, rows) | _row_range_span(text, rows)
+
+
+# A DISCLAIMER: prose naming rows the author says they are NOT claiming — `V1, V3–V6 remain
+# unmeasured`, `V1 … are follow-ups`, `V5 is not claimed`. ⛔ THESE ARE NOT A CLAIM, AND READING THEM AS
+# ONE TURNED THE DEFECT'S OWN SHAPE INTO `clean`: `Closes #13036 (row V2 only); V1, V3, V4, V5, V6
+# remain unmeasured` named all six on the closing line, so the arm reported `clean` — a false PASS on the
+# arm's headline question, one sentence away from the record it exists for. The disclosure protects
+# nothing, either: GitHub's closing parser is NOT context-aware, so a keyword beside "these are NOT
+# claimed" still closes every row. Every cue below is the NEGATIVE form only. `only` is deliberately
+# NOT one — it LIMITS an affirmative claim (`Closes #N (row V2 only)` claims V2) — and bare `remain` is
+# not one either, because `none remain` is affirmative.
+_DISCLAIMER_RE = re.compile(
+    r"\bnot\b|n't\b|\bnever\b|\bno\b|\bwithout\b"
+    r"|not\s+claim(?:ed|s)?|unclaimed|not\s+closed|not\s+measured|unmeasured|not\s+proved|unproved"
+    r"|not\s+complete|incomplete|remain\w*\s+(?:open|unmeasured|unproved|unclaimed|deferred|out)"
+    r"|(?:stays?|left|still)\s+open|not\s+finished|unfinished|unstarted|not\s+yet|yet\s+to"
+    r"|still\s+being|in\s+progress|\bopen\b"
+    r"|pending|\btodos?\b|outstanding|queued|backlog|remaining|\byet\b|unknown|whether"
+    r"|remain\w*\s+to\s+be|to\s+be\s+(?:proved|measured|done|closed|verified|satisfied)"
+    r"|none\s+of\s+the\s+rows?|nothing\s+about|outside\s+this\s+pr|come[sn]?\s+in\s+later"
+    r"|follow[\s-]?ups?|deferred|out\s+of\s+scope|excluded|except|apart\s+from|other\s+than",
+    re.IGNORECASE)
+
+# ⛔ `only` IS A DISCLAIMER CUE ON AN OWN LINE AND STAYS INERT ON A CLOSING LINE. On the closing line it
+# is the verb's qualifier and LIMITS an affirmative claim (`Closes #N (row V2 only)` claims V2, pinned),
+# so it is not a negative cue there — this regex is consulted only in the OWN-LINE branch. On an own line
+# there is no claim for it to limit. Deliberately NOT folded into `_DISCLAIMER_RE`, which is shared with
+# the closing-line read where that pinned claim would break.
+_ONLY_RE = re.compile(r"\bonly\b", re.IGNORECASE)
+
+
+def _names_a_proper_subset_in(unit: str, rows: list[str]) -> bool:
+    """Does this UNIT OF TEXT — a line, or a single clause — name SOME but not ALL of the rows?
+
+    One implementation, two granularities, because the two call sites disagree about what a unit is
+    and neither may grow its own vocabulary: `_names_a_proper_subset` asks it a LINE at a time (the
+    closing-line refusal), and `_a_clause_names_a_proper_subset` asks it a CLAUSE at a time (the
+    whole-body fallback, review round 29). A second implementation is how the two paths drifted into
+    disagreeing about the same sentence in the first place.
+    """
+    # ⛔ TWO READINGS, EVALUATED INDEPENDENTLY — NEVER UNIONED INTO ONE SET (review round 30, P1).
+    # This function had one `named` set that ranges were folded into, and the fold had to be either
+    # gated or unconditional; each choice masked the other direction, and round 28 traded eleven false
+    # passes for twenty-four:
+    #   * unconditional  -> `Only V2 of V1–V6 landed.` widened to all six, masking its own subset;
+    #   * gated          -> `V1–V3 landed in this PR.` / `Satisfies #N: V1–V3` contributed NOTHING
+    #                       (`_explicit_ids` blanks every range), so a range-spelled subset beside a
+    #                       complete claim read `clean` while the identical id-spelled subset was
+    #                       correctly refused — the arm's headline class, and the round-27 headline
+    #                       `Satisfies` false PASS re-opened simply by spelling the subset as a range.
+    # The union was the bug: wide and narrow evidence are not alternatives to pick between, they are
+    # two independent questions, and a NEGATIVE read must refuse if EITHER answers "a proper subset".
+    #   wide   — explicit ids, plus every range expanded to its whole span (so a complete range close
+    #            is all six and is never mistaken for a two-row subset);
+    #   narrow — explicit ids, plus only ranges that ARE the whole claim (so `(row V2 of V1–V6)` is
+    #            V2 here, as it is to `_row_range_span`).
+    # Neither can invent a row: both expand from the issue's own order.
+    # ⛔ AND EACH RANGE IS INDEPENDENT EVIDENCE — IT IS NEVER FOLDED INTO THE OTHERS (review round 31,
+    # P1). Round 30 fixed the union of ranges with the ids, but the ranges were still UNIONED WITH EACH
+    # OTHER into `wide`, so a full-span range on the same line absorbed a subset range and masked it:
+    #   `V1–V3 of V1–V6 landed in this PR.`    -> wide = {V1..V6}, narrow = {} -> `clean`
+    #   `The bar is V1–V6; this PR does V1–V3.` -> same
+    #   `| V1–V3 of V1–V6 | done |`             -> same (table cell)
+    # Six such cells, each one step from a pinned shape and all visible with the issue's own ids.
+    # A fold can only ever answer "is the UNION of what this line mentions a subset?", which is the
+    # wrong question: `V1–V3` is a proper subset of the six whatever else the line also mentions. So
+    # every candidate set is judged ALONE — the explicit ids, and then EACH range's span — and a
+    # negative read refuses if ANY of them is a proper subset. `Closes #N (rows V1–V6)` still reads
+    # complete because its only candidate is the full span.
+    order = {row: i for i, row in enumerate(rows)}
+    explicit = set(_explicit_ids(unit, rows))
+    # ⛔ AN ID LIST IS ONE CLAIM, NOT A SET OF INDEPENDENT MENTIONS (review round 32, P1). Judging
+    # `V1–V2` alone as a two-row subset accused a COMPLETE close spelled `(V1–V2, V3, V4–V6)` — the
+    # same false accusation, from the negative read that is supposed to catch false passes. Where
+    # every naming clause is a pure id list the ranges expand and the union is the single candidate;
+    # the per-range reading stays for prose, which is where a subset range really is the claim
+    # (`V1–V3 of V1–V6 landed in this PR.` must keep refusing — it is not an id list).
+    if _naming_clauses_are_all_id_lists(unit, rows):
+        claim = explicit | _all_range_spans(unit, rows)
+        return not set(rows) <= claim
+    if explicit and not set(rows) <= explicit:
+        return True
+    for match in _range_matches(unit, rows):
+        lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
+        if not set(rows) <= set(rows[lo:hi + 1]):
+            return True
+    return False
+
+
+def _names_a_proper_subset(text: str, rows: list[str],
+                           issue: int | None = None, repo: str | None = None) -> bool:
+    """Does any line of `text` name SOME but not ALL of the issue's declared rows?
+
+    ⛔ THE STRUCTURAL PARTIALITY SIGNAL, AND THE REASON NO CUE VOCABULARY IS NEEDED FOR IT (review
+    round 27, R1+R2). A body that names a subset of the rows while a closing line claims ALL of them
+    is self-contradictory however the surrounding prose words it — `Satisfies #N: V2` beside
+    `Closes #N (rows V1–V6)`, `Just V2 landed here.`, `Solely V2.`, `V2 alone.`, `Nothing but V2.`,
+    `So far, V2.`, `V1, V2 only.`. Five review rounds each added one more cue WORD to a list and each
+    found the next word; a subset needs no word at all, which is why this replaces the enumeration
+    rather than extending it.
+
+    It is used ONLY as a NEGATIVE signal — it can refuse a complete claim, never add one — so it does
+    not touch the round-18 precedence decision that `Satisfies` is consulted only where the closing
+    line named nothing (see `_closing_line_claim`). Rows come from the issue, so it cannot invent one.
+
+    ⛔ LINE GRANULARITY IS NOT ENOUGH ON ITS OWN (review round 29, P2 — PR #14771). The whole-body
+    fallback needs the same signal where the narrowing sits in a DIFFERENT sentence from the complete
+    claim (`V1 … V6 verified in the programme. This PR: V2.`) — one line, so this line-level read
+    sees all six and no subset. `_a_clause_names_a_proper_subset` asks the same question of the
+    CLAUSES; the unit function above is shared so the two cannot answer it differently.
+    ⛔ AND A CLAUSE THAT CLOSES A DIFFERENT ISSUE IS BLANKED FIRST (review round 32, P1). Without it
+    `Closes #13036 (rows V1–V6), closes #13037 (row V2 only)` read `V2` as a subset of #13036's rows
+    and refused a COMPLETE close to UNANSWERABLE — the same wrong-claim-set defect the positive read
+    had, arriving through the negative one. Only `origin`-relevant clauses are read.
+    """
+    for line in strip_code(text, strict=True)[0].splitlines():
+        foreign = _foreign_closing_clauses(line, rows, issue, repo)
+        if foreign:
+            spans = _clause_spans(line, rows)
+            chars = list(line)
+            for idx in foreign:
+                if idx < len(spans):
+                    a, b = spans[idx]
+                    chars[a:b] = " " * (b - a)
+            line = "".join(chars)
+        if _names_a_proper_subset_in(line, rows):
+            return True
+    return False
+
+
+def _a_clause_names_a_proper_subset(text: str, rows: list[str],
+                                   issue: int | None = None,
+                                   repo: str | None = None) -> bool:
+    """Does any CLAUSE of `text` name SOME but not ALL of the rows — the fallback's partiality test?
+
+    ⛔ WHY THE WHOLE-BODY FALLBACK NEEDS IT, AND WHY AT CLAUSE GRANULARITY (review round 29, P2).
+    The fallback accepts a body that names every row in an affirmative clause. It had NO negative
+    signal, so `Closes #N` + `V1, V2, V3, V4, V5, V6 verified in the programme. This PR: V2.` read
+    `clean` — a one-row close of a six-row capstone, reported as a complete one, with no cue word
+    anywhere (so no disclaimer and no `only`). The contradiction is between two CLAUSES of that
+    sentence, so the read has to be clause-shaped: the line names all six and only the clause split
+    shows the narrowing. Downstream the caller refuses the fallback and reports AMBIGUOUS — the cheap
+    error in this file's ranking — never a pass.
+
+    ⛔ AND A RANGE-ONLY CLAUSE IS COVERED BY `_names_a_proper_subset_in`'S WIDE READING (review round
+    30) — this function deliberately does NOT grow a second range expansion of its own: the unit read
+    now evaluates wide and narrow independently, so `… are all proved; V1–V3 in this PR.` is a
+    subset without help from here, and a duplicate expansion would be the second implementation this
+    file keeps having to remove.
+    """
+    # ⛔ A CLAUSE THAT CLOSES A DIFFERENT ISSUE IS NOT A STATMENT ABOUT THIS ONE'S ROWS (review round 31,
+    # P1 — caught by a pinned test, not by prose). `Closes #13036 (V1 … V6), closes #13037 (V2)` is ONE
+    # complete close of #13036 plus a second, unrelated close; read as clauses, `closes #13037 (V2)`
+    # names V2 — a declared row of #13036 — so this returned True and accused a COMPLETE close of
+    # claiming only V2. A foreign closing clause (and its attached qualifier) is excluded here, the same
+    # exclusion `_narrowing_sibling_ids` makes, so the two reads agree about what a clause is about.
+    for line in strip_code(text, strict=True)[0].splitlines():
+        spans = _clause_spans(line, rows)
+        foreign = _foreign_closing_clauses(line, rows, issue, repo)
+        for i, (a, b) in enumerate(spans):
+            if i in foreign:
+                continue
+            if _names_a_proper_subset_in(line[a:b], rows):
+                return True
+    return False
+
+# ⛔ THE POSITIVE MARKER FOR *IDs* (review round 9): round 8 retired the prose-cue blocklist for
+# RANGES, but the ids read still decided polarity by vocabulary — anything `_DISCLAIMER_RE` did not
+# recognise was unioned in as a CLAIM. That made a NEGATION of the close earn the pass: `We do not
+# close #N with V1, V3, V4, V5, V6` and `The capstone rows are V1..V6. This PR proves V2.` both read
+# `clean` over #13036's six rows, because those ids sat in a clause the cue list happened to miss.
+# Prose-based polarity cannot terminate, so a CLAUSE now contributes claims only on a POSITIVE
+# structural marker: it carries the closing keyword (with its attached qualifier), it carries a
+# COMPLETION verb (`_AFFIRM_RE`), or it is the documented `Satisfies #<issue>: <ids>` form. Everything
+# else is a mention, and mentions are not claims in either direction — with ONE exception, added in
+# review round 11: where a mention NARROWS a range on the same line, the rows it names are what the
+# sentence claims (`_narrowing_ids`). Reading only the marked clauses made `(rows V1–V6; V2 only)` a
+# complete claim on all six, i.e. `clean` on a one-row close — the false PASS this rule exists for.
+_AFFIRM_RE = re.compile(
+    r"\b(?:prov(?:e|es|ed|en|ing)|measur\w+|done|complet\w+|deliver\w+|cover(?:s|ed)?|verif\w+"
+    r"|landed|shipped|closed|all\s+six|every\s+row)\b",
+    re.IGNORECASE)
+# ⛔ AND "PROVED … IN OTHER PRs" IS NOT A CLAIM ON THESE ROWS (review round 11): the whole-body
+# fallback asks "does this body affirmatively name every row", and a disclosure saying the other rows
+# were done ELSEWHERE satisfies it word for word — `All six rows V1 … V6 are proved in the predecessor
+# PR` is a complete claim on somebody else's work. A clause that points at another PR, issue, branch or
+# predecessor is a mention, whatever verb it carries.
+_ELSEWHERE_RE = re.compile(
+    r"\b(?:other|separate|another|elsewhere|predecessor|successor|subsequent|upstream|downstream"
+    r"|follow[\s-]?up|later|previous|prior)\b"
+    r"|\b(?:in|by|via|under)\s+#\d+",
+    re.IGNORECASE)
+# Where one CLAIM can end and a disclaimer can begin. A SPACED dash is a boundary (`#N — only V2 is
+# claimed`), but one sitting BETWEEN two declared row ids is a RANGE (`V1 — V6`) and must NOT split:
+# separating a range's endpoints would silently turn a complete claim into a partial one (`_clauses`).
+_CLAUSE_SPLIT_RE = re.compile(r"[;()\[\]]|\s+[—–]\s+|\s+but\s+|(?<=[.!?])\s+")
+
+
+def _clause_spans(line: str, rows: list[str]) -> list[tuple[int, int]]:
+    """The CLAUSE offsets of one line — the boundaries where a claim ends and a disclaimer begins.
+
+    The polarity read (see `_closing_line_claim`) is per clause, because a single line routinely says
+    both things: `Closes #N (row V2 only); V1, V3, V4, V5, V6 remain unmeasured`. Deciding polarity for
+    the whole LINE would either drop the real claim or accept the disclaimer's ids as claims — the
+    false PASS this reads out. A spaced dash between two declared row ids is a range, not a boundary,
+    and offsets (not strings) are returned so the range read can find a match's OWN clause.
+    """
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for match in _CLAUSE_SPLIT_RE.finditer(line):
+        if match.group().strip() in {"\u2014", "\u2013"}:
+            before, after = line[:match.start()].rstrip(), line[match.end():].lstrip()
+            if (any(re.search(rf"(?<![A-Za-z0-9]){re.escape(r)}$", before) for r in rows)
+                    and any(re.match(rf"{re.escape(r)}(?![A-Za-z0-9])", after) for r in rows)):
+                continue
+        spans.append((start, match.start()))
+        start = match.end()
+    spans.append((start, len(line)))
+    return spans
+
+
+def _clauses(line: str, rows: list[str]) -> list[str]:
+    """The clause TEXTS of one line — see `_clause_spans` for the boundaries."""
+    return [line[a:b] for a, b in _clause_spans(line, rows)]
+
+
+def _narrowing_ids(line: str, match: re.Match, rows: list[str],
+                   issue: int | None = None, repo: str | None = None) -> set[str]:
+    """The ids a NARROWING sibling clause names — `(rows V1–V6; V2 only)` claims **V2**.
+
+    ⛔ WHY THIS EXISTS, AND WHY IT IS NOT A CUE LIST (review round 11). Round 10 masked the claim read
+    to CLAIMABLE clauses so that `(row V2 only); V1, V3, V4, V5, V6 are separate PRs` could not count
+    its cue-free narrowing as claims. That is right for ids, and it took the *evidence* the range read
+    depends on with it: `claimable` now blanks a sibling clause that carries no completion verb, so
+    `(rows V1–V6; V2 only)` stopped looking narrowed — the bare range became "the whole claim" and a
+    ONE-ROW close of `#13036`'s six read **`clean`**, the false PASS this arm ranks worst. The
+    demoted range is therefore resolved by the sibling that demoted it: the rows IT names are the
+    narrower claim the sentence means. Nothing about the words is guessed — the sibling is identified
+    by *naming a declared row outside the range*, and it only counts when it names a STRICT SUBSET of
+    the span, so a sibling that names the whole span (`V1 … V6 are separate PRs`) is not a narrowing
+    and earns nothing (the line lands `ambiguous`, never `clean`).
+    """
+    # ⛔ AND A SIBLING THAT CLOSES A DIFFERENT ISSUE IS NOT THIS ISSUE'S NARROWING (review round 32,
+    # P2). This function is the ONLY one of the three narrowing reads that did not make the exclusion
+    # its two peers already make (`_names_a_proper_subset`, `_narrowing_sibling_ids`), so
+    # `Closes #N (V1-V6), closes #M (V2)` read the foreign qualifier as a narrowing of #N and accused
+    # a COMPLETE close of claiming V2 — a wrong-claim-set finding, ranked beside a false PASS here.
+    spans = _clause_spans(line, rows)
+    own = next(((a, b) for a, b in spans if a <= match.start() and match.end() <= b), None)
+    foreign = _foreign_closing_clauses(line, rows, issue, repo)
+    ids: set[str] = set()
+    for i, (a, b) in enumerate(spans):
+        if (a, b) == own or i in foreign:
+            continue
+        clause = line[a:b]
+        if _DISCLAIMER_RE.search(clause):
+            continue
+        ids |= _explicit_ids(clause, rows)
+    return ids
+
+
+def _foreign_closing_sets(line: str, rows: list[str], issue: int | None,
+                          repo: str | None) -> tuple[set[int], set[int]]:
+    """The clause indices that close ANOTHER issue, split into (REF clauses, their QUALIFIERS).
+
+    ⛔ SPLIT BECAUSE THE TWO ARE READ DIFFERENTLY (review rounds 37/38). A ref clause is about another
+    issue's SUBJECT, so its `other`-family cue is the org name and is suppressed; a qualifier is about
+    another issue's ROWS and may carry a cue about rows on this line, so it is read normally. Round 35
+    inferred which was which from index adjacency (`(i - 1) in foreign`), which is wrong for two foreign
+    closes in a row — the SECOND ref follows the first one's qualifier and was mistaken for a qualifier,
+    so its `other-org` name disclaimed a correct complete close. Both sets are produced here, from the
+    attribution itself, and they are DISJOINT: a set named for refs that also holds the qualifiers is
+    how round 38 shipped a rule its own comment stated and its code did not implement.
+    """
+    return _foreign_closing_sets_impl(line, rows, issue, repo)
+
+
+def _foreign_closing_clauses(line: str, rows: list[str], issue: int | None,
+                             repo: str | None) -> set[int]:
+    """Clause indices that CLOSE A DIFFERENT ISSUE, including each one's attached qualifier.
+
+    ⛔ ONE IMPLEMENTATION, TWO READERS (review round 31, P1). `Closes #13036 (V1 … V6), closes #13037
+    (V2)` is one complete close of #13036 plus an unrelated close of #13037. Read as clauses,
+    `closes #13037 (V2)` names V2 — a declared row of #13036 too — so a NEGATIVE read called a
+    COMPLETE close partial and accused it of claiming V2. The first fix for this lived inside
+    `_narrowing_sibling_ids`; `_a_clause_names_a_proper_subset` then re-derived a worse version of it
+    and disagreed with it, which is exactly the second-implementation drift this file keeps removing.
+    The qualifier belongs to the foreign close by the SAME attachment rule the closing-line read uses
+    (a bracket or a spaced dash), so `, closes #M (V2)` puts V2 out of scope rather than in it.
+    """
+    if issue is None:
+        return set()
+    refs, quals = _foreign_closing_sets_impl(line, rows, issue, repo)
+    return refs | quals  # the qualifier IS part of the foreign span for every existing reader
+
+
+def _foreign_closing_sets_impl(line: str, rows: list[str], issue: int | None,
+                               repo: str | None) -> tuple[set[int], set[int]]:
+    if issue is None:
+        return set(), set()
+    spans = _clause_spans(line, rows)
+    foreign: set[int] = set()
+    quals: set[int] = set()
+    for i, (a, b) in enumerate(spans):
+        # ⛔ TWO SINK SEMANTICS, AND THEY ARE NOT THE SAME TEST (review rounds 32/35, P3).
+        # `_claims_in` reports a closing ref that names a repo it could not prove is this one in
+        # `other_repo` — which covers BOTH an unresolvable repo and a resolved-but-different one, and
+        # only when the ref is closing-bound and is the keyword's FIRST (a `Refs other/repo#N` mention
+        # is still not a close, #10534).
+        #   * an UNRESOLVABLE ref (`repo is None`) is only known by its NUMBER, so a ref carrying THIS
+        #     issue's number stays native — we cannot prove it is elsewhere;
+        #   * a ref whose repo was RESOLVED to a different one is foreign by IDENTITY, whatever its
+        #     number. Comparing it by number dropped the datum and kept the accusation:
+        #     `Closes #N (V1–V6), closes other-org/other-repo#N (V2)` claimed `V2` of a COMPLETE close
+        #     for another repo's issue that happens to share N.
+        other_repo: list[int] = []
+        closing = set(_claims_in(line[a:b], None, repo, None, other_repo)["closing"])
+        elsewhere = bool(other_repo) if repo else bool(set(other_repo) - {issue})
+        if not (closing - {issue}) and not elsewhere:
+            continue
+        foreign.add(i)
+        if i + 1 < len(spans):
+            sep = line[b:spans[i + 1][0]].strip()
+            if sep == "(" or sep in {"—", "–"} or "(" in sep:
+                quals.add(i + 1)
+    # ⛔ THE UNION IS BUILT HERE, NOT IN THE SET NAMED FOR REFS (review round 38, P1). The first version
+    # of this split added the qualifier to BOTH sets, so `refs ⊇ quals`, the caller's `i in refs` was
+    # byte-for-byte the old `i in foreign`, and the rule its own docstring states was never implemented:
+    # `Closes #N (rows V1–V6), closes #M (the rest of #N lands in a later PR)` read `clean` — a FALSE
+    # PASS on the arm's headline question — because the qualifier's `later` cue was suppressed along with
+    # the foreign ref's org name. A split whose halves are nested is not a split.
+    return foreign, quals
+
+
+def _narrowing_sibling_ids(line: str, rows: list[str], claimable: set[int],
+                           issue: int | None = None, repo: str | None = None) -> set[str]:
+    """The ids a NARROWING sibling clause names when NO RANGE matched — `(V1, …, V6; V2 only)` ⇒ V2.
+
+    ⛔ THIS IS `_narrowing_ids` WITHOUT A RANGE (review round 29, P2). `_narrowing_ids` is handed the
+    range MATCH and exempts the clause the range sits in; here the claim is the set of CLAIMABLE
+    clauses, so those are the ones exempted and every other clause is a candidate narrowing. The two
+    reads share their exclusions deliberately: a clause carrying a DISCLAIMER or an ELSEWHERE cue is
+    the negative signal those predicates already own (`disclaimed`), and reading its rows as the new
+    claim would point the finding at the rows the author said they were NOT closing.
+
+    Rows come from the issue, so a clause can only narrow to a declared row, and the caller applies
+    the strict-subset test (`narrowing < line_named`) so a sibling naming the WHOLE set — the
+    `V1 … V6 are separate PRs` shape — narrows nothing and earns no pass.
+
+    ⛔ TWO THINGS THIS READ MISSED WHEN IT WAS FIRST WRITTEN, BOTH FOUND BY REVIEWING IT AGAINST THE
+    SAME CLASS IT EXISTS FOR — and both false PASSes one spelling away:
+    * A SIBLING THAT CLOSES A DIFFERENT ISSUE IS NOT THIS ISSUE'S NARROWING. `Closes #N (V1 … V6),
+      closes #M (V2)` read the second parenthetical as a narrowing of #N and accused a complete close
+      of claiming `V2` — a wrong-claim-set finding, which this file ranks beside a false PASS.
+    * A RANGE-ONLY SIBLING NAMES ITS SPAN. `(V1, …, V6; V1–V3 in this PR)` names three rows, but
+      `_explicit_ids` BLANKS range mentions, so the demotion never happened and a THREE-row close of
+      six read `clean`. Expanded from the issue's own order and only when the clause names no id
+      outside the range, so it cannot invent a row; a sibling that repeats ids the claim already has
+      (`; V2 only`) is read by `_explicit_ids` as before.
+    """
+    ids: set[str] = set()
+    order = {row: i for i, row in enumerate(rows)}
+    spans = _clause_spans(line, rows)
+    foreign = _foreign_closing_clauses(line, rows, issue, repo)
+    for i, (a, b) in enumerate(spans):
+        if i in claimable or i in foreign:
+            continue
+        clause = line[a:b]
+        if _DISCLAIMER_RE.search(clause) or _ELSEWHERE_RE.search(clause):
+            continue
+        named = _explicit_ids(clause, rows)
+        if not named:
+            for match in _range_matches(clause, rows):
+                lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
+                ids |= set(rows[lo:hi + 1])
+        ids |= named
+    return ids
+
+
+# Row-population COUNT words, used only by `_a_rowless_rider_understates_the_rows`. This is NOT the
+# negation-cue blocklist the file retired in round 8: a cardinal is a SYNTACTIC class, and its meaning
+# is fixed by the issue's own declared row population (`len(rows)`), which is the authority every other
+# read in this module is already grounded in. It says "this rider states a number of rows smaller than
+# the number the issue declares", never "this rider uses the word `remain`".
+_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+
+
+def _a_rowless_rider_understates_the_rows(line: str, rows: list[str], claimable: set[int],
+                                        issue: int | None = None,
+                                        repo: str | None = None) -> bool:
+    """Does any clause on the closing line state a COUNT smaller than the issue's declared rows?
+
+    (Its own declared ids and ranges are blanked first — see `_blank_declared_ids` — so the count is
+    read from what the clause SAYS, and the read is not positional.)
+
+    ⛔ WHY THIS EXISTS (review round 32, P1). The two refusals that guard a COMPLETE claim are keyed on
+    (a) a cue word (`_DISCLAIMER_RE` / `_ELSEWHERE_RE` / `only`) or (b) a clause naming a NAMED subset of
+    the rows. A rider that names NO row and carries NO cue word satisfies neither, so it was simply
+    blanked as a non-claimable sibling and the complete claim stood. Measured on `#13036`'s six rows,
+    every one of these read `clean` while saying on its own closing line that rows are outstanding:
+
+        Closes #13036 (V1, V2, V3, V4, V5, V6); three remain
+        Closes #13036 (V1, V2, V3, V4, V5, V6); two are missing
+        Closes #13036 (V1, V2, V3, V4, V5, V6); 3 of 6 done
+        Closes #13036 (rows V1–V6); two are missing
+
+    — the exact defect this arm was filed for — while the SAME sentence joined by `but` was already
+    AMBIGUOUS (pinned, `NORTH_OF_ROUND_29`). `but` is a clause boundary (`_CLAUSE_SPLIT_RE`) and
+    `_range_is_the_whole_claim` refuses a bare range with a rider after it, so the rule existed but was
+    spelled against ONE separator and ONE of the two claim spellings; a `;` leaked, and an ID LIST
+    never reached it at all. `;` and `but` must not disagree about the same sentence.
+
+    ⛔ AND A BLANKET "ANY ROWLESS SIBLING DEMOTES" RULE IS REFUSED BY A RECORDED DECISION. The
+    first draft of this predicate did exactly that, and it broke two pinned controls —
+    `test_a_range_narrowed_by_a_cue_free_sibling_claims_exactly_that_sibling`'s CONTROL B
+    (`Closes #N (rows V1–V6; evidence in the evidence doc)` is a COMPLETE close) and the
+    `MINIMAL_PAIR_ROUND_29` row `…; the evidence doc is attached` — both of which record that a
+    rowless, cue-free sibling which merely POINTS somewhere is neutral and leaves the claim intact.
+    That pin is the round-8 decision that retired the cue blocklist precisely because it flagged
+    correct completes. So the discriminator cannot be "is the sibling rowless" — it must be what the
+    rider asserts. A remainder/partial claim states a NUMBER OF ROWS; a pointer names an artifact.
+
+    The number is read against the ISSUE's own declared population, so the test is grounded rather
+    than lexical: a stated count is a contradiction only when it is SMALLER than `len(rows)` —
+    `3 of 6 done` and `three remain` (3 < 6) contradict a six-row complete claim, while
+    `6/6 measured` (6 is not < 6) and `evidence in the evidence doc` (no count) do not. That keeps
+    both pinned controls green and catches every measured shape above.
+
+    The one remaining exclusion is a shape check, not vocabulary: a clause closing a DIFFERENT issue
+    (`… , closes #13037 (V2)`) is `_foreign_closing_clauses`' job, reused here so the three reads agree
+    about what a clause is ABOUT. A clause that names THIS issue's rows is NOT skipped — its ids and
+    ranges are blanked instead (see the residue read below), because a rider written inside the claim
+    (`(V1, V2, V3, V4, V5, V6, 3 of 6 done)`) is in the same clause as the ids and a skip would make
+    the read separator-dependent again. A span that states no count cannot trigger the rule, so the
+    bare `)` of `Closes #N (rows V1–V6)` needs no special case.
+
+    ⛔ THE COST, RECORDED: a correct complete close that says a SMALLER number than the population
+    anywhere on its closing line (`Closes #N (rows V1–V6); 3 doc rows are links`, `Addresses 3
+    findings. Closes #N (rows V1–V6)`) now reads AMBIGUOUS instead of `clean`. That is the cheap error
+    in this file's ranking (a counted abstention, never a pass, and never a false accusation), which is
+    the same price round 27 accepted for `_names_a_proper_subset`.
+    ⚠️ AND THIS READ IS NO LONGER POSITIONAL (review round 34, P1). It used to require the rider to
+    come AFTER the claim, justified by an example that measured FALSE on re-check: the claimed victim
+    (`This closes the capstone; Closes #N (rows V1–V6)`) states no count at all, so widening it costs
+    nothing there — while `Three remain. Closes #N (V1–V6)`, the same disclosure written first, was an
+    uncounted FALSE PASS. The measured cost of the widening is the `Addresses 3 findings` line above,
+    which is the direction this file already chooses to err in.
+    """
+    spans = _clause_spans(line, rows)
+    if not claimable:
+        return False
+    foreign = _foreign_closing_clauses(line, rows, issue, repo)
+    for i, (a, b) in enumerate(spans):
+        if i in foreign:
+            continue
+        clause = line[a:b]
+        # ⛔ READ THE COUNT OUT OF WHAT THE CLAUSE SAYS, NOT THE ROWS IT LISTS (review round 34, P1).
+        # Two earlier guards made this read separator- and spelling-dependent and let the arm's headline
+        # false PASS back in, both measured:
+        #   `Closes #N (V1, V2, V3, V4, V5, V6, 3 of 6 done)`   -> `clean`  (the rider is INSIDE the
+        #       claimable clause, so the `i in claimable` skip never looked at it — a comma is not a
+        #       clause boundary, and making it one would contradict round 12)
+        #   `Closes #N (rows V1–V6); 3/6`                      -> `clean`  (the no-letters skip took a
+        #       numeric-only rider for the bare `)` span)
+        # Blanking the declared ids and the RANGES first makes both guards unnecessary: ids are not
+        # claims here, and a span that states no count cannot trigger the rule.
+        if _clause_states_a_partial_count(_blank_declared_ids(clause, rows), len(rows)):
+            return True
+    return False
+
+
+def _clause_states_a_partial_count(clause: str, row_count: int) -> bool:
+    """Does this clause state a number of rows SMALLER than the issue declares? `3 of 6`, `two`.
+
+    Grounded in `row_count` (the issue's own rows), never in a word list of negations: `two are
+    missing` and `two more are needed` both state a partial row count, and both are contradictions of
+    a complete claim regardless of the verb. `6 of 6 done` and `all six` are not, because the stated
+    count is not smaller than the population — which is what keeps the pinned complete-close controls
+    (`…; the evidence doc is attached`) and honest self-reports (`6/6`) reading `clean`.
+    """
+    for token in re.finditer(r"(?<![\w#])(\d{1,3})(?!\d)", clause):
+        if int(token.group(1)) < row_count:
+            return True
+    for token in re.finditer(r"\b(" + "|".join(_COUNT_WORDS) + r")\b", clause, re.IGNORECASE):
+        if _COUNT_WORDS[token.group(1).lower()] < row_count:
+            return True
+    return False
+
+
+def _closing_line_range_claim(line: str, claim_text: str, rows: list[str],
+                              issue: int | None = None, repo: str | None = None) -> set[str]:
+    """The rows a RANGE earns on a closing line — read against THREE views of the same line.
+
+    `claim_text` is the line with every non-CLAIMABLE clause blanked, so a range only counts where the
+    author positively marked a claim. Offsets are identical to `line` (blanking preserves length),
+    which is what lets the range be FOUND in the masked view and JUDGED in the unmasked one:
+
+    * a range that is the WHOLE CLAIM of its line (`(rows V1–V6)`) spans every row between its
+      endpoints;
+    * a range demoted to a mention by a NARROWING sibling claims the rows that sibling names, and
+      only when they are a strict subset of the span (`(rows V1–V6; V2 only)` ⇒ V2);
+    * anything else (a range the sentence merely describes, a sentence that names the whole span as
+      *elsewhere*) earns nothing, so the verdict falls to AMBIGUOUS — never a `clean` and never an
+      accusation naming rows the author did not claim.
+    """
+    out: set[str] = set()
+    order = {row: i for i, row in enumerate(rows)}
+    for match in _range_matches(claim_text, rows):
+        lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
+        span = set(rows[lo:hi + 1])
+        if _range_is_the_whole_claim(line, match, rows, issue, repo):
+            out |= span
+            continue
+        narrowing = _narrowing_ids(line, match, rows, issue, repo)
+        if narrowing and narrowing < span:
+            out |= narrowing
+    return out
+
+
+# ⛔ A `Satisfies` LINE THAT IS NOT A CLAIM. The documented partial form is an AFFIRMATIVE statement of
+# what the PR delivered; the same eight words appear in a PLAN, in a quotation, in an unticked template
+# and in a sentence about somebody else's PR — and reading those as claims turned the arm's headline
+# false PASS back on (review round 17, F1). The line must not be an unchecked checkbox, a blockquote, a
+# heading, a question, or a remark about other/future work.
+_NOT_A_CLAIM_LINE_RE = re.compile(r"^\s*(?:[-*+]\s*\[[ ~-]?\]|>|#{1,6}\s)|\?\s*$", re.MULTILINE)
+
+
+def _is_an_id_list(clause: str, rows: list[str]) -> bool:
+    """Is this clause NOTHING BUT declared row ids and separators — `V3, V4, V5, V6`?
+
+    Used to decide which clauses of a `Satisfies` line are part of its CLAIM rather than a sibling
+    that may narrow it (review round 29): a `;`-separated continuation of the id list is the same
+    claim and must not be demoted, while a clause carrying prose (`this PR proves V2`) is a
+    narrowing. Decided structurally — the clause names at least one declared row and its residue
+    is empty once the rows and separators are removed — so it needs no vocabulary.
+    """
+    ids = _explicit_ids(clause, rows)
+    if not ids:
+        return False
+    residue = clause
+    for row in rows:
+        residue = re.sub(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", " ", residue)
+    return not re.sub(r"[\s,;:.\u2013\u2014\-()\[\]]", "", residue)
+
+
+def _satisfies_claim(text: str, issue: int, rows: list[str], repo: str | None) -> set[str]:
+    """The rows a `Satisfies #<issue>: <ids>` clause CLAIMS — the documented partial form.
+
+    Read only where polarity is positively established: an unticked checkbox, a quotation, a heading,
+    a question, or a clause that points at other/future work is a mention, and mentions are not claims
+    in either direction. A fully-qualified `owner/repo#N` must name THIS repo when the repo is known.
+    """
+    claimed: set[str] = set()
+    for match in SATISFIES_IDS_RE.finditer(text):
+        if int(match.group("num")) != issue:
+            continue
+        owner, name = match.group("owner"), match.group("repo_name")
+        if owner and repo and f"{owner}/{name}".lower() != repo.lower():
+            continue
+        if owner and not repo:
+            continue
+        start = text.rfind("\n", 0, match.start()) + 1
+        end = text.find("\n", match.end())
+        line = text[start:end if end != -1 else len(text)]
+        if _NOT_A_CLAIM_LINE_RE.search(line):
+            continue
+        clause = SATISFIES_IDS_RE.sub(lambda m: m.group("ids"), line, count=1)
+        if _DISCLAIMER_RE.search(clause) or _ELSEWHERE_RE.search(clause):
+            continue
+        claimed_ids = _ids_in(match.group("ids"), rows)
+        # ⛔ A NARROWING SIBLING DEMOTES THIS CLAIM TOO (review round 29, P2 — the second
+        # re-derivation path). `Satisfies #N: V1, V2, V3, V4, V5, V6 — this PR proves V2` returned all
+        # six: `SATISFIES_IDS_RE`'s `ids` group runs to end of line, so the sentence that narrows them
+        # was read as more ids, `named` came back complete, and the whole-body fallback (where the
+        # partiality test now lives) was UNREACHABLE — the false PASS one spelling from the
+        # closing-line one, on the path the review named. The demotion is the same read, on the same
+        # line, with the clause carrying the `Satisfies` keyword as its "own" clause.
+        # ⛔ "OWN" IS NOT THE MATCH SPAN: the greedy group would swallow the narrowing clause and
+        # exempt it. It is the clause that carries the KEYWORD, plus any clause that is nothing but
+        # ids (`Satisfies #N: V1, V2; V3, V4, V5, V6` — a `;`-separated LIST is still a claim, and
+        # demoting it would name the wrong rows). A clause with prose in it that names a strict subset
+        # is the narrowing.
+        spans = _clause_spans(line, rows)
+        own = {i for i, (a, b) in enumerate(spans)
+               if _is_an_id_list(line[a:b], rows)
+               or a <= match.start() - start < b}
+        narrowing = _narrowing_sibling_ids(line, rows, own, issue, repo)
+        if narrowing and narrowing < claimed_ids:
+            claimed_ids = narrowing
+        claimed |= claimed_ids
+    return claimed
+
+
+def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
+                        repo: str | None = None) -> tuple[set[str], bool, bool]:
+    """`(rows this PR claims, did a closing line DISCLAIM rows)` — the polarity-aware read.
+
+    Two sources, and both are GROUNDED in the issue's declared rows, so a token the issue does not use
+    can never count as a claim:
+
+    ⛔ `repo` IS PART OF THE READ, NOT A DISPLAY DETAIL (review round 16). The line test below uses the
+    module's own binding grammar (`_claims_in`), and that grammar needs the repo to resolve a
+    FULLY-QUALIFIED ref: with `repo=None` a `Closes owner/repo#N` was dropped by the claim read while
+    `closing_targets` — which DOES resolve the repo — counted it in the population. The arm then flagged
+    a PR whose closing line it refused to read, the empty claim set fell through to the whole-body
+    fallback, and a one-row close of a six-row capstone came back `clean`. This is the same invisible
+    drop `closing_targets`' own docstring records; it was threaded through ONE reader and this is the
+    second.
+
+    * a ``Satisfies #<issue>: <ids>`` clause — the documented partial form;
+    * the **qualifier on the closing keyword's own line**. That is the measured shape: #13886 wrote
+      ``Closes #13036 (row V2 only).`` and the row it claimed sat in the parenthetical, one line
+      away from the keyword that fired. This is the ONE prose-adjacent read in the arm, and it is
+      deliberately narrow: the line must carry a CLOSING word, must name THIS issue, a token only
+      counts when the issue declares that exact row id, and a token inside a DISCLAIMER clause
+      (`_DISCLAIMER_RE`) counts as the opposite of a claim.
+
+    A RANGE SHORTHAND names every row it spans, not its two endpoints (see `_row_range_span`):
+    ``(rows V1–V6)`` is a claim on all six, which is what its author wrote.
+
+    ⛔ AN EMPTY CLAIM SET IS NOT "NO CLAIM" — it is "this PR did not say on this line", which is why
+    the caller falls back to the WHOLE body before deciding, and reports a body that names nothing as
+    AMBIGUOUS rather than as either a finding or a pass (see `classify_partial_close`). The second
+    element exists so that fallback can be REFUSED where it would launder a disclaimer: a body whose
+    closing line says `V1–V6 remain unmeasured` names every id somewhere, and reading the whole body
+    there reports `clean` on a close that disclaimed all six. ⛔ THAT REFUSAL COVERS THIS READ TOO
+    (round 19): a `Satisfies` line naming EVERY row beside a disclaimer is the same launder through
+    the other source, so it is dropped here and the caller reaches the same UNANSWERABLE verdict.
+
+    ⛔ THERE IS NO `skipped` SINK HERE, AND THAT IS MEASURED, NOT AN OVERSIGHT (review round 18, P3).
+    This read used to take a `skipped` parameter and forward it to `_claims_in`, and **no caller ever
+    supplied one** — so it described a second drop note that could never print, which reads to the
+    next lane as a live guard. A drop here is unreachable in effect: the population is built by
+    `closing_targets`, which resolves an `owner/repo#N` under the SAME repo, so an issue whose
+    qualifier cannot be resolved is dropped THERE and reported through its own `dropped` sink (see
+    `run_closing_scope`) before this read is ever asked about it; and where the repo IS known this
+    read resolves the qualifier too. Dead parameters are removed here rather than documented.
+    """
+    text, _hidden = strip_code(pr_body, strict=True)
+    named: set[str] = set()
+    disclaimed = False
+    rider_seen = False
+    ref = re.compile(rf"#{issue}(?!\d)")
+    for line in text.splitlines():
+        # ⛔ THE KEYWORD MUST BIND THIS ISSUE, NOT MERELY SHARE ITS LINE (review round 14). `ref.search`
+        # + `_CLOSING_WORD_RE.search` made any sentence that MENTIONS the issue and carries a
+        # closing-word stem a closing line, so a descriptive body line — `#13036 records six rows … and
+        # closes when all are measured` — was unioned in as a claim on all six and erased the qualifier
+        # above it: `clean` on the exact shape the arm was filed for. The module already owns the
+        # binding grammar (`CLAIM_RE` via `_claims_in`, the same test `closing_targets` trusts), so the
+        # line qualifies only when that grammar says the keyword resolves THIS issue here.
+        # ⛔ AND A CLOSING KEYWORD BESIDE A SAME-LINE DECLINE STILL QUALIFIES (review round 32, P2).
+        # `_decline_targets` is line-scoped, so in
+        #     `Closes #13036 (row V2 only) — this does not close #13036 as a whole.`
+        # the ref is recorded ONLY as declined and `closing` never holds it. The population fix in
+        # `closing_targets` made the ARM read the ref, but this gate then skipped the only line that
+        # claimed it, so the verdict fell to AMBIGUOUS — a counted abstention, but strictly worse than
+        # the FINDING the SAME sentence earns when the disclosure is on its own line, for a difference
+        # of punctuation. A decline is arm 1's answer; this read asks what GitHub will fire on.
+        _line_claims = _claims_in(line, None, repo)
+        # ⛔ A SAME-LINE DECLINE IS A DISCLAIMER WHATEVER WORD IT USES (review round 34, P2). The
+        # decline is established STRUCTURALLY here (the ref is in `closed_but_declined`), but the
+        # refusal below reads only `_DISCLAIMER_RE`/`_ELSEWHERE_RE`/`only` — and `DECLINE_RE` admits
+        # spellings `_DISCLAIMER_RE` does not. Measured: `Closes #N (rows V1–V6) — non-closing
+        # reference.` read `clean`, i.e. the arm ASSERTED a complete close on a body that says it is
+        # not closing, while the `not closing` spelling of the same sentence was UNANSWERABLE. One
+        # word must not decide between a pass and a refusal, so the structural signal is used.
+        if issue in _line_claims["closed_but_declined"]:
+            disclaimed = True
+        if issue not in set(_line_claims["closing"]) | set(_line_claims["closed_but_declined"]):
+            # ⛔ NOT a closing line, but it can still DISCLAIM. A disclosure written on its OWN line
+            # is the shape the careful author produces — `Closes #N` on one line, then `V2 is proved;
+            # V1, V3–V6 remain unmeasured and are follow-ups` on the next — and reading disclaimers
+            # only from closing lines let the whole-body fallback see those six ids as claims and
+            # report `clean` on a close that disclaimed five. A row-naming line with a negative cue
+            # therefore refuses the fallback too; over-detecting here costs an `ambiguous` (never a
+            # pass), while under-detecting costs a false PASS on the arm's headline question.
+            # ⛔ AND IT IS THE SAME PREDICATE PAIR THE CLOSING-LINE PATH USES (review round 21, F1).
+            # Consulting only `_DISCLAIMER_RE` here made the SAME sentence two different verdicts
+            # depending on where it was written: `V1, V3–V6 landed in later PRs` in the closing
+            # line's parenthetical set `disclaimed` (via `_ELSEWHERE_RE`, per the round-12 rule at
+            # the clause loop below), while the identical sentence on its OWN line set only
+            # `_DISCLAIMER_RE` — so beside a complete `Satisfies #N: V1 … V6` it reported `clean`,
+            # the false PASS this arm exists for, through the pronunciation a careful author
+            # actually uses. All seven `_ELSEWHERE_RE` spellings measured that way; the round-12
+            # comment below states the rule this line was violating.
+            # ⛔ THIS READ IS DELIBERATELY WIDER THAN THE CLAUSE-BOUNDED ONE (review round 23, P2), AND
+            # THAT IS THE WHOLE POINT. Scoping the cue to the clause that carries the rows removed a
+            # REAL detection: English negation and ellipsis scope over the PRECEDING clause's
+            # predicate, which is where the rows are — `All six rows V1 … V6 are proved — not by this
+            # PR`, `… are proved — in the predecessor PR`, and `V1, V3–V6 landed — in later PRs`
+            # beside a complete `Satisfies` ALL read `clean` under clause scoping (measured, and each
+            # one is the arm's headline false PASS), because the cue sits in a rowless sibling clause.
+            # A rowful clause followed by a cue clause therefore disclaims here even where the cue
+            # clause has its own subject (`— docs work is tracked in #14716`), so a legitimate
+            # complete close of that shape reads AMBIGUOUS. That cost is accepted and pinned: in this
+            # file's own ranking an over-abstention is the cheap error and a false PASS is the
+            # expensive one, so the floor stays fail-closed and clause scoping is NOT reapplied
+            # unless it can tell ellipsis from a new subject — which `_ELSEWHERE_RE` cannot.
+            # ⛔ THIS READ NO LONGER ASKS WHETHER THE LINE NAMES A ROW, AND THAT IS THE FIX (review
+            # round 26). "Names a row" was implemented as a SPELLING LIST — ids, then ranges, then a
+            # totalising regex — and each review round found the next spelling that fell outside it:
+            # `V3–V6` (round 25), `all six rows` (round 26), then `the six rows`, `all rows`, `the
+            # rest`, `the others`, `3 of them`, `the other five`, `V1, V2 only`. A vocabulary list
+            # cannot bound an English disclosure, so the requirement is DROPPED: a cue-bearing line of
+            # the PR body IS a disclosure of the rows the body is claiming, and its antecedent is the
+            # body itself rather than a token on that line. This is the same move the file makes
+            # everywhere else — refuse on the structural marker, never on a guessed vocabulary.
+            # ⛔ THE COST IS OVER-ABSTENTION AND IT IS THE CHEAP SIDE: a complete close whose evidence
+            # lines happen to carry a reassuring negative word (`nothing outstanding`, `no follow-ups
+            # needed`) now reads AMBIGUOUS instead of `clean`. In this file's own ranking that is the
+            # acceptable error and a false PASS is the expensive one, and the alternative — an
+            # ever-growing cue/noun enumeration — is precisely what produced five rounds of the same
+            # defect class one spelling deep.
+            # ⛔ `only` IS NOT A CUE — NAMING A PROPER SUBSET IS (review round 27, R2). Round 26 added
+            # `only` as a one-word cue, which was itself the vocabulary enumeration this file keeps
+            # having to replace: `Just V2 landed here.`, `Solely V2.`, `V2 alone.`, `Nothing but V2.`,
+            # `So far, V2.` all read `clean`, one word away. The structural signal needs no vocabulary
+            # and lives at the claim level (see `_names_a_proper_subset` below): a body that names SOME
+            # of the rows while claiming ALL of them is self-contradictory whatever the surrounding
+            # prose says. The cue read below still covers the implicit family (`The rest are
+            # follow-ups`), which names no row at all and so needs a word.
+            # ⛔ `only` COMES BACK AS A CUE, FOR THE FAMILY THE STRUCTURAL RULE CANNOT SEE (review round
+            # 28, P1). Round 27 deleted it as "the enumeration"; but the subset rule can only fire on a
+            # line that NAMES rows, and `Only the first row is proved here.` / `Only part of this
+            # landed.` name none — so deleting the cue lost coverage there (both read `clean` beside a
+            # `Closes #N (rows V1–V6)`). The two mechanisms are complementary, not alternatives: the
+            # subset rule needs no vocabulary for rows it can see, and this word covers the rows a
+            # line only alludes to. On a CLOSING line `only` still LIMITS a claim and this branch is
+            # never reached there, so the pinned `(row V2 only)` decision is untouched.
+            if (_DISCLAIMER_RE.search(line) or _ELSEWHERE_RE.search(line)
+                    or _ONLY_RE.search(line)):
+                disclaimed = True
+            continue
+        # ⛔ THE LINE IS THE UNIT, the clause is the polarity boundary: the range read needs the whole
+        # line to see a SIBLING clause that narrows a bare range (`(rows V1–V6; V2 is what this PR
+        # proves)` is not a complete claim), so non-claimable clauses are BLANKED in place of being
+        # skipped. Skipping them read each clause in isolation, where that bare range looked like a
+        # claim on all six and the line reported `clean` on a one-row PR.
+        spans = _clause_spans(line, rows)
+        foreign = _foreign_closing_clauses(line, rows, issue, repo)
+        claimable: set[int] = set()
+        for i, (a, b) in enumerate(spans):
+            clause = line[a:b]
+            if ref.search(clause) and _CLOSING_WORD_RE.search(clause):
+                # THE CLOSING VERB AND ITS ATTACHED QUALIFIER are the structural positive marker:
+                # `Closes #N (row V2 only)` claims V2 because that PARENTHETICAL is the verb's object.
+                # ⛔ ATTACHMENT IS `(`, NOT POSITION (review round 12): promoting whatever clause came
+                # next made a `;`-separated disclosure the verb's object, so
+                # `Closes #N; V1 … V6 remain to be proved` claimed all six and reported `clean`. A
+                # `;` or a sentence break ENDS the claim; only a bracket opens a qualifier.
+                claimable.add(i)
+                if i + 1 < len(spans):
+                    # …and the qualifier must be ATTACHED by a bracket or a spaced dash — the two
+                    # separators that introduce the verb's object. `;` and a sentence break END the
+                    # claim, and a second sentence is emphatically not its object.
+                    sep = line[spans[i][1]:spans[i + 1][0]].strip()
+                    # ⛔ UNLESS THIS CLAUSE CLOSES ANOTHER ISSUE (review round 36, P2). A bracket after
+                    # a foreign closing ref is THAT close's qualifier, not this issue's claim — attributing
+                    # it here asserted a complete claim of all six rows on a body that names none for
+                    # this issue: `Closes #N, closes other-org/other-repo#M (V1–V6)` read `clean`, and
+                    # the `_foreign_closing_clauses` side had already attributed the same bracket the
+                    # other way, which is the two-readers-disagreeing drift this file keeps removing.
+                    if (sep == "(" or sep in {"—", "–"} or "(" in sep) and i not in foreign:
+                        claimable.add(i + 1)
+            # ⛔ A SIBLING CLAUSE MAY ONLY NARROW, NEVER ADD (review round 11). Promoting a sibling
+            # that carries a completion verb made a DISCLOSURE a claim — `(row V2 only); V1 … V6
+            # landed in later PRs` read `clean` on a one-row close, and six one-word variants of the
+            # pinned false-PASS family did too, because `landed`/`covered`/`verified`/`shipped` are
+            # exactly the verbs a careful partial close uses about the rows it is NOT closing. Claims
+            # now come only from a STRUCTURAL marker: the closing verb with its attached qualifier,
+            # or the documented `Satisfies #N:` form. `_AFFIRM_RE` survives for the WHOLE-BODY
+            # fallback, where there is no closing verb to attach to.
+        chars = list(line)
+        for i, (a, b) in enumerate(spans):
+            # ⛔ THE SAME PREDICATE ON BOTH PATHS (review round 12): a clause that points at other work
+            # is a mention on the closing line exactly as it is in the body, so `_ELSEWHERE_RE` is
+            # consulted here too — `… all six rows V1 … V6 come in later PRs` was a CLAIM one line up
+            # from where the same sentence was a mention.
+            # ⛔ `only` IS A CUE IN A CLAUSE THAT NAMES NO ROW, AND STAYS INERT WHERE IT QUALIFIES THE
+            # ROW IT NAMES (review round 28, residual). On this path `only` is normally the verb's
+            # qualifier — `Closes #N (row V2 only)` claims V2, pinned since round 7 — but written as a
+            # SIBLING clause it is an ordinary disclosure: `Closes #N (rows V1–V6); Only the first row
+            # is proved here.` read `clean`. The two are separable without a vocabulary, by the same
+            # structural test the rest of this file uses: the qualifier form NAMES the rows it limits,
+            # the disclosure form names none. So `only` counts only in a clause with no declared id.
+            # ⛔ IN A CLAUSE THAT CLOSES ANOTHER ISSUE, ONLY `_ELSEWHERE_RE` IS SUPPRESSED — AND THAT
+            # IS THE WHOLE RULE (review rounds 34/35/36). Three attempts at this were each one shape
+            # too wide, and the reason is that the two cue families answer different questions:
+            #   * `_ELSEWHERE_RE` carries `other`, so a clause naming `other-org/other-repo#M` trips it
+            #     on the ORG'S OWN NAME and made a correct complete close abstain;
+            #   * `_DISCLAIMER_RE` (`not in this PR`, `remain unmeasured`) and `only` are about the ROWS
+            #     ON THIS LINE — and a comma is not a clause boundary (round 12), so such a cue can sit
+            #     in the very span a foreign close opened. Suppressing the whole span threw it away:
+            #     `Closes #N (V1–V6), closes #M, V3–V6 not in this PR` asserted a COMPLETE close of #N
+            #     while saying five of its rows are elsewhere.
+            # So the foreign span keeps the row-cues and loses only the `other`-family cue. That also
+            # removes the index-adjacency test (`(i - 1) in foreign`) the previous round needed to tell
+            # a foreign ref from its qualifier: a SECOND foreign close on the line is exempt on its own
+            # account now, instead of being exempted only if it happened to follow a foreign clause.
+            # ⛔ AND A FOREIGN REF CLAUSE THAT NAMES THIS ISSUE'S OWN ROWS KEEPS THE CUE TOO (review
+            # round 37, P2). `_ELSEWHERE_RE` is not only the org-name trip: `V3–V6 in other PRs`,
+            # `… in #N`, `the other rows` are exactly how a body scopes ROWS — and a comma is not a
+            # clause boundary (round 12), so such a cue lands in the span the foreign ref opened.
+            # (It is a NAMES-rows test, not a CLAIMS-rows one: `_ids_in` answers "what does this clause
+            # claim", which is empty for a range named in prose — the exact case here.)
+            # Measured: `Closes #N (V1–V6), closes other-org/r#9 (V2), closes other-org/r#8, V3–V6 in
+            # other PRs` read `clean` with all six claimed. A foreign REF clause that names none of
+            # the rows is the org-name case this suppression exists for; one that names them is
+            # evidence about them. (A foreign QUALIFIER is never suppressed — see above.)
+            foreign_refs, _foreign_quals = _foreign_closing_sets(line, rows, issue, repo)
+            names_rows = bool(_explicit_ids(line[a:b], rows) or _range_matches(line[a:b], rows))
+            elsewhere_suppressed = i in foreign_refs and not names_rows
+            if (_DISCLAIMER_RE.search(line[a:b])
+                    or (_ELSEWHERE_RE.search(line[a:b]) and not elsewhere_suppressed)
+                    or (_ONLY_RE.search(line[a:b]) and not _ids_in(line[a:b], rows))):
+                disclaimed = True
+                claimable.discard(i)
+            # ⛔ BLANK EVERY CLAUSE THAT IS NOT CLAIMABLE — NOT JUST THE RECOGNISED DISCLAIMERS
+            # (review round 10). Making `claimable` a mere gate on "should I scan the line" left the
+            # rule it implements unenforced: `(row V2 only); V1, V3, V4, V5, V6 are separate PRs` has
+            # no cue word at all, so the five narrowing ids were unioned in as CLAIMS and the arm
+            # reported `clean` on a one-row PR. Claimable clauses stay readable together, so the
+            # sibling rule that turns a bare range in a narrowed line into a mention still applies.
+            if i not in claimable:
+                chars[a:b] = " " * (b - a)
+        if claimable:
+            # ⛔ TWO VIEWS OF ONE LINE (review round 11). The IDS come from the masked clause set —
+            # a mention is not a claim in either direction — while the RANGE is judged against the
+            # unmasked line, because a narrowing sibling that carries no completion verb is still
+            # proof the range is a mention. Judging the range on the masked view made
+            # `(rows V1–V6; V2 only)` a complete claim, i.e. `clean` on a one-row close.
+            claim_text = "".join(chars)
+            line_named = (_explicit_ids(claim_text, rows)
+                          | _closing_line_range_claim(line, claim_text, rows, issue, repo))
+            # ⛔ A RIDER THAT STATES A PARTIAL COUNT DISQUALIFIES THE COMPLETE CLAIM ON ITS OWN LINE
+            # (review round 32, P1). This is the claim-set-level half of the `but` rule: the range path
+            # already refuses a bare range followed by a rowless rider, but an ID LIST never reached it,
+            # so `Closes #N (V1 … V6); three remain` was the arm's headline false PASS one separator
+            # away from the pinned control. Recorded here, applied with the SAME refusal the subset and
+            # disclaimer halves use, so all three land on the one verdict (AMBIGUOUS, counted).
+            if _a_rowless_rider_understates_the_rows(line, rows, claimable, issue, repo):
+                rider_seen = True
+            # ⛔ A NARROWING ON THE LINE DECIDES THE CLAIM WHETHER OR NOT A RANGE MATCHED (review
+            # round 29, P2 — the recorded false PASS on PR #14771). The sibling read above lived
+            # only inside `_closing_line_range_claim`, i.e. only where a RANGE was present, so the
+            # same sentence with the rows spelled as an ID LIST never met it: `Closes #N (V1, V2,
+            # V3, V4, V5, V6; V2 only)` named all six on a claimable clause, the `; V2 only` sibling
+            # carries no positive marker and was masked, and the line read as a complete claim —
+            # `clean` on a one-row close, ONE SPELLING away from the shape the arm was filed for.
+            # The range match must not be what grants the pass: a sibling clause that names a strict
+            # SUBSET of the claimed rows demotes the claim to those rows, exactly as the range
+            # spelling already did, and the finding then names the rows left unclaimed.
+            # ⛔ THE COST IS THE FILE'S ACCEPTED ONE: a complete close whose same line carries a
+            # narrowing-sounding sibling naming one row (`… ; V6 needed a migration`) is read as
+            # claiming V6, i.e. a finding rather than a pass. A false finding on a correct close is
+            # the cheap error here and a false PASS on a partial one is the expensive one, and the
+            # alternative — deciding which sibling `means` a narrowing by its vocabulary — is the
+            # enumeration five earlier rounds each leaked through.
+            narrowing = _narrowing_sibling_ids(line, rows, claimable, issue, repo)
+            if narrowing and narrowing < line_named:
+                line_named = narrowing
+            named |= line_named
+    # ⛔ THE CLOSING LINE WINS, AND `Satisfies` IS READ ONLY WHEN IT SAID NOTHING (review round 17,
+    # F1). The `Satisfies` loop ran FIRST and UNIONED, with no clause context at all — so an
+    # unticked `- [ ] Satisfies #N: V1..V6`, a future-tense plan (`A later PR will write Satisfies
+    # #N: …`), a BLOCKQUOTED template or a `## Will write:` heading enumerated all six rows and
+    # overrode the qualifier: `Closes #N (row V2 only)` + an unticked checklist read `clean`, the
+    # false PASS this arm exists for. A `Satisfies` line is now read under the same polarity rules
+    # every other read uses, and only where the closing line named nothing.
+    # ⛔ AND "ONLY WHERE THE CLOSING LINE NAMED NOTHING" IS THE GUARD, NOT A DESCRIPTION (review round
+    # 18, F1). The polarity fix above left the union itself UNCONDITIONAL, so the precedence this
+    # block states was never enforced: `Closes #N (row V2 only)` + `Satisfies #N: V1 … V6` — a lane
+    # copying the process doc's own complete-close form under a qualified closing line — unioned the
+    # other five in and read `clean`, which is the arm's headline false PASS. The union also EXTENDED
+    # a closing line's claim with a body line's rows (`(row V2 only)` + `Satisfies #N: V5` claimed
+    # both). A closing line that named at least one row is the claim; `Satisfies` is consulted only
+    # when it named none, which keeps a bare `Closes #N` + a complete `Satisfies` reading clean.
+    if not named:
+        satisfies_named = _satisfies_claim(text, issue, rows, repo)
+        # ⛔ AND A DISCLAIMER VETOES THE COMPLETE CLAIM FROM THIS SOURCE TOO (round 19, found while
+        # verifying round 18's guard). The `if disclaimed:` refusal that refuses the whole-body
+        # fallback lives in `classify_partial_close`, so it covers ONE of the two "names all of them
+        # anywhere" paths: a body that said five rows `remain unmeasured` AND carried the process
+        # doc's complete `Satisfies #N: V1 … V6` form reported `clean` — a false PASS on a close that
+        # disclaimed five, through the source that refusal does not reach. `(rows V1, V3–V6 remain
+        # unmeasured)` on the closing line laundered identically. Same reasoning, same verdict: a PR
+        # that told us what it is NOT claiming, and then claimed everything, is UNANSWERABLE, not a
+        # pass (the caller reports that, because the claim set goes back empty). The veto is on the
+        # COMPLETE claim, never on the source — a `Satisfies` line naming just the row the PR did
+        # prove still yields the finding, so the refusal costs no true positive.
+        if disclaimed and set(rows) <= satisfies_named:
+            satisfies_named = set()
+        named |= satisfies_named
+    # ⛔ A COMPLETE CLAIM BESIDE A DISCLAIMER IS A CONTRADICTION, NOT A PASS — AND THIS IS THE ONE PLACE
+    # BOTH SOURCES ARE STILL VISIBLE AT ONCE (review round 24, P1). `disclaimed` was CAPTURED from the
+    # closing line and then consulted only in `classify_partial_close`'s `if not named_rows:` branch —
+    # so a closing line that named EVERY row and also disclaimed some of them took the non-empty
+    # branch and never reached that read. It reported `clean` on the shape `#13886` IS:
+    #
+    #     Closes #13036 (V1, V2, V3, V4, V5, V6 landed — V1 and V2 in this PR, V3-V6 in later PRs)
+    #     Closes #13036 (V1, V2, V3, V4, V5, V6 are proved; V3–V6 are follow-ups)
+    #     Closes #13036 (V1, V2, V3, V4, V5, V6 are proved — not by this PR)
+    #     Closes #13036 (rows V1–V6 — see the predecessor PR)
+    #
+    # all `clean` (measured) — the instrument held the datum and did not read it. A claim on ALL rows
+    # that the same body negates or defers is UNANSWERABLE, which is the verdict this module already
+    # states for the identical contradiction on the `Satisfies` path above; it is the same rule, so it
+    # is applied to the claim set itself rather than to one source of it.
+    # ⛔ IT IS GATED ON a COMPLETE claim, which is what keeps the two pinned TRUE positives: a PARTIAL
+    # closing claim beside a disclosure of the remaining rows (`(row V2 only); V1, V3, V4, V5, V6
+    # remain unmeasured`, `… are separate PRs`) is the careful author's correct form and still yields
+    # the finding on V2 — that claim is not complete, so this refusal never fires on it.
+    refused = False
+    if disclaimed and set(rows) <= named:
+        named = set()
+        refused = True
+    # ⛔ AND A ROWLESS RIDER REFUSES IT TOO — the same rule, from the same line (review round 32,
+    # P1). Gated on a COMPLETE claim for the reason the disclaimer veto is: it only contradicts a
+    # claim that says it closed everything, and a PARTIAL claim beside a rider is the careful
+    # author's correct form and must still yield its finding.
+    if rider_seen and set(rows) <= named:
+        named = set()
+        refused = True
+    # ⛔ AND A PROPER SUBSET ANYWHERE IN THE BODY REFUSES A COMPLETE CLAIM (review round 27, R1+R2).
+    # `Closes #N (rows V1–V6)` beside `Satisfies #N: V2` claimed all six and read `clean` (the arm's
+    # headline false PASS, through the same path round 24 closed for `disclaimed`); `Just V2.` and its
+    # siblings did the same. Both are the SAME signal — some rows named, not all — so both are refused
+    # by one structural test instead of a cue per round.
+    # ⛔ THE COST, RECORDED: a legitimate complete close whose evidence prose mentions ONE row by id
+    # (`V2 needed the migration; V1-V3, V5, V6 were renames`) now reads AMBIGUOUS. That is the cheap
+    # error in this file's ranking — a counted abstention, never a pass — and it is the price of not
+    # shipping a false PASS that only a longer word list would have caught.
+    # ⛔ AND THE CLAUSE READING GATES THIS REFUSAL TOO (review round 31, P1). `_a_clause_names_a_proper
+    # _subset` was consulted ONLY by the whole-body fallback, so a narrowing split across two CLAUSES of
+    # one line was invisible whenever the closing line already claimed every row — the fallback never
+    # ran, and `Closes #N (rows V1–V6)` + `V1 … V6 verified in the programme. This PR: V2.` read
+    # `clean`. The datum was computed and then not read. Both granularities are asked here, so the
+    # same sentence cannot get different answers from the two paths.
+    if set(rows) <= named and (_names_a_proper_subset(text, rows, issue, repo)
+                               or _a_clause_names_a_proper_subset(text, rows, issue, repo)):
+        named = set()
+        refused = True
+    # ⛔ THE REFUSAL MUST BE REPORTED TO THE CALLER, NOT JUST APPLIED HERE (review round 28, P1). Returning
+    # only `(named, disclaimed)` left the caller unable to tell "the closing line said nothing" from "a
+    # claim was refused on evidence" — so for a SUBSET refusal (which carries no cue word, hence no
+    # `disclaimed`) the whole-body fallback ran, re-derived a complete claim from the body and reported
+    # `clean`, re-doing exactly what round 24 fixed for the disclaimer case. The third element is that
+    # distinction, and the caller routes it to UNANSWERABLE before the fallback.
+    return named, disclaimed, refused
+
+
+def claimed_row_ids(pr_body: str, issue: int, rows: list[str],
+                    repo: str | None = None) -> set[str]:
+    """Which of the ISSUE's own rows this PR NAMES as its claim — the only set the arm compares against.
+
+    The claim set alone; see `_closing_line_claim` for the read and for why a disclaimer's rows are
+    NOT claims. `classify_partial_close` uses the wider pair, because it also has to know whether a
+    disclaimer was seen before it may fall back to the whole body.
+    """
+    return _closing_line_claim(pr_body, issue, rows, repo)[0]
+
+
+def criteria_state(comment_bodies: list[str]) -> dict:
+    """The tick state of the issue's OWN `## Satisfies` criteria — `measured` says whether there are any.
+
+    This is NOT the field #13946 says is missing (that claim is measured FALSE and `row_ids` carries
+    the correction) — but it IS the field the process doc already mandates for the same question
+    (`docs/ops/ISSUE-WORKING-PROCESS.md` §4: SCOPING posts one ``- [ ]`` per acceptance criterion; §9:
+    tick as proved, close only when all are ticked). So the arm reads it too, and it wins where it
+    exists: a TICK is proof-or-not of a row, while a heading is only a declaration of one.
+
+    ⚠️ ADOPTION IS MEASURED NEAR-ZERO (0 of the 30 newest open issues carry the heading at this head),
+    which is why it cannot be the arm's only source and why the abstention is counted and printed.
+
+    ⛔ THE **LATEST** SECTION THAT CARRIES BOXES WINS, not the union of every section. Read as a
+    union, a re-posted checklist that is fully ticked inherits the unticked boxes of the comment it
+    supersedes and the arm flags a finished issue — the false positive this whole file ranks second
+    worst. The rule is TWO-LEVEL, and both levels are "last wins": `comment_bodies` arrives body-first
+    then chronologically (`fetch_issue`), so the newest BODY is the first in reversed order that
+    carries boxes; inside it, the newest SECTION is the LAST one carrying boxes. The second level is
+    not decoration — a lane that re-posts its checklist inside ONE comment writes the superseded and
+    the current section in the same body, and taking the union there read `unticked=2` on a finished
+    issue (i.e. exactly the false positive this paragraph rules out).
+
+    `measured` FALSE IS NOT A PASS: the question is UNANSWERABLE from artifacts rather than answered
+    YES, and the caller counts those.
+    """
+    for body in reversed(comment_bodies):
+        # `indented_code=True` — not `strict` — for the reason `has_satisfies_checklist` gives: a
+        # 4-space line inside a list item is a real criterion, while a top-level indented block is a
+        # QUOTED example of the format. This is the same read as arm 2's, deliberately: two arms that
+        # disagreed about what a checklist IS would disagree about whether one exists.
+        text = strip_code(body, indented_code=True)[0]
+        newest: list[tuple[str, str]] | None = None
+        for section in _satisfies_sections(text):
+            boxes = [(match.group("mark"), match.group("label").strip())
+                     for match in CRITERION_RE.finditer(section)]
+            if boxes:
+                # ⛔ `=` NOT `|=`: the LAST section carrying boxes in this body is the one that
+                # supersedes the rest. A union read here made the paragraph above FALSE at section
+                # granularity — one comment posting `- [ ] a/- [ ] b` and then `- [x] a/- [x] b`
+                # measured `unticked=2`, i.e. the arm flagged a FINISHED issue, which is the false
+                # positive the whole section rule exists to prevent.
+                newest = boxes
+        if newest is None:
+            continue
+        unticked = [label for mark, label in newest if mark not in "xX"]
+        return {"measured": True, "ticked": len(newest) - len(unticked),
+                "total": len(newest), "unticked": len(unticked), "unticked_labels": unticked}
+    return {"measured": False, "ticked": 0, "total": 0, "unticked": 0, "unticked_labels": []}
+
+
+def closing_targets(body: str, number: int | str, repo: str | None = None,
+                    skipped: list[int] | None = None) -> list[int]:
+    """The issues this body RESOLVES with a closing keyword — the refs a `Closes` will actually fire on.
+
+    Read through `_claims_in`, the same reader arm 1 uses, so the two arms cannot disagree about
+    which refs a body closes (a second grammar here is the drift this file keeps re-discovering).
+    `Satisfies #N: <ids>` is deliberately NOT in this set: it is the PARTIAL form, and flagging it
+    would demand a closing keyword from exactly the PR that followed the process.
+
+    ⛔ THE `declined` SET IS DELIBERATELY NOT APPLIED HERE — see the note at the return; it is arm 1's
+    answer, and filtering on it made the arm's own headline shape measure zero.
+
+    `skipped`, when supplied, is handed to `_claims_in` so every `owner/repo#N` claim dropped because
+    the repo was UNKNOWN reaches the caller. ⛔ WITHOUT IT THE DROP WAS INVISIBLE HERE AND ONLY HERE:
+    arm 1 passes its own sink and notes the drop, but `--arm pr-partial-close` never calls arm 1 — so
+    `closing_targets("Closes owner/repo#13036", …, None)` lost the ref and the run printed
+    `0 closing ref(s) read — 0 clean, 0 flagged`, rc 0, reading as "nothing to see" when nothing was
+    read. `KEYWORD OWNER/REPOSITORY#ISSUE-NUMBER` is a documented closing form, so it is a live
+    spelling, and a narrower population must SAY it is narrower.
+    """
+    own = number if isinstance(number, int) and number > 0 else None
+    text, _hidden = strip_code(body, strict=True)
+    c = _claims_in(text, own, repo, skipped)
+    # ⛔ A DECLINED REF IS STILL A REF GITHUB WILL CLOSE (review round 32, P2). This filtered the
+    # `declined` set out of the population, so
+    #     `Closes #13036 (row V2 only).` + `This does not close #13036 as a whole.`
+    # — the arm's HEADLINE instance plus the one honest disclosure sentence a careful author writes —
+    # measured a population of ZERO, printed `0 closing ref(s) read — 0 clean, 0 flagged`, and said
+    # nothing about the drop: a false PASS delivered by the arm written to refuse it. A decline is
+    # arm 1's answer to a DIFFERENT question (`did you answer the claim?`); GitHub's parser does not
+    # read prose, so a `Closes` beside a disclaimer still fires on merge — which is precisely why
+    # `_DISCLAIMER_RE` routes such a body to UNANSWERABLE instead of to a pass. Arm 3 therefore asks
+    # the question its own docstring states ("the refs a `Closes` will actually fire on") and leaves
+    # the declined set to arm 1.
+    # ⛔ AND THE SAME-LINE SPELLING NEEDS THE THIRD KEY, NOT JUST THIS ONE (review round 32, P2 —
+    # found by a fresh reviewer after the first version of this fix). `_decline_targets` is
+    # LINE-scoped, so for `Closes #N (row V2 only) — this does not close #N as a whole.` the ref never
+    # reaches `closing` at all: it is recorded ONLY as declined, and the population stayed zero while
+    # the counters line printed the exact pre-fix sentence. `_claims_in` now also reports the refs a
+    # CLOSING keyword bound that a same-line decline swallowed, which is the population this arm is
+    # about.
+    return sorted(set(c["closing"]) | set(c["closed_but_declined"]))
+
+
+def classify_partial_close(body: str, number: int | str,
+                           scope_by_issue: dict[int, dict | None],
+                           repo: str | None = None) -> tuple[list[Finding], dict[str, int]]:
+    """ARM 3 — a PR closes an issue as a WHOLE while naming only SOME of its rows.
+
+    THE MEASURED DEFECT (#13946, 2026-11-20). PR #13886 opened with `Closes #13036 (row V2 only).`
+    and GitHub closed the six-row capstone `#13036` one second after the squash-merge (`bd020ff45b`,
+    `closedAt 06:36:50Z`) with five rows never measured and the evidence document the issue requires
+    absent from `origin/main`. It was reopened by hand. **GitHub's closing grammar has no notion of
+    partial scope** — any qualifier surrounding a `Closes` still fires — and `tools/closes_landing.py`
+    reads the keyword, never the qualifier.
+
+    TWO SOURCES OF "THE ROWS", ONE QUESTION. Both are the ISSUE's own artifacts, so the arm never
+    compares against a vocabulary it invented:
+
+    1. a ``## Satisfies`` tick state — a TICK is proof-or-not of a row, so it wins where it exists;
+    2. the issue's declared row HEADINGS (``### V1 ·``, ``## R1 —``) — the shape measured on the real
+       multi-row population (`#13036`'s six, `#14715`'s three). A row HEADING is only a declaration,
+       so this source fires only when the PR NAMES at least one row and NOT all of them.
+
+    ⛔ IT ABSTAINS, LOUDLY, WHERE NEITHER EXISTS — AND THAT IS THE COMMON CASE. Measured at this head
+    over the 30 newest open issues: 0 carry a ``## Satisfies`` checklist and 1 declares ≥2 row
+    headings. So a closing ref will usually be UNMEASURABLE, and the arm's job there is to say so in a
+    COUNT rather than look clean. **`#13036` itself is in that population**: it declared rows as
+    headings but the PR that closed it named `V2` in prose and the issue carried no tick state, so
+    this arm DOES flag #13886's shape whenever the issue declares rows — and abstains where the issue
+    declares none.
+
+    ⛔ AND "NAMES NO ROW" IS AMBIGUOUS, NOT CLEAN. A 3-row issue closed by a bare `Closes #N` may be a
+    complete close or a silent partial; the two are indistinguishable from artifacts, so it is
+    reported as AMBIGUOUS and neither flagged nor passed. Flagging it would put bureaucracy on every
+    correct complete close; passing it silently is the defect.
+    """
+    findings: list[Finding] = []
+    stats = {"closes": 0, "clean": 0, "finding": 0, "abstained": 0, "ambiguous": 0, "unread": 0}
+    for issue in closing_targets(body, number, repo):
+        stats["closes"] += 1
+        scope = scope_by_issue.get(issue)
+        if scope is None:
+            stats["unread"] += 1
+            continue
+        rows = scope["rows"]
+        satisfies = scope["satisfies"]
+        if satisfies.get("measured"):
+            if satisfies["unticked"] <= 0:
+                stats["clean"] += 1
+                continue
+            labels = [lbl or "(unnamed criterion)" for lbl in satisfies["unticked_labels"]]
+            named = "; ".join(labels[:3])
+            if len(labels) > 3:
+                named += f"; … +{len(labels) - 3} more"
+            detail = (
+                f"closes #{issue} with a closing keyword while {satisfies['unticked']} of its "
+                f"{satisfies['total']} `## Satisfies` criteria are still UNTICKED ({named}). A "
+                f"closing keyword resolves the WHOLE issue whatever qualifier surrounds it, so the "
+                f"criteria this PR does not claim are closed unmeasured. Tick each criterion as it "
+                f"is proved and write `Closes #{issue}` only on the last one; use "
+                f"`Satisfies #{issue}: <ids>` + `Refs #{issue}` before that "
+                f"(docs/ops/ISSUE-WORKING-PROCESS.md §7/§9).")
+            findings.append(Finding(arm=ARM_PARTIAL, subject=_subject("PR", number), detail=detail,
+                                    evidence={"issue": issue, "source": "satisfies", **satisfies}))
+            stats["finding"] += 1
+            continue
+        if len(rows) < 2:
+            # No tick state and no row DECLARATION: nothing machine-readable says how many rows this
+            # issue has, so "did this PR close part of it" is UNANSWERABLE. Never a pass.
+            stats["abstained"] += 1
+            continue
+        named_rows, disclaimed, refused = _closing_line_claim(body, issue, rows, repo)
+        named_rows &= set(rows)
+        if not named_rows:
+            # ⛔ A CLAIM REFUSED ON EVIDENCE MUST NOT REACH THE FALLBACK EITHER (review round 28, P1).
+            # The fallback exists for a PR that named nothing; a PR whose COMPLETE claim was refused —
+            # because a disclaimer or a proper-subset line contradicted it — has already been answered,
+            # and re-deriving the same complete claim from the body silently undoes the refusal.
+            # ⛔ THE FALLBACK IS NOT A PASS EITHER. A PR that never puts a row id on its closing line
+            # may still be claiming every row in a TABLE further down (#13886's own body carries such
+            # a table), so "names all of them ANYWHERE" is a complete close — but "names none of them
+            # anywhere" is indistinguishable from a silent partial, and is reported as AMBIGUOUS.
+            # The closing-line read takes PRIORITY precisely because #13886 has both: a table naming
+            # all six rows AND a qualifier naming one, and it is the qualifier that is the claim.
+            if disclaimed or refused:
+                # ⛔ AND THE FALLBACK IS REFUSED WHERE THE CLOSING LINE DISCLAIMED ROWS, OR WHERE A
+                # COMPLETE CLAIM WAS REFUSED ON STRUCTURAL EVIDENCE (`refused`) — the subset case has
+                # no cue word, so `disclaimed` alone leaves it open. Its rows sit
+                # in the body BY CONSTRUCTION, so the whole-body read would find all six and report
+                # `clean` — on the exact sentence (`V1–V6 remain unmeasured`, beside a `Closes`) that
+                # GitHub closes whole. UNANSWERABLE is the honest verdict: the PR told us what it is
+                # NOT claiming and what nothing of what it is.
+                stats["ambiguous"] += 1
+                continue
+            # ⛔ AND THE FALLBACK NOW NEEDS AN AFFIRMATIVE CLAUSE, NOT A MENTION (review round 9).
+            # "names all of them ANYWHERE" was true of a row TABLE, a list of rows that are PENDING,
+            # and a sentence that says the opposite of closing — so a body that merely enumerated the
+            # rows reported `clean`. The positive marker is the same one the closing line uses: the
+            # rows must name themselves in a clause carrying a COMPLETION verb and no disclaimer.
+            affirmative_all = False
+            for line in strip_code(body, strict=True)[0].splitlines():
+                if _NOT_A_CLAIM_LINE_RE.search(line):
+                    continue
+                for a, b in _clause_spans(line, rows):
+                    clause = line[a:b]
+                    if (_AFFIRM_RE.search(clause) and not _DISCLAIMER_RE.search(clause)
+                            and not _ELSEWHERE_RE.search(clause)
+                            and set(rows) <= _ids_in(clause, rows)):
+                        affirmative_all = True
+                        break
+                if affirmative_all:
+                    break
+            # ⛔ AND THE FALLBACK CARRIES THE PARTIALITY TEST TOO (review round 29, P2) — a fallback
+            # that skips it is the same bug in a second place. `affirmative_all` asks only whether
+            # SOME clause names every row; the question this arm answers is whether the PR claims to
+            # have proved them, and a body whose other clause narrows to one row has answered that
+            # NO. `Closes #N` + `V1, V2, V3, V4, V5, V6 verified in the programme. This PR: V2.` read
+            # `clean` at the reviewed head with no cue word anywhere, which is why the test has to be
+            # structural. Refusing here yields AMBIGUOUS (the caller's next branch) — a counted
+            # abstention, never a pass.
+            if affirmative_all and not _a_clause_names_a_proper_subset(body, rows, issue, repo):
+                stats["clean"] += 1
+                continue
+            stats["ambiguous"] += 1
+            continue
+        unclaimed = [r for r in rows if r not in named_rows]
+        if not unclaimed:
+            stats["clean"] += 1
+            continue
+        detail = (
+            f"closes #{issue} with a closing keyword while claiming only "
+            f"{', '.join(sorted(named_rows))} of its {len(rows)} declared rows — "
+            f"{', '.join(unclaimed)} would be closed UNMEASURED. A closing keyword resolves the "
+            f"WHOLE issue whatever qualifier surrounds it (`(row V2 only)` included: #13886 closed "
+            f"the six-row #13036 that way, `bd020ff45b`). Use `Satisfies #{issue}: "
+            f"{', '.join(sorted(named_rows))}` + `Refs #{issue}`, and keep the closing keyword for "
+            f"the PR that claims all {len(rows)} (docs/ops/ISSUE-WORKING-PROCESS.md §7).")
+        findings.append(Finding(arm=ARM_PARTIAL, subject=_subject("PR", number), detail=detail,
+                                evidence={"issue": issue, "source": "rows", "rows": rows,
+                                          "claimed": sorted(named_rows), "unclaimed": unclaimed}))
+        stats["finding"] += 1
+    return findings, stats
+
+
 # --- measurement (gh) ---------------------------------------------------------------------
 def _gh(args: list[str], timeout: int = 60) -> str:
     try:
@@ -1357,6 +2959,33 @@ def fetch_issue(number: int, repo: str | None) -> tuple[str, list[str]]:
         args += ["--repo", repo]
     data = json.loads(_gh(args))
     return data.get("body") or "", [(c.get("body") or "") for c in data.get("comments") or []]
+
+
+def read_scope(numbers: list[int], repo: str | None,
+               notes: list[str] | None = None) -> dict[int, dict | None]:
+    """The two things arm 3 compares against, per issue — `None` where the issue could not be read.
+
+    A failed read is an abstention, never a pass: `fetch_issue` raises `Unmeasurable` on a `gh`
+    failure, and letting that escape one issue would abort a whole `--sweep` over a single deleted or
+    transferred ref — so it is caught HERE, per issue, and the caller prints how many went unread.
+    The alternative (drop it and carry on silently) is the shape this module refuses everywhere.
+
+    One `gh issue view` per DISTINCT issue, and only for refs the body actually CLOSES: a `--pr` run
+    therefore costs one extra call for the ordinary single-issue PR, and a `--sweep` costs one per
+    closed issue across its (capped) population. The population is the CALLER's, so the caller
+    declares the cost rather than this function growing a cache nobody asked for.
+    """
+    out: dict[int, dict | None] = {}
+    for number in dict.fromkeys(numbers):
+        try:
+            body, bodies = fetch_issue(number, repo)
+        except Unmeasurable as exc:
+            out[number] = None
+            if notes is not None:
+                notes.append(f"#{number} could NOT be read, so its criteria are UNMEASURED: {exc}")
+            continue
+        out[number] = {"rows": row_ids([body]), "satisfies": criteria_state([body, *bodies])}
+    return out
 
 
 def sweep_prs(repo: str | None, limit: int) -> list[tuple[int, str, list[str]]]:
@@ -1423,9 +3052,9 @@ def _comments_from_file(path: Path) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="Advisory: flag a PR claiming an issue that nothing resolves, and an issue with "
-                    "WIP but no `## Satisfies` checklist. Never a gate (rc 0 clean / 3 findings / "
-                    "2 unmeasured).")
+        description="Advisory: flag a PR claiming an issue that nothing resolves, a PR closing an "
+                    "issue whose own criteria are not all ticked, and an issue with WIP but no "
+                    "`## Satisfies` checklist. Never a gate (rc 0 clean / 3 findings / 2 unmeasured).")
     which = ap.add_mutually_exclusive_group(required=True)
     which.add_argument("--pr", type=int, help="classify one PR by number")
     which.add_argument("--issue", type=int, help="classify one issue by number")
@@ -1443,6 +3072,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--repo", default=None,
                     help="owner/name (default: resolved from gh in the LIVE modes only; pass it "
                          "explicitly to count owner/repo#N claims in the offline file modes)")
+    ap.add_argument("--arm", choices=[*ARM_NAMES, "all"], default="all",
+                    help="which arm(s) to run (default: all). ⛔ WHY THIS EXISTS: a consumer mounts "
+                         "ONE arm and must not inherit another's findings — "
+                         "`.github/workflows/closes-coherence.yml` mounts `pr-partial-close` on "
+                         "every PR, and running `all` there would also publish arm 1's findings, "
+                         "whose measured false-positive population (36%% of live open PRs) is "
+                         "exactly "
+                         "why it was never mounted on an every-PR surface. An arm this mode cannot "
+                         "run is REFUSED, never silently dropped.")
     ap.add_argument("--comments-file", type=Path, default=None,
                     help="offline issue mode: comment bodies (JSON list, gh-shaped, or markdown)")
     ap.add_argument("--wip", action="store_true",
@@ -1522,10 +3160,67 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--json and --annotate are mutually exclusive: --json emits one JSON document, "
                  "--annotate emits ::warning/::notice lines — passing both silently dropped the "
                  "annotations")
+    # `--arm` selects a SUBSET, so a selection the chosen mode cannot evaluate is refused rather than
+    # dropped — the same doctrine as `--wip`/`--label`/`--limit` above. `all` never needs this.
+    issue_mode = args.issue is not None or args.sweep_issues or args.issue_body_file is not None
+    pr_mode = args.pr is not None or args.sweep or args.body_file is not None
+    if args.arm == ARM_ISSUE and pr_mode:
+        ap.error(f"--arm {ARM_ISSUE} is an ISSUE-side arm; this mode reads a PR body, so the "
+                 "selection would be dropped in silence")
+    if args.arm in (ARM_PR, ARM_PARTIAL) and issue_mode:
+        ap.error(f"--arm {args.arm} is a PR-side arm; this mode reads an issue, so the selection "
+                 "would be dropped in silence")
+    run_arm_pr = args.arm in ("all", ARM_PR)
+    # A `--body-file` run cannot reach arm 3's input, so it does not RUN it — and then says so in its
+    # output. Selection is not the same question as execution.
+    run_arm_partial = args.arm in ("all", ARM_PARTIAL) and args.body_file is None
+    arm_partial_selected = args.arm in ("all", ARM_PARTIAL)
+    if args.body_file is not None and args.arm == ARM_PARTIAL:
+        # ⛔ OFFLINE IS OFFLINE. Arm 3 reads the CLOSED ISSUE's own checklist, which a body file does
+        # not carry, so this mode cannot answer it — and a run that reported "NOTHING FLAGGED" over an
+        # arm it never evaluated is exactly how a silence gets read as health. An EXPLICIT selection
+        # of an arm this mode cannot run is REFUSED; the default `all` runs arm 1 and prints a line
+        # saying arm 3 did not run, so a bare `--body-file` keeps working and still cannot be read as
+        # a verdict about arm 3.
+        ap.error(f"--arm {ARM_PARTIAL} reads the CLOSED ISSUE's own `## Satisfies` checklist, which a "
+                 "`--body-file` does not carry; run it with `--pr <N> --repo <owner/name>` (an "
+                 "explicit selection here would be dropped in silence)")
+    # ⛔ NO `--wip`-ON-A-NON-ISSUE-ARM GUARD HERE (review round 11, F3): the one that stood on this
+    # line could not fire. `wip` is non-None only for `--issue`/`--issue-body-file` (the mode refusals
+    # above reject every other mode first), and on those modes `--arm pr-*` is already refused by the
+    # arm/mode check above. A probe of 6 modes × 5 arms × {--wip} emitted its message in 0 of 60
+    # combinations: an enforcer whose condition can never hold while it appears to protect something.
+    # There is no issue-side SELECTOR to guard: the issue branches call `classify_issue`
+    # unconditionally, which is correct while there is exactly one issue-side arm. The refusals that
+    # DO fire are the mode and arm/mode ones.
 
     findings: list[Finding] = []
     measured_rows: list[dict] = []
     notes: list[str] = []
+    # Arm 3's own population counters. `None` means THE ARM DID NOT RUN, which is a different claim
+    # from "it ran and found nothing" — the distinction this module refuses to blur anywhere else.
+    closing_scope: dict | None = None
+
+    def run_closing_scope(body: str, number: int, repo2: str | None) -> list[Finding]:
+        """Arm 3 for one PR body, accumulating its population counters as a side effect."""
+        nonlocal closing_scope
+        if closing_scope is None:
+            closing_scope = {"closes": 0, "clean": 0, "finding": 0,
+                             "abstained": 0, "ambiguous": 0, "unread": 0}
+        dropped: list[int] = []
+        targets = closing_targets(body, number, repo2, dropped)
+        if dropped:
+            # ⛔ ARM 1 IS NOT RUN IN THIS MODE, SO ITS OWN DROP NOTE IS NOT PRINTED EITHER. Without this
+            # the arm measured a NARROWER population and reported `0 closing ref(s) read` as if it had
+            # read the body — the shape this module refuses everywhere else.
+            notes.append(f"{len(dropped)} owner/repo#N closing claim(s) in PR #{number} were NOT "
+                         f"read — {repo_unknown or 'the repo is unknown; pass --repo to count them'}")
+        scopes = read_scope(targets, repo2, notes)
+        found, stats = classify_partial_close(body, number, scopes, repo2)
+        for key, value in stats.items():
+            closing_scope[key] += value
+        return found
+
     try:
         # Resolve the repo through `gh` ONLY in the modes that reach GitHub. The `--body-file` and
         # `--issue-body-file` modes are documented as OFFLINE, and making an unannounced network
@@ -1544,7 +3239,8 @@ def main(argv: list[str] | None = None) -> int:
             "the repo is unknown offline; pass --repo to count them")
         if args.body_file is not None:
             body = args.body_file.read_text(encoding="utf-8")
-            findings += classify_pr(body, "body-file", repo, notes=notes, repo_unknown=repo_unknown)
+            if run_arm_pr:
+                findings += classify_pr(body, "body-file", repo, notes=notes, repo_unknown=repo_unknown)
             population = "1 body (offline)"
         elif args.issue_body_file is not None:
             bodies = _comments_from_file(args.comments_file) if args.comments_file else []
@@ -1556,7 +3252,10 @@ def main(argv: list[str] | None = None) -> int:
             population = f"1 issue body + {len(bodies)} comment(s) (offline)"
         elif args.pr is not None:
             body, labels = fetch_pr(args.pr, repo)
-            findings += classify_pr(body, args.pr, repo, labels, notes=notes, repo_unknown=repo_unknown)
+            if run_arm_pr:
+                findings += classify_pr(body, args.pr, repo, labels, notes=notes, repo_unknown=repo_unknown)
+            if run_arm_partial:
+                findings += run_closing_scope(body, args.pr, repo)
             population = "1 PR"
         elif args.issue is not None:
             # The body is a comment-shaped input on the LIVE path too — the offline sibling twelve
@@ -1570,7 +3269,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.sweep:
             rows = sweep_prs(repo, limit)
             for number, body, labels in rows:
-                findings += classify_pr(body, number, repo, labels, notes=notes, repo_unknown=repo_unknown)
+                if run_arm_pr:
+                    findings += classify_pr(body, number, repo, labels, notes=notes, repo_unknown=repo_unknown)
+                if run_arm_partial:
+                    findings += run_closing_scope(body, number, repo)
             population = f"{len(rows)} open PR(s)"
             _note_truncation(notes, rows, limit, "open PR")
         else:  # --sweep-issues
@@ -1587,6 +3289,39 @@ def main(argv: list[str] | None = None) -> int:
 
     marker_reads = sum(1 for m in measured_rows if m["marker_count"])
     markerless = sum(1 for m in measured_rows if not m["marker_count"] and m["wip_source"] == "comment-marker")
+
+    # ONE sentence, printed by all three surfaces, so the human/JSON/annotation runs cannot describe
+    # the same arm three different ways (the F7 shape this module already paid for once).
+    # `closing_scope is None` under a selected arm means the arm did not run, which is stated as such
+    # — never as "nothing found".
+    if not arm_partial_selected:
+        closing_line: str | None = None
+    elif closing_scope is None:
+        if args.sweep and run_arm_partial:
+            # ⛔ AN EMPTY SWEEP IS NOT "THE ARM DID NOT RUN IN THIS MODE": the mode can run it and
+            # simply had no PR to read. Reporting the mode's own limitation over a population of zero
+            # misstates the reason, which is the did-not-run-vs-found-nothing distinction this arm is
+            # otherwise careful about (review round 6, P3).
+            closing_scope = {"closes": 0, "clean": 0, "finding": 0,
+                             "abstained": 0, "ambiguous": 0, "unread": 0}
+        else:
+            closing_line = ("closing-scope arm did NOT RUN in this mode (it reads the closed issue's own "
+                            "`## Satisfies` checklist) — so there is no verdict from it here")
+    if closing_scope is not None:
+        # ⛔ THE COUNTERS ARE THE ARTIFACT (measured: 0 of 30 newest open issues carry a `## Satisfies`
+        # checklist and 1 declares ≥2 row headings, so ABSTAINED is the DOMINANT outcome here). A line
+        # that printed only findings would make "this arm cannot answer that question about most
+        # issues" look like "nothing is wrong", which is the false PASS the arm exists to refuse.
+        closing_line = (
+            f"closing-scope arm: {closing_scope['closes']} closing ref(s) read — "
+            f"{closing_scope['clean']} clean, {closing_scope['finding']} flagged; "
+            f"UNANSWERABLE for {closing_scope['abstained']} (no `## Satisfies` tick state and fewer "
+            f"than 2 declared row headings, so the issue does not say how many rows it has — NEVER "
+            f"read as complete), {closing_scope['ambiguous']} where the PR named no row on its "
+            f"closing line and nothing in the body affirmatively claimed them all, or where its own "
+            f"disclosure contradicted a complete claim (a complete close and a silent partial are "
+            f"indistinguishable in both), "
+            f"{closing_scope['unread']} unread")
 
     if args.json:
         # ⛔ NO `wip_read` FOR AN ARM THAT NEVER RAN (review round 28, P3). The docstring says a
@@ -1607,10 +3342,16 @@ def main(argv: list[str] | None = None) -> int:
                                                m["wip_source"] == "injected" for m in measured_rows)
                                             else ["branches", "worktrees", "ref-claims"])}
                                        if measured_rows else None),
+                          # `None` = the arm was NOT SELECTED. A selected arm that could not run
+                          # carries its `line` and a null `stats` — the two are different claims.
+                          "closing_scope": (None if closing_line is None
+                                            else {"stats": closing_scope, "line": closing_line}),
                           "findings": [f.as_dict() for f in findings]}, indent=2))
     elif args.annotate:
         for note in notes:
             print(f"::notice title=issue-process-lint::{note}")
+        if closing_line is not None:
+            print(f"::notice title=issue-process-lint::{closing_line}")
         for f in findings:
             print(f.annotate())
         if measured_rows:
@@ -1631,6 +3372,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"issue_process_lint (advisory) — population: {population}")
         for note in notes:
             print(f"  ! {note}")
+        if closing_line is not None:
+            print(f"  {closing_line}")
         if measured_rows and all(m["wip_source"] == "injected" for m in measured_rows):
             # ⛔ NO MARKER COUNT UNDER AN INJECTED VERDICT (review round 29, P3). `markerless` counts
             # only rows read from a `<!-- p01-status -->` COMMENT, so with an injected `--wip` verdict
