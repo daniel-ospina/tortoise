@@ -914,24 +914,28 @@ render_record() { # <days> <now>
   printf 'DOWN_MIN = minutes the service was OBSERVED DOWN. DEGRADED_MIN is the same measure for DEGRADED incidents, in its OWN column — DOWN and DEGRADED are never summed. ⛔ MINUTES ARE WALL-CLOCK AND UNIONED: overlapping incidents are counted ONCE, and a minute is attributed to the UTC day it OCCURRED (the incident COUNT columns next to them attribute each incident to the day it was FIRST observed — a count belongs to the incident, a minute belongs to the clock). UNBOUNDED_INC = incidents that produce NO minutes and are disclosed here instead: still open, closed with an unreadable recovery stamp, closed as not_planned/duplicate (not a recovery), a recovery stamp that precedes the first failure, no parseable first_failure_ts, or a usable span with no parseable kind. Each carries its own label in the per-incident list, so an unknown end is never printed as "down right now". DOWN_MIN is a LOWER BOUND wherever UNBOUNDED_INC > 0. Resolution = the probe cadence printed above — a span shorter than one probe interval cannot be told apart from one interval.\n'
   printf '  incident totals: down=%s degraded=%s unknown=%s restart_attempts=%s\n' \
     "$total_down_inc" "$total_degraded_inc" "$total_unknown_inc" "$total_restarts"
-  printf '  recovered downtime: %s min DOWN over %s DOWN incident(s) and %s min DEGRADED over %s DEGRADED incident(s) — never summed. These are WALL-CLOCK minutes (overlapping incidents union, not add) attributed to the UTC day the minute occurred; a span that BEGAN BEFORE this window still contributes its in-window minutes while its incident is counted on its first-observed day, so the minutes and the counts are TWO DIFFERENT ATTRIBUTIONS and not a ratio. %s incident(s) have NO usable span and contribute NOTHING, so every figure here is a LOWER BOUND wherever that count is non-zero.\n' \
-    "$total_down_min" "$total_recovered" "$total_degraded_min" "$total_recovered_deg" "$total_unbounded"
+  printf '  recovered downtime: %s min DOWN and %s min DEGRADED — never summed. These are WALL-CLOCK minutes (overlapping incidents union, not add) attributed to the UTC day the minute OCCURRED, so a span that BEGAN BEFORE this window still contributes its in-window minutes. The incidents FIRST OBSERVED inside this window are %s DOWN and %s DEGRADED — a count belongs to the incident and a minute to the clock, so the two are STATED SEPARATELY and are not a ratio. %s incident(s) have NO usable span and contribute NOTHING, so every figure here is a LOWER BOUND wherever that count is non-zero.\n' \
+    "$total_down_min" "$total_degraded_min" "$total_recovered" "$total_recovered_deg" "$total_unbounded"
   printf '  (those totals are WINDOW-SCOPED — summed from the day columns above. The list below covers the\n'
   printf '   whole ledger, so it can name an incident that is outside this window. They are NOT the sum of\n'
   printf '   the per-incident down_for= lines: overlapping spans union, and every minute is clipped to its\n'
   printf '   UTC day, so a line is evidence — not an addend.)\n'
   if [ "$undated_inc" -gt 0 ]; then
-    printf '  %s incident(s) carry no parseable first_failure_ts: listed below, but attributable to no UTC day and therefore NOT counted in the window totals above (a human-edited state block is warned about, NEVER silently dropped).\n' "$undated_inc"
+    # ⛔ THE DISCLOSURE MUST MATCH THE COLUMN (review round 7 P2). These incidents are
+    # COUNTED in the TOTAL's `unbounded_inc` (`total_unbounded += undated_inc`) because
+    # both the header and the legend name them as members of that class — so the old
+    # "NOT counted in the window totals" sentence contradicted the row three lines above it.
+    printf '  %s incident(s) carry no parseable first_failure_ts: listed below, counted in the TOTAL%s unbounded_inc but on NO day row (attributable to no UTC day) — a human-edited state block is warned about, NEVER silently dropped.\n' "$undated_inc" "'s"
   fi
   if [ ! -s "$RUN_TMP/incidents.tsv" ]; then
     printf '  (none found in the ledger)\n'
   else
-    local inc_n inc_kind inc_day inc_ff inc_end inc_state inc_rest rest_disp restart_count down_disp
+    local inc_n inc_kind inc_day inc_ff inc_end inc_state inc_rest rest_disp restart_count down_disp ff_i now_i
     while IFS="$(printf '\t')" read -r inc_n inc_kind inc_day inc_ff inc_end inc_state inc_rest; do
       [ -n "$inc_n" ] || continue
       [ -n "$inc_day" ] || inc_day="n/a"
       if [ "$inc_day" = "n/a" ]; then
-        warn "ledger incident #${inc_n} has no parseable first_failure_ts — listed, but attributable to no UTC day and therefore NOT counted in the window totals"
+        warn "ledger incident #${inc_n} has no parseable first_failure_ts — listed, counted in the TOTAL's unbounded_inc but on no day row"
       fi
       if [ "$inc_kind" = "unknown" ]; then
         warn "ledger incident #${inc_n} has no parseable kind= — counted as unknown (never as down or degraded)"
@@ -967,14 +971,30 @@ render_record() { # <days> <now>
           elif [ "$inc_state" = "closed" ]; then
             down_disp="closed, recovery stamp unreadable (NOT counted as downtime)"
           else
-            down_disp="open (>= $(( ($(now_epoch) - $(to_int "$inc_ff" 0)) / 60 )) min elapsed, NOT counted)"
+            # ⛔ A STAMP AHEAD OF NOW IS NOT AN ELAPSED TIME (review round 7 P3). The width
+            # gate admits any 10-digit epoch, so a future `first_failure_ts` published
+            # `open (>= -3505893 min elapsed)` — a NEGATIVE duration offered as downtime
+            # evidence, the same false-statement class round 2 set out to remove.
+            ff_i="$(to_int "$inc_ff" 0)"; now_i="$(now_epoch)"
+            if [ "$ff_i" -gt "$now_i" ]; then
+              down_disp="unknown (first_failure_ts is in the FUTURE — NOT counted)"
+            else
+              down_disp="open (>= $(( (now_i - ff_i) / 60 )) min elapsed, NOT counted)"
+            fi
           fi
           ;;
         x) down_disp="excluded (closed as not_planned/duplicate — not a recovery)" ;;
         *)
           case "$inc_kind" in
             down|degraded)
-              if [ "$inc_day" != "n/a" ] && [ "$inc_end" -ge "$(to_int "$inc_ff" 0)" ]; then
+              # ⛔ ONE `else` FOR TWO CAUSES WAS A WRONG DIAGNOSIS (review round 7 P3). "No
+              # parseable first_failure_ts" and "the recovery precedes the failure" reach this
+              # arm the same way (`inc_end` is numeric), and the header promises each unbounded
+              # class its OWN label — so an undated row was told it held a clock inversion that
+              # does not exist, and pointed at the wrong field to repair.
+              if [ "$inc_day" = "n/a" ] || [ "$inc_ff" = "-" ]; then
+                down_disp="unknown (no parseable first_failure_ts)"
+              elif [ "$inc_end" -ge "$(to_int "$inc_ff" 0)" ]; then
                 down_disp="$(( (inc_end - $(to_int "$inc_ff" 0)) / 60 )) min"
               else
                 down_disp="unusable (recovery stamp precedes the first failure — NOT counted)"
