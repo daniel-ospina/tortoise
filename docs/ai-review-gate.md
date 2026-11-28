@@ -104,7 +104,6 @@ entry condition closes that path.
   reviewed change is untouched, which is why a refreshed branch used to demand a
   fresh 20–40 minute review for a diff nobody changed.
 
-  **The patch arm requires the base to have ADVANCED, not the branch to have been
   **The patch arm requires a BASE ADVANCE — it does not carry across a rewrite and it
   does not carry across new authored commits.** Three checks, all fail-closed:
 
@@ -130,7 +129,8 @@ entry condition closes that path.
   statement now runs where it used to be unreachable, with rules (a)/(b) correctly
   refusing and rule (c) carrying. The anchor proves where the *reviewed* bytes came
   from; it says nothing about the live branch, so it cannot bound either. Harness
-  `(t22)` (rewrite) and `(t23)` (authored commit) pin them, both mutation-controlled.
+  `(t22)` (rewrite) and `(t23)` (authored commit, with a differential pair AND a
+  mutation) pin them.
 
   ⛔ **The patch arm cannot mint evidence.** It is consulted only after the
   marker's own signed `diff=` has been REPRODUCED by the gate: it fetches
@@ -157,7 +157,14 @@ entry condition closes that path.
     changed. The same happens when a base advance re-groups the PR's hunks. The
     heading is kept anyway because a position-blind projection accepts a change
     that was **moved**, which is the direction a gate must not fail in.
-    A relocation into a DIFFERENT scope is refused too (pinned by `(t20)`).
+    A relocation into a DIFFERENT scope is refused when the **heading text** changes
+    (pinned by `(t20)`) — but the frame is a STRING, not a position: two distinct
+    scopes sharing the same heading text (two `def handler(event):`, duplicate
+    markdown headings, two letter-initial lines in a driverless text file) project
+    identically, so a relocation between them is NOT distinguished (pinned as a
+    declared residual by `(t20b)`). No position-bearing frame can close that: each
+    side carries one hunk, so an ordinal matches too, and a pre-image line number is
+    the base-move-sensitive datum the projection exists to drop.
   - A marker minted with the producer's **legacy raw** digest cannot be anchored
     (the anchor reproduces the normalized digest) and is refused — fail-closed,
     pre-change behaviour, and no harness fixture covers that population.
@@ -370,7 +377,7 @@ is unambiguous:
 | `was found for <other>, not for <repo>` | marker is STALE **and** bound to a different repo | re-record for this repo |
 | `normalises to an empty value` | the configured secret is whitespace-only, so the HMAC key would be the empty (public) string | set a real `AI_REVIEW_GATE_KEY` |
 | `HMAC mismatch` | key or signed text differs; prints `sha256` prefixes of the text it checked | compare the prefix with the recording machine, then re-record |
-| `is stale` | marker is for another head sha, and its `diff=` is absent, could not be hashed live, matches neither the normalized nor the raw digest, AND its patch projection does not match this PR's — or one of rule (c)'s preconditions refused. Check the run log for `passed via PATCH match`: if that line is present the gate DID carry, and the red you are reading is from a different job | re-run the review and re-record at the new head. ⛔ Before treating a red here as a gate bug, read the log for one of the FOUR `::warning::` lines rule (c) emits, each naming a *declared*, deliberate refusal: **`is NOT an ancestor of this PR's head`** — the branch was force-pushed/rebased/amended rather than advanced, so a carry would approve a history this branch no longer has; **`gained a NON-MERGE commit after the reviewed sha`** — the PR's own content changed after the review, which is not a base advance; **`could not READ this PR's commit graph`** — a FAIL-CLOSED refusal, not evidence the review is stale: **re-run the job first**, the carry may still apply; **`the ANCHOR held`** — the reviewed bytes were reproduced but the authored change still differs, which is either new content (a fresh review IS owed) or the declared OVER-BLOCK where a base advance rewrote the hunk's enclosing-scope heading. If NONE of the four is present, and the PR was refreshed onto a moved base by a **merge** with nothing you authored changed, the patch arm should have carried it: that is a bug in this gate, not a missing review |
+| `is stale` | marker is for another head sha, and its `diff=` is absent, could not be hashed live, matches neither the normalized nor the raw digest, AND its patch projection does not match this PR's — or one of rule (c)'s preconditions refused. Check the run log for `passed via PATCH match`: if that line is present the gate DID carry, and the red you are reading is from a different job | re-run the review and re-record at the new head. ⛔ Before treating a red here as a gate bug, read the log for one of the FIVE `::warning::` lines rule (c) emits, four of them naming a *declared*, deliberate refusal: the fifth is the PROBE CAP — `stopped after N distinct SIGNED patch probes`, which can cost the carry on a PR with many recorded reviews; **`is NOT an ancestor of this PR's head`** — the branch was force-pushed/rebased/amended rather than advanced, so a carry would approve a history this branch no longer has; **`gained a NON-MERGE commit after the reviewed sha`** — the PR's own content changed after the review, which is not a base advance; **`could not READ this PR's commit graph`** — a FAIL-CLOSED refusal, not evidence the review is stale: **re-run the job first**, the carry may still apply; **`the ANCHOR held`** — the reviewed bytes were reproduced but the authored change still differs, which is either new content (a fresh review IS owed) or the declared OVER-BLOCK where a base advance rewrote the hunk's enclosing-scope heading. ⛔ If NONE of them is present, **re-run the job first**: several failure arms are SILENT and fail-closed by design — the base-sha read (`p_base` not 40-hex), the reviewed-diff `compare` fetch (failed, empty, or no `diff --git`), an ANCHOR mismatch, and an empty projection all refuse without a warning, and a marker minted with the producer's legacy **raw** digest lands here too (refused by design, see the residual list above). Only a RE-RUN that still refuses, on a base advanced by **merge**, with nothing you authored changed, is a bug in this gate — not a missing review |
 | `NO marker in this PR's body[ or its admitted comments] is bound to <head>` | the stale verdict, stated as what it examined: `or its admitted comments` appears only when the comment channel was actually read. It prints `candidate marker(s): N` (with their shas), the channel the last candidate came from, the head it expected, and the provenance of BOTH sources (`body=<rest-live\|event-snapshot>`, `comments=<read\|NOT-READ>`) | if `body=event-snapshot` the run judged a body frozen at the event, so re-run the check before acting — a record posted afterwards is invisible to it; if `comments=NOT-READ` the comment side was never examined; otherwise re-record at the head |
 | `the LIVE body could not be used (…)` | the run fell back to the event payload: the REST read failed, or it succeeded and returned an empty body | re-run the check before acting on the verdict; the evidence may still be valid |
 | `live diff hash could not be computed` | the REST diff fetch failed; a `diff=` marker fails closed rather than carrying forward | re-run the job once the API is reachable — the evidence may still be valid |

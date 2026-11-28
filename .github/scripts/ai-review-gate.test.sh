@@ -68,9 +68,10 @@
 #       boundary, and final-newline preservation)
 #   (s) the #1224 evidence channels: the PR body AND its issue comments, with the
 #       comment read's failure and provenance kept distinguishable from "no marker"
+#   (i3) verdict=clean-low on both acceptance paths (#4755)
 #   (t) acceptance rule (c) (#4255) — the PATCH projection survives a base advance:
 #       pinned projection vectors (reviewed/live/edited/whitespace/renamed/deleted),
-#       the anti-vacuity pairs, and (t1)-(t26) the end-to-end cases: the carry, the
+#       the anti-vacuity pairs, and (t1)-(t10)/(t20)-(t26) the end-to-end cases: the carry, the
 #       three fail-closed arms, the probe cost bounds, the ANCHOR, the ANCESTRY and
 #       authored-commit preconditions and their mutations, one HMAC verifier, the
 #       relocation refusal, and every refusal's operator-facing diagnostic
@@ -442,8 +443,12 @@ cat > "$T/bin/gh" <<'STUB'
 if grep -qE -- "/compare/" <<<"$*" && ! grep -qF -- "application/vnd.github.v3.diff" <<<"$*"; then
     if [ "${STUB_COMPARE_JSON_FAIL:-0}" = "1" ]; then exit 1; fi
     if grep -qE -- "compare/${STUB_BASE_SHA:-}\.\.\." <<<"$*"; then
-        # The branch-side graph, post-`--jq`: <total_commits>\t<sha:parents ...>
-        printf '%s\t%s\n' "${STUB_BRANCH_TOTAL:-0}" "${STUB_BRANCH_SHAS:-}"
+        # The branch-side graph, post-`--jq`: <total_commits>\t<len(commits)>\t<s has>.
+        # The middle field is the page length, so a case can reproduce a TRUNCATED
+        # response (total > returned) and prove the gate refuses instead of treating a
+        # missing sha as "came from the base". Default: a consistent page.
+        printf '%s\t%s\t%s\n' "${STUB_BRANCH_TOTAL:-0}" \
+            "${STUB_BRANCH_COUNT:-${STUB_BRANCH_TOTAL:-0}}" "${STUB_BRANCH_SHAS:-}"
         exit 0
     fi
     # The reviewed→head graph, post-`--jq`: status, total, count, "sha:parents" list.
@@ -1501,7 +1506,7 @@ if [[ "$CAP_PIN" =~ ^[0-9]+$ ]]; then
         STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$CAPBODY"
     assert_rc 1 "(t9) signed stale records that match nothing still FAIL closed"
     # ⛔ COUNT THE SHAPE, NOT THE ENDPOINT. Since the ancestry precondition the gate
-    # makes up to THREE calls per probe (ancestry read, base sha, reviewed diff) and
+    # makes up to FOUR calls per probe (ancestry read, base sha, reviewed diff) and
     # ALL of them are repo-scoped `gh api` calls against the shared budget — so the
     # assertion is two-sided: the EXPENSIVE per-probe compare is exactly CAP_PIN, and
     # the rule-(c) call total is bounded by 3 x CAP_PIN. Counting `/compare/` alone
@@ -1513,10 +1518,10 @@ if [[ "$CAP_PIN" =~ ^[0-9]+$ ]]; then
     else
         bad "(t9) $_t9_cap_compares reviewed-diff compare calls for $((CAP_PIN + 3)) signed records (cap is $CAP_PIN) — the bound is not enforced"
     fi
-    if [ "$_t9_cap_all" -le $((CAP_PIN * 3)) ]; then
-        ok "(t9) …and the TOTAL rule-(c) API spend is bounded (${_t9_cap_all} calls ≤ 3 x $CAP_PIN)"
+    if [ "$_t9_cap_all" -le $((CAP_PIN * 4)) ]; then
+        ok "(t9) …and the TOTAL rule-(c) API spend is bounded (${_t9_cap_all} calls ≤ 4 x $CAP_PIN)"
     else
-        bad "(t9) $_t9_cap_all rule-(c) calls for a $CAP_PIN-probe cap — a probe costs at most 3, so the bound leaked"
+        bad "(t9) $_t9_cap_all rule-(c) calls for a $CAP_PIN-probe cap — a probe costs at most 4, so the bound leaked"
     fi
     assert_contains "(t9) …and the cap is reported, not silent" "stopped after ${CAP_PIN} distinct SIGNED patch probes"
 else
@@ -1915,6 +1920,29 @@ STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
 assert_rc 1 "(t23) a TRUNCATED commit list refuses (unverifiable is never a pass)"
 assert_contains "(t23) …and says the graph could not be READ, not that the branch was rewritten" "could not READ this PR's commit graph"
 
+# (e) MUTATION: delete the authored-commit guard and (a) must CARRY. Without this the
+# row is a behavioural pair, not an attribution — and a "both mutation-controlled"
+# sentence in the docs would be false (the final review measured exactly that).
+MUT_NEWC="$T/mutant-no-newcommit.sh"
+sed 's/^      \[ "${p_np:-0}" -ge 2 \] || { patch_newcommit=1; return 1; }$/      :/' "$RUN_BLOCK" > "$MUT_NEWC"
+if cmp -s "$RUN_BLOCK" "$MUT_NEWC"; then
+    bad "(t23) the authored-commit mutation did not apply — the guard line changed shape, so this control proves NOTHING"
+else
+    _saved_block="$RUN_BLOCK"; RUN_BLOCK="$MUT_NEWC"
+    STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+        STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" \
+        STUB_ANCESTOR_STATUS=ahead STUB_ANCESTOR_TOTAL=1 STUB_ANCESTOR_SEEN=1 \
+        STUB_ANCESTOR_COMMITS="${NEWC}:1" STUB_BRANCH_SHAS="$NEWC" \
+        run_gate "$T/body-t23"
+    RUN_BLOCK="$_saved_block"
+    if [ "$GATE_RC" = "0" ]; then
+        ok "(t23) the MUTANT carries the authored commit — so the shape check is what refuses it"
+    else
+        bad "(t23) the MUTANT still refused (rc=$GATE_RC) — (t23) does not depend on the shape check"
+    fi
+fi
+
+
 # ── (t24) AN UNREADABLE ANCESTRY ANSWER IS NOT A REWRITE (review cycle 2, P2) ──
 # A 502 on the compare call used to fall into the same branch as `diverged` and print
 # "the branch was REWRITTEN (force-push / rebase / amend)" — a false statement about
@@ -1938,6 +1966,57 @@ STUB_DIFF_FILE="$RELOC_LIVE" STUB_BASE_SHA="$BASE_SHA" \
     STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t25"
 assert_rc 1 "(t25) an authored change (or a heading rewrite) still refuses"
 assert_contains "(t25) …and the log SAYS the anchor held but the projection differs, naming the declared over-block" "the ANCHOR held"
+
+
+# ── (t20b) THE FRAME IS A STRING, NOT A POSITION — the DECLARED residual ─────
+# ⛔ THE LIMIT THIS PINS, MEASURED (final review of #4255). `(t20)` refuses a relocation
+# between `def alpha()` and `def zulu()` — DIFFERENT heading text. Two DISTINCT scopes
+# that happen to share the SAME text (two `def handler(event):` at column 0, two
+# duplicate markdown headings, or two letter-initial lines in a driverless text file)
+# render the SAME frame, so a relocation between them projects IDENTICALLY.
+# This is NOT closable inside the projection: the reviewed and live diffs each carry one
+# hunk, so an ordinal matches too, and a pre-image line number is exactly the
+# base-move-sensitive datum the projection exists to drop. It is bounded OUTSIDE it — by
+# the ancestry and authored-commit shape checks — and the row exists so the limit cannot
+# quietly turn back into a claim of coverage (it asserted refusal until this row).
+DUP_SCOPE_REVIEWED="$T/dup-scope-reviewed.diff"
+cat > "$DUP_SCOPE_REVIEWED" <<'DIFFEOF'
+diff --git a/h.py b/h.py
+index 1111111..2222222 100644
+--- a/h.py
++++ b/h.py
+@@ -2,3 +2,4 @@ def handler(event):
+     a1
+     a2
++AUDIT()
+     a3
+DIFFEOF
+DUP_SCOPE_LIVE="$T/dup-scope-live.diff"
+cat > "$DUP_SCOPE_LIVE" <<'DIFFEOF'
+diff --git a/h.py b/h.py
+index 3333333..4444444 100644
+--- a/h.py
++++ b/h.py
+@@ -40,3 +40,4 @@ def handler(event):
+     a1
+     a2
++AUDIT()
+     a3
+DIFFEOF
+_dup_r="$(patch_projection_review_diff < "$DUP_SCOPE_REVIEWED" | openssl dgst -sha256 | awk '{print $NF}')"
+_dup_l="$(patch_projection_review_diff < "$DUP_SCOPE_LIVE" | openssl dgst -sha256 | awk '{print $NF}')"
+if [ "$_dup_r" = "$_dup_l" ]; then
+    ok "(t20b) DECLARED RESIDUAL: two scopes sharing one heading TEXT project identically, so a relocation between them is not distinguished by the projection"
+else
+    bad "(t20b) the two same-text scopes now project DIFFERENTLY — the residual is gone; update the docs bullet that declares it (do not leave them claiming a limit the code no longer has)"
+fi
+DUP_SCOPE_ANCHOR="$(normalize_review_diff < "$DUP_SCOPE_REVIEWED" | openssl dgst -sha256 | awk '{print $NF}')"
+printf '%s\n' "$(diff_marker "$STALE" "$DUP_SCOPE_ANCHOR")" > "$T/body-t20b"
+STUB_DIFF_FILE="$DUP_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$DUP_SCOPE_REVIEWED" run_gate "$T/body-t20b"
+# ⛔ ASSERTED AS THE RESIDUAL, NOT AS DESIRABLE BEHAVIOUR: this carry is the documented
+# limit, and the row is what makes it visible if the docs ever claim otherwise.
+assert_rc 0 "(t20b) …and it CARRIES (the declared residual, bounded only by the ancestry + authored-commit checks — not by the frame)"
 
 
 # ── (t26) REPEATED RECORDS COST ONE PROBE — AND WHAT IS NOT ATTRIBUTABLE ─────

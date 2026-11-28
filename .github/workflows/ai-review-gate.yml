@@ -223,12 +223,14 @@ name: ai-review-gate
 # ⛔ AND SAY WHICH CASES ACTUALLY PIN THEM — this sentence used to name four and was
 # wrong in both directions (measured by the #4255 cycle-2 review): deleting the
 # SIGNATURE-FIRST check reddens §(t9) twice, §(t10) twice and §(t21) — NOT (t6)/(t8)/(t22),
-# which are about other guards. And the DEDUP half is NOT individually attributable:
-# deleting the in-loop (sha,diff) `case` leaves the suite green, because `all_markers`
-# is already de-duplicated upstream on the whole line and filtered to the accepted
-# shapes. §(t26) pins the reachable property (repeated records cost one probe) and says
-# so; the `case` itself is unreachable defence in depth, kept as a belt, not a pinned
-# bound.
+# which are about other guards (a THIRD review measured that deletion at §(t9)x2,
+# §(t10)x1, §(t21)x1 — an earlier revision of this sentence said (t10) twice).
+# And the DEDUP half is NOT pinned: deleting the in-loop (sha,diff) `case` leaves the
+# suite green. It is REACHABLE, but only by two DISTINCT SIGNED records sharing
+# (sha,diff) — a key-holder shape no fixture constructs — because `all_markers` is
+# de-duplicated upstream on the WHOLE LINE (`awk '!seen[$0]++'`) and filtered to the
+# accepted shapes. §(t26) pins the reachable end-to-end property (repeated records cost
+# one probe) and says so; the `case` is kept as a belt, not a pinned bound.
 #
 # The signature is HMAC-SHA256 over the marker text, keyed by the
 # AI_REVIEW_GATE_KEY repo secret (the agent machine holds the same key at
@@ -656,15 +658,23 @@ jobs:
           # another function projected identically, so a force-push that only moved
           # the reviewed lines carried the verdict with no base advance at all
           # (measured by the fresh review of #4255). A relocation under the SAME
-          # heading still projects the same — a NARROW residual, DECLARED here, and
-          # NOT bounded by the anchor (the anchor proves the reviewed side's
-          # provenance and says nothing about the live one; a flat force-push that
-          # relocated a reviewed line carried with the anchor reproducing perfectly).
-          # It is bounded instead by the ANCESTOR precondition in `patch_arm_ok`:
-          # the reviewed sha must be reachable from the head, so the branch was
-          # ADVANCED, not rewritten. What is left is a merge-resolution that moves
-          # the author's own lines within one scope — which the heading check already
-          # catches whenever the scope changes, and which is pinned nowhere.
+          # heading still projects the same — and ⛔ THE HEADING IS A STRING, NOT A
+          # POSITION (final review of #4255, measured): two DISTINCT top-level
+          # definitions with identical signature text (`def handler(event):` in two
+          # places), or two duplicate headings in a driverless text file, render the
+          # same frame, so a relocation between them projects IDENTICALLY. This is a
+          # DECLARED residual, and it is NOT bounded by the anchor (the anchor proves
+          # the reviewed side's provenance and says nothing about the live one; a flat
+          # force-push that relocated a reviewed line carried with the anchor
+          # reproducing perfectly). It is bounded by the TWO shape checks in
+          # `patch_arm_ok` — the reviewed sha must be reachable, and everything the
+          # branch gained after the review must be a merge commit — so what is left is
+          # a MERGE (or a conflict resolution) that moves the author's own lines to a
+          # position whose enclosing heading string matches. A position-bearing frame
+          # cannot be added: the reviewed and live diffs each carry one hunk, so an
+          # ordinal matches too, and a pre-image line number is exactly the
+          # base-move-sensitive datum this projection exists to drop. `(t20b)` pins the
+          # residual so it cannot drift back into a claim of coverage.
           #
           # ⛔ DECLARED DIVERGENCE FROM THE PRODUCER (measured 2026-11-27 against
           # agent-infra origin/main `scripts/lib/diff-normalize.py --patch-only`): the
@@ -922,9 +932,9 @@ jobs:
           # is narrowed to OWNER|MEMBER|COLLABORATOR, but the PR BODY is not
           # narrowed at all, and this workflow is `pull_request_target` BY DESIGN,
           # so a fork PR's body reaches the loop below. A marker LINE is ~257 bytes,
-          # so a 64 KiB body holds ~254 of them, and probing each one costs THREE
-          # repo-scoped `gh api` calls (the ancestry read, the base sha, and the
-          # compare) against the
+          # so a 64 KiB body holds ~254 of them, and probing each one costs up to FOUR
+          # repo-scoped `gh api` calls (the ancestry read, the base sha, the branch-side
+          # commit list, and the reviewed diff) against the
           # 1,000-request/hour-PER-REPOSITORY `GITHUB_TOKEN` budget that every
           # workflow in this repo shares. `ai-review-gate` is the Mergify queue's
           # ENTRY condition (#5433), so exhausting that budget would red the merge
@@ -987,13 +997,17 @@ jobs:
               # excluded by construction), so membership in it is what separates "the
               # author pushed this" from "the base brought it in".
               p_bside="$(gh api "repos/${REPO_NAME}/compare/${p_base}...${expected}" \
-                --jq '[(.total_commits // 0), ([.commits[]? | .sha[0:12]] | join(" "))] | @tsv' \
+                --jq '[(.total_commits // 0), ([.commits[]?] | length), ([.commits[]? | .sha[0:12]] | join(" "))] | @tsv' \
                 2>/dev/null || true)"
               if [ -z "$p_bside" ]; then patch_ancestry_unreadable=1; return 1; fi
-              IFS="$(printf '\t')" read -r p_btotal p_bshas <<< "$p_bside"
-              # Same truncation rule: an unreadable branch-side list would make an
-              # AUTHORED commit look like one the base brought in.
-              [ "${p_btotal:-0}" -le 250 ] || { patch_ancestry_unreadable=1; return 1; }
+              IFS="$(printf '\t')" read -r p_btotal p_bcount p_bshas <<< "$p_bside"
+              # ⛔ THE SAME RULE AS THE REVIEWED SIDE, EXACTLY (final review of #4255): a
+              # count that does not match the returned page means a sha is MISSING, and a
+              # missing branch-side sha makes the loop below `continue` — i.e. an AUTHORED
+              # commit would be treated as one the base brought in, which is the failure
+              # this whole guard exists to prevent. A bare `<= 250` was asymmetric with the
+              # reviewed-side check and could not catch it.
+              [ "${p_btotal:-0}" = "${p_bcount:-x}" ] || { patch_ancestry_unreadable=1; return 1; }
               for p_tok in $p_added; do
                 p_psha="${p_tok%%:*}"
                 p_np="${p_tok##*:}"
