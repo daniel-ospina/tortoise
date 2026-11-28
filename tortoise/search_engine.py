@@ -6251,7 +6251,13 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             # them `ep_state()` called a stored (0, 0) pair PRESENT while
             # `ep_has_belief_cypher` called it absent — the four-surface split
             # (0.5 / None / absent / nan) this class of bug kept reappearing as.
-            "  n.posterior_beta, n.ep_beta "
+            "  n.posterior_beta, n.ep_beta, "
+            # #14796: the POSITION axis rides the tail (15 = `isClosed`,
+            # 16 = `pipelineSlot`) so the #2490 gate below hands
+            # `is_terminal_status` every input it takes. Appended, never
+            # inserted, so the documented 0..14 index map keeps its meaning
+            # under the len guards that tolerate the pre-#14796 row shape.
+            "  coalesce(n.isClosed, false), n.pipelineSlot "
         )
         rows = graph.query(cypher, params={"ids": point_ids}).result_set
 
@@ -6276,7 +6282,10 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             # as measured EP — has_ep=False + contested=False (the columns
             # are fetched so the terminal state is read, not guessed; the len
             # guard tolerates doubles mirroring the pre-#2490 7-col shape).
-            terminal = len(row) > 8 and is_terminal_status(row[7], bool(row[8]))
+            terminal = len(row) > 8 and is_terminal_status(
+                row[7], bool(row[8]),
+                is_closed=row[15] if len(row) > 15 else None,
+                stage_slot=row[16] if len(row) > 16 else None)
             if terminal:
                 has_ep = False
             # #3276: baseline_set rides the tail (index 9) so the pre-#3276
@@ -7162,7 +7171,13 @@ def get_relationships_bounded(
                 # defaults (a half pair read 0.3333 with variance 0.0889 here
                 # while every other surface answered None + absent).
                 "  other.posterior_alpha, other.ep_alpha, "
-                "  other.posterior_beta, other.ep_beta, other.confidence "
+                "  other.posterior_beta, other.ep_beta, other.confidence, "
+                # #14796: the POSITION axis (16 = `isClosed`,
+                # 17 = `pipelineSlot`), appended. The Cypher has_ep gate in
+                # THIS query (`_alive_flag`, via `_terminal_expression`) already
+                # reads both axes; the Python fold below did not, so the two
+                # halves of one row disagreed about whether a peer was ended.
+                "  coalesce(other.isClosed, false), other.pipelineSlot "
                 "LIMIT $raw_cap",
                 params={"op_ids": list(op_ids), "raw_cap": raw_cap,
                         "contested_threshold": CONTESTED_VARIANCE_THRESHOLD,
@@ -7206,7 +7221,9 @@ def get_relationships_bounded(
                 "  other.createdAt, coalesce(other.outdated, false), "
                 # #11702: raw belief columns + mirror (see op_crit).
                 "  other.posterior_alpha, other.ep_alpha, "
-                "  other.posterior_beta, other.ep_beta, other.confidence",
+                "  other.posterior_beta, other.ep_beta, other.confidence, "
+                # #14796: the position axis (see op_crit).
+                "  coalesce(other.isClosed, false), other.pipelineSlot",
                 params={"op_ids": list(expand_ops), "per_op": per_op_cap},
                 timeout=_DECORATION_TIMEOUT_MS,
             ).result_set)
@@ -7266,6 +7283,9 @@ def get_relationships_bounded(
                 # #11702: raw α/β + mirror (11..15) for the shared readers.
                 (row[11], row[12], row[13], row[14], row[15])
                 if len(row) > 15 else None,
+                # #14796: the POSITION axis, under its own len guard so a
+                # pre-#14796 row double still answers from the word axis.
+                (row[16], row[17]) if len(row) > 17 else None,
             )
 
         for row in _wave.result("support"):
@@ -7280,6 +7300,9 @@ def get_relationships_bounded(
                 bool(row[10]),
                 (row[11], row[12], row[13], row[14], row[15])
                 if len(row) > 15 else None,
+                # #14796: the POSITION axis, under its own len guard so a
+                # pre-#14796 row double still answers from the word axis.
+                (row[16], row[17]) if len(row) > 17 else None,
             )
 
         op_family: dict[tuple[str, str], int] = {}
@@ -7308,7 +7331,12 @@ def get_relationships_bounded(
                     if other_id == pid:
                         continue  # self-peer exclusion
                     (et2, _other_idx, kind, status, alpha, beta, has_ep,
-                     created, outdated, raw) = ep
+                     created, outdated, raw, pos) = ep
+                    # #14796: the position axis of THIS peer, from the same
+                    # row. `.get`-free because the tuple always carries the
+                    # slot (None on a pre-#14796 row double).
+                    is_closed, stage_slot = pos if pos is not None \
+                        else (None, None)
                     # #11702: ONE owner for presence, one for the width. The
                     # coalesced α/β above are only the ARITHMETIC inputs; the
                     # raw columns decide whether a belief and a width EXIST.
@@ -7372,7 +7400,9 @@ def get_relationships_bounded(
                     # in no status-set member, only the fetched column
                     # expresses it) stay a critical class and never read as
                     # measured/contested EP.
-                    terminal = is_terminal_status(status, outdated)
+                    terminal = is_terminal_status(
+                        status, outdated, is_closed=is_closed,
+                        stage_slot=stage_slot)
                     role = "source" if (n_idx is not None and n_idx == 0) else "target"
                     direction = "outgoing" if role == "source" else "incoming"
                     entry = {
@@ -7699,7 +7729,14 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             # #2350 (E-prec): the per-end precision declaration, appended
             # LAST so every index above is untouched. Read into the additive
             # precision block by ``window_read_fields`` below.
-            "  n.validFromPrecision, n.validToPrecision",
+            "  n.validFromPrecision, n.validToPrecision, "
+            # #14796: the POSITION axis, appended LAST for the same reason every
+            # addition above was — the 0..22 index map is untouched. The reader
+            # that decides CURRENCY from this map (`time_aware.is_stale_entry`,
+            # via `prefer_latest_ids`) reads both axes; without the columns it
+            # could only read the word, so a claim ended by `isClosed` / a
+            # `terminal` slot kept its page slot as current.
+            "  coalesce(n.isClosed, false), n.pipelineSlot",
             params={"ids": point_ids},
             timeout=_DECORATION_TIMEOUT_MS,
         ).result_set
@@ -7709,6 +7746,9 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             st = out.setdefault(pid, {
                 "status": row[1] or "",
                 "outdated": bool(row[18]) if len(row) > 18 else False,
+                # #14796: the position markers, appended with the columns.
+                "isClosed": bool(row[23]) if len(row) > 23 else False,
+                "pipelineSlot": row[24] if len(row) > 24 else None,
                 "superseded_by": None,
                 "supersedes": [],
                 "subject": None,
