@@ -3357,13 +3357,17 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
   so every `extractor_v2.py` carrier at or below `:12358` moved, and the cites this bundle and its
   probes print for them had to be re-derived rather than carried. Reached through §10.41: `#14357`'s
   tree is the base this entry measures FROM, and §10.41 is marked superseded above for that reason.
-- **The measured shift.** `+10` for every cite at or below `:9154` and above `:12347`; **`+437`** for every
-  cite below `:12358` (the three `+427`-line clusters resolve to the same offset for the tail). The
+- **The measured shift.** Four bands, measured off the line map rather than read off one constant:
+  `:9154`–`:9156` are REPLACED (no shifted counterpart), `:9157`–`:12347` take **`+10`**,
+  `:12348`–`:12359` take **`+352`**, `:12360`–`:12362` take **`+408`**, and everything below
+  `:12363` takes **`+437`** — the offsets the three insertions (anchored at `:12347`, `:12359`,
+  `:12362`) stack up to. Every pair below is `+10` or `+437` because every carrier this record cites
+  sits in one of those two terminal bands. The
   cite pairs below are MEASURED per cite against this tree, never computed from a constant stated
   here — the rule §10.40 had to learn twice. Measured on this tree:
   `:14798`→`:15235` (the vet flag), `:14802`→`:15239` (the early return),
   `:14833`→`:15270` (its vet surface), `:14829`→`:15266` (the classify block),
-  `:15254`→`:15691` and `:15397`→`:15844` (the two `if items:` gates),
+  `:15254`→`:15691` and `:15407`→`:15844` (the two `if items:` gates),
   `:15267`→`:15704` and `:15418`→`:15855` (the two fail-open `except` arms),
   `:15383`→`:15820` and `:18056`→`:18493` (the union and S2 `_run_vet_pass` calls),
   `:18055`→`:18492` (`if vet_enabled and embed_list:`), `:15382`→`:15819`

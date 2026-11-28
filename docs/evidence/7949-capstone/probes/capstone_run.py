@@ -36,8 +36,8 @@ the corrected reading:
    ``execute_embed`` (S5+S6, ``:16067``). ONE cite per symbol, on the line that symbol is on:
    S2.3 makes TWO calls two lines apart, and the single ``:NNNN`` a
    ``a``/``b`` pair cite could carry is only ever checkable for one of them —
-   that pair form is how ``_apply_classify_kinds`` sat on ``:13292`` (naming
-   ``classify_items``' line) while the README's one-symbol row was right. The
+   that pair form is how ONE number came to stand for BOTH of S2.3's calls, two lines apart,
+   while the README's one-symbol row was right. The
    SYMBOL is authoritative and the line is a convenience — the three
    FILE-NAMED cites above are resolved against the tree by the bundle's pin,
    and EACH of the nine bare step cites is resolved by the same pin

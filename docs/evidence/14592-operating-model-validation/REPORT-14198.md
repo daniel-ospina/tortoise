@@ -34,7 +34,7 @@ Three facts, in the order they bite:
 |---|---|---|
 | 1 | `tortoise/extractor_v2.py:12360` (pre-fix) | the operator pass resolves both endpoints through `_resolve`, which reads **only this capture's** `point_ids`/`event_ids`. An older side that lives in a **prior** capture is unresolvable there *by construction* — so a cross-document contradiction is dropped by the resolver's scope, not by any guard rejecting it. |
 | 2 | `tortoise/extractor_v2.py:3614` | the `#10997` hold that step 1's failure creates is not persisted — `hold_store` is `None` on the path that ships (no caller in `sdk.py`/`mcp_server.py`/`tool_registry.py` passes one), so a later run cannot drain it. `stats.held: 3`, `supersessions: 0`. |
-| 3 | `tortoise/extractor_v2.py:11700` (collect) + `:11763` (resolve) + `:9854` | the channel that **does** cross captures — a point-level `supersedes` ref, resolved against the S3 prior set by `_resolve_point_supersede` — was never used, because the model declared a `NAND` between two *points* instead. |
+| 3 | `tortoise/extractor_v2.py:11700` (collect) + `:11763` (resolve) + `:9864` | the channel that **does** cross captures — a point-level `supersedes` ref, resolved against the S3 prior set by `_resolve_point_supersede` — was never used, because the model declared a `NAND` between two *points* instead. |
 
 So the answer to "which of the three" is: **the write path dropped a declared
 relation**, and **nothing closed an interval** because the one channel that
@@ -169,13 +169,13 @@ $ python docs/evidence/14592-operating-model-validation/replay_14198.py \
 # new claim (this capture) : pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5
 # older claim (prior)      : pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078
 
-```text
-$ PYTHONPATH=<worktree at 875abfd> python docs/evidence/14592-operating-model-validation/replay_14198.py
 supersessions recorded      : 0
 supersessions naming the pair: 0
 
 warnings naming the pair:
   - operator dropped: src/dst did not resolve to an emitted point/event ('The cold-chain audit failed ColdPath Logistics last week' → 'ColdPath Logistics holds a validated cold-chain certificate')
+
+operators naming the pair : 0
 
 VERDICT: the cross-document contradiction is NOT RECORDED
 ```
