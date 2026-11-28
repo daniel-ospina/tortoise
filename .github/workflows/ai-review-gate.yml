@@ -895,7 +895,12 @@ jobs:
             while IFS= read -r line; do
               [ -z "$line" ] && continue
               m_diff="$(printf '%s' "$line" | sed -nE 's/^.* @ [0-9a-f]{40} diff=([0-9a-f]{64}) \(.*$/\1/p')"
-              if printf '%s' "$line" | grep -qE "$sha_ok_re"; then
+              # `<<<` not `printf | grep -q`: under `set -o pipefail` the pipeline can
+              # report the PRODUCER's SIGPIPE rather than grep's answer, which turns a
+              # MATCH into a miss (agent-infra#841). Here that would only fail closed (the
+              # `elif` below drops the marker), but a no-op guard on the one line that
+              # decides rule (a) is not worth keeping for a pipe.
+              if grep -qE "$sha_ok_re" <<<"$line"; then
                 candidates="${candidates}${line}"$'\n'
               elif [ -n "$m_diff" ] && [ -n "$live_diff_hash_norm$live_diff_hash_raw" ] \
                    && { [ "$m_diff" = "$live_diff_hash_norm" ] || [ "$m_diff" = "$live_diff_hash_raw" ]; }; then
