@@ -71,7 +71,7 @@
 #   (i3) verdict=clean-low on both acceptance paths (#4755)
 #   (t) acceptance rule (c) (#4255) — the PATCH projection survives a base advance:
 #       pinned projection vectors (reviewed/live/edited/whitespace/renamed/deleted),
-#       the anti-vacuity pairs, and (t1)-(t10)/(t20)-(t28), incl. (t20b) the end-to-end cases: the carry, the
+#       the anti-vacuity pairs, and (t1)-(t10)/(t20)-(t28), incl. (t10b) and (t20b) the end-to-end cases: the carry, the
 #       three fail-closed arms, the probe cost bounds, the ANCHOR, the ANCESTRY and
 #       authored-commit preconditions and their mutations, one HMAC verifier, the
 #       relocation refusal, and every refusal's operator-facing diagnostic
@@ -1617,6 +1617,67 @@ assert_not_contains "(t10) …and does NOT blame the key for a marker rule (c) c
     "the recording KEY is the problem"
 assert_contains "(t10) …and tells the operator to re-record instead" \
     "re-record on the current head"
+
+
+# ── (t10b) THE RULE-(c) DIAGNOSTICS SURVIVE THE HMAC-MISMATCH EXIT ───────────
+# ⛔ THE POPULATION THE FIX EXISTS FOR HAD NO ROW (final review). `patch_sig_rejected`
+# and `patch_shape_rejected` used to be emitted inside the `[ -z "$marker" ]`
+# classification block, which runs AFTER the HMAC-mismatch branch — so whenever the body
+# ALSO carried a decoy candidate (the shape the new entry condition serves), the gate
+# exited on "HMAC mismatch" and never printed the reason rule (c) refused. Measured
+# before the fix: decoy + wrong-key stale `diff=` marker printed 0 of those lines.
+# Both blocks now precede that branch, guarded on `[ -z "$marker" ]`.
+#
+# ⛔ AND THE GUARD IS PINNED IN THE DIRECTION A REFACTOR BREAKS IT: the second half
+# asserts the diagnostic is ABSENT on a run that CARRIES. Moving the block back below
+# the exit — or dropping the `[ -z "$marker" ]` guard, which makes a GREEN run print a
+# false `::error::` — reddens here and nowhere else.
+DECOY_HEAD="review recorded: reviews/${PR_NUMBER}.json verdict=clean @ ${HEAD} (${REPO_NAME})"
+BAD_SIG_T10B="$(printf 'e%.0s' $(seq 1 64))"
+{
+    printf '%s sig=%s\n' "$DECOY_HEAD" "$BAD_SIG_T10B"
+    printf 'review recorded: reviews/%s.json verdict=clean @ %s diff=%s (%s) sig=%s\n' \
+        "$PR_NUMBER" "$STALE" "$PB_REVIEWED" "$REPO_NAME" "$BAD_SIG_T10B"
+} > "$T/body-t10b-decoy"
+STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t10b-decoy"
+assert_rc 1 "(t10b) a decoy beside a wrong-key stale diff= marker still fails closed"
+assert_contains "(t10b) …and the operator is TOLD the stale marker's signature is the problem, despite the HMAC-mismatch exit" \
+    "STALE-sha evidence marker(s) carried BOTH"
+assert_contains "(t10b) …and both diagnoses are printed, not one" "HMAC mismatch"
+# The anti-vacuity half: a VALID stale record carries, and must NOT print that error.
+{
+    printf '%s sig=%s\n' "$DECOY_HEAD" "$BAD_SIG_T10B"
+    diff_marker "$STALE" "$PB_REVIEWED"
+} > "$T/body-t10b-carry"
+STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t10b-carry"
+assert_rc 0 "(t10b) a decoy beside a VALID stale record still carries"
+assert_not_contains "(t10b) …and prints NO key error on a carry (the empty-marker guard)" \
+    "STALE-sha evidence marker(s) carried BOTH"
+assert_not_contains "(t10b) …and no shape-error either (that is the OTHER diagnostic the same guard covers)" \
+    "failed the signature check AND lack the shape"
+# MUTATION: drop that guard, and the carry above must sprout a false ::error::.
+MUT_GUARD="$T/mutant-no-marker-guard-on-diag.sh"
+# The OUTER guard is the one that matters: the two diagnostics are nested inside
+# `if [ -z "$marker" ]`, so mutating an inner condition alone changes nothing (measured).
+# `0,/re/` replaces only the FIRST match, which is the hoisted wrapper — the
+# classification block's own `[ -z "$marker" ]` is the second and must stay.
+sed '0,/^if \[ -z "\$marker" \]; then$/s//if true; then/' \
+    "$RUN_BLOCK" > "$MUT_GUARD"
+if cmp -s "$RUN_BLOCK" "$MUT_GUARD"; then
+    bad "(t10b) the diagnostic-guard mutation did not apply — this control proves NOTHING"
+else
+    _saved_block="$RUN_BLOCK"; RUN_BLOCK="$MUT_GUARD"
+    STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+        STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t10b-carry"
+    RUN_BLOCK="$_saved_block"
+    if printf '%s' "$GATE_OUT" | grep -q "failed the signature check AND lack the shape"; then
+        ok "(t10b) the MUTANT annotates a GREEN run with a key error — so the guard is load-bearing"
+    else
+        bad "(t10b) the mutant printed no key error on the carry — the not_contains assertion above attributes nothing"
+    fi
+fi
 
 
 # ── (u) END TO END ON REAL GIT BYTES: a base advance that rewrites hunk context ──
