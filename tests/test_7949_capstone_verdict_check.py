@@ -2118,6 +2118,23 @@ def test_the_readme_does_not_describe_the_retired_extraction_lookup():
         "the README must name the binding the probe actually uses")
 
 
+def _cites_a_call(text: str, name: str) -> bool:
+    """Does `text` CALL `name`? A call, at a name boundary — not a mention.
+
+    ⛔ THE BOUNDARY IS THE WHOLE POINT (#14794 mutation pass, MEASURED). A bare
+    `name + "("` substring is satisfied by a SIBLING function whose name ENDS
+    with the cited one: `_collect_classify_items(embed_list)` contains
+    `classify_items(`, so the README's `classify_items` row stayed GREEN when
+    the cite was moved onto it — the exact counterexample the widening above
+    was written for. A call therefore has to start where a name starts:
+    `(?<![\w])` refuses a preceding WORD character — which is what
+    `_collect_classify_items(` has — while still admitting an ATTRIBUTE call
+    (`kind_classifier.classify_items(items)`), because the dot is a real call
+    form this bundle cites and refusing it would be the false-block twin.
+    """
+    return re.search(r"(?<![\w])" + re.escape(name) + r"\(", text) is not None
+
+
 def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     """A cite that says it was re-derived at the head must BE the head's line.
 
@@ -2195,7 +2212,15 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
         # passed here while naming a DIFFERENT function than the row claims.
         # The table's column is "call site", so the citation is a call, and the
         # test for a call is `name(`.
-        assert (symbol.split(".")[-1] + "(") in text, (
+        # ⛔ `name(` ALONE IS NOT ENOUGH, and the sentence above is why: the
+        # counterexample it names (`_collect_classify_items(`) CONTAINS
+        # `classify_items(`, so a bare substring still passed the first cut of
+        # this widening (measured in the mutation pass: the README cite moved to
+        # `:15690` stayed GREEN under it). The call must start at a NAME
+        # BOUNDARY — not preceded by a word character or a dot — which is what
+        # `_CALL_BOUNDARY` below is, and the mutation that reddens it is that
+        # same one-line README edit.
+        assert _cites_a_call(text, symbol.split(".")[-1]), (
             f"README cites `{symbol}` at extractor_v2.py:{lineno}, which reads "
             f"{text.strip()!r} — the line moved and the cite did not: "
             f"`{symbol.split('.')[-1]}` "
@@ -2229,8 +2254,9 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
         # ⛔ Same call-form rule as (b), for the same measured reason: a bare
         # substring is satisfied by a DIFFERENT function whose name contains
         # the cited one (`_collect_classify_items` for `classify_items`, which
-        # is exactly what the re-derivation landed on).
-        assert all((sym + "(") in text for sym in named), (
+        # is exactly what the re-derivation landed on) — which is why (b) needs
+        # the NAME BOUNDARY this delegates to and not a plain `name(`.
+        assert all(_cites_a_call(text, sym) for sym in named), (
             f"the probe cites `{first}`"
             + (f" / `{second}`" if second else "")
             + f" at extractor_v2.py:{lineno}, which reads {text.strip()!r} — "
