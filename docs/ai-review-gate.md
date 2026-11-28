@@ -92,6 +92,155 @@ entry condition closes that path.
   regardless — that binding is the stronger, pre-#2982 claim, so its `diff=`
   field (if present) is never matched against the live diff.
 
+  **A third arm: the PATCH projection (#4255).** When neither rule above finds
+  an acceptable marker, the gate asks a narrower question — *is the change this
+  PR AUTHORED still the change a reviewer approved?* — and accepts a marker whose
+  **patch projection** equals this PR's live patch projection. The projection
+  keeps the `diff --git`/`---`/`+++` lines, every mode/rename/copy/similarity
+  line, every `+`/`-` line BYTE-EXACT (including whitespace), `\ No newline`
+  markers, and each hunk's frame with its enclosing-scope heading (`@@ def f():`)
+  — and drops blob `index` ids, hunk line numbers and counts, and hunk CONTEXT
+  lines. Those are exactly the fields a **base advance** rewrites while the
+  reviewed change is untouched, which is why a refreshed branch used to demand a
+  fresh 20–40 minute review for a diff nobody changed. Every field the arm
+  promises to KEEP is pinned as its own vector — `PP_NONL` (the
+  `\ No newline at end of file` marker), `PP_MODE` (a hunk-less mode/binary entry,
+  whose `index` line IS the content) and `PP_CRLF` (CRLF bytes) included — and
+  each is asserted to project to its OWN digest, so a refactor that drops a field
+  reddens instead of making two different changes project identically.
+
+  **It is entered when no ACCEPTABLE marker exists** — not when no marker-SHAPED
+  line exists. A PR-body line that merely matches the marker shape is a
+  *candidate* before its signature is checked, and the body is author-writable,
+  so it costs nothing to paste one whose 64-hex `sig=` does NOT verify (a pasted
+  marker, one signed with a rotated/personal key, one edited after signing).
+  Gating the arm on "no candidates" let one such head-bound line suppress the
+  whole arm and report an `HMAC mismatch` instead — sending you to fix a key that
+  is fine, for a review you were never owed. The guard is now "no candidate's
+  signature verifies": a local HMAC, no extra API call, and it can only ADD
+  evidence (harness case `(t27)`, both directions).
+
+  **The patch arm requires a BASE ADVANCE — it does not carry across a rewrite and it
+  does not carry across new authored commits.** Three checks, all fail-closed:
+
+  1. **Reachability.** `compare/<the marker's signed @ sha>...<this PR's head>` must
+     answer `ahead` (and not a truncated page): the reviewed commit is still reachable
+     from the head. A base advance by **merge** (`gh pr update-branch`, or merging
+     `origin/main` into the branch) keeps it reachable. A **force-push / rebase /
+     amend** rewrites it out of the history and the gate answers `diverged`: the carry
+     is refused and the log says the branch was *rewritten*.
+  2. **What was added.** Every commit the branch gained after the reviewed sha — i.e.
+     every head-side commit the **base does not already contain** — must be a **merge
+     commit**. A `git commit` after the review is not a base advance, however
+     reachable it is.
+  3. **If the graph cannot be read** (API failure, a page that lists fewer commits
+     than it claims, a count that does not match the number of SHAs actually
+     rendered, or an answer of a different SHAPE — absent or non-numeric counts, a
+     status outside `ahead`/`behind`/`diverged`/`identical`), the arm refuses and the
+     log says the read FAILED and to re-run — it does not guess.
+     ⛔ The SHAPE and ARITY halves are checked **before** the answer is interpreted:
+     the counts used to default to `0`, so a differently-shaped answer read as a
+     consistent page (`0 == 0`) and skipped checks 1–2's dependants entirely, leaving
+     a post-review authored commit carrying on `status=ahead` alone. `presence, then
+     arity, then meaning` is what closes that — the reviewed and branch-side SHA
+     lists must each render exactly as many entries as their count claims, so `0`
+     always means an EMPTY list rather than a list that was never rendered. A page that
+     says `ahead` with ZERO commits between two different shas is SELF-CONTRADICTORY
+     (GitHub cannot render it) and is refused for that reason too, so a changed
+     expression rendering literal zeros cannot skip the authored-commit loop; and an
+     unrecognised status is reported as an UNREADABLE graph, not as a rewrite, which
+     would send you to buy a 20–40 minute re-review for an API blip (harness cases
+     `(t32a)`–`(t33)`). The workflow header names, guard by guard, which row pins it — and
+     which guards are NOT individually pinned at all: the numeric-presence check is MASKED
+     (removing it reddens nothing, and removing it together with the arity check reddens
+     `(t32d)` only, because a further guard still refuses), and the empty-parse arm, the
+     branch-side numeric-presence check and `[ -z "$p_bside" ]` are SUBSUMED — the last one
+     has no row of its own and is observable only inside `(t30)`'s joint mutation.
+     `(t32f)` strips five guards together for its own fixed fixture (two of which ARE
+     individually pinned), which is why a single deletion there LOOKS green. ⛔ The
+     ATTRIBUTION LIST quotes no tally and no PASS total — those drift as rows are added, so
+     it names guards and the mutation is re-runnable. (Prose elsewhere may still mention the
+     outcome of a specific one-off measurement; no such number is load-bearing here.)
+
+  ⛔ Checks 1 and 2 are not decoration, and check 1 alone was not enough. Measured on
+  this rule, end to end, each `passed via PATCH match` with the anchor reproducing
+  perfectly: a **force-push** that kept the reviewed `+`/`-` lines and moved them
+  within one scope (**no base advance at all**); and an **ordinary commit** on top of
+  the reviewed sha that relocated the same lines ACROSS an existing guard — so the
+  statement now runs where it used to be unreachable, with rules (a)/(b) correctly
+  refusing and rule (c) carrying. The anchor proves where the *reviewed* bytes came
+  from; it says nothing about the live branch, so it cannot bound either. Harness
+  `(t22)` (rewrite) and `(t23)` (authored commit, with a differential pair AND a
+  mutation) pin them.
+
+  ⛔ **The patch arm cannot mint evidence.** It is consulted only after the
+  marker's own signed `diff=` has been REPRODUCED by the gate: it fetches
+  `compare/<current base>...<the marker's signed @ sha>`, normalizes those bytes,
+  and requires the result to equal the marker's `diff=` (the **anchor**). A
+  patch match with a wrong anchor is a refusal. Nothing here relaxes the
+  sha-match or the diff-match arm, and the green path pays no extra API call.
+
+  **What the patch arm does NOT do.** Its residual is narrower than "position
+  blind" but it is not zero, and it is declared rather than hidden:
+
+  - **A relocation into a scope whose heading TEXT is unchanged** (the same function
+    signature repeated at two places, two duplicate markdown headings, two
+    letter-initial lines in a driverless text file) still projects identically — the
+    frame is a STRING, not a position (pinned by `(t20b)`, which also pins that the
+    shape checks below DO refuse it once the branch gained a non-merge commit or its
+    history was rewritten). What is left is a **merge** whose conflict resolution
+    relocates the author's own lines between such scopes.
+  - **A relocation whose hunk LINE NUMBERS are the only thing that moved** is carried
+    by **rule (b)**, not by this arm — the normalized binding digest drops hunk
+    numbers by design (#1362), so such a pair is diff-identical and rule (c) is never
+    consulted. That is a pre-existing property of the binding normalizer, unchanged
+    here, and it is NOT bounded by rule (c)'s shape checks. `(t20b)` deliberately
+    differs in a CONTEXT line so the row tests rule (c) rather than passing through
+    this path (a first version of it did not, and stayed green with the patch arm
+    disabled — measured).
+  - **A base advance that rewrites the hunk's enclosing-scope heading** — git
+    derives the heading from the last preceding line matching its default
+    funcname pattern (`^[A-Za-z_$]` per gitattributes(5): a line beginning with a
+    letter, `_` or `$`), so inserting such a
+    line above the change (any markdown/text file, or a new `def` above the
+    edited one) changes it — **refuses** the carry. That is an **over-block**: a
+    false RED, never a pass, and it costs a fresh review on a diff nobody
+    changed. It is measured and pinned by `(t28)`, and its refusal is audible
+    (`the ANCHOR held`, pinned by `(t25)`) so the log does not read as a silently
+    changed diff. The same happens when a base advance re-groups the PR's hunks. The
+    heading is kept anyway because a position-blind projection accepts a change
+    that was **moved**, which is the direction a gate must not fail in. A relocation
+    whose heading TEXT changes is refused (pinned by `(t20)`); the unchanged-text case
+    is the first bullet above. No position-bearing frame can close that: each side
+    carries one hunk, so an ordinal matches too, and a pre-image line number is the
+    base-move-sensitive datum the projection exists to drop.
+  - A marker minted with the producer's **legacy raw** digest cannot be anchored
+    (the anchor reproduces the normalized digest) and is refused — fail-closed,
+    pre-change behaviour, and no harness fixture covers that population.
+
+  The pass message names which arm fired: `passed via PATCH match` (this one),
+  `passed via diff match` (the digest arm), or the head-bound message.
+
+  **The producer half is a cross-repo contract, and the harness measures it.**
+  The same projection is produced by agent-infra's
+  `scripts/lib/diff-normalize.py --patch-only` for `record-review.sh`'s
+  `patch_dimension_carry` — **once `agent-infra#4261` lands**: `main` today still
+  emits the frame-less shape, so until that PR merges the two sides disagree on
+  every hunk-bearing entry and this gate is the STRICTER half (see the workflow
+  header's declared divergence). Nothing in the fleet compares a producer digest
+  with a consumer digest at runtime, so drift between the two halves is invisible
+  until someone recomputes the pinned literals — which is how the position-bearing
+  frame could be quietly reverted. The harness therefore probes a local producer
+  (via `AGENT_INFRA_PATH` or `~/.pi/agent/scripts`) and reports five distinct
+  outcomes: agree is a PASS; a **producer that fails to run** is its own named
+  non-pass (its exit code is probed on every input the section reads — a crash
+  also emits no `@@` line, so absorbing it as "the old shape" would hide the
+  drift most worth seeing); a producer that **exits 0 and produces no output** is
+  named separately (a zero-byte projection is the empty-digest hazard, not an old
+  frame); the pre-#4261 frame-less shape is a named SKIP; and a
+  position-bearing mismatch is a FAIL. A box with no producer says agreement was
+  **not measured** and never claims a pass.
+
   **Two channels (#1224).** The marker is read from the PR body AND from the
   PR's issue comments, because the body is a mutable field any later legitimate
   edit rewrites — a body-only copy reddens this check on a review that genuinely
@@ -199,7 +348,8 @@ express it). Never use `git patch-id`: `--stable` and the default both
 forward (a false accept). sha256 over normalized bytes does not.
 
 The gate computes **both** digests from the same fetched bytes and accepts a
-marker whose signed `diff=` equals either:
+marker whose signed `diff=` equals either (the digest arms; the patch arm above
+is separate and additionally anchored on that same `diff=`):
 
 - `live_diff_hash_norm` — the normalized digest, for markers a post-#1362
   producer emits; and
@@ -296,7 +446,7 @@ is unambiguous:
 | `was found for <other>, not for <repo>` | marker is STALE **and** bound to a different repo | re-record for this repo |
 | `normalises to an empty value` | the configured secret is whitespace-only, so the HMAC key would be the empty (public) string | set a real `AI_REVIEW_GATE_KEY` |
 | `HMAC mismatch` | key or signed text differs; prints `sha256` prefixes of the text it checked | compare the prefix with the recording machine, then re-record |
-| `is stale` | marker is for another head sha, and its `diff=` is absent, could not be hashed live, or matches neither the normalized nor the raw digest | re-run the review, re-record at the new head |
+| `is stale` | marker is for another head sha, and its `diff=` is absent, could not be hashed live, matches neither the normalized nor the raw digest, AND its patch projection does not match this PR's — or one of rule (c)'s preconditions refused. Check the run log for `passed via PATCH match`: if that line is present the gate DID carry, and the red you are reading is from a different job | re-run the review and re-record at the new head. ⛔ Before treating a red here as a gate bug, read the log for one of the FIVE `::warning::` lines rule (c) emits: **three** name a *declared*, deliberate refusal (branch rewritten / a non-merge commit after the review / the ANCHOR-held over-block), **one** is a TRANSIENT read failure whose action is "re-run, do not re-record", and the last is the PROBE CAP — `stopped after N distinct SIGNED patch probes`, which can cost the carry on a PR with many recorded reviews; **`is NOT an ancestor of this PR's head`** — the branch was force-pushed/rebased/amended rather than advanced, so a carry would approve a history this branch no longer has; **`gained a NON-MERGE commit after the reviewed sha`** — the PR's own content changed after the review, which is not a base advance; **`could not READ this PR's commit graph`** — a FAIL-CLOSED refusal, not evidence the review is stale: **re-run the job first**, the carry may still apply; **`the ANCHOR held`** — the reviewed bytes were reproduced but the authored change still differs, which is either new content (a fresh review IS owed) or the declared OVER-BLOCK where a base advance rewrote the hunk's enclosing-scope heading. ⛔ If NONE of them is present, **re-run the job first**: several failure arms are SILENT and fail-closed by design — the base-sha read (`p_base` not 40-hex), the reviewed-diff `compare` fetch (failed, empty, or no `diff --git`), an ANCHOR mismatch, and an empty projection all refuse without a warning, and a marker minted with the producer's legacy **raw** digest lands here too (refused by design, see the residual list above). Only a RE-RUN that still refuses, on a base advanced by **merge**, with nothing you authored changed, is a bug in this gate — not a missing review |
 | `NO marker in this PR's body[ or its admitted comments] is bound to <head>` | the stale verdict, stated as what it examined: `or its admitted comments` appears only when the comment channel was actually read. It prints `candidate marker(s): N` (with their shas), the channel the last candidate came from, the head it expected, and the provenance of BOTH sources (`body=<rest-live\|event-snapshot>`, `comments=<read\|NOT-READ>`) | if `body=event-snapshot` the run judged a body frozen at the event, so re-run the check before acting — a record posted afterwards is invisible to it; if `comments=NOT-READ` the comment side was never examined; otherwise re-record at the head |
 | `the LIVE body could not be used (…)` | the run fell back to the event payload: the REST read failed, or it succeeded and returned an empty body | re-run the check before acting on the verdict; the evidence may still be valid |
 | `live diff hash could not be computed` | the REST diff fetch failed; a `diff=` marker fails closed rather than carrying forward | re-run the job once the API is reachable — the evidence may still be valid |
