@@ -1207,6 +1207,35 @@ _SIGNAL_DURING_CONSTRUCTION_CHILD = (
     "    while time.time() < deadline and getattr(lc, '_deferred_signum', None) is None:\n"
     "        time.sleep(0.01)\n"
     "    print('DEFERRED=%%s' %% (getattr(lc, '_deferred_signum', None),), flush=True)\n"
+    "    # #3055 review F4: the server is UP at this point (`record_owner` runs\n"
+    "    # after `RedisMixin.__init__` waited for the socket), so its pid is\n"
+    "    # readable NOW. Reporting it makes the \"server is gone\" assertion\n"
+    "    # unconditional: the post-close state has no registry left to read, so\n"
+    "    # a pid captured only from the parent side cannot distinguish \"closed\"\n"
+    "    # from \"never built\".\n"
+    "    import json as _json, pathlib as _pathlib\n"
+    "    _pid = None\n"
+    "    try:\n"
+    "        _reg = _json.loads(_pathlib.Path(sys.argv[1] + '.settings').read_text())\n"
+    "        _pf = _reg.get('pidfile')\n"
+    "        if _pf and os.path.exists(_pf):\n"
+    "            _pid = int(_pathlib.Path(_pf).read_text().strip())\n"
+    "    except Exception as _exc:\n"
+    "        print('PID_READ_ERROR=%%s' %% (_exc,), flush=True)\n"
+    "    print('SERVER_PID=%%s' %% (_pid,), flush=True)\n"
+    "    # Liveness is read HERE, inside the window, where it is a fact rather\n"
+    "    # than a race: the parent's probe would land after the child has\n"
+    "    # already resumed, completed construction and torn the server down,\n"
+    "    # so probing from outside made the precondition flaky (measured once\n"
+    "    # in six runs).\n"
+    "    _live = False\n"
+    "    if _pid:\n"
+    "        try:\n"
+    "            os.kill(_pid, 0)\n"
+    "            _live = True\n"
+    "        except OSError:\n"
+    "            _live = False\n"
+    "    print('SERVER_ALIVE=%%s' %% (_live,), flush=True)\n"
     "    return _orig(sock)\n"
     "lc.record_owner = _parked_record_owner\n"
     "from tortoise import FalkorDB\n"
@@ -1215,10 +1244,7 @@ _SIGNAL_DURING_CONSTRUCTION_CHILD = (
     "time.sleep(600)\n"
 )
 
-#: Tests 2/3's child: open the window by hand, self-signal inside it, and
-#: report whether the process was still alive afterwards. No redislite, no
-#: construction — this isolates the deferral seam itself, so a regression is
-#: not hidden behind whether a server happened to exist.
+#: Test 2's child: park a signal, then leave the window (#3055).
 _DEFER_WINDOW_CHILD = (
     "import sys, time, os, signal\n"
     "sys.path.insert(0, %(root)r)\n"
@@ -1242,6 +1268,68 @@ _DEFER_WINDOW_CHILD = (
     "        raise RuntimeError('construction aborted')\n"
     "print('REACHED_AFTER_WINDOW', flush=True)\n"
     "time.sleep(600)\n"
+)
+
+
+#: Test 4's child (fresh-context review F3): fork from INSIDE an open window
+#: and ask the CHILD — which never entered that window — to stop. The child
+#: must die by the signal immediately. Pre-fix it inherits `_defer_depth == 1`
+#: from a window it cannot close (the thread that opened it does not exist in
+#: the child), so the request is parked forever and the child reaches its own
+#: `os._exit(7)`. The outer process reports the wait status, so the assertion
+#: never depends on the outer process dying.
+_DEFER_FORK_CHILD = (
+    "import sys, time, os, signal\n"
+    "sys.path.insert(0, %(root)r)\n"
+    "from tortoise.embedded_lifecycle import (\n"
+    "    defer_terminating_signals, install_embedded_signal_cleanup)\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
+    "try:\n"
+    "    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})\n"
+    "except (AttributeError, OSError, ValueError):\n"
+    "    pass\n"
+    "install_embedded_signal_cleanup()\n"
+    "print('HANDLER_INSTALLED=%%s' %% (signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL,),"
+    " flush=True)\n"
+    "with defer_terminating_signals():\n"
+    "    pid = os.fork()\n"
+    "    if pid == 0:\n"
+    "        os.kill(os.getpid(), signal.SIGTERM)\n"
+    "        time.sleep(5)\n"
+    "        os._exit(7)\n"
+    "    print('FORKED_CHILD=%%s' %% pid, flush=True)\n"
+    "    _pid, status = os.waitpid(pid, 0)\n"
+    "    print('CHILD_SIGNALED=%%s' %% (os.WIFSIGNALED(status),), flush=True)\n"
+    "    print('CHILD_SIGNUM=%%s' %% (os.WTERMSIG(status) if os.WIFSIGNALED(status) else -1,),"
+    " flush=True)\n"
+    "os._exit(0)\n"
+)
+
+#: Test 5's child (fresh-context review F2): park a signal and then STAY inside
+#: the window — a construction that is slow rather than hung. The recorded
+#: bound says a stuck start cannot swallow the stop, so the watchdog must close
+#: the servers and end the process BEFORE the construction returns; the
+#: documented convention on that path is `os._exit(128+signum)` (143), because
+#: the watchdog is not the main thread and cannot restore the disposition.
+_DEFER_DEADLINE_CHILD = (
+    "import sys, time, os, signal\n"
+    "sys.path.insert(0, %(root)r)\n"
+    "import tortoise.embedded_lifecycle as lc\n"
+    "lc._DEFER_DEADLINE_S = %(bound)s\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
+    "try:\n"
+    "    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})\n"
+    "except (AttributeError, OSError, ValueError):\n"
+    "    pass\n"
+    "lc.install_embedded_signal_cleanup()\n"
+    "print('HANDLER_INSTALLED=%%s' %% (signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL,),"
+    " flush=True)\n"
+    "with lc.defer_terminating_signals():\n"
+    "    os.kill(os.getpid(), signal.SIGTERM)\n"
+    "    print('SIGNAL_SENT', flush=True)\n"
+    "    time.sleep(%(hold)s)\n"
+    "    print('WINDOW_LEFT_WITHOUT_DYING', flush=True)\n"
+    "print('REACHED_AFTER_WINDOW', flush=True)\n"
 )
 
 
@@ -1306,6 +1394,20 @@ def test_terminating_signal_during_construction_still_closes_the_server(tmp_path
             "#3055: the signal was NOT parked while the construction window was "
             f"open ({deferred_line!r}) — the deferral seam did not engage, "
             "so the handler tore down a half-built client instead")
+        # #3055 review F4: the pid is captured from INSIDE the window (the
+        # server is up; the registry is removed by the close), so this half of
+        # the contract is asserted unconditionally instead of being gated on a
+        # registry that only exists in the failure case.
+        pid_line = _read_child_line(proc, "SERVER_PID=")
+        alive_line = _read_child_line(proc, "SERVER_ALIVE=")
+        assert pid_line != "SERVER_PID=None", (
+            "#3055: no embedded server was ever built, so this run cannot show "
+            f"the teardown closed one ({_child_diagnosis(proc)[:400]})")
+        redis_pid = int(pid_line.split("=", 1)[1])
+        assert alive_line == "SERVER_ALIVE=True", (
+            f"#3055: the embedded server (pid {redis_pid}) was already gone "
+            "BEFORE the parent was signalled, so this run cannot show the "
+            "teardown closed it")
         try:
             proc.wait(timeout=60)
         except _subprocess.TimeoutExpired:
@@ -1317,14 +1419,10 @@ def test_terminating_signal_during_construction_still_closes_the_server(tmp_path
             f"#3055: a deferred terminating signal must still kill the process "
             f"by the signal (expected rc={-signum}, got {proc.returncode}); "
             f"child said: {_child_diagnosis(proc)}")
-        # The server the window was building: read its pid from redislite's
-        # registry if it is still there, and assert it is GONE either way.
-        redis_pid = _registry_redis_pid(dbdir / "sig.db")
-        if redis_pid is not None:
-            assert _wait_server_dead(redis_pid, timeout=_SERVER_DEATH_TIMEOUT_S), (
-                f"#3055: the deferred teardown did not close embedded "
-                f"redis-server (pid {redis_pid}) — the mid-construction signal "
-                "still orphaned the server")
+        assert _wait_server_dead(redis_pid, timeout=_SERVER_DEATH_TIMEOUT_S), (
+            f"#3055: the deferred teardown did not close embedded redis-server "
+            f"(pid {redis_pid}) — the mid-construction signal still orphaned "
+            "the server")
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -1400,6 +1498,152 @@ def test_defer_window_honours_the_signal_when_the_construction_raises(tmp_path):
         f"child said: {out}")
     assert "REACHED_AFTER_WINDOW" not in out, (
         f"the exception escaped the deferral window unhonoured; child said: {out}")
+
+
+def test_defer_state_is_reset_in_a_forked_child(tmp_path):
+    """#3055 review F3: a fork inherits no window, so it must inherit no bound.
+
+    The window spans a whole construction, so a fork taken by another thread
+    while any construction is in flight is WIDE. Pre-fix the child inherits
+    `_defer_depth == 1` from a window whose owner thread does not exist in the
+    child, so the child's first terminating signal is parked and never
+    re-delivered — a stop silently swallowed, the fail-open class #4879 and
+    #4926 fixed for the other two registries.
+    """
+    if not hasattr(os, "fork"):  # pragma: no cover - POSIX-only module
+        pytest.skip("POSIX-only: no os.fork")
+    child = _DEFER_FORK_CHILD % {"root": _REPO_ROOT}
+    proc, lines = _run_child_and_read(
+        [sys.executable, "-c", child, str(tmp_path)],
+        ("HANDLER_INSTALLED=", "FORKED_CHILD="))
+    try:
+        assert lines["HANDLER_INSTALLED="] == "HANDLER_INSTALLED=True", (
+            "#6177: the child did not install the guard "
+            f"({lines['HANDLER_INSTALLED=']!r})")
+        signalled = _read_child_line(proc, "CHILD_SIGNALED=")
+        signum_line = _read_child_line(proc, "CHILD_SIGNUM=")
+        assert signalled == "CHILD_SIGNALED=True", (
+            "#3055 F3: the forked child did not die by the signal — it inherited "
+            "an open deferral window it could never close, so the stop was "
+            f"parked forever ({signalled!r})")
+        assert signum_line == f"CHILD_SIGNUM={int(_signal.SIGTERM)}", (
+            f"#3055 F3: the forked child died by the wrong signal ({signum_line!r})")
+        proc.wait(timeout=60)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+
+
+def test_defer_watchdog_bounds_a_request_parked_before_the_deadline(tmp_path):
+    """#3055 review F2: the bound must hold a PARKED request, not just the park.
+
+    The recorded decision's wiring table says a slow construction "cannot
+    swallow the stop", but the first cut read `_DEFER_DEADLINE_S` only when a
+    signal ARRIVED, so a request parked before the deadline waited on the
+    window's `finally` — which a construction that never returns never
+    reaches, and the supervisor's SIGKILL then left the unrecorded orphan this
+    seam exists to prevent.
+
+    The child parks a SIGTERM and then sits inside the window for 8x the bound.
+    It must be gone WELL BEFORE that, and by the documented non-main-thread
+    convention (`os._exit(128+signum)` = 143), not by the signal, because the
+    watchdog cannot restore the disposition. Pre-fix it survives the whole
+    sleep and then dies by the signal at window exit (rc=-15).
+    """
+    bound = 0.5
+    hold = 8.0
+    child = _DEFER_DEADLINE_CHILD % {
+        "root": _REPO_ROOT, "bound": bound, "hold": hold}
+    proc, lines = _run_child_and_read(
+        [sys.executable, "-c", child, str(tmp_path)],
+        ("HANDLER_INSTALLED=", "SIGNAL_SENT"))
+    started = time.time()
+    try:
+        assert lines["HANDLER_INSTALLED="] == "HANDLER_INSTALLED=True", (
+            "#6177: the child did not install the guard "
+            f"({lines['HANDLER_INSTALLED=']!r})")
+        proc.wait(timeout=bound * 2 + 20)
+    except _subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail("#3055 F2: the parked request was never honoured — the "
+                    f"child held the stop past the {bound}s bound; child said: "
+                    f"{_child_diagnosis(proc)}")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        if proc.returncode is None:
+            proc.wait()
+    elapsed = time.time() - started
+    out = _child_diagnosis(proc)
+    assert proc.returncode == 128 + int(_signal.SIGTERM), (
+        "#3055 F2: the deadline must end the process from the watchdog thread "
+        f"(expected rc={128 + int(_signal.SIGTERM)}, got {proc.returncode}) — "
+        f"child said: {out}")
+    assert elapsed < hold, (
+        f"#3055 F2: the stop was held for {elapsed:.1f}s, past the {bound}s "
+        f"bound (the construction released it, not the deadline); "
+        f"child said: {out}")
+    assert "WINDOW_LEFT_WITHOUT_DYING" not in out, (
+        f"#3055 F2: the construction returned while a stop was parked; {out}")
+
+
+class _TripwireLock:
+    """A lock that fails the test the moment anything acquires it.
+
+    Used to pin the fresh-context review's F1 rule: the SIGNAL HANDLER must
+    never take the deferral lock. Python runs handlers on the main thread at a
+    bytecode boundary, so a handler that took a non-reentrant lock would
+    deadlock whenever the signal interrupted that same thread inside the
+    lock's critical section — no death, no teardown, no close, and the
+    supervisor's SIGKILL then leaves the unrecorded orphan #3055 exists to
+    prevent.
+    """
+
+    def acquire(self, *args, **kwargs):
+        raise AssertionError(
+            "#3055 F1: the terminating-signal handler took the deferral lock — "
+            "a signal interrupting that same thread's critical section now "
+            "deadlocks the process and the stop is never honoured")
+
+    def release(self):  # pragma: no cover - acquire never succeeds
+        pass
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def test_signal_handler_never_takes_the_deferral_lock():
+    """#3055 review F1: the park is lock-free, proven rather than asserted.
+
+    The window side legitimately takes `_defer_lock`; the HANDLER must not.
+    With the lock replaced by a tripwire, a handler that took it would raise
+    instead of parking — so the pre-fix code fails this test, and this
+    exercises the path that a real signal makes unobservable (a signal landing
+    inside the main thread's own critical section).
+    """
+    from tortoise import embedded_lifecycle as lc
+
+    signum = _signal.SIGTERM
+    original_lock = lc._defer_lock
+    window = lc.defer_terminating_signals()
+    window.__enter__()
+    try:
+        lc._defer_lock = _TripwireLock()
+        lc._embedded_term_handler(signum, None)
+        assert lc._deferred_signum == int(signum), (
+            "#3055 F1: the handler did not park the request "
+            f"({lc._deferred_signum!r})")
+        # Never honour a synthetic park in the test process: clearing it is
+        # what makes this test survive its own window.
+        lc._deferred_signum = None
+    finally:
+        lc._defer_lock = original_lock
+        window.__exit__(None, None, None)
 
 
 def test_sigkill_owner_record_lets_reaper_reclaim_the_server(tmp_path,
