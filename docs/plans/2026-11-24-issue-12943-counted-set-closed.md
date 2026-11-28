@@ -9,7 +9,15 @@ aboutSubjects: tortoise
 aboutObjects: tortoise-hosted-api, tortoise-cache-projection, tortoise-storage
 ---
 <!-- research-path: issue daniel-ospina/tortoise#12943 comment carrying `<!-- research: v1 -->` (7236051267) -->
-<!-- plan-review: cycles=<n>, status=<clean|threat-surface-covered>, version=2.3.0 -->
+<!-- plan-review: cycles=1, status=open, version=2.3.0 -->
+<!-- ⛔ THE SCHEMA'S OTHER TWO VALUES ARE `clean` AND `threat-surface-covered`, and this lane may
+     record NEITHER: it has no `task` tool by dispatch contract, so the plan's review round IS the
+     harness reviewer at the PR head, and round 1 returned three P2 findings (all fixed). The
+     authoritative CLEAN verdict for this head is the signed attestation the harness mints
+     (`review recorded: reviews/14810.json verdict=… @ <sha> (daniel-ospina/tortoise)`), not this
+     line — and a line claiming `clean` before that exists would be the exact fabrication the
+     review-discipline rule forbids. `status=open` is the honest value here; do not "fix" it to
+     `clean` without an attestation at this head. (Review round 1, P2-3.) -->
 
 # #12943 — the counted population is closed, and the lane that was outside it is inside
 
@@ -62,7 +70,7 @@ and the lane is one hop from the sanctioned writer.
 | 3 | **Add the call AND make the named set mechanical (chosen)** | Cheap: one call, one constant, one AST census. The census is what makes "closed" **checkable** instead of another prose promise — a new lane fails the suite until it is declared, which is `tests/test_9124_declared_live_doors.py`'s established idiom in this repo (*"derived from the SOURCE … so a function added later cannot slip in undeclared"*). |
 | 4 | Derive the counted set at RUNTIME (wrap the helper, census call sites dynamically) | The helper is already the single chokepoint; what is missing is *which callers are supposed to exist*. A runtime census answers "who called", never "who should have". It also cannot fail a PR. |
 
-Chosen: **3**. It closes the instance, the class, and the drift, and each half is independently
+Chosen: **3**. It closes the instance and the DECLARATION drift, and each half is independently
 falsifiable.
 
 ## 3. Complexity and domains
@@ -141,7 +149,12 @@ measure you cannot compute over a population you cannot enumerate, which is why 
 
 ## 8. Rounds
 
-`**Rounds:** <n> (verifiers: <n>, class: code)` — filled at PLAN-VERIFY close.
+`**Rounds:** 1 (verifiers: 1, class: code)` — the plan's review round is the harness reviewer at the
+PR head (this lane has no `task` tool by dispatch contract, so no separate PLAN-VERIFY verifier is
+dispatched). Round 1 returned three P2 findings, all fixed: a third hand count left in
+`cache_leg.py`'s `_TARGETS` docstring, an over-broad census claim (it binds the declaration against
+the call sites, not the omission direction), and this marker being an unfilled template. A capped or
+unclean exit is never reported as clean — see the marker's own note above.
 
 ### Review Scope Contract
 

@@ -128,10 +128,10 @@ _TARGETS_CAP = 16
 #: and its lock. Not an attempt count and not a row count — see
 #: :func:`note_cache_write_target`'s own paragraph for what it does and does not
 #: bound.
-#: Written by :func:`note_cache_write_target` from the seven live lanes — the fold,
-#: the structural-edge mint, three declared gateways, and two hosted
-#: session-delete sweeps — so the UNIT is one lane operation (a fold, a mint, a
-#: gateway statement, a sweep), not one journal record.
+#: Written by :func:`note_cache_write_target` from the EIGHT live lanes declared
+#: in :data:`_COUNTED_LIVE_WRITE_LANES` — do not hand-count them here, that count
+#: already rotted once (#12943) — so the UNIT is one lane operation (a fold, a
+#: mint, a gateway statement, a sweep), not one journal record.
 #: Read it for WHERE a process writes; do not read it as "writes landed", because
 #: an arm whose fold returns no count is counted even when its statement matched
 #: 0 rows (the bound is stated on `note_cache_write_target`).
@@ -235,10 +235,21 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     EIGHT call sites, and the list is CLOSED rather than implied. The authority is
     :data:`_COUNTED_LIVE_WRITE_LANES`, and an AST census
     (`tests/test_12943_cache_leg.py::test_the_declared_counted_set_is_the_ACTUAL_call_sites`)
-    re-derives it from the source, so a lane added tomorrow fails the suite until
-    it is declared instead of quietly reading `{}`.
+    checks the DECLARATION against the CALL SITES, so a lane that CALLS this
+    helper cannot go undeclared and a stale row cannot linger.
     ``projection.note_live_write_target`` is the ONE helper all of them go
     through, so the endpoint resolution has a single owner.
+
+    ⛔ WHAT THE CENSUS DOES *NOT* BIND, stated because the first draft of this
+    paragraph claimed it did (review round 1, P2-2): **the OMISSION direction.**
+    A lane that writes the cache and never calls the helper produces no `ast.Call`
+    to find, so the census stays green at eight while that lane reads `{}` — which
+    is precisely the #12943 defect (`_seed_demo_graph` wrote 26 nodes with no
+    call, and no count of call sites could have seen it). Closing that direction
+    is not a job for a caller-side census; it belongs where §17.1 already puts it —
+    at the write handle's own statement census (`_GuardedGraph`), plus review.
+    What this list buys is that the SET OF CALLERS is honest and stable, which is
+    the half that can be checked mechanically.
 
     * ``FalkorProjection.apply`` — the fold every door passes (SDK, REST, MCP,
       capture, the metadata lanes), counted once per fold that RETURNED and that
@@ -265,8 +276,10 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
       before it was declared: 26 nodes across five labels landed and
       ``cache_write_targets`` read ``{}``.
 
-    A NINTH lane added tomorrow must be added here — and it cannot be forgotten
-    silently: the census above fails on an undeclared call site.
+    A NINTH lane added tomorrow must be added here — and if it CALLS the helper
+    without a row, the census above reds. (A ninth lane that does not call it is
+    the omission direction, which no caller-side census can see: §17.1's handle
+    census is where that lives.)
     The residual is narrower than "any raw statement": it is a raw statement that
     does NOT choose its graph (the capture provenance stamps,
     ``_CAPTURE_PROVENANCE_LANE``), and it is named on the helper.

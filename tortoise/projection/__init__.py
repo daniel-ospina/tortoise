@@ -4746,10 +4746,17 @@ def note_live_write_target(proj) -> None:
     THIS process's live writes go" is what turns that into a measurement.
 
     The CLOSED, NAMED population is `tortoise.cache_leg._COUNTED_LIVE_WRITE_LANES`
-    — an AST census in `tests/test_12943_cache_leg.py` re-derives it from the
-    source, so a lane missing from it fails the suite rather than quietly reading
-    `{}` — and this helper is where every one of them records. Stated, not
-    implied:
+    — an AST census in `tests/test_12943_cache_leg.py` checks that declaration
+    against the CALL SITES, so a lane that CALLS this helper cannot go undeclared
+    and a stale row cannot linger — and this helper is where every one of them
+    records. Stated, not implied:
+
+    ⛔ It does NOT bind the OMISSION direction, and claiming it did was review
+    round 1's P2-2: a lane that writes the cache and never calls this helper
+    leaves no `ast.Call` to find, so the census stays green while that lane reads
+    `{}` — the #12943 defect itself (`_seed_demo_graph` wrote 26 nodes with no
+    call). That direction is closed at the write handle's own statement census
+    (§17.1), plus review; it is not a job for a caller-side check.
 
     * the fold (`FalkorProjection.apply`) — once per fold that RETURNED without a
       `_skip()` mark. That is a STATEMENT test, not a landed-row test, in BOTH

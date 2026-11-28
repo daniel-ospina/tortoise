@@ -1390,8 +1390,12 @@ def test_hosted_session_delete_records_its_target(monkeypatch, tmp_path):
 # review cycles of that PR (5, 6 and 7) each found exactly one more lane, and the
 # last one measured this: `_seed_demo_graph` writes 26 nodes across five labels
 # and the registry reads `{}`, byte-identical to "this process took no live cache
-# write". These two tests close the instance and the class: the lane is counted,
-# and the population is a named set a census can check.
+# write". These two tests close the INSTANCE and the DECLARATION DRIFT: the lane
+# is counted, and the population is a named set checked against its call sites.
+# ⛔ NOT "the class": a ninth lane that writes the cache and never calls the
+# helper leaves no `ast.Call` for the census to find, so it stays green — that
+# omission direction is §17.1's write-handle statement census, not this file's
+# (review round 1, P2-2: the first draft of this comment claimed the class).
 
 
 def test_the_demo_seeder_records_its_target(monkeypatch, tmp_path):
@@ -1489,11 +1493,19 @@ def test_the_declared_counted_set_is_the_ACTUAL_call_sites():
     This is the finding that ended #13363's three-cycle tail: the registry's prose
     claimed a universal over an open-ended population, and every review round that
     hunted another lane found one. A CLOSED set makes the claim true and
-    terminates the search — as long as something re-derives it. That is this test.
+    terminates the search — as long as something checks it. That is this test.
 
-    It fails in both directions, which is the point: an undeclared new lane (the
-    finding class), and a stale row for a lane that was renamed or deleted (which
-    would make the census pass by agreeing about something that no longer exists).
+    It fails in both directions of the DECLARATION: a caller the constant does not
+    list, and a row for a lane that was renamed or deleted (which would make the
+    census pass by agreeing about something that no longer exists).
+
+    ⛔ WHAT IT CANNOT SEE, stated because the first draft claimed it closed the
+    class (review round 1, P2-2): a ninth lane that writes the cache and never
+    calls `note_live_write_target` produces no `ast.Call`, so `discovered ==
+    declared` stays true and nothing reds — while that lane reads `{}`. That is
+    the #12943 defect itself, and no caller-side census can reach it; it belongs
+    at the write handle's statement census (§17.1). This test binds the set of
+    CALLERS, which is the half that can be checked mechanically.
     """
     from tortoise.cache_leg import _COUNTED_LIVE_WRITE_LANES
 
