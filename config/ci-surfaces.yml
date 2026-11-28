@@ -72,17 +72,22 @@ version: 1
 # differ by `124/118` (a stable pair — `git diff a01675b50c 344a1c086e --
 # config/ci-surfaces.yml` -> `124 118`, both endpoints named so the reading is reproducible), and
 # the row is present in `origin/main`'s
-# manifest and ABSENT from the PRE-FOLD BASE's, so the fold brought it in) — and this lane registers
-# ONE row of its OWN (`tests/test_relation_orientation_14304.py`, `core`, at the same flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`), so the two rows are named separately rather than one standing for both.
-# With this lane's row on the tree, the verb packs five shards at 828.2 s (a, g, i, j, k) and six at
-# 828.1 s (b, c, d, e, f,
-# h), so `ceil(828.2/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST
-# shard's) — and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
-# (1680 / 828.2 = 2.0285) on every one of the eleven shards, so the two agree by construction
-# rather than by a hand re-read. ⛔ THE FIGURES ABOVE ARE A RE-MEASUREMENT ON THIS MERGED TREE with
-# `--emit-push-matrix`, not #14723's seven-and-four or this lane's own pre-fold five-and-six: a row
-# landing moves the bins, so neither earlier spelling describes this head.
+# manifest and ABSENT from the PRE-FOLD BASE's, so the fold brought it in), and `main` now also
+# carries `tests/test_relation_orientation_14304.py` (`core`, the same flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`) from #14790 — so this tree holds BOTH of `main`'s rows rather than either
+# standing in for the other, and this PR registers ONE row of its OWN on top of them
+# (`tests/test_14198_contradiction_closure.py`).
+# With `main`'s two rows AND this PR's registration on the tree, the verb packs three shards at
+# 828.4 s (a, j, k) and eight at
+# 828.3 s (b, c, d, e, f, g, h, i), so `ceil(828.4/60 x 2)` = 28 m governs (a shard's job-level wall
+# clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
+# `watchdog_headroom: 2.03`
+# (1680 / 828.4 = 2.0280) on every one of the eleven shards, so the two agree by construction
+# rather than by a hand re-read. ⛔ THE FIGURES ABOVE ARE A RE-MEASUREMENT ON THIS REBASED TREE with
+# `--emit-push-matrix`, and neither parent's spelling describes it: #14723 measured seven-and-four,
+# #14790 measured five-and-six with only its own row on top of that, and an earlier cut of this
+# branch measured five-and-six too. A row landing moves the bins, so two parents' re-derivations
+# must never be spliced into one sentence — that splice is what this re-derivation replaces.
 # ⛔ #14723 RE-DERIVED THIS SENTENCE ON `main` ITSELF, and the attribution is corrected here rather
 # than carried (#14587 review cycle 10, P2, MEASURED): `tests/test_14691_structure_evidence.py` is
 # `main`'s row — it is already in `git show 344a1c086e06:config/ci-surfaces.yml` — so it is NOT this
@@ -94,14 +99,14 @@ version: 1
 # reads). Measured by loading each tree's OWN manifest through `fast_pool()` — `git show
 # origin/main:config/ci-surfaces.yml` for the other side:
 # `set(fast_pool(head)) - set(fast_pool(main))` returns exactly ONE entry,
-# `tests/test_relation_orientation_14304.py` (`core`, flat 2.0 s) — the row THIS lane registers — and
-# the reverse difference is empty. So the delta here is that one row and nothing else; on the
-# PRE-merge tree it was empty, which is why an earlier spelling of this paragraph said there was
-# none.
+# `tests/test_14198_contradiction_closure.py` (`core`, flat 2.0 s) — the registration THIS PR adds;
+# #14790's `tests/test_relation_orientation_14304.py` is `main`'s own row and is on both sides, so it
+# is not this delta — and
+# the reverse difference is empty. So the delta here is that one registration and nothing else.
 # ⛔ THAT IS WHY THE PARTITION IS STATED AND NOT ONLY THE MINUTE: an arithmetic check on `28 m`
 # cannot see a carried figure, and a reader comparing only minutes would call the move cosmetic. The
-# same lesson recurs one notice down: five-and-six is not #14723's seven-and-four, and the MINUTE and
-# the headroom are identical on all three spellings.
+# same lesson recurs one notice down: three-and-eight is not #14723's seven-and-four, and the MINUTE
+# and the headroom are identical on every spelling.
 # ⛔ No pool SIZE is restated BY THIS RE-DERIVATION, and the reason is a recorded ruling rather
 # than a preference (#14691 review, round 15, finding 4): the repo's own doctrine is at
 # `tests/test_ci_selection.py` — "a pool size is a measurement with several independent reasons to
@@ -270,12 +275,14 @@ version: 1
 # every `durations_floors` entry and `tier1`, value by value, zero differing". That was TRUE of the
 # fold whose delta it measured (a two-sentence prose repair, which touched neither the surface map
 # nor the selector) and FALSE from the moment a lane that REGISTERS a row carried it: on this tree
-# the `core` surface list and the `durations` map each hold one entry `main` does not
-# (`tests/test_relation_orientation_14304.py`, this lane's), while `durations_floors` and `tier1`
-# still compare equal — so the blanket word is the defect here, and the per-key reading is the
+# `surfaces[core]` holds exactly one entry `main` lacks
+# (`tests/test_14198_contradiction_closure.py`, this PR's registration — no `durations` row, so the
+# flat `DEFAULT_FAST_WEIGHT` applies), while the `durations` map, `durations_floors`, `tier1`,
+# `slow_files`, `carve_out` and `on_demand` carry no entry `main` lacks and drop none `main` holds
+# — so the blanket word is the defect here, and the per-key reading is the
 # durable form, because it is what settles which of the two a given head is (measured at this head
 # with a per-key parse of the two manifests, #14587 review cycle 10, P2 — that cycle found the word
-# TRUE because the row registering it had since landed on `main`; #14304 registers a new one, so it
+# TRUE because the row registering it had since landed on `main`; this PR registers a new one, so it
 # is false again, which is exactly why the reading is re-done rather than remembered). ⛔ NO POOL SIZE AND NO ROW COUNT IS STATED HERE as a claim about
 # this head, on purpose: written as figures they owe a re-measurement to whoever next moves one and
 # nothing grades them, which is exactly the rot this block's own doctrine names. ⛔ THE DELTA IS A
@@ -7799,6 +7806,22 @@ surfaces:
   # (the durations-row case-count arm reads durations rows only).
   - test_14357_fallback_thinking.py
   - test_extractor_embed_coerce_5060.py  # #5060: execute_embed must not raise on a non-string name/content (whole-session payload loss)
+  # #14198: a DECLARED contradiction whose older side lives in a PRIOR capture
+  # CLOSES that claim's interval (CORRECTS + `validTo`/`expiredAt`, the claim
+  # RETAINED as terminal — §2.0, never deleted, never folded) instead of being
+  # dropped at `execute_embed`'s operator pass, where `_resolve` reads only
+  # THIS capture's ids. Its subject is `tortoise/extractor_v2.py` — the
+  # default `core` surface — and it sits beside the other `execute_embed`
+  # guards for the same reason. ⛔ It was in NO surface when the PR opened it
+  # (review P0, measured): `tools/ci_selection.py --integrity` reported
+  # `manifest drift: ['test_14198_contradiction_closure.py']`, which reds the
+  # REQUIRED `manifest-integrity` leg, and `select()` never emits the file for
+  # a diff — so the regression the PR fixes could return with no red. Hermetic:
+  # a fake model and the eval ingest path on a throwaway EMBEDDED graph — the
+  # fixture passes an explicit `db_path`, which wins over `TORTOISE_DB_URI`
+  # (#139), so the file needs the `TORTOISE_TEST_CARVE_OUT=1` lane and is not
+  # redirected to a live server; no network.
+  - test_14198_contradiction_closure.py
   # #10311: the S2/S4 prompt BODIES frame session text as untrusted DATA — the
   # clause, the body-derived boundary, and the parsing contract that must not
   # move. `core` for the same reason as the rest of the extractor guards: its
