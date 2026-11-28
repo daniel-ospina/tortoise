@@ -32,6 +32,27 @@ from tortoise.sdk import TortoiseSDK
 
 TEST_ORG_ID = "team-001"
 
+#: This module now pays a REAL-EMBEDDER cold load, in one module-scoped fixture
+#: (below), and that load is the reason for this budget. The suite's per-item
+#: default is 300 s (``--timeout=300`` in python-ci.yml); a measured
+#: ``bge-small``-class load is ~57 s on an idle runner and **135.59 s** on this
+#: project's own dev box — and on a box saturated by parallel lanes it crosses
+#: 300 s outright, which kills the WARM-UP inside setup and errors all sixteen
+#: tests before one of them runs (observed 2026-11-28 at load 26-34: `16 errors`,
+#: every one `Failed: Timeout (>300.0s)` at ``ERROR at setup of …``). 600 s is
+#: the budget the repository already gives real-embedder modules
+#: (``tests/eval/retrieval/test_integration.py``: `pytestmark =
+#: pytest.mark.timeout(600)  # real-embedder tests load bge-small`), and it is
+#: deliberately just 2x: ``EmbeddingModel.get()`` carries its own
+#: ``_LOAD_TIMEOUT_S`` = 300 s cap, so the loader's own bound still fires first
+#: and the fixture cannot outlive this one.
+#:
+#: ⛔ Not a licence for a hanging test: the assertions in this file are
+#: themselves wall-clock bounded (2.4 s ceiling, ``test_hard_ceiling_never_hangs_caller``),
+#: so a slower outer watchdog changes no outcome — it only stops the SETUP
+#: being mistaken for the failure.
+pytestmark = pytest.mark.timeout(600)
+
 
 # ── hermetic read-path warm-up (#3083) ────────────────────────────────────
 
