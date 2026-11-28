@@ -4745,8 +4745,18 @@ def note_live_write_target(proj) -> None:
     fails, and every counter reads healthy. A per-process answer to "where did
     THIS process's live writes go" is what turns that into a measurement.
 
-    Called from every gateway that writes the cache WITHOUT folding a record,
-    and from the fold itself, so the bound is stated rather than implied:
+    The CLOSED, NAMED population is `tortoise.cache_leg._COUNTED_LIVE_WRITE_LANES`
+    — an AST census in `tests/test_12943_cache_leg.py` checks that declaration
+    against the CALL SITES under `tortoise/`, the walk's own scope, so a lane that
+    CALLS this helper there cannot go undeclared and a stale row cannot linger —
+    and this helper is where every one of them records. Stated, not implied:
+
+    ⛔ It does NOT bind the OMISSION direction, and claiming it did was review
+    round 1's P2-2: a lane that writes the cache and never calls this helper
+    leaves no `ast.Call` to find, so the census stays green while that lane reads
+    `{}` — the #12943 defect itself (`_seed_demo_graph` wrote 26 nodes with no
+    call). That direction is closed at the write handle's own statement census
+    (§17.1), plus review; it is not a job for a caller-side check.
 
     * the fold (`FalkorProjection.apply`) — once per fold that RETURNED without a
       `_skip()` mark. That is a STATEMENT test, not a landed-row test, in BOTH
@@ -4760,9 +4770,11 @@ def note_live_write_target(proj) -> None:
       that already existed (`edges.py` states that bound at the call site).
     * the three declared live gateways that issue their own statements —
       `onboarding.state._run`, `webhook_delivery._run`, `why_snapshot._run` —
-      and the two hosted session-delete sweeps
+      the two hosted session-delete sweeps
       (`hosted_api._capture_session_impl`, `hosted_api.delete_session`), which
-      are raw multi-statement lanes that CHOOSE their graph;
+      are raw multi-statement lanes that CHOOSE their graph, and the opt-in demo
+      seeder `hosted_api._seed_demo_graph` — raw Cypher, org-chosen handle,
+      folding no record (#12943: 26 nodes landed while this read `{}`);
     * and ``replay_window_open()`` excludes every one of them, because a rebuild
       writes the same target on purpose and counting it would let a repair make
       the live picture look healthier than the traffic it repaired — and this
@@ -4777,10 +4789,11 @@ def note_live_write_target(proj) -> None:
     from a lane that does NOT choose its graph — the capture provenance stamps
     (`_CAPTURE_PROVENANCE_LANE`) are the standing example — is not recorded. That
     is accepted because such a writer can only write the graph the SDK is already
-    bound to (it stamps nodes by id), so it cannot hide this class. A lane that
-    CHOOSES a graph calls this helper directly (the two hosted session-delete
-    sweeps are that shape); closing the rest belongs at the write handle, where
-    §17.1's per-statement census already lives.
+    bound to (it stamps nodes by id), so it cannot hide this class. ⛔ That test
+    is about CHOOSING A GRAPH, not about being raw: the graph-choosing lanes under
+    `tortoise/` that call this helper are the rows in
+    `cache_leg._COUNTED_LIVE_WRITE_LANES`; a writer that chooses a graph and never
+    calls it is the OMISSION direction above. §17.1's census closes the rest.
 
     ⛔ TOTAL (#5148's rule): observability must never break a write that already
     landed, so every step — endpoint resolution included — is inside the guard.
@@ -12968,16 +12981,18 @@ class FalkorProjection(
         def _skip() -> None:
             """This call folded NOTHING — say so, then return.
 
-            #12943: the write-target registry counts writes LANDED on a graph,
-            and this fold has many exits that write nothing (a malformed
+            #12943: the write-target registry counts a fold that RETURNED and
+            that no mark covered — a STATEMENT test, never a landed-row test — and
+            this fold has many exits that write nothing (a malformed
             envelope, an unwritable or absent id on the point/operator/promote
             arms, a `PointRevised` with no writable id, a `SourceCreated` /
-            `SourceVersioned` with neither a writable url nor id, an empty
-            `merge_ids`, a re-stamp that folded no Point, a supersede that
-            matched no Object, a 0-row annotator / retract / belief /
+            `SourceVersioned` with neither a writable url nor id, a `merge_ids`
+            with no usable `str` id, a re-stamp that folded no Point, a supersede
+            that matched no Object, a 0-row annotator / retract / belief /
             edge-message fold, an `EntityLinked` or `SessionRecorded` whose
-            statement matched nothing, and the three recognized-not-folded arms
-            at the tail). Counting them
+            statement matched nothing, a `SessionDeleted` with no id, an
+            `EventRecorded` with no writable `eventId`, and the three
+            recognized-not-folded arms at the tail). Counting them
             would answer "how many folds were STARTED"; the one direction that
             matters is the opposite — a record-written / cache-not-written split
             must never read as a write that landed (#12943 review cycle 2,
@@ -12985,8 +13000,8 @@ class FalkorProjection(
 
             ⛔ THE RULE, stated once so the next arm does not have to infer it:
             mark the arm when the record is DECIDABLY a no-write — no statement
-            can be issued (malformed envelope, unwritable/absent id, empty
-            `merge_ids`) or the fold's own return says nothing matched
+            can be issued (malformed envelope, unwritable/absent id, a `merge_ids`
+            with no usable `str` id) or the fold's own return says nothing matched
             (`ObjectSuperseded`, the retract/annotator/belief/edge-message
             folds, `EntityLinked`, `SessionRecorded`, `EntityMutated`).
 

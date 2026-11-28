@@ -1443,12 +1443,23 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # the SYMBOLS are unchanged — only the lines. The rows are therefore no longer
     # a delta against `main`; that is expected on a branch that edits this module,
     # and the re-derivation is still the pin's own documented remedy.
-    ("tortoise/projection/__init__.py", 21208, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:21208`"),
-    ("tortoise/projection/__init__.py", 21651, "def _create_fulltext_index(",
-     "`:21651`"),
-    ("tortoise/projection/__init__.py", 22093,
-     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:22093`"),
+    #
+    # ⛔ AND A THIRD TIME, from #12943: its `tortoise/projection/__init__.py` edits
+    # (the `note_live_write_target` docstring and `_apply_event._skip`'s summary,
+    # both ABOVE all three rows) are a net **+15**, so the previous hop's
+    # 21208/21651/22093 are 21223/21666/22108 here. Measured per row on the live
+    # file (`grep -n`), and the pin's fourth fragment — the `# Ensure pointKind is
+    # present` comment the capstone probe cites — moved 14805 -> 14820 by the same
+    # +15, re-derived by CONTENT in `docs/evidence/7949-capstone/probes/capstone_measure.py`.
+    # The rows below and `docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md`
+    # §1 are ONE fact in TWO carriers: a repair that moves only one side leaves the
+    # other citing a line that holds different text, and the arm below compares them.
+    ("tortoise/projection/__init__.py", 21223, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:21223`"),
+    ("tortoise/projection/__init__.py", 21666, "def _create_fulltext_index(",
+     "`:21666`"),
+    ("tortoise/projection/__init__.py", 22108,
+     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:22108`"),
 )
 
 

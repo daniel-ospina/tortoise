@@ -128,10 +128,10 @@ _TARGETS_CAP = 16
 #: and its lock. Not an attempt count and not a row count — see
 #: :func:`note_cache_write_target`'s own paragraph for what it does and does not
 #: bound.
-#: Written by :func:`note_cache_write_target` from the seven live lanes — the fold,
-#: the structural-edge mint, three declared gateways, and two hosted
-#: session-delete sweeps — so the UNIT is one lane operation (a fold, a mint, a
-#: gateway statement, a sweep), not one journal record.
+#: Written by :func:`note_cache_write_target` from the EIGHT live lanes declared
+#: in :data:`_COUNTED_LIVE_WRITE_LANES` — do not hand-count them here, that count
+#: already rotted once (#12943) — so the UNIT is one lane operation (a fold, a
+#: mint, a gateway statement, a sweep), not one journal record.
 #: Read it for WHERE a process writes; do not read it as "writes landed", because
 #: an arm whose fold returns no count is counted even when its statement matched
 #: 0 rows (the bound is stated on `note_cache_write_target`).
@@ -232,9 +232,32 @@ def cache_store_fingerprint(endpoint: object) -> str:
 def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     """Record one LIVE write lane operation at the store+graph it reached.
 
-    SEVEN call sites, and the list is maintained rather than implied:
-    ``projection.note_live_write_target`` is the ONE helper they all go through,
-    so the endpoint resolution has a single owner.
+    EIGHT call sites, and the list is CLOSED rather than implied. The authority is
+    :data:`_COUNTED_LIVE_WRITE_LANES`, and an AST census
+    (`tests/test_12943_cache_leg.py::test_the_declared_counted_set_is_the_ACTUAL_call_sites`)
+    checks the DECLARATION against the CALL SITES under `tortoise/` — the walk's
+    own scope — so a lane that CALLS this helper there cannot go undeclared and a
+    stale row cannot linger.
+    ``projection.note_live_write_target`` is the ONE helper all of them go
+    through, so the endpoint resolution has a single owner.
+
+    ⛔ WHAT THE CENSUS DOES *NOT* BIND, stated because the first draft of this
+    paragraph claimed it did (review round 1, P2-2): **the OMISSION direction.**
+    A lane that writes the cache and never calls the helper produces no `ast.Call`
+    to find, so the census stays green at eight while that lane reads `{}` — which
+    is precisely the #12943 defect (`_seed_demo_graph` wrote 26 nodes with no
+    call, and no count of call sites could have seen it). Closing that direction
+    is not a job for a caller-side census; it belongs where §17.1 already puts it —
+    at the write handle's own statement census (`_GuardedGraph`), plus review.
+    What this list buys is that the SET OF CALLERS is honest and stable, which is
+    the half that can be checked mechanically.
+
+    ⛔ NOR the FILE SCOPE (review round 8, P2): the walk roots at
+    `(REPO_ROOT / "tortoise").rglob("*.py")`, so a caller added under `tools/`,
+    `graph-scripts/` or `tests/` produces no row and the census stays green. Every
+    call site today is under `tortoise/`; the claim is bounded to that tree rather
+    than to "any caller anywhere", because a universal is exactly what this list
+    replaced.
 
     * ``FalkorProjection.apply`` — the fold every door passes (SDK, REST, MCP,
       capture, the metadata lanes), counted once per fold that RETURNED and that
@@ -255,12 +278,19 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
       ``hosted_api.delete_session``'s ``_delete_session_sync`` — two raw
       multi-statement ``DETACH DELETE`` lanes that CHOOSE their graph and fold no
       record. They are the reason the helper is a sanctioned third option beside
-      "a fold" and "a mint": such a lane calls it directly.
+      "a fold" and "a mint": such a lane calls it directly;
+    * ``hosted_api._seed_demo_graph`` (#12943) — the opt-in demo/sample seeder,
+      raw Cypher, ``proj = sdk._get_proj()`` on an org-chosen handle. Measured
+      before it was declared: 26 nodes across four labels landed and
+      ``cache_write_targets`` read ``{}``.
 
-    An eighth gateway added tomorrow must be added here. The residual is narrower
-    than "any raw statement": it is a raw statement that does NOT choose its graph
-    (the capture provenance stamps, ``_CAPTURE_PROVENANCE_LANE``), and it is named
-    on the helper.
+    A NINTH lane added tomorrow must be added here — and if it CALLS the helper
+    without a row, the census above reds. (A ninth lane that does not call it is
+    the omission direction, which no caller-side census can see: §17.1's handle
+    census is where that lives.)
+    The residual is narrower than "any raw statement": it is a raw statement that
+    does NOT choose its graph (the capture provenance stamps,
+    ``_CAPTURE_PROVENANCE_LANE``), and it is named on the helper.
 
     ⛔ THE RESIDUAL IS NAMED RATHER THAN IMPLIED: a raw statement issued at
     ``proj.g`` inside a live scope — the capture provenance stamps
@@ -268,16 +298,19 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     without passing either lane and is NOT counted. That is accepted because such
     a writer does not CHOOSE its graph (it stamps nodes by id in the graph the
     SDK is already bound to), so it cannot hide the split this registry exists to
-    expose; a lane that could choose would have to go through a fold or a mint.
-    Closing it belongs at the write handle (``_GuardedGraph``), where a
-    per-statement census already exists (§17.1), not here.
+    expose. ⛔ That is the WHOLE of the residual — it says nothing about a lane
+    that DOES choose its graph, which is why the three graph-choosing raw lanes
+    (`_capture_session_impl`'s sweep, `delete_session`, `_seed_demo_graph`) call
+    the helper directly and appear in :data:`_COUNTED_LIVE_WRITE_LANES`. Closing
+    the non-choosing shape belongs at the write handle (``_GuardedGraph``), where
+    a per-statement census already exists (§17.1), not here.
 
     ⛔ REPLAY IS NOT EXCLUDED HERE, and a caller must not assume it is. A rebuild
     WRITES the target on purpose, and counting it would let a repair make the
     picture look healthier than the live traffic it repaired. That exclusion
     lives in exactly ONE place: ``projection.note_live_write_target``, which
     returns before reaching this function when ``replay_window_open()`` is true.
-    All seven live lanes go through that helper, so they inherit it; this
+    All eight live lanes go through that helper, so they inherit it; this
     function is caller-unchecked BY DESIGN and holds no window check of its own.
     A lane that calls it DIRECTLY — instead of through the helper — counts a
     rebuild's writes as live traffic, which is the polarity inversion this
@@ -339,6 +372,47 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
         return key
     except Exception:  # noqa: BLE001, RUF100 — never deny a write that landed
         return "unknown"
+
+
+#: The CLOSED, NAMED population of lanes that count their live cache writes
+#: (#12943). `(repo-relative module path, dotted qualname of the enclosing
+#: class/function)` — the shape this DECLARATION uses; the helper itself records a
+#: store+graph key (`cache_write_targets()`), never a lane identity, so this tuple
+#: is the only place in the codebase that names a lane.
+#:
+#: ⛔ THE POINT IS THAT IT IS CLOSED. The claim this replaced was a UNIVERSAL
+#: ("called from every gateway that writes the cache without folding a record"),
+#: and a universal cannot be satisfied by enumeration: it produced a new finding
+#: in three consecutive review cycles of #13363 (rounds 5, 6 and 7 each found
+#: exactly one more lane). A named set makes the claim TRUE and terminates the
+#: search — `tests/test_12943_cache_leg.py::
+#: test_the_declared_counted_set_is_the_ACTUAL_call_sites` re-derives this list
+#: from the SOURCE (under `tortoise/`, the walk's own scope) with an AST census,
+#: so a ninth lane THERE cannot slip in undeclared and a stale row cannot linger.
+#:
+#: A row is here if the lane issues its OWN statements against the cache graph
+#: and folds no record (or, for the two `apply`-side rows, IS the write seam). A
+#: raw statement that cannot choose its graph — the capture provenance stamps,
+#: `_CAPTURE_PROVENANCE_LANE` — is NOT here and needs no row: it can only write
+#: the graph the SDK is already bound to, so it cannot hide the record/cache
+#: split. That is the residual, and it is stated on the helper as well.
+_COUNTED_LIVE_WRITE_LANES: tuple[tuple[str, str], ...] = (
+    # the fold — every door that goes through the projection
+    ("tortoise/projection/__init__.py", "FalkorProjection.apply"),
+    # the structural-edge mint: `create_edge` and the about-lane never fold
+    ("tortoise/projection/edges.py",
+     "_EdgeHandlers._record_structural_edges"),
+    # the three declared live gateways (each issues its own statements)
+    ("tortoise/onboarding/state.py", "_run"),
+    ("tortoise/webhook_delivery.py", "_run"),
+    ("tortoise/why_snapshot.py", "_run"),
+    # two raw multi-statement DETACH DELETE sweeps that CHOOSE their graph
+    ("tortoise/hosted_api.py",
+     "_capture_session_impl._report_capture._sweep_orphaned_writes"),
+    ("tortoise/hosted_api.py", "delete_session._delete_session_sync"),
+    # the demo seeder — raw Cypher, chooses its graph, folds no record (#12943)
+    ("tortoise/hosted_api.py", "_seed_demo_graph"),
+)
 
 
 def cache_write_targets() -> dict[str, int]:

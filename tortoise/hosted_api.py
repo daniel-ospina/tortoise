@@ -20598,6 +20598,26 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
         params={"now": now},
     )
 
+    # #12943: this lane CHOOSES ITS GRAPH (`_org_sdk(org_id)` above) and folds no
+    # record — every statement in this function is a raw `proj.g.query`, so the
+    # fold's hook never sees them. Without the recorder below a process whose live
+    # traffic is a demo seed reads `cache_write_targets == {}` — byte-identical to
+    # "this process took no live cache write" — while the 26 nodes ABOVE land in
+    # whatever graph the org credential opened. MEASURED on an embedded SDK before
+    # this line existed: `nodes written: [[26]]`, `cache_write_targets {}` across
+    # four labels. The helper's stated residual excuses a raw writer only because
+    # "such a writer does not CHOOSE its graph"; this one does, so the residual
+    # does not reach it.
+    #
+    # One call for the LANE, after the last statement — the same shape and the same
+    # reason as `_delete_session_sync`'s own recorder: the unit is one lane operation,
+    # not one statement, and the helper is total (its own guard wraps every step,
+    # endpoint resolution included), so it cannot deny a write that already landed.
+    # ⛔ The `already_seeded` early return above issues only a READ and is
+    # deliberately not counted — a registry that moved on a read would report a
+    # target this process never wrote.
+    note_live_write_target(proj)
+
     # `points` is a `:Point` CENSUS of what this call writes (the sentinel
     # excluded — `public_demo` adds it), not a description of the sample
     # content: its only consumer meters a write op — `public_demo` calls

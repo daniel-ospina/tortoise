@@ -1380,3 +1380,157 @@ def test_hosted_session_delete_records_its_target(monkeypatch, tmp_path):
             f"{cache_write_targets()!r}")
     finally:
         sdk.close()
+
+
+# ── 9. the population is CLOSED, and the demo seeder is in it (#12943) ──────
+#
+# #13363's registry was correct on every lane it named. The claim around it was a
+# UNIVERSAL — "called from every gateway that writes the cache without folding a
+# record" — and a universal cannot be satisfied by enumeration: three consecutive
+# review cycles of that PR (5, 6 and 7) each found exactly one more lane, and the
+# last one measured this: `_seed_demo_graph` writes 26 nodes across four labels
+# and the registry reads `{}`, byte-identical to "this process took no live cache
+# write". These two tests close the INSTANCE and the DECLARATION DRIFT: the lane
+# is counted, and the population is a named set checked against its call sites.
+# ⛔ NOT "the class": a ninth lane that writes the cache and never calls the
+# helper leaves no `ast.Call` for the census to find, so it stays green — that
+# omission direction is §17.1's write-handle statement census, not this file's
+# (review round 1, P2-2: the first draft of this comment claimed the class).
+
+
+def test_the_demo_seeder_records_its_target(monkeypatch, tmp_path):
+    """`_seed_demo_graph` CHOOSES its graph and folds no record — count it.
+
+    Every statement in the seeder is a raw `proj.g.query` against an
+    org-resolved handle, so the fold's hook never sees them. The helper's stated
+    residual excuses a raw writer only because "such a writer does not CHOOSE its
+    graph"; `sdk = sdk if sdk is not None else _org_sdk(org_id)` is the choice,
+    so the residual does not reach this lane.
+
+    Both arms are driven, because the registry's polarity fails in two different
+    ways. The seeding run must record a target (without the recorder: 26 nodes
+    and `{}` — measured). The `already_seeded` re-run must NOT, because it issues
+    only a READ, and a registry that moved on a read would report a target this
+    process never wrote.
+    """
+    from tortoise import hosted_api
+    from tortoise.cache_leg import cache_write_targets, reset_cache_write_targets
+
+    _drop_uri(monkeypatch)
+    sdk = _embedded_sdk(tmp_path)
+    try:
+        reset_cache_write_targets()
+        created = hosted_api._seed_demo_graph("org12943demo", sdk=sdk)
+        assert created["status"] == "demo_created", created
+        assert sum(cache_write_targets().values()) >= 1, (
+            "the demo seeder wrote the graph and recorded no target — the "
+            f"sentry reads healthy over an uncounted lane: {cache_write_targets()!r}")
+
+        # The SECOND arm proves the first one actually wrote, without a raw
+        # census query of its own (a `proj.g.query` here would raise this repo's
+        # untyped-receiver ratchet, `tools/sdk_privatise.py --check`): the
+        # sentinel short-circuit only answers `already_seeded` when the seeding
+        # run landed the sentinel node. A seeder that wrote nothing would answer
+        # `demo_created` again and this assertion would red.
+        before = dict(cache_write_targets())
+        again = hosted_api._seed_demo_graph("org12943demo", sdk=sdk)
+        assert again["status"] == "already_seeded", (
+            "the seeding run wrote no sentinel, so the registry assertion above "
+            f"proves nothing: {again!r}")
+        assert cache_write_targets() == before, (
+            "the sentinel short-circuit issues only a READ, so it must not "
+            f"register a write: {cache_write_targets()!r} != {before!r}")
+    finally:
+        sdk.close()
+
+
+def _note_target_call_sites() -> set[tuple[str, str]]:
+    """Every `note_live_write_target(...)` call in `tortoise/`, from the SOURCE.
+
+    `(repo-relative module path, dotted qualname of the enclosing class/function)`
+    — derived with `ast`, never from a hand-maintained list, which is the idiom
+    `tests/test_9124_declared_live_doors.py` established for this repo: a lane
+    added later cannot slip in undeclared because it fails here first.
+
+    ⛔ KNOWN LIMIT, stated rather than implied (the #9124 precedent): a call
+    reached through a variable alias (`f = note_live_write_target; f(proj)`), a
+    `getattr`, or a reference stashed on an object is NOT resolved. Every live
+    caller in this tree spells the name directly, and a lane that obfuscated it
+    would be hiding from review as well as from this census — but the census does
+    not claim to see it.
+    """
+    import ast
+
+    found: set[tuple[str, str]] = set()
+
+    def walk(node: ast.AST, stack: tuple[str, ...]) -> None:
+        for child in ast.iter_child_nodes(node):
+            inner = stack
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef)):
+                inner = (*stack, child.name)
+            if isinstance(child, ast.Call):
+                fn = child.func
+                if isinstance(fn, ast.Name):
+                    called = fn.id
+                elif isinstance(fn, ast.Attribute):
+                    called = fn.attr
+                else:
+                    called = None
+                if called == "note_live_write_target":
+                    found.add((rel, ".".join(stack)))
+            walk(child, inner)
+
+    for path in sorted((REPO_ROOT / "tortoise").rglob("*.py")):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)), ())
+    return found
+
+
+def test_the_declared_counted_set_is_the_ACTUAL_call_sites():
+    """The declared population IS the population — checked, not promised (#12943).
+
+    This is the finding that ended #13363's three-cycle tail: the registry's prose
+    claimed a universal over an open-ended population, and every review round that
+    hunted another lane found one. A CLOSED set makes the claim true and
+    terminates the search — as long as something checks it. That is this test.
+
+    It fails in both directions of the DECLARATION: a caller the constant does not
+    list, and a row for a lane that was renamed or deleted (which would make the
+    census pass by agreeing about something that no longer exists).
+
+    ⛔ WHAT IT CANNOT SEE, stated because the first draft claimed it closed the
+    class (review round 1, P2-2): a ninth lane that writes the cache and never
+    calls `note_live_write_target` produces no `ast.Call`, so `discovered ==
+    declared` stays true and nothing reds — while that lane reads `{}`. That is
+    the #12943 defect itself, and no caller-side census can reach it; it belongs
+    at the write handle's statement census (§17.1). This test binds the set of
+    CALLERS, which is the half that can be checked mechanically.
+    """
+    from tortoise.cache_leg import _COUNTED_LIVE_WRITE_LANES
+
+    discovered = _note_target_call_sites()
+    declared = set(_COUNTED_LIVE_WRITE_LANES)
+
+    # A scanner that silently finds nothing would compare `set() == set()` and
+    # pass over an empty tree — the false green this whole file is about.
+    assert discovered, (
+        "the census resolved no `note_live_write_target` call site at all — that "
+        "is the scanner failing, not the populated set being empty")
+
+    undeclared = sorted(discovered - declared)
+    stale = sorted(declared - discovered)
+    assert discovered == declared, (
+        "the counted live-write population drifted from its declaration.\n"
+        f"  undeclared lane(s) — add a row to `cache_leg._COUNTED_LIVE_WRITE_LANES` "
+        f"and to its docstring count: {undeclared}\n"
+        f"  stale row(s) — the lane was renamed/removed, drop the row: {stale}")
+
+    # Only `cache_leg.note_cache_write_target`'s docstring carries the numeral
+    # (EIGHT call sites / All eight live lanes); `projection.note_live_write_target`
+    # names the population by REFERENCE to `_COUNTED_LIVE_WRITE_LANES` and states
+    # no count — claiming it did was review round 8's P2. A new row must move the
+    # numeral in `cache_leg.py` in the same change, or that prose is false again.
+    assert len(declared) == 8, (
+        f"`cache_leg.py`'s docstrings state EIGHT counted lanes; the declaration "
+        f"has {len(declared)}: {sorted(declared)}")
