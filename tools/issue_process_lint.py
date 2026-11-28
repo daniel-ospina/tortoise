@@ -1513,11 +1513,15 @@ def _blank_declared_ids(text: str, rows: list[str]) -> str:
     bounded so `V1` is never found inside `V10`/`AV1`.
     ⚠️ MEASURED SCOPE OF THAT CLAIM (review round 36, P3): with THIS helper applied there, neither the
     ordering nor the bound is individually load-bearing for a verdict — deleting the range pass or the
-    lookarounds changes no verdict across the suite's bodies, because `_ID_LIST_FILLER_RE` absorbs a
-    leftover join and `_clause_states_a_partial_count`'s own word-boundary lookbehind already blinds a range's
-    digits. They are correctness properties of the helper (a `V10` mention must not be blanked to
-    `0`), not the mechanism behind any pin — the dedup is what this change was for, and the two are
-    stated separately here so the next reader does not mistake one for the other.
+    lookarounds changes no verdict — is FALSE for the second half and is corrected here: the BOUND is
+    pinned by `test_a_mention_of_a_ten_plus_row_id_is_not_partially_blanked`, which reddens when the
+    lookarounds are dropped, because `_clause_states_a_partial_count` then reads the surviving `0` of a
+    `V10` mention as a row count and a correct close abstains. The RANGE pass is genuinely not
+    load-bearing for any verdict (`_ID_LIST_FILLER_RE` absorbs a leftover join); both are correctness
+    properties of the helper, and only one of them has a pin.
+    ⛔ RECORDED BECAUSE IT HAPPENED: the first draft of this paragraph claimed neither half mattered and
+    named "the count read's own lookbehind" as the reason — measured false, in the same commit that
+    added the pin. A comment that understates a guard is how the guard gets deleted.
     """
     blanked = text
     for match in reversed(_range_matches(text, rows)):
@@ -1979,6 +1983,22 @@ def _narrowing_ids(line: str, match: re.Match, rows: list[str],
     return ids
 
 
+def _foreign_closing_sets(line: str, rows: list[str], issue: int | None,
+                          repo: str | None) -> tuple[set[int], set[int]]:
+    """The clause indices that close ANOTHER issue, split into (REF clauses, their QUALIFIERS).
+
+    ⛔ SPLIT BECAUSE THE TWO ARE READ DIFFERENTLY (review round 37, P2). A ref clause is about another
+    issue's SUBJECT, so its `other`-family cue is the org name and is suppressed; a qualifier is about
+    another issue's ROWS and may carry a cue about rows on this line, so it is read normally. The
+    previous round inferred which was which from index adjacency (`(i - 1) in foreign`), and that is
+    provably wrong for two foreign closes in a row: the SECOND ref follows the first one's qualifier and
+    was therefore mistaken for a qualifier, so its `other-org` name disclaimed a correct complete close.
+    Both sets are produced here, from the attribution itself.
+    """
+    refs, quals = _foreign_closing_sets_impl(line, rows, issue, repo)
+    return refs, quals
+
+
 def _foreign_closing_clauses(line: str, rows: list[str], issue: int | None,
                              repo: str | None) -> set[int]:
     """Clause indices that CLOSE A DIFFERENT ISSUE, including each one's attached qualifier.
@@ -1994,8 +2014,17 @@ def _foreign_closing_clauses(line: str, rows: list[str], issue: int | None,
     """
     if issue is None:
         return set()
+    refs, quals = _foreign_closing_sets_impl(line, rows, issue, repo)
+    return refs | quals
+
+
+def _foreign_closing_sets_impl(line: str, rows: list[str], issue: int | None,
+                               repo: str | None) -> tuple[set[int], set[int]]:
+    if issue is None:
+        return set(), set()
     spans = _clause_spans(line, rows)
     foreign: set[int] = set()
+    quals: set[int] = set()
     for i, (a, b) in enumerate(spans):
         # ⛔ TWO SINK SEMANTICS, AND THEY ARE NOT THE SAME TEST (review rounds 32/35, P3).
         # `_claims_in` reports a closing ref that names a repo it could not prove is this one in
@@ -2018,7 +2047,8 @@ def _foreign_closing_clauses(line: str, rows: list[str], issue: int | None,
             sep = line[b:spans[i + 1][0]].strip()
             if sep == "(" or sep in {"—", "–"} or "(" in sep:
                 foreign.add(i + 1)
-    return foreign
+                quals.add(i + 1)
+    return foreign, quals
 
 
 def _narrowing_sibling_ids(line: str, rows: list[str], claimable: set[int],
@@ -2488,8 +2518,21 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # removes the index-adjacency test (`(i - 1) in foreign`) the previous round needed to tell
             # a foreign ref from its qualifier: a SECOND foreign close on the line is exempt on its own
             # account now, instead of being exempted only if it happened to follow a foreign clause.
+            # ⛔ AND A FOREIGN REF CLAUSE THAT NAMES THIS ISSUE'S OWN ROWS KEEPS THE CUE TOO (review
+            # round 37, P2). `_ELSEWHERE_RE` is not only the org-name trip: `V3–V6 in other PRs`,
+            # `… in #N`, `the other rows` are exactly how a body scopes ROWS — and a comma is not a
+            # clause boundary (round 12), so such a cue lands in the span the foreign ref opened.
+            # (It is a NAMES-rows test, not a CLAIMS-rows one: `_ids_in` answers "what does this clause
+            # claim", which is empty for a range named in prose — the exact case here.)
+            # Measured: `Closes #N (V1–V6), closes other-org/r#9 (V2), closes other-org/r#8, V3–V6 in
+            # other PRs` read `clean` with all six claimed. A foreign REF clause that names none of
+            # the rows is the org-name case this suppression exists for; one that names them is
+            # evidence about them. (A foreign QUALIFIER is never suppressed — see above.)
+            foreign_refs, _foreign_quals = _foreign_closing_sets(line, rows, issue, repo)
+            names_rows = bool(_explicit_ids(line[a:b], rows) or _range_matches(line[a:b], rows))
+            elsewhere_suppressed = i in foreign_refs and not names_rows
             if (_DISCLAIMER_RE.search(line[a:b])
-                    or (_ELSEWHERE_RE.search(line[a:b]) and i not in foreign)
+                    or (_ELSEWHERE_RE.search(line[a:b]) and not elsewhere_suppressed)
                     or (_ONLY_RE.search(line[a:b]) and not _ids_in(line[a:b], rows))):
                 disclaimed = True
                 claimable.discard(i)

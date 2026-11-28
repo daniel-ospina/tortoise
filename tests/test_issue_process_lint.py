@@ -4542,6 +4542,16 @@ def test_a_close_of_ANOTHER_repo_is_foreign_under_either_repo_state():
     # elsewhere. Only `_ELSEWHERE_RE` — whose `other` trips on `other-org` — is suppressed there.
     ("Closes #13036 (V1–V6), closes #13037 (V2 — V3–V6 not in this PR)\n", "ambiguous"),
     ("Closes #13036 (V1–V6), closes #13037, V3–V6 not in this PR\n", "ambiguous"),
+    # ⛔ AND A FOREIGN REF CLAUSE THAT NAMES THIS ISSUE'S ROWS KEEPS THE `other`-FAMILY CUE TOO (round
+    # 37, P2): `V3–V6 in other PRs` is how a body scopes ROWS, and a comma is not a clause boundary, so
+    # the cue lands in the span the foreign ref opened. The org-name case names no row and is the one
+    # the suppression exists for.
+    ("Closes #13036 (V1–V6), closes other-org/r#9 (V2), "
+     "closes other-org/r#8, V3–V6 in other PRs\n", "ambiguous"),
+    ("Closes #13036 (V1–V6), closes other-org/r#9, V3–V6 in other PRs\n", "ambiguous"),
+    # ⛔ AND `only` IS NOT DISTINGUISHED BY THE FOREIGN RULE EITHER (round 37, P3 pin gap): adding the
+    # foreign condition to the `_ONLY_RE` arm flipped this to `clean` with the suite green.
+    ("Closes #13036 (V1–V6), closes #13037 (only one is done)\n", "ambiguous"),
     # ⛔ A SECOND FOREIGN CLOSE ON THE LINE IS EXEMPT ON ITS OWN ACCOUNT (round 36, P3): the previous
     # round's `(i - 1) in foreign` adjacency test exempted only the FIRST foreign ref, so a correct
     # complete close abstained for the org's name tripping `_ELSEWHERE_RE`.
