@@ -39,8 +39,11 @@ RULE_T1 = ("PASS iff the second ingestion adds no RE-STATED knowledge: 0 new "
            "noise on the object axis: a re-ingestion IS an occurrence, so one "
            "Event per capture is expected — but an event-kind POINT re-minted for "
            "a sentence that was already stated is noise, and is counted.")
-RULE_T2 = ("PASS iff the restatement (doc-06) adds 0 new ENTITIES and the goal "
-           "fact resolves to exactly ONE point id shared across the two wordings; a "
+RULE_T2 = ("PASS iff the restatement (doc-06) adds 0 new ENTITIES and every "
+           "doc-06 statement of the goal resolves to an EXISTING doc-03 point id — a "
+           "complete merge, one thing carrying two sources, not a second copy (this "
+           "is a resolution test, not a count: the goal fact is two sentences per "
+           "wording, so a complete merge shares TWO ids and a partial one shares one); a "
            "second same-meaning entity (an unlinked second point) is FAIL. 'Entities' "
            "here is Object + Subject, NOT Event: doc-06's first ingest is one capture, "
            "and RULE_T1 states that one Event per capture is expected rather than "
@@ -407,8 +410,12 @@ def t2(receipt: dict, corpus: dict) -> dict:
 
     # RULE_T2 states THREE legs, and each is now either GRADED or DISCLOSED:
     #   * the entity delta — graded;
-    #   * exactly ONE shared point id — graded (`len(shared) == 1`, not merely
-    #     "non-empty": two shared ids is two things the product believes are one);
+    #   * the goal resolving to ONE thing — graded as a RESOLUTION (every doc-06
+    #     candidate reuses a doc-03 id), never as a count. It was `len(shared) == 1`,
+    #     which INVERTED the signal on this corpus: the fact is two sentences per
+    #     wording, so a complete 1:1 merge shares TWO ids (FAIL) and a HALF merge
+    #     shares one (PASS) — the acceptance gate was open on a partial fix and shut
+    #     on the fix it asks for (review round 3, finding 2);
     #   * "carrying two sources" — NOT gradeable from this artifact. The `sources`
     #     door answers per-Source POINT COUNTS, not point->Source links, so the
     #     question cannot be put to the committed readback at all. Recorded as gap
@@ -418,8 +425,9 @@ def t2(receipt: dict, corpus: dict) -> dict:
     # fix that removed the duplicate Object and merged the points would otherwise still
     # fail T2 on an axis this bundle declares clean.
     entity_delta = (d.get("taxonomy.Object", 0) + d.get("taxonomy.Subject", 0))
-    one_shared_point = len(shared) == 1
-    verdict = "PASS" if (entity_delta == 0 and one_shared_point) else "FAIL"
+    unresolved = sorted(ids_b - ids_a)
+    one_goal = bool(ids_b) and bool(ids_a) and not unresolved
+    verdict = "PASS" if (entity_delta == 0 and one_goal) else "FAIL"
     return {
         "test": "T2",
         "rule": RULE_T2,
@@ -434,8 +442,12 @@ def t2(receipt: dict, corpus: dict) -> dict:
         "legs": {"entity_delta_zero": entity_delta == 0,
                  "entity_axes": "Object + Subject (Event excluded — RULE_T1 declares one "
                                 "Event per capture expected)",
-                 "exactly_one_shared_point": one_shared_point,
-                 "shared_count": len(shared)},
+                 "goal_resolves_to_one_thing": one_goal,
+                 "doc_06_ids_unresolved_in_doc_03": unresolved,
+                 "shared_count": len(shared),
+                 "granularity": ("the goal fact is stated in two sentences per wording, "
+                                 "so a COMPLETE merge resolves two ids — a count of shared "
+                                 "ids asks the wrong question in both directions")},
         "source_link_leg": {
             "graded": False,
             "why": ("D7 — the `sources` door answers per-Source POINT COUNTS, not "
@@ -492,11 +504,20 @@ def t3(receipt: dict, corpus: dict) -> dict:
         if not name:
             continue
         hits = [doc for doc, text in texts.items() if name and name in norm(text)]
-        owned = [t for t in tokens(name) if len(t) > 4]
-        partial = [doc for doc, text in texts.items()
-                   if owned and sum(1 for t in owned if t in tokens(text)) / len(owned) >= 0.8]
+        # ⛔ The band is RULE_T3's band — "content-token overlap ... the same near-match
+        # band T1 uses" — so it is `overlap()`, NOT a second tokenisation. This used to
+        # filter to `len(t) > 4` while the rule printed `>2`, which changed the
+        # denominator and the ANSWER: `the ownership map` tokenises to {ownership, map},
+        # scores 0.500 against doc-04 at the rule's own band, and 1.000 with `map`
+        # dropped by the extra filter (review round 3, finding 1).
+        scored = sorted(((overlap(name, text), doc) for doc, text in texts.items()),
+                        key=lambda pair: (-pair[0], pair[1]))
+        best = scored[0] if scored else (0.0, None)
+        partial = [doc for score, doc in scored if score >= 0.8]
         named_in_corpus.append({"name": row.get("name"), "kind": row.get("kind"),
-                                "exact_doc_hits": hits, "near_doc_hits": partial})
+                                "exact_doc_hits": hits, "near_doc_hits": partial,
+                                "best_overlap": {"doc": best[1],
+                                                 "share": round(best[0], 3)}})
     # RULE_T3 has TWO conjuncts and BOTH are graded: the share, AND that every orphan
     # named is explainable as a standalone fact in the corpus text. The second was
     # computed and then dropped before #14812's review — the rule quoted beside the

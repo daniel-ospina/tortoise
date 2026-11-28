@@ -381,22 +381,24 @@ def test_t3_share_leg_is_graded_at_the_majority_boundary(monkeypatch):
     receipt_t2 = json.loads(json.dumps(_receipt()))
     base = module.t2(receipt_t2, _corpus())
     assert base["verdict"] == "FAIL", "the committed run fails T2; the fixture starts there"
-    assert base["legs"]["exactly_one_shared_point"] is False
+    assert base["legs"]["goal_resolves_to_one_thing"] is False
     cands = _score()["tests"]["T2"]["goal_point_candidates"]
-    id_doc3 = next(c["point_id"] for c in cands if c["doc_id"] == "doc-03")
-    id_doc6 = next(c["point_id"] for c in cands if c["doc_id"] == "doc-06")
+    ids_doc3 = [c["point_id"] for c in cands if c["doc_id"] == "doc-03"]
+    ids_doc6 = [c["point_id"] for c in cands if c["doc_id"] == "doc-06"]
+    assert len(ids_doc3) == len(ids_doc6) == 2, \
+        "the goal fact is two sentences per wording; the arm resolves them 1:1"
     renamed = 0
     # ⛔ Mutate the RECEIPT, not `points()`'s return: that helper yields `{**pt, …}`
     # copies, so a rebind on its output never reaches the data the scorer reads.
     for doc in receipt_t2["passes"][0]["documents"]:
         for pt in ((doc.get("result") or {}).get("points") or []):
-            if pt.get("point_id") == id_doc3:
-                pt["point_id"] = id_doc6
+            if pt.get("point_id") in ids_doc6:
+                pt["point_id"] = ids_doc3[ids_doc6.index(pt["point_id"])]
                 renamed += 1
-    assert renamed, "the fixture could not rebind a doc-03 goal point"
+    assert renamed == len(ids_doc6), "the fixture could not rebind every doc-06 goal point"
     forced = module.t2(receipt_t2, _corpus())
-    assert forced["legs"]["exactly_one_shared_point"] is True, (
-        "the shared-id leg did not see the forced id — the arm is not driving the leg")
+    assert forced["legs"]["goal_resolves_to_one_thing"] is True, (
+        "the goal leg did not see the forced resolution — the arm is not driving the leg")
     assert forced["legs"]["entity_delta_zero"] is False
     assert forced["verdict"] == "FAIL", (
         "T2 PASSes with a non-zero entity delta and one shared id — its entity-delta "
@@ -434,7 +436,13 @@ def test_t2_the_two_wordings_landed_as_two_points():
     # BOTH graded legs are recorded, not just the one that happens to fail first.
     legs = row["legs"]
     assert legs["entity_delta_zero"] is False
-    assert legs["exactly_one_shared_point"] is False and legs["shared_count"] == 0
+    assert legs["goal_resolves_to_one_thing"] is False
+    assert len(legs["doc_06_ids_unresolved_in_doc_03"]) == 2 and legs["shared_count"] == 0
+    # The goal fact is TWO sentences per wording, so four candidate Points exist and a
+    # count of shared ids asks the wrong question in both directions (review round 3,
+    # finding 2). The artifact must disclose the granularity it graded at.
+    assert len(row["goal_point_candidates"]) == 4
+    assert "two sentences per wording" in legs["granularity"]
     # Event is excluded on purpose — RULE_T1 declares one Event per capture expected, so
     # counting it here would fail T2 on an axis the bundle calls clean.
     assert "Event excluded" in legs["entity_axes"]
@@ -457,10 +465,17 @@ def test_t3_the_orphan_share_is_stated_with_its_population_and_its_door():
     legs = row["orphan_legs"]
     assert legs["majority_are_not_orphans"] is True
     assert legs["every_orphan_explained_in_corpus"] is False
+    # THREE names fall below the band, at the band the rule itself prints (content
+    # tokens of >2 characters, i.e. T1's `overlap()`, NOT a second tokenisation):
+    # `the ownership map` scores 0.500 against doc-04, and the other two 0.600/0.667.
     assert [r["name"] for r in legs["unexplained"]] == [
-        "the cold-chain rules as operational preferences", "chilled-goods operation"]
+        "the ownership map", "the cold-chain rules as operational preferences",
+        "chilled-goods operation"]
+    overlap_by_name = {r["name"]: r["best_overlap"] for r in row["orphan_traceability"]}
+    assert overlap_by_name["the ownership map"] == {"doc": "doc-04", "share": 0.5}
+    assert overlap_by_name["chilled-goods operation"]["share"] == pytest.approx(0.667)
     # The band is named in the rule, so the count cannot drift into "no document states
-    # it" for a name that merely falls below the band (one of these scores 0.667).
+    # it" for a name that merely falls below the band.
     assert "0.8" in row["rule"]
     # The disagreement between the two reads is the finding, not noise: a door
     # that reported 7 "isolated" entities would make D4 unfalsifiable.
@@ -665,6 +680,7 @@ def test_the_conjuncts_that_never_decide_on_this_run_are_still_pinned():
       keeping T1 red once the entity layers hold.
     """
     import copy
+    import unittest.mock as mock
 
     module = _score_module()
     corpus = _corpus()
@@ -718,19 +734,25 @@ def test_the_conjuncts_that_never_decide_on_this_run_are_still_pinned():
                     pt["point_id"] = mapping[pt["point_id"]]
         return module.t2(receipt, corpus)
 
-    # TWO shared ids: the product believes the fact is two things, which the rule fails.
-    two = t2_with({ids3[0]: ids6[0], ids3[1]: ids6[1]})
-    assert two["legs"]["entity_delta_zero"] is True, "the entity leg must be held true here"
-    assert two["legs"]["shared_count"] == 2
-    assert two["verdict"] == "FAIL", (
-        "T2 PASSes with TWO shared goal points — `len(shared) == 1` has been relaxed to "
-        "`>= 1`, which is the property the scorer's own comment claims")
-    # …and exactly one shared id (with a non-zero entity delta removed) must PASS.
-    one = t2_with({ids3[1]: ids6[0]})
-    assert one["legs"]["shared_count"] == 1, "the single-shared-id control did not rebind"
-    assert one["verdict"] == "PASS", (
-        "T2 fails with one shared point and no entity growth — the shared-id leg is "
-        "over-strict or another leg is misfiring")
+    # ── The goal leg is a RESOLUTION, not a count (review round 3, finding 2): the goal
+    #    fact is two sentences per wording, so `len(shared) == 1` FAILED a complete 1:1
+    #    merge (two shared ids) and PASSED a half merge (one) — the acceptance gate this
+    #    issue sets, open on a partial fix and shut on the fix it asks for.
+    # A COMPLETE merge — every doc-06 goal candidate reuses a doc-03 id — is the bar.
+    full = t2_with({ids3[0]: ids6[0], ids3[1]: ids6[1]})
+    assert full["legs"]["entity_delta_zero"] is True, "the entity leg must be held true here"
+    assert full["legs"]["doc_06_ids_unresolved_in_doc_03"] == []
+    assert full["legs"]["goal_resolves_to_one_thing"] is True
+    assert full["verdict"] == "PASS", (
+        "T2 FAILs a complete 1:1 merge — the leg is still counting shared ids instead of "
+        "asking whether anything survived as a second copy")
+    # A HALF merge — one doc-06 candidate re-minted, the other resolved — is FAIL.
+    half = t2_with({ids3[1]: ids6[0]})
+    assert half["legs"]["doc_06_ids_unresolved_in_doc_03"] == [ids6[1]], \
+        "the half-merge control did not rebind exactly one doc-06 id"
+    assert half["verdict"] == "FAIL", (
+        "T2 PASSes a half merge — the partial fix still leaves a second copy of the goal, "
+        "which is the defect this leg exists to grade")
 
     # ── T4: Sources below one-per-document must FAIL, everything else true.
     readback = copy.deepcopy(_readback())
@@ -742,7 +764,6 @@ def test_the_conjuncts_that_never_decide_on_this_run_are_still_pinned():
         {"id": "s2", "name": "the delivery partner decision", "layer": "object",
          "kind": "core:decision"},
     ]
-    import unittest.mock as mock
     with mock.patch.object(module, "load", return_value=readback):
         short = module.t4({}, corpus)
         assert short["flat_distribution"]["Source"] == 5, "the fixture must be short one Source"
@@ -756,3 +777,52 @@ def test_the_conjuncts_that_never_decide_on_this_run_are_still_pinned():
         assert module.t4({}, corpus)["verdict"] == "PASS", (
             "T4 fails at one Source per document — the conjunct is not reading the "
             "taxonomy, or is over-strict")
+
+    # ── T1's OTHER three conjuncts: `object_delta <= 0`, `subject_delta <= 0` and
+    #    `not dup_names` (review round 3, finding 4). All three are TRUE on the
+    #    committed data and the only T1 arm drove `restated`, so deleting any of them
+    #    left the artifact byte-identical and every pinned row green — T1 would have
+    #    PASSed a re-ingestion that added 4 Objects and restated nothing. Each is
+    #    driven here with the other three legs held true.
+    def t1_with(*, objects: int = 0, subjects: int = 0, duplicate_name: bool = False) -> dict:
+        receipt = copy.deepcopy(_receipt())
+        p2 = receipt["passes"][1]
+        # No restatements: `restated` cannot decide.
+        for doc in p2["documents"]:
+            for pt in ((doc.get("result") or {}).get("points") or []):
+                pt["text"] = "zzz nothing in common zzz"
+        after = copy.deepcopy(receipt["passes"][0]["overview_after"])
+        tax = dict(after.get("taxonomy") or {})
+        tax["Object"] = tax.get("Object", 0) + objects
+        tax["Subject"] = tax.get("Subject", 0) + subjects
+        after["taxonomy"] = tax
+        p2["overview_after"] = after
+        readback = copy.deepcopy(_readback())
+        if duplicate_name:
+            ents = readback.get("entities") or []
+            ents.append(dict(ents[0], id="dup-of-" + str(ents[0]["id"])))
+        with mock.patch.object(module, "load", return_value=readback):
+            return module.t1(receipt)
+
+    control = t1_with()
+    assert control["restated_points_pass_2"]["restating_a_pass_1_point"] == 0
+    assert control["entities"]["object_delta"] == 0
+    assert control["entities"]["subject_delta"] == 0
+    assert control["same_name_entities_after_both_passes"] == {}
+    assert control["verdict"] == "PASS", "the control must hold all four legs true"
+    grew_objects = t1_with(objects=4)
+    assert grew_objects["entities"]["object_delta"] == 4
+    assert grew_objects["verdict"] == "FAIL", (
+        "T1 PASSes a re-ingestion that added 4 Objects — its `object_delta <= 0` "
+        "conjunct is dropped")
+    grew_subjects = t1_with(subjects=1)
+    assert grew_subjects["entities"]["subject_delta"] == 1
+    assert grew_subjects["verdict"] == "FAIL", (
+        "T1 PASSes a re-ingestion that added a Subject — its `subject_delta <= 0` "
+        "conjunct is dropped")
+    named_twice = t1_with(duplicate_name=True)
+    assert named_twice["same_name_entities_after_both_passes"], \
+        "the duplicate-name fixture did not create a same-name pair"
+    assert named_twice["verdict"] == "FAIL", (
+        "T1 PASSes a graph that counts the same name twice — its `not dup_names` "
+        "conjunct is dropped")

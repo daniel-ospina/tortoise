@@ -459,7 +459,7 @@
     },
     "T2": {
       "test": "T2",
-      "rule": "PASS iff the restatement (doc-06) adds 0 new ENTITIES and the goal fact resolves to exactly ONE point id shared across the two wordings; a second same-meaning entity (an unlinked second point) is FAIL. 'Entities' here is Object + Subject, NOT Event: doc-06's first ingest is one capture, and RULE_T1 states that one Event per capture is expected rather than noise, so counting it here would fail T2 on an axis this bundle declares clean. Overlap is content-token overlap (lowercased alphanumeric tokens of >2 characters, common English function words removed). \u26d4 The rule's \"carrying two sources\" leg is NOT graded: the sources door answers per-Source POINT COUNTS, not point-to-Source links, so \"does this point carry two sources\" cannot be asked of the committed readback at all \u2014 recorded as gap D7 rather than assumed.",
+      "rule": "PASS iff the restatement (doc-06) adds 0 new ENTITIES and every doc-06 statement of the goal resolves to an EXISTING doc-03 point id \u2014 a complete merge, one thing carrying two sources, not a second copy (this is a resolution test, not a count: the goal fact is two sentences per wording, so a complete merge shares TWO ids and a partial one shares one); a second same-meaning entity (an unlinked second point) is FAIL. 'Entities' here is Object + Subject, NOT Event: doc-06's first ingest is one capture, and RULE_T1 states that one Event per capture is expected rather than noise, so counting it here would fail T2 on an axis this bundle declares clean. Overlap is content-token overlap (lowercased alphanumeric tokens of >2 characters, common English function words removed). \u26d4 The rule's \"carrying two sources\" leg is NOT graded: the sources door answers per-Source POINT COUNTS, not point-to-Source links, so \"does this point carry two sources\" cannot be asked of the committed readback at all \u2014 recorded as gap D7 rather than assumed.",
       "pair": [
         "doc-03",
         "doc-06"
@@ -560,8 +560,13 @@
       "legs": {
         "entity_delta_zero": false,
         "entity_axes": "Object + Subject (Event excluded \u2014 RULE_T1 declares one Event per capture expected)",
-        "exactly_one_shared_point": false,
-        "shared_count": 0
+        "goal_resolves_to_one_thing": false,
+        "doc_06_ids_unresolved_in_doc_03": [
+          "pt_4b63d2794f40a1a1e4727f136ce04932c9fa3f607ab7ae5e1bc07280cee110",
+          "pt_b8ae771b546025c400d69ae5cb74f7c3f5fdf7a3e1ba3be279dcbd14e5762a"
+        ],
+        "shared_count": 0,
+        "granularity": "the goal fact is stated in two sentences per wording, so a COMPLETE merge resolves two ids \u2014 a count of shared ids asks the wrong question in both directions"
       },
       "source_link_leg": {
         "graded": false,
@@ -758,9 +763,11 @@
           "name": "the ownership map",
           "kind": "core:standard",
           "exact_doc_hits": [],
-          "near_doc_hits": [
-            "doc-04"
-          ]
+          "near_doc_hits": [],
+          "best_overlap": {
+            "doc": "doc-04",
+            "share": 0.5
+          }
         },
         {
           "name": "revert to NordicFreight as delivery partner",
@@ -768,13 +775,21 @@
           "exact_doc_hits": [],
           "near_doc_hits": [
             "doc-05"
-          ]
+          ],
+          "best_overlap": {
+            "doc": "doc-05",
+            "share": 1.0
+          }
         },
         {
           "name": "the cold-chain rules as operational preferences",
           "kind": "core:strategy",
           "exact_doc_hits": [],
-          "near_doc_hits": []
+          "near_doc_hits": [],
+          "best_overlap": {
+            "doc": "doc-02",
+            "share": 0.6
+          }
         },
         {
           "name": "the own refrigerated van option",
@@ -782,13 +797,21 @@
           "exact_doc_hits": [],
           "near_doc_hits": [
             "doc-01"
-          ]
+          ],
+          "best_overlap": {
+            "doc": "doc-01",
+            "share": 1.0
+          }
         },
         {
           "name": "chilled-goods operation",
           "kind": "core:workflow",
           "exact_doc_hits": [],
-          "near_doc_hits": []
+          "near_doc_hits": [],
+          "best_overlap": {
+            "doc": "doc-02",
+            "share": 0.667
+          }
         },
         {
           "name": "the 4 degrees Celsius cold-chain constraint",
@@ -796,7 +819,11 @@
           "exact_doc_hits": [],
           "near_doc_hits": [
             "doc-02"
-          ]
+          ],
+          "best_overlap": {
+            "doc": "doc-02",
+            "share": 1.0
+          }
         },
         {
           "name": "restaurant account",
@@ -811,13 +838,21 @@
             "doc-03",
             "doc-04",
             "doc-06"
-          ]
+          ],
+          "best_overlap": {
+            "doc": "doc-03",
+            "share": 1.0
+          }
         }
       ],
       "orphan_legs": {
         "majority_are_not_orphans": true,
         "every_orphan_explained_in_corpus": false,
         "unexplained": [
+          {
+            "name": "the ownership map",
+            "kind": "core:standard"
+          },
           {
             "name": "the cold-chain rules as operational preferences",
             "kind": "core:strategy"
@@ -3620,7 +3655,7 @@
   },
   "rules": {
     "T1": "PASS iff the second ingestion adds no RE-STATED knowledge: 0 new Objects, 0 new Subjects, 0 same-name entities, and no Point whose text re-states an existing Point (>= 0.8 content-token overlap with a pass-1 Point). Events are reported SEPARATELY and are not counted as noise on the object axis: a re-ingestion IS an occurrence, so one Event per capture is expected \u2014 but an event-kind POINT re-minted for a sentence that was already stated is noise, and is counted.",
-    "T2": "PASS iff the restatement (doc-06) adds 0 new ENTITIES and the goal fact resolves to exactly ONE point id shared across the two wordings; a second same-meaning entity (an unlinked second point) is FAIL. 'Entities' here is Object + Subject, NOT Event: doc-06's first ingest is one capture, and RULE_T1 states that one Event per capture is expected rather than noise, so counting it here would fail T2 on an axis this bundle declares clean. Overlap is content-token overlap (lowercased alphanumeric tokens of >2 characters, common English function words removed). \u26d4 The rule's \"carrying two sources\" leg is NOT graded: the sources door answers per-Source POINT COUNTS, not point-to-Source links, so \"does this point carry two sources\" cannot be asked of the committed readback at all \u2014 recorded as gap D7 rather than assumed.",
+    "T2": "PASS iff the restatement (doc-06) adds 0 new ENTITIES and every doc-06 statement of the goal resolves to an EXISTING doc-03 point id \u2014 a complete merge, one thing carrying two sources, not a second copy (this is a resolution test, not a count: the goal fact is two sentences per wording, so a complete merge shares TWO ids and a partial one shares one); a second same-meaning entity (an unlinked second point) is FAIL. 'Entities' here is Object + Subject, NOT Event: doc-06's first ingest is one capture, and RULE_T1 states that one Event per capture is expected rather than noise, so counting it here would fail T2 on an axis this bundle declares clean. Overlap is content-token overlap (lowercased alphanumeric tokens of >2 characters, common English function words removed). \u26d4 The rule's \"carrying two sources\" leg is NOT graded: the sources door answers per-Source POINT COUNTS, not point-to-Source links, so \"does this point carry two sources\" cannot be asked of the committed readback at all \u2014 recorded as gap D7 rather than assumed.",
     "T3": "Reported as a share, with an explicit population. PASS iff the majority of created entities are NOT orphans AND every orphan named is standalone in the corpus text \u2014 graded as: its NAME is stated in one document, verbatim or at >= 0.8 content-token overlap with that document (content tokens are lowercased alphanumeric tokens of >2 characters with common English function words removed; the same near-match band T1 uses for a restatement); otherwise FAIL, with the door's own answer reported beside the write receipt's so a door defect cannot be laundered as an extractor defect.",
     "T4": "PASS iff none of the ontology's types is collapsed: the flat (Point/Event/Subject/Object/Source) distribution is non-degenerate (Event, Subject and Object all non-zero, and at least one Source per document ingested), a decision is represented by a decision-kind ENTITY, roles land as Subject-layer role entities, and documents land as Sources. \u26d4 The decision's SENTENCES are Points and land as `statement` kind; this rule grades the decision ENTITY, and the Points' kinds are reported beside the verdict rather than graded.",
     "T5": "PASS iff every sampled relation is stated or directly implied by the corpus text: both ENDPOINTS named in one document \u2014 verbatim, or the extractor's re-wording at >= 0.6 content-token overlap with that document. 'Content-token overlap' is lowercased alphanumeric tokens of >2 characters with common English function words removed. The POPULATION is every relation either pass's write receipt says it wrote: pass 2 is where re-extraction invents names (\u00a74), so excluding it would be sampling away the defect. One relation whose endpoints are never co-stated fails the test. \u26d4 The PREDICATE axis is NOT graded: the corpus is prose and the graph's predicates are ontology names (`ownedBy`, `related`, \u2026), so a wording test would score a correct normalisation as an invention \u2014 the count of rows whose predicate wording appears in its co-stated documents is reported as gap D6 instead of being passed silently."
