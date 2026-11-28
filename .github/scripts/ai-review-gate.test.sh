@@ -2452,28 +2452,53 @@ STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
 assert_rc 1 "(t30) an UNREADABLE branch-side graph refuses (a missing sha must never read as 'came from the base')"
 assert_contains "(t30) …and says the graph could not be READ" "could not READ this PR's commit graph"
 assert_not_contains "(t30) …and does NOT claim the branch was rewritten" "REWRITTEN (force-push"
-# (b) The FIVE-guard sweep below removes the same authored-commit fixture's refusals and it
-# CARRIES, which is the false pass those guards prevent. ⛔ NOT "the pair": removing only
-# `[ -z "$p_bside" ]` + the branch-side arity check does NOT carry (measured: `rc=1`, the
-# only red is this row's own `bad`), and restoring `p_bside` into the sweep still refuses —
-# `p_bside` is load-bearing only INSIDE the set. This is what makes the class attributable
-# even though no single member can be pinned on its own.
+# (b) The sweep below neutralises FOUR branch-side guards and the same authored-commit
+# fixture CARRIES — the false pass those guards prevent. ⛔ IT IS NOT "the pair":
+# `[ -z "$p_bside" ]` + the arity check alone does NOT carry (measured: `rc=1`, the only
+# red is this row's own `bad`), and restoring `p_bside` into the sweep still refuses.
+# ⛔ AND THE COUNT-EQUALITY `[ "$p_btotal" = "$p_bcount" ]` IS NOT PART OF THE SWEEP: it is
+# INERT on this fixture (`STUB_BRANCH_FAIL=1` makes `p_bside` empty, so `read` yields
+# `""`/`""` and `[ "" = "" ]` is true), so neutralising it here would let this row's
+# printed verdict name a member it never tested. It IS pinned — by `(t23)`'s truncated
+# branch page, on its own.
+# ⛔ THE VERDICT NAMES WHAT THE MUTANT SWEPT, NOT A GLOSSARY CATEGORY. Three of the four
+# are ALSO individually pinned (arity -> `(t32e)`, `p_btotal >= 1` -> `(t33)`, numeric
+# presence -> nothing alone); what this row uniquely shows is that they are jointly
+# load-bearing for THIS fixture. Do not restate that as "no single member is pinned".
 MUT_BSIDE="$T/mutant-no-bside-guards.sh"
-# Three separate `-e`s, each with NO capture group used in the replacement: an
-# alternation across two patterns with different group counts silently mangles the
-# replacement (measured: it appended the original line and left the block unparseable,
-# which surfaced as a misleading `rc=2` instead of this row's own verdict).
+# Separate `-e`s, each with NO capture group used in the replacement: an alternation
+# across two patterns with different group counts silently mangles the replacement
+# (measured: it appended the original line and left the block unparseable, which surfaced
+# as a misleading `rc=2` instead of this row's own verdict).
+_bt_guards=(
+  'if [ -z "$p_bside" ]; then patch_ancestry_unreadable=1; return 1; fi'
+  '[[ "$p_btotal" =~ ^[0-9]+$ && "$p_bcount" =~ ^[0-9]+$ ]] || { patch_ancestry_unreadable=1; return 1; }'
+  '[ "$(printf '"'"'%s'"'"' "$p_bshas" | wc -w)" = "$p_bcount" ] || { patch_ancestry_unreadable=1; return 1; }'
+  '[ "${p_btotal:-0}" -ge 1 ] || { patch_ancestry_unreadable=1; return 1; }'
+)
 sed -E -e 's/^ *(if \[ -z "\$p_bside" \]; then patch_ancestry_unreadable=1; return 1; fi)$/:/' \
        -e 's/^ *(\[\[ "\$p_btotal" =~ \^\[0-9\]\+\$ && "\$p_bcount" =~ \^\[0-9\]\+\$ \]\] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
-       -e 's/^ *(\[ "\$p_btotal" = "\$p_bcount" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
        -e 's/^ *(\[ "\$\(printf .%s. "\$p_bshas" \| wc -w\)" = "\$p_bcount" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
        -e 's/^( *).*p_btotal:-0.*-ge 1.*$/\1:/' \
     "$RUN_BLOCK" > "$MUT_BSIDE"
+# ⛔ PER-PATTERN APPLICATION CHECK (#4255, review cycle 8). `cmp -s` only notices that
+# NOTHING applied: if ONE pattern silently stops matching (a guard line changes shape),
+# the mutant is the four-guard one, which CARRIES — so `cmp` passes, `bash -n` passes, the
+# run carries, and the row would print a verdict about a set it did not sweep. Each of the
+# four must therefore be GONE from the mutant; a survivor is reported by name, which is
+# the same self-report `(t32h)` uses for its single guard.
+_bt_missing=0
+for _g in "${_bt_guards[@]}"; do
+    if grep -qF -- "$_g" "$MUT_BSIDE"; then
+        bad "(t30) a guard in the sweep was NOT neutralised, so the verdict below would name a set the mutant did not sweep: $_g"
+        _bt_missing=1
+    fi
+done
 if cmp -s "$RUN_BLOCK" "$MUT_BSIDE"; then
     bad "(t30) the branch-side guard mutation did not apply — the guards changed shape, so this control proves NOTHING"
 elif ! bash -n "$MUT_BSIDE"; then
     bad "(t30) the branch-side mutant does not PARSE — an unparseable mutant cannot attribute anything (fix the mutation, not the row)"
-else
+elif [ "$_bt_missing" -eq 0 ]; then
     _saved_block="$RUN_BLOCK"; RUN_BLOCK="$MUT_BSIDE"
     STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
         STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" \
@@ -2481,9 +2506,9 @@ else
         STUB_ANCESTOR_COMMITS="dddddddddddd:1" STUB_BRANCH_FAIL=1 run_gate "$BSIDE_BODY"
     RUN_BLOCK="$_saved_block"
     if [ "$GATE_RC" = "0" ]; then
-        ok "(t30) with those FIVE guards removed an API failure CARRIES an authored commit — so the SET is jointly load-bearing (no single member is)"
+        ok "(t30) with those FOUR branch-side guards neutralised an API failure CARRIES an authored commit — so they are jointly load-bearing for this fixture (the count-equality guard is inert here and is pinned by (t23) instead)"
     else
-        bad "(t30) the five-guard mutant still refused (rc=$GATE_RC) — something else refuses this, so the row's claim about that set is wrong"
+        bad "(t30) the four-guard mutant still refused (rc=$GATE_RC) — something else refuses this, so the row's claim about that set is wrong"
     fi
 fi
 

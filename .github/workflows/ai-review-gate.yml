@@ -1061,9 +1061,13 @@ jobs:
             #       check, and `[ -z "$p_bside" ]`. ⛔ `[ -z "$p_bside" ]` has NO row of its
             #       own and is not attributable together with the arity check either (measured:
             #       removing just those two reddens `(t32e)` and nothing else). It is observable
-            #       only inside `(t30)`'s joint mutation, which sweeps the branch-side numeric
-            #       presence, the count equality, the arity check, `[ -z "$p_bside" ]` and
-            #       `p_btotal >= 1` TOGETHER — a carry needs all of them gone.
+            #       only inside `(t30)`'s joint mutation, which neutralises the branch-side
+            #       numeric presence, the SHA-list arity check, `[ -z "$p_bside" ]` and
+            #       `p_btotal >= 1` TOGETHER — a carry needs those FOUR gone. The branch-side
+            #       count EQUALITY is deliberately NOT in that sweep: it is inert on
+            #       `(t30)`'s fixture (`STUB_BRANCH_FAIL=1` empties the page, so `[ "" = "" ]`
+            #       is true) and is pinned alone by `(t23)`. Naming it in the sweep would let
+            #       the row's verdict claim a member it never tested.
             # Both reads therefore refuse on anything unreadable or truncated, so a
             # transient (or a mis-shaped) answer can only NARROW rule (c), never widen it.
             p_base="$(gh api "repos/${REPO_NAME}/pulls/${PR_NUMBER}" --jq .base.sha 2>/dev/null || true)"
