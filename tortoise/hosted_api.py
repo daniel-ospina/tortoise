@@ -20610,8 +20610,8 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     # does not reach it.
     #
     # One call for the LANE, after the last statement — the same shape and the same
-    # reason as `delete_session`'s (`:30996`): the unit is one lane operation, not
-    # one statement, and the helper is total (its own guard wraps every step,
+    # reason as `_delete_session_sync`'s own recorder: the unit is one lane operation,
+    # not one statement, and the helper is total (its own guard wraps every step,
     # endpoint resolution included), so it cannot deny a write that already landed.
     # ⛔ The `already_seeded` early return above issues only a READ and is
     # deliberately not counted — a registry that moved on a read would report a
@@ -55357,7 +55357,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (490 distinct
+# ABSOLUTE line number from 207 tracked files (485 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

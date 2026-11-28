@@ -40,10 +40,10 @@ labels:             [['Meta', 1], ['Point', 10], ['Session', 1], ['Tag', 14]]
 
 **26 nodes written, registry `{}` — byte-identical to "this process took no live cache write".** That
 is the false-PASS shape the registry exists to end, occurring **inside the registry's own claimed
-population**: `note_live_write_target`'s docstring opens *"Called from every gateway that writes the
-cache WITHOUT folding a record"* (`tortoise/projection/__init__.py:4748`), and `_seed_demo_graph`
-(`tortoise/hosted_api.py:20376`) is exactly such a gateway. It **chooses its graph** —
-`sdk = sdk if sdk is not None else _org_sdk(org_id)` at `:20407` — so the helper's stated residual
+population**: `note_live_write_target`'s docstring used to open, before this change, with *"Called
+from every gateway that writes the cache WITHOUT folding a record"* — the universal this PR replaces
+with the named set — and `hosted_api._seed_demo_graph` is exactly such a gateway. It **chooses its
+graph** (`sdk = sdk if sdk is not None else _org_sdk(org_id)`) so the helper's stated residual
 (which excuses a raw writer *because it does not choose a graph*) does not reach it.
 
 Two further facts make this a bookkeeping defect rather than a policy one:
@@ -84,7 +84,7 @@ sub-block and the adversarial 2-cycle bound does not apply).
 
 | surface | what it is | test layer |
 |---|---|---|
-| `hosted_api._seed_demo_graph` | the lane under fix; reached from `public_demo` REST (`:41105 → :41153 → :41161`) and MCP (`mcp_server.py:9015, 9024`), and from `/internal/demo` (`:20635`) | unit, against a real embedded graph |
+| `hosted_api._seed_demo_graph` | the lane under fix; reached from `public_demo` REST (`hosted_api.public_demo`), from the MCP demo tool (`mcp_server`'s `_seed_demo_graph(...)` call), and from `/internal/demo` (`hosted_api.create_demo_graph`) | unit, against a real embedded graph |
 | `cache_leg._COUNTED_LIVE_WRITE_LANES` | new declaration; read by the census test and cited by both docstrings | unit (AST census over `tortoise/`) |
 | `projection.note_live_write_target` | unchanged behaviour; docstring's population claim replaced | unchanged (existing 5 lanes stay pinned) |
 | `projection._apply_event._skip` | unchanged behaviour; summary line + marked-exit enumeration corrected | unchanged (existing corpus test) |
@@ -93,9 +93,11 @@ sub-block and the adversarial 2-cycle bound does not apply).
 ## 5. Research
 
 `<!-- research: v1 -->` on #12943 (comment `7236051267`). It settles four things this plan rests on:
-the universal claim is false (`projection/__init__.py:4748`); the demo lane chooses its graph
-(`hosted_api.py:20407`), so the residual does not excuse it; the drift list from #13363's post-merge
-review is still live (`projection/__init__.py:12971`, `cache_leg.py:271`, the two missing marked arms);
+the universal claim is false (`note_live_write_target`'s old "every gateway" sentence, replaced by
+this change); the demo lane chooses its graph (`_seed_demo_graph`'s `sdk if sdk is not None else
+_org_sdk(org_id)`), so the residual does not excuse it; the drift list from #13363's post-merge
+review is still live (the `_skip` summary sentence, the `note_cache_write_target` "SEVEN" count, the
+two missing marked arms);
 and the repo already has the idiom for a mechanical census (`tests/test_9124_declared_live_doors.py`).
 Externally, the CQRS literature's own failure catalogue names "a projector that skips messages" as a
 first-class divergence class and verifies projections by **per-projection** lag/freshness SLO — a
@@ -106,27 +108,28 @@ measure you cannot compute over a population you cannot enumerate, which is why 
 
 | thing touched | every call site / importer / consumer | what it does there |
 |---|---|---|
-| `note_live_write_target` (called) | `projection/__init__.py:12957` `FalkorProjection.apply` | the fold's one call, after a returned non-skipped fold |
-| | `projection/edges.py:1572` `_record_structural_edges` | the structural-edge mint |
-| | `onboarding/state.py:711` `_run` | declared live gateway |
-| | `webhook_delivery.py:239` `_run` | declared live gateway |
-| | `why_snapshot.py:149` `_run` | declared live gateway |
-| | `hosted_api.py:25218` `_capture_session_impl._sweep_orphaned_writes` | raw graph-choosing sweep |
-| | `hosted_api.py:31000` `delete_session._delete_session_sync` | raw graph-choosing sweep |
-| | **`hosted_api.py` `_seed_demo_graph` (NEW)** | **raw graph-choosing demo seed — the lane this change adds** |
-| `note_live_write_target` (defined) | `tortoise/cache_leg.py:236,278` | docstring's "ONE helper" and the replay-window exclusion — both stay true |
+| `note_live_write_target` (called) | `projection.FalkorProjection.apply` | the fold's one call, after a returned non-skipped fold |
+| | `projection.edges._EdgeHandlers._record_structural_edges` | the structural-edge mint |
+| | `onboarding.state._run` | declared live gateway |
+| | `webhook_delivery._run` | declared live gateway |
+| | `why_snapshot._run` | declared live gateway |
+| | `hosted_api._capture_session_impl._report_capture._sweep_orphaned_writes` | raw graph-choosing sweep |
+| | `hosted_api.delete_session._delete_session_sync` | raw graph-choosing sweep |
+| | **`hosted_api._seed_demo_graph` (NEW)** | **raw graph-choosing demo seed — the lane this change adds** |
+| `note_live_write_target` (defined) | `tortoise/cache_leg.py` (`note_cache_write_target`) | docstring's "ONE helper" and the replay-window exclusion — both stay true |
 | `_COUNTED_LIVE_WRITE_LANES` (NEW) | `tests/test_12943_cache_leg.py` (census test) | the authority the census compares the AST against |
 | | `cache_leg.note_cache_write_target` docstring | cites it as the closed set, replacing "SEVEN call sites, and the list is maintained rather than implied" |
 | | `projection.note_live_write_target` docstring | cites it as the closed set, replacing the universal |
-| `_seed_demo_graph` (callers, unchanged) | `hosted_api.py:20657` `/internal/demo`; `:41153`/`:41161` `public_demo` REST; `:45824`, `mcp_server.py:9015, 9024` | none change behaviour; they inherit a correct registry reading |
+| `_seed_demo_graph` (callers, unchanged) | `hosted_api.create_demo_graph` (`/internal/demo`); `hosted_api.public_demo` (REST); the MCP demo tool in `mcp_server` | none change behaviour; they inherit a correct registry reading |
 
 ## 7. Implementation steps
 
 1. **Prove the hole (already measured).** `_seed_demo_graph` on an embedded SDK → `26 nodes`,
    `targets {}`. → *test:* `test_the_demo_seeder_records_its_target` — RED before the fix.
 2. **`hosted_api._seed_demo_graph`:** one `note_live_write_target(proj)` after the sentinel statement
-   (`:20594-20599`), the same shape `delete_session` uses (*"One call for the lane, after the last
-   statement"*). The `already_seeded` early return issues only a read and stays uncounted. →
+   (the `CREATE` that closes the demo-point write batch), the same shape `delete_session` uses (*"One
+   call for the lane, after the last statement"*, its own `note_live_write_target(proj)` in
+   `_delete_session_sync`). The `already_seeded` early return issues only a read and stays uncounted. →
    *test:* step 1's test goes green; deleting the call reds it (mutation proof).
 3. **`cache_leg._COUNTED_LIVE_WRITE_LANES`:** the eight `(module, qualname)` rows above, next to
    `cache_write_targets`. → *test:* `test_the_declared_counted_set_is_the_ACTUAL_call_sites` — an AST
