@@ -157,7 +157,7 @@ def _context(client, payload: dict, *, headers: dict | None = None,
     embedder: **1.59 s** for the first read, **0.88-0.89 s** after, against that
     2.4 s ceiling; a loaded shard crosses it and empties a perfectly healthy
     response (observed here: ``test_two_teams_two_keys_zero_cross_team`` →
-    ``assert a_claim in []``).
+    ``assert a_claim in a_ids`` failing with ``[]``).
 
     The retry is the caller's own documented remedy — the read path is
     stateless (``re-POST the same session_id adds 0 graph nodes``) and a 429 is
@@ -166,6 +166,15 @@ def _context(client, payload: dict, *, headers: dict | None = None,
     ``degraded_reason`` in hand. Status-only assertions never need this: use
     the plain POST there, and use the plain POST in the degrade tests, which
     ASSERT the degraded shape.
+
+    ⛔ A retry that ends degraded returns the EMPTY block (``pointers``/
+    ``why``/``surfaced`` = ``[]``, ``block`` = ``""``), and an empty response
+    satisfies any assertion of the form "it is 200", "both are equal", "no
+    nodes were written" or "X is not in the ids". So a caller whose assertions
+    an empty block would pass MUST also assert ``degraded_reason is None`` —
+    otherwise the retry turns a dead read into a vacuous pass (the false-PASS
+    class this repository classifies as A; a cross-team isolation assertion
+    reading ``assert a_claim not in []`` is the worst case of it).
     """
     r = client.post("/v1/context", json=payload, headers=headers)
     for _ in range(attempts - 1):
@@ -244,6 +253,10 @@ def test_repost_same_session_identical_and_zero_new_nodes(client):
     r1 = _context(client, payload)
     r2 = _context(client, payload)
     assert r1.status_code == r2.status_code == 200
+    # A DEGRADED read is 200 + the empty block, and two identical empty blocks
+    # satisfy both assertions below (and write no nodes) — so the healthy-read
+    # precondition has to be named, or this test is green on a dead read.
+    assert r1.json()["degraded_reason"] is None, r1.json()
     assert r1.json() == r2.json()
     assert _count_nodes(sdk) == before  # 0 new graph nodes
 
@@ -294,6 +307,8 @@ def test_get_vs_post_context_never_collide(client):
     p = _context(client, {"window": _window(
         "What do you remember from last session?")})
     assert p.status_code == 200
+    # The shape is the same on a degraded 200, so name the healthy read.
+    assert p.json()["degraded_reason"] is None, p.json()
     assert set(p.json()) == {"pointers", "why", "surfaced", "block",
                              "degraded_reason"}
 
@@ -414,31 +429,27 @@ def test_429_rate_limit_retry_after_backoff_safe(monkeypatch, tmp_path):
                        methods=["POST"])
     # The per-IP bucket key is derived from the client address
     # (`_bucket_key` → `ip:<host>`), so pin it rather than inheriting the
-    # client library's default host name; the lane keeps the request off the
-    # box's ambient graph (a slow open would spend the limiter's window).
+    # client library's default host name; and the lane keeps the request off
+    # the box's ambient graph.
     with (_sdk_lane(os.path.join(str(tmp_path), "limited.db")),
           TestClient(mini, client=("127.0.0.1", 40777)) as tc):
         payload = {"window": _window("What did Alice decide?"),
                    "session_id": "sess_429"}
-        t0 = time.monotonic()
         first = tc.post("/v1/context", json=payload)
-        first_elapsed = time.monotonic() - t0
         assert first.status_code == 200, first.text
-        # The bucket charge is stamped when the request ENTERS the
-        # middleware and expires 60 s later, so a first request slower
-        # than the window hands the second one a fresh budget — the
-        # second POST would 200 and read as "the limiter is inert"
-        # (#3083). This is a precondition with ~200x headroom once the
-        # read path is warm, not a latency assertion on the product.
-        assert first_elapsed < 60.0, (
-            f"the first request took {first_elapsed:.1f}s — longer than "
-            "the limiter's 60 s window, so its own charge has expired "
-            "before the retry; the 429 below would be measuring nothing")
+        # ⛔ The precondition that matters is a HEALTHY first request, not a
+        # fast one: `degraded_reason is None` is what goes RED when the
+        # read-path warm-up is removed on a box whose cold embedder load
+        # exceeds the 2.4 s ceiling. (An elapsed-time bound cannot play this
+        # role — the ceiling caps every request well inside the limiter's
+        # 60 s window by construction, so such an assertion would be dead
+        # weight that reads as a guard.)
+        assert first.json()["degraded_reason"] is None, first.json()
         limited = tc.post("/v1/context", json=payload)
         assert limited.status_code == 429, (
             "the limiter did not charge a second request "
-            f"(RATE_LIMIT_DISABLED={os.environ.get('RATE_LIMIT_DISABLED')!r}, "
-            f"first_elapsed={first_elapsed:.2f}s): {limited.text}")
+            f"(RATE_LIMIT_DISABLED={os.environ.get('RATE_LIMIT_DISABLED')!r}): "
+            f"{limited.text}")
         assert "Retry-After" in limited.headers
         # Deterministic read-only: the same request is safe to retry (no
         # state mutated by the 429'd attempt).
@@ -576,6 +587,11 @@ def test_two_teams_two_keys_zero_cross_team(provision_test_user, real_auth):
             "session_id": "sess_B"}, headers=auth_b)
         assert r_b.status_code == 200, r_b.text
         b_ids = [p["id"] for p in r_b.json()["pointers"]]
+        # ⛔ The isolation assertion below is `a_claim not in b_ids`, which a
+        # DEGRADED read satisfies vacuously (`not in []`). Name the healthy
+        # read first, or this test is a false PASS on the one assertion that
+        # must never be one.
+        assert r_b.json()["degraded_reason"] is None, r_b.json()
         assert a_claim not in b_ids, f"CROSS-TEAM LEAK: {b_ids}"
         # Sanity: B's key resolves B's graph (same window, own content).
         r_b2 = _context(client, {
