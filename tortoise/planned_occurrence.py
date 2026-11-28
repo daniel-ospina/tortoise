@@ -1065,6 +1065,20 @@ def _resolve_plan(sdk, plan_ref: str) -> tuple[str, dict]:
         # settle. `plan_position` cannot answer this — it reads the position axis
         # only — so the gate lives here, at the ONE resolver both writers share,
         # and lands before any write.
+        #
+        # ⛔ #14796 DECLARED EXCEPTION — the POSITION axis is answered by each
+        # CALLER, before the write, and that split is deliberate rather than a
+        # residue: `record_occurrence` and `settle_plan` both ask
+        # `plan_position(...)["ended"]` (the ONE answer to "still open, ended, or
+        # unresolvable") as their first act after this resolver returns, and both
+        # produce the "(closed marker set)" refusal this gate does not.
+        # ⛔ THEREFORE A NEW CALLER OF THIS RESOLVER MUST REPEAT THAT GATE. This
+        # one cannot carry it: the slot of the RESOLVED stage is what decides a
+        # terminal position, `plan_position` owns resolving it, and re-deriving
+        # it here would be the second spelling of one rule — measured when it was
+        # tried, and it reordered two pinned refusals
+        # (`test_13100_planned_occurrences.py::test_a_MARKER_CLOSED_plan_is_
+        # refused_before_any_write`).
         raise ValueError(
             f"Refused: the plan {plan_ref!r} is already settled — its status is "
             f"{stored_status!r}"
