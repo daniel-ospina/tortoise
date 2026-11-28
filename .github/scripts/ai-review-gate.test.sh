@@ -2459,12 +2459,14 @@ assert_not_contains "(t30) …and does NOT claim the branch was rewritten" "REWR
 # ⛔ AND THE COUNT-EQUALITY `[ "$p_btotal" = "$p_bcount" ]` IS NOT PART OF THE SWEEP: it is
 # INERT on this fixture (`STUB_BRANCH_FAIL=1` makes `p_bside` empty, so `read` yields
 # `""`/`""` and `[ "" = "" ]` is true), so neutralising it here would let this row's
-# printed verdict name a member it never tested. It IS pinned — by `(t23)`'s truncated
-# branch page, on its own.
-# ⛔ THE VERDICT NAMES WHAT THE MUTANT SWEPT, NOT A GLOSSARY CATEGORY. Three of the four
-# are ALSO individually pinned (arity -> `(t32e)`, `p_btotal >= 1` -> `(t33)`, numeric
-# presence -> nothing alone); what this row uniquely shows is that they are jointly
-# load-bearing for THIS fixture. Do not restate that as "no single member is pinned".
+# printed verdict name a member it never tested. It IS pinned — alone, by `(t23)`'s
+# truncated branch page (measured: removing it reddens `(t23)` and nothing here).
+# ⛔ THE VERDICT NAMES WHAT THE MUTANT SWEPT, NOT A GLOSSARY CATEGORY. TWO of the four are
+# ALSO individually pinned (the arity check -> `(t32e)`, `p_btotal >= 1` -> `(t33)`); the
+# other two — the branch-side numeric presence and `[ -z "$p_bside" ]` — are SUBSUMED
+# (0 red rows alone; see the workflow header). What this row uniquely shows is that the
+# four are JOINTLY load-bearing for THIS fixture. Do not restate that as a count of
+# pinned members: an earlier version said "three", which double-counted the arity check.
 MUT_BSIDE="$T/mutant-no-bside-guards.sh"
 # Separate `-e`s, each with NO capture group used in the replacement: an alternation
 # across two patterns with different group counts silently mangles the replacement
@@ -2487,9 +2489,18 @@ sed -E -e 's/^ *(if \[ -z "\$p_bside" \]; then patch_ancestry_unreadable=1; retu
 # run carries, and the row would print a verdict about a set it did not sweep. Each of the
 # four must therefore be GONE from the mutant; a survivor is reported by name, which is
 # the same self-report `(t32h)` uses for its single guard.
+# ⛔ TWO-SIDED, AND THE PRESENT HALF IS NOT OPTIONAL (#4255, review cycle 9). Asserting
+# absence alone is blind to a guard that has been DELETED or reshaped in the gate: there is
+# no literal left to find, so a three-guard mutant in a four-guard row reads as "all
+# neutralised". Measured: deleting the branch-side numeric-presence guard left the suite
+# GREEN and (t30) printing its four-guard verdict. Each literal must therefore be PRESENT
+# in the pre-sweep block (it occurs exactly once) and ABSENT after it.
 _bt_missing=0
 for _g in "${_bt_guards[@]}"; do
-    if grep -qF -- "$_g" "$MUT_BSIDE"; then
+    if ! grep -qF -- "$_g" "$RUN_BLOCK"; then
+        bad "(t30) a guard this sweep claims to neutralise is not in the gate at all (deleted or reshaped), so the verdict below would name a set the mutant did not sweep: $_g"
+        _bt_missing=1
+    elif grep -qF -- "$_g" "$MUT_BSIDE"; then
         bad "(t30) a guard in the sweep was NOT neutralised, so the verdict below would name a set the mutant did not sweep: $_g"
         _bt_missing=1
     fi
