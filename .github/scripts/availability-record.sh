@@ -77,8 +77,11 @@
 #              minutes: still open; closed with an unreadable recovery stamp;
 #              closed as not_planned/duplicate (a human decision is not a
 #              recovery); a recovery stamp EARLIER than the first failure; no
-#              parseable first_failure_ts; or a usable span with no parseable
-#              kind. Disclosing them together is what guarantees no incident can
+#              USABLE first_failure_ts (absent, unparseable, or AHEAD of now —
+#              a stamp after this run's clock is classified at ingest, so it can
+#              never be counted and denied in the same record); or a usable span
+#              with no parseable kind. Disclosing them together is what
+#              guarantees no incident can
 #              be simultaneously INVISIBLE and costed at 0 minutes — but each
 #              carries its own label in the per-incident list, so "we do not know
 #              when it ended" is never printed as "it is down right now".
@@ -922,7 +925,7 @@ render_record() { # <days> <now>
   printf '\n'
   printf 'INCIDENTS — from ledger issues carrying %s (kind and restarts read from each state block).\n' "$INCIDENT_STATE_MARKER"
   printf 'DOWN (no answer) and DEGRADED (answered wrongly) are SEPARATE product failures and are never summed.\n'
-  printf 'DOWN_MIN = minutes the service was OBSERVED DOWN. DEGRADED_MIN is the same measure for DEGRADED incidents, in its OWN column — DOWN and DEGRADED are never summed. ⛔ MINUTES ARE WALL-CLOCK AND UNIONED: overlapping incidents are counted ONCE, and a minute is attributed to the UTC day it OCCURRED (the incident COUNT columns next to them attribute each incident to the day it was FIRST observed — a count belongs to the incident, a minute belongs to the clock). UNBOUNDED_INC = incidents that produce NO minutes and are disclosed here instead: still open, closed with an unreadable recovery stamp, closed as not_planned/duplicate (not a recovery), a recovery stamp that precedes the first failure, no parseable first_failure_ts, or a usable span with no parseable kind. Each carries its own label in the per-incident list, so an unknown end is never printed as "down right now". DOWN_MIN is a LOWER BOUND wherever UNBOUNDED_INC > 0. Resolution = the probe cadence printed above — a span shorter than one probe interval cannot be told apart from one interval.\n'
+  printf 'DOWN_MIN = minutes the service was OBSERVED DOWN. DEGRADED_MIN is the same measure for DEGRADED incidents, in its OWN column — DOWN and DEGRADED are never summed. ⛔ MINUTES ARE WALL-CLOCK AND UNIONED: overlapping incidents are counted ONCE, and a minute is attributed to the UTC day it OCCURRED (the incident COUNT columns next to them attribute each incident to the day it was FIRST observed — a count belongs to the incident, a minute belongs to the clock). UNBOUNDED_INC = incidents that produce NO minutes and are disclosed here instead: still open, closed with an unreadable recovery stamp, closed as not_planned/duplicate (not a recovery), a recovery stamp that precedes the first failure, no USABLE first_failure_ts (absent, unparseable, or ahead of now), or a usable span with no parseable kind. Each carries its own label in the per-incident list, so an unknown end is never printed as "down right now". DOWN_MIN is a LOWER BOUND wherever UNBOUNDED_INC > 0. Resolution = the probe cadence printed above — a span shorter than one probe interval cannot be told apart from one interval.\n'
   printf '  incident totals: down=%s degraded=%s unknown=%s restart_attempts=%s\n' \
     "$total_down_inc" "$total_degraded_inc" "$total_unknown_inc" "$total_restarts"
   # ⛔ THE COUNT CLAUSE NAMES A POPULATION, SO IT MUST PRINT THAT POPULATION (review round 8 P2).
@@ -936,7 +939,10 @@ render_record() { # <days> <now>
   # undated class is added to that TOTAL and has no day row, so the sentence must name the
   # exception instead of implying a reconciliation that cannot be performed.
   printf '  (those totals are WINDOW-SCOPED — summed from the day columns above, EXCEPT `unbounded_inc`,\n'
-  printf '   which also counts incidents with no parseable `first_failure_ts` (they have no day row).\n'
+  # ⚙ THE NOTE MUST NAME THE WHOLE CLASS (review round 10 P3): the undated class now includes a
+  # PARSEABLE stamp that is AHEAD of `now`, so "no parseable first_failure_ts" describes a
+  # population of size 0 while the TOTAL still shows the off-row +1.
+  printf '   which also counts incidents with no USABLE `first_failure_ts` (absent, unparseable, or ahead of now).\n'
   printf '   The list below covers the\n'
   printf '   whole ledger, so it can name an incident that is outside this window. They are NOT the sum of\n'
   printf '   the per-incident down_for= lines: overlapping spans union, and every minute is clipped to its\n'
@@ -961,7 +967,10 @@ render_record() { # <days> <now>
         warn "ledger incident #${inc_n} has no parseable first_failure_ts — listed, counted in the TOTAL's unbounded_inc but on no day row"
       fi
       if [ "$inc_kind" = "unknown" ]; then
-        warn "ledger incident #${inc_n} has no parseable kind= — counted as unknown (never as down or degraded)"
+        # A row with no day cannot reach `unknown_inc` (that column is day-keyed), so the
+        # warning must not claim it was counted there (pre-existing defect, exposed by the
+        # undated/future classes this diff adds).
+        warn "ledger incident #${inc_n} has no parseable kind= — never counted as down or degraded (unknown where it has a day, unclassified otherwise)"
       fi
       if [ -n "$inc_rest" ]; then rest_disp="$inc_rest"; else rest_disp="(none)"; fi
       restart_count="$(printf '%s' "$inc_rest" | tr ',' '\n' | grep -c '[0-9]' || true)"

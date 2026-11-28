@@ -1184,6 +1184,12 @@ assert_eq "$(printf '%s\n' "$OUT" | awk '$1 ~ /^2026-09-17/ { print $(NF-6) }')"
   "the incident is not counted in down_inc either"
 assert_contains "$OUT" "recovered downtime: 0 min DOWN and 0 min DEGRADED — never summed" \
   "no downtime figure is published for a stamp that has not happened yet"
+# ⛔ THE LEGEND AND THE NOTE MUST NAME THE FUTURE MEMBER of unbounded_inc (review round 10 P3),
+# or the note explains its own off-row +1 with a class of size 0.
+assert_contains "$OUT" "no USABLE first_failure_ts (absent, unparseable, or ahead of now)" \
+  "the published legend names the class the future stamp was filed under"
+assert_contains "$OUT" "which also counts incidents with no USABLE \`first_failure_ts\` (absent, unparseable, or ahead of now)" \
+  "the reconciliation note names the same class"
 assert_eq "$(printf '%s\n' "$OUT" | awk '$1 == "TOTAL" { print $NF }')" "1" \
   "it is disclosed in the TOTAL's unbounded_inc instead of vanishing"
 
