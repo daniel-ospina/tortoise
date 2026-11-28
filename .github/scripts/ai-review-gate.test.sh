@@ -481,7 +481,14 @@ if grep -qE -- "/compare/" <<<"$*" && ! grep -qF -- "application/vnd.github.v3.d
         # `0\t0`. The gate tolerated it; the guard now refuses it, and a fixture must not
         # be able to create that inconsistency by OMISSION. Fixtures that deliberately
         # render a TRUNCATED page set BOTH explicitly (e.g. TOTAL=9 COUNT=1) and still do.
-        _bs_shas="${STUB_BRANCH_SHAS:-}"
+        # ⛔ A FIXTURE THAT SAYS NOTHING ABOUT THE GRAPH NOW RENDERS A PLAUSIBLE ONE
+        # (review cycle 3). The gate requires a stale marker's page to be non-empty —
+        # GitHub cannot render `ahead` with ZERO commits between two different shas —
+        # so the previous silent default (`0` commits, empty list) described a page the
+        # API cannot produce, and a fixture relying on it tested an impossible answer.
+        # The default is now ONE base-brought MERGE commit (`ffffffffffff:2`),
+        # which the branch-side list contains, i.e. a legal base advance.
+        _bs_shas="${STUB_BRANCH_SHAS-ffffffffffff}"
         _bs_count="${STUB_BRANCH_COUNT:-$(printf '%s' "$_bs_shas" | wc -w | tr -d ' ')}"
         _bs_total="${STUB_BRANCH_TOTAL:-$_bs_count}"
         printf '%s\t%s\t%s\n' "$_bs_total" "$_bs_count" "$_bs_shas"
@@ -505,7 +512,7 @@ if grep -qE -- "/compare/" <<<"$*" && ! grep -qF -- "application/vnd.github.v3.d
     # Same rule as the branch side above: the counts default to the LIST's arity, so a
     # fixture that sets only the commit list is internally consistent; a deliberately
     # truncated page still sets TOTAL/SEEN explicitly.
-    _an_commits="${STUB_ANCESTOR_COMMITS:-}"
+    _an_commits="${STUB_ANCESTOR_COMMITS-ffffffffffff:2}"
     _an_seen="${STUB_ANCESTOR_SEEN:-$(printf '%s' "$_an_commits" | wc -w | tr -d ' ')}"
     _an_total="${STUB_ANCESTOR_TOTAL:-$_an_seen}"
     printf '%s\t%s\t%s\t%s\n' "${STUB_ANCESTOR_STATUS:-ahead}" "$_an_total" \
@@ -1558,6 +1565,15 @@ else
     fi
 fi
 
+# Reviewed-diff compare counting (review cycle 3): the DECISIVE call is the one
+# carrying the diff MEDIA TYPE. A bare `compare/<base>...` count also counts the
+# BRANCH-SIDE read, which is a SECOND call per probe — a distinction invisible while
+# the fixture graph was empty (the read never ran), i.e. those assertions used to pass
+# for the wrong reason. The live-diff call is a `/pulls/` URL, so it is not matched.
+reviewed_diff_compares() { # <gh-log>
+    grep -E -- "compare/" "$1" | grep -cF -- "application/vnd.github.v3.diff" || true
+}
+
 # ── (t9) THE PROBE FAN-OUT IS BOUNDED BY EVIDENCE, NOT BY BODY BYTES ─────
 # `all_markers` is attacker-supplied text: the PR BODY is not restricted to
 # OWNER|MEMBER|COLLABORATOR and this workflow is `pull_request_target`, so a fork PR's
@@ -1578,9 +1594,9 @@ diff_marker "$STALE" "$PB_REVIEWED" >> "$FORGED"
 STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
     STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$FORGED"
 assert_rc 0 "(t9) 25 forged marker lines beside ONE signed record: the signed record still carries"
-_t9_compares="$(grep -cE -- "compare/${BASE_SHA}\.\.\." "$T/gh.log" || true)"
+_t9_compares="$(reviewed_diff_compares "$T/gh.log")"
 _t9_all_calls="$(grep -cE -- '/compare/|--jq \.base\.sha' "$T/gh.log" || true)"
-if [ "$_t9_compares" -le 1 ] && [ "$_t9_all_calls" -le 3 ]; then
+if [ "$_t9_compares" -le 1 ] && [ "$_t9_all_calls" -le 4 ]; then
     ok "(t9) the forged lines bought NO probe (${_t9_compares} reviewed-diff compare(s), ${_t9_all_calls} rule-(c) call(s) — signature verified FIRST)"
 else
     bad "(t9) the body's forged lines bought ${_t9_compares} reviewed-diff compare(s) / ${_t9_all_calls} rule-(c) call(s) — the probe fan-out is a function of PR TEXT"
@@ -1610,7 +1626,14 @@ if [[ "$CAP_PIN" =~ ^[0-9]+$ ]]; then
     # the rule-(c) call total is bounded by 4 x CAP_PIN. Counting `/compare/` alone
     # would have read a correct multi-call probe as a cap violation (measured: 16 for 8
     # when it was three calls and the comment said two).
-    _t9_cap_compares="$(grep -cE -- "compare/${BASE_SHA}\.\.\." "$T/gh.log" || true)"
+    # ⛔ AND COUNT THE DECISIVE CALL, NOT EVERY URL THAT STARTS WITH IT (review cycle 3):
+    # the BRANCH-SIDE read also fetches `compare/<base>...`, so a bare
+    # `compare/${BASE_SHA}\.\.\.` count reads TWO calls per probe once the branch-side
+    # read actually runs — which it did not while the fixture graph was empty. That made
+    # this assertion pass for the wrong reason and would report a cap violation (or mask
+    # one) after any fixture change. A reviewed-diff compare is the one that carries the
+    # diff MEDIA TYPE; the live-diff call is a `/pulls/` URL and so is not matched here.
+    _t9_cap_compares="$(reviewed_diff_compares "$T/gh.log")"
     _t9_cap_all="$(grep -cE -- '/compare/|--jq \.base\.sha' "$T/gh.log" || true)"
     if [ "$_t9_cap_compares" -eq "$CAP_PIN" ]; then
         ok "(t9) the probe cap holds (${_t9_cap_compares} reviewed-diff compares for $((CAP_PIN + 3)) signed records, cap $CAP_PIN)"
@@ -2398,13 +2421,17 @@ fi
 
 
 # ── (t30) THE BRANCH-SIDE READ IS A GUARD, NOT A CONVENIENCE ────────────────
-# ⛔ THE SECOND UNPINNED PAIR (final review). `[ -z "$p_bside" ]` and the arity check
-# on the branch-side counts are what make an UNREADABLE
-# branch-side graph refuse instead of treating a missing sha as "the base brought it in".
-# Removing either alone reddened NO row, and removing BOTH let a single-parent AUTHORED
-# commit carry via PATCH match — a false pass of exactly the class this rule exists to
-# stop. It was untestable because the stub's `STUB_COMPARE_JSON_FAIL` fails both compare
-# arms together; `STUB_BRANCH_FAIL` (added above) fails only this one, as gh really can.
+# ⛔ NOT AN UNPINNED PAIR ANY MORE, AND THE ATTRIBUTION IS PER-HALF (review cycle 3, which
+# measured this sentence FALSE as written). `[ -z "$p_bside" ]` and the branch-side
+# ARITY check are what make an UNREADABLE branch-side graph refuse instead of treating a
+# missing sha as "the base brought it in". Measured at `eebfd924`, each removed ALONE:
+#   · `[ -z "$p_bside" ]`          -> PASS=274 FAIL=0  (reddens NOTHING on its own)
+#   · the branch-side ARITY line   -> PASS=271 FAIL=3  (`(t32e)` x3)
+# so "removing EITHER alone reddened NO row" is wrong: `(t32e)` — added by this same PR —
+# pins the arity half by itself, and only the `[ -z "$p_bside" ]` half is attribution-less.
+# Removing BOTH still lets a single-parent AUTHORED commit carry via PATCH match, which is
+# why the mutant below sweeps the pair. `STUB_BRANCH_FAIL` (added above) fails only this
+# arm, as gh really can.
 BSIDE_BODY="$T/body-t30"
 printf '%s\n' "$(diff_marker "$STALE" "$SAME_SCOPE_ANCHOR")" > "$BSIDE_BODY"
 # (a) The read fails: REFUSED, with the read-failure diagnosis, not a rewrite.
@@ -2507,6 +2534,36 @@ STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
 assert_rc 1 "(t32e) an EMPTY branch-side sha list with agreeing counts REFUSES — it must never read as 'came from the base'"
 assert_contains "(t32e) …and says the graph could not be READ" "could not READ this PR's commit graph"
 assert_not_contains "(t32e) …and no patch match is claimed" "passed via PATCH match"
+# ── (t32g) A PAGE THAT CONTRADICTS THE HEAD IT DESCRIBES ─────────────────────
+# `ahead<TAB>0<TAB>0<TAB>` — the counts are present, numeric, equal, and arity-consistent
+# (zero words for a count of zero), so every check (t32a)-(t32e) passes it. But the marker
+# sha is ALREADY known to differ from the head, so a page claiming ZERO commits between
+# them is self-contradictory: GitHub cannot render that. Left unchecked it skipped the
+# authored-commit loop and a changed `--jq` expression rendering literal zeros would carry
+# (review cycle 3).
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" STUB_ANCESTOR_ROW="$(printf 'ahead\t0\t0\t')" run_gate "$T32_BODY"
+assert_rc 1 "(t32g) a page claiming ahead with ZERO commits between two different shas REFUSES"
+assert_contains "(t32g) …as an UNREADABLE page" "could not READ this PR's commit graph"
+assert_not_contains "(t32g) …and no patch match is claimed" "passed via PATCH match"
+# ── (t32h) its own mutation control: strip ONLY the self-consistency guard.
+MUT_T32H="$T/mutant-no-seen-guard.sh"
+sed -E 's/^ *(\[ "\$p_seen" -ge 1 \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' "$RUN_BLOCK" > "$MUT_T32H"
+if cmp -s "$RUN_BLOCK" "$MUT_T32H"; then
+    bad "(t32h) the self-consistency mutation did not apply — this control proves NOTHING"
+elif ! bash -n "$MUT_T32H"; then
+    bad "(t32h) the mutant does not PARSE — it cannot attribute anything"
+else
+    _saved_block="$RUN_BLOCK"; RUN_BLOCK="$MUT_T32H"
+    STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+        STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" STUB_ANCESTOR_ROW="$(printf 'ahead\t0\t0\t')" run_gate "$T32_BODY"
+    RUN_BLOCK="$_saved_block"
+    if [ "$GATE_RC" = "0" ]; then
+        ok "(t32h) with the self-consistency guard removed that page CARRIES — so it is load-bearing"
+    else
+        bad "(t32h) the mutant still refused (rc=$GATE_RC) — (t32g) attributes nothing"
+    fi
+fi
 # ── (t32f) MUTATION: strip the presence AND list-arity guards → the short row
 # CARRIES, which is the false pass they prevent.
 MUT_T32="$T/mutant-no-arity-guards.sh"
@@ -2514,6 +2571,7 @@ sed -E -e 's/^ *(\[\[ "\$p_rel" =~ \^\(ahead\|behind\|diverged\|identical\)\$ \]
        -e 's/^ *(\[\[ "\$p_total" =~ \^\[0-9\]\+\$ && "\$p_seen" =~ \^\[0-9\]\+\$ \]\] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
        -e 's/^ *(\[ "\$p_total" = "\$p_seen" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
        -e 's/^ *(\[ "\$\(printf .%s. "\$p_added" \| wc -w\)" = "\$p_seen" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
+       -e 's/^ *(\[ "\$p_seen" -ge 1 \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
     "$RUN_BLOCK" > "$MUT_T32"
 if cmp -s "$RUN_BLOCK" "$MUT_T32"; then
     bad "(t32f) the arity-guard mutation did not apply — this control proves NOTHING"
@@ -2552,7 +2610,7 @@ DUPBODY="$T/body-t26"
 STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
     STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$DUPBODY"
 assert_rc 0 "(t26) the same signed record repeated three times still carries"
-_t26="$(grep -cE -- "compare/${BASE_SHA}\\.\\.\\." "$T/gh.log" || true)"
+_t26="$(reviewed_diff_compares "$T/gh.log")"
 if [ "$_t26" -eq 1 ]; then
     ok "(t26) three copies of ONE record bought exactly 1 reviewed-diff compare"
 else

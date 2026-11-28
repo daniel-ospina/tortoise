@@ -1024,12 +1024,27 @@ jobs:
             # present and numeric, each count must equal the number of items in its own
             # list (so `0` ⟺ an empty list), and the status must be one of the four
             # GitHub statuses. A short, absent or differently-shaped row is UNREADABLE —
-            # never a consistent page, and never a rewrite. `(t32a)`–`(t32c)` pin the
-            # three shapes, `(t32d)`/`(t32e)` pin the LIST-ARITY invariant on each side
-            # (a row with the counts right and the list EMPTY used to skip the whole
-            # authored-commit guard — the same fail-open one shape over, found by review
-            # cycle 2), and `(t32f)` is the mutation control proving these guards are
-            # what refuse.
+            # never a consistent page, and never a rewrite.
+            # ⛔ WHICH ROW PINS WHICH GUARD — the attribution is NOT one row per guard, and
+            # pretending otherwise is the defect this parameter has produced in every cycle
+            # (measured 2026-11-28, each guard removed ALONE at `eebfd924`):
+            #   · status allowlist            -> `(t32c)` x2   (pinned ALONE)
+            #   · reviewed-side list arity    -> `(t32d)` x3   (pinned ALONE)
+            #   · branch-side list arity      -> `(t32e)` x3   (pinned ALONE)
+            #   · the `p_seen -ge 1` self-consistency guard -> `(t32g)`/`(t32h)`
+            #   · numeric presence on BOTH counts -> NOTHING ALONE (0 red rows). It is a
+            #     MUTUAL-MASKING PAIR with the reviewed-side arity: with presence removed,
+            #     `p_total`/`p_seen` are `""` and the arity comparison refuses anyway, so
+            #     `(t32a)`/`(t32b)` pass on the pair. Removing BOTH lets `(t32a)`, `(t32b)`
+            #     AND `(t32d)` all carry (`rc=0`, `passed via PATCH match`). `(t32f)` is the
+            #     only control that strips both, so a single deletion here LOOKS green.
+            #     Do not delete one of the two on the strength of a green suite.
+            #   · `[ -z "$p_row" ]` (the empty-parse arm) and the BRANCH-side numeric
+            #     presence check are SUBSUMED by their siblings — each reddens nothing
+            #     alone (measured: 0) and is kept as defence in depth, not as a pinned
+            #     bound. That is stated, not implied.
+            # `(t32f)` strips the presence+arity set and asserts the short row CARRIES, which
+            # is what makes the class attributable at all.
             # Both reads therefore refuse on anything unreadable or truncated, so a
             # transient (or a mis-shaped) answer can only NARROW rule (c), never widen it.
             p_base="$(gh api "repos/${REPO_NAME}/pulls/${PR_NUMBER}" --jq .base.sha 2>/dev/null || true)"
@@ -1054,6 +1069,7 @@ jobs:
             if [ "$p_rel" != "ahead" ]; then patch_rewritten=1; return 1; fi
             # A truncated page could hide the commit this guard exists to find.
             [ "$p_total" = "$p_seen" ] || { patch_ancestry_unreadable=1; return 1; }
+            [ "$p_seen" -ge 1 ] || { patch_ancestry_unreadable=1; return 1; }
             # ⛔ THE LIST'S ARITY IS PART OF THE PAGE, NOT A SEPARATE DETAIL (review
             # cycle 2 of #4255). The equality above proves the two counts AGREE; it does
             # not prove the sha LIST was rendered. A row of `ahead<TAB>1<TAB>1<TAB>` —
@@ -1065,6 +1081,14 @@ jobs:
             # number of tokens in the list, so `p_seen = 0` ⟺ an empty list. `(t32d)` pins
             # it here and `(t32e)` on the branch side, each with its own fixture.
             [ "$(printf '%s' "$p_added" | wc -w)" = "$p_seen" ] || { patch_ancestry_unreadable=1; return 1; }
+            # ⛔ AND THE PAGE MUST NOT CONTRADICT WHAT WE ALREADY KNOW (review cycle 3):
+            # `p_sha != expected` is established above, so the head is NOT the reviewed
+            # commit — yet this page claims ZERO commits between them, which GitHub cannot
+            # render for two different shas with `status=ahead`. Under the old guard such a
+            # row passed (0 counted 0 words) and then SKIPPED the authored-commit loop, so a
+            # changed `--jq` expression rendering literal zeros would still carry. It is a
+            # self-contradictory page, so it is UNREADABLE. `(t32g)` pins it.
+            [ "$p_seen" -ge 1 ] || { patch_ancestry_unreadable=1; return 1; }
             if [ -n "$p_added" ]; then
               # `compare/<base>...<head>` lists ONLY head-side commits (base ones are
               # excluded by construction), so membership in it is what separates "the

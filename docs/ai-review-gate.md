@@ -144,10 +144,14 @@ entry condition closes that path.
      a post-review authored commit carrying on `status=ahead` alone. `presence, then
      arity, then meaning` is what closes that — the reviewed and branch-side SHA
      lists must each render exactly as many entries as their count claims, so `0`
-     always means an EMPTY list rather than a list that was never rendered — and an
+     always means an EMPTY list rather than a list that was never rendered. A page that
+     says `ahead` with ZERO commits between two different shas is SELF-CONTRADICTORY
+     (GitHub cannot render it) and is refused for that reason too, so a changed
+     expression rendering literal zeros cannot skip the authored-commit loop; and an
      unrecognised status is reported as an UNREADABLE graph, not as a rewrite, which
      would send you to buy a 20–40 minute re-review for an API blip (harness cases
-     `(t32a)`–`(t32f)`).
+     `(t32a)`–`(t32h)`, whose comments state which guard each row pins — including the
+     two that are pinned only as a MUTUAL-MASKING PAIR and the two subsumed ones).
 
   ⛔ Checks 1 and 2 are not decoration, and check 1 alone was not enough. Measured on
   this rule, end to end, each `passed via PATCH match` with the anchor reproducing
