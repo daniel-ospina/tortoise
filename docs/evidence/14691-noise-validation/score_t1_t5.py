@@ -52,8 +52,14 @@ RULE_T4 = ("PASS iff none of the ontology's types is collapsed: the flat "
            "decisions land as the event/decision kind rather than as a bare "
            "statement, roles land as Subjects, and documents land as Sources.")
 RULE_T5 = ("PASS iff every sampled relation is stated or directly implied by the "
-           "corpus text — both endpoints named in one document, and the "
-           "predicate's wording present. One invented edge fails the test.")
+           "corpus text: both ENDPOINTS named in one document — verbatim, or the "
+           "extractor's re-wording at >= 0.6 content-token overlap with that "
+           "document. One relation whose endpoints are never co-stated fails the "
+           "test. ⛔ The PREDICATE axis is NOT graded: the corpus is prose and the "
+           "graph's predicates are ontology names (`ownedBy`, `related`, …), so a "
+           "wording test would score a correct normalisation as an invention — the "
+           "count of rows whose predicate wording appears in its co-stated "
+           "documents is reported as gap D6 instead of being passed silently.")
 
 
 def load(name: str) -> dict:
@@ -410,10 +416,20 @@ def t3(receipt: dict, corpus: dict) -> dict:
                    if owned and sum(1 for t in owned if t in tokens(text)) / len(owned) >= 0.8]
         named_in_corpus.append({"name": row.get("name"), "kind": row.get("kind"),
                                 "exact_doc_hits": hits, "near_doc_hits": partial})
+    # RULE_T3 has TWO conjuncts and BOTH are graded: the share, AND that every orphan
+    # named is explainable as a standalone fact in the corpus text. The second was
+    # computed and then dropped before #14812's review — the rule quoted beside the
+    # verdict was not the rule that produced it, and by the quoted rule T3 was FAIL
+    # (two orphans match no document at all). `>= 0.8` of an orphan's own long tokens
+    # is the same near-match band the T1 restatement test uses, so "traceable" means
+    # the same thing in both places.
+    unexplained = [r for r in named_in_corpus
+                   if not r["exact_doc_hits"] and not r["near_doc_hits"]]
     share_receipt = (len(orphans_receipt) / len(rows)) if rows else None
     share_door = (len(orphans_door) / len(rows)) if rows else None
     majority_orphans = share_receipt is not None and share_receipt > 0.5
-    verdict = "FAIL" if majority_orphans else "PASS"
+    every_orphan_explained = not unexplained
+    verdict = "FAIL" if (majority_orphans or not every_orphan_explained) else "PASS"
     return {
         "test": "T3",
         "rule": RULE_T3,
@@ -434,6 +450,14 @@ def t3(receipt: dict, corpus: dict) -> dict:
                             "rows": [{"name": r["name"], "kind": r["kind"]}
                                      for r in orphans_door]},
         "orphan_traceability": named_in_corpus,
+        "orphan_legs": {
+            "majority_are_not_orphans": not majority_orphans,
+            "every_orphan_explained_in_corpus": every_orphan_explained,
+            "unexplained": [{"name": r["name"], "kind": r["kind"]}
+                            for r in unexplained],
+            "note": ("both conjuncts of RULE_T3 are graded; a row here has no exact "
+                     "or near document hit, so the corpus never says it"),
+        },
         "verdict": verdict,
     }
 
@@ -462,10 +486,17 @@ def t4(receipt: dict, corpus: dict) -> dict:
     sources = c["source_rows"]
     docs = len(corpus["documents"])
 
+    # RULE_T4's decision clause — "decisions land as the event/decision kind rather
+    # than as a bare statement" — is GRADED, not merely reported. It was computed and
+    # dropped before #14812's review, so a run whose decisions landed as bare
+    # statements still PASSed. `event_kinds` counts POINTS whose kind is `event`; the
+    # taxonomy's `Event` above counts the Event layer, which is a different quantity.
+    decision_leg = bool(decision_points) and event_kinds > 0
     verdict = "PASS" if (c["taxonomy"].get("Event", 0) > 0
                          and c["taxonomy"].get("Subject", 0) > 0
                          and c["taxonomy"].get("Object", 0) > 0
                          and c["taxonomy"].get("Source", 0) >= docs
+                         and decision_leg
                          and role_entities) else "FAIL"
     return {
         "test": "T4",
@@ -476,7 +507,8 @@ def t4(receipt: dict, corpus: dict) -> dict:
                             "operators": c["operators"]},
         "entity_kinds_seen": kinds,
         "per_kind_full_scan": scans,
-        "decision_leg": {"events": c["taxonomy"].get("Event", 0),
+        "decision_leg": {"graded": decision_leg,
+                         "events": c["taxonomy"].get("Event", 0),
                          "event_point_kind_rows": event_kinds,
                          "decision_wording_points": [
                              {"doc_id": p.get("doc_id"), "kind": p.get("kind"),
@@ -550,6 +582,30 @@ def t5(receipt: dict, corpus: dict) -> dict:
     unsupported = [s for s in samples if s["support"] == "none"]
     tiers = {t: sum(1 for s in samples if s["support"] == t)
              for t in ("verbatim", "paraphrase", "none")}
+    # ── D6: the PREDICATE axis, MEASURED but not graded ────────────────────────
+    # `RULE_T5` grades the ENDPOINTS. The predicate is a different claim, and it is
+    # NOT graded here for the reason the rule states: the extractor writes ontology
+    # predicate names into a corpus of English prose, so a substring test on the
+    # predicate's spelling would score a correct normalisation (`ownedBy` for
+    # "owns") as an invented edge — the exact rename-vs-invention confusion
+    # `trace()`'s own docstring refuses one level down. What the bundle CAN do
+    # honestly is measure the gap and hand it to a reader as a number: for each
+    # sampled row, do the documents that co-state its endpoints also contain the
+    # predicate's own wording? Unmapped rows are counted separately rather than
+    # folded into either side, so a predicate the corpus cannot carry is never
+    # silently reported as supported OR as an invention.
+    predicate_axis = []
+    for s in samples:
+        docs = s["co_stated_verbatim"] or s["co_stated_paraphrase"]
+        wording = {(s["predicate"] or "").lower(),
+                   (s["stated_predicate"] or "").lower()} - {""}
+        found = sorted(doc for doc in docs
+                       if any(w in norm(texts.get(doc, "")) for w in wording))
+        predicate_axis.append({"predicate": s["predicate"],
+                               "stated_predicate": s["stated_predicate"],
+                               "wording_in_co_stated_docs": found})
+    predicate_graded_in_corpus = sum(1 for r in predicate_axis
+                                    if r["wording_in_co_stated_docs"])
     # The rule's number is the NONE tier: a paraphrase is the extractor's own
     # re-wording of a stated fact, an unsupported row is a claim the corpus never made.
     verdict = "PASS" if samples and not unsupported else ("FAIL" if samples else "NO-DATA")
@@ -563,6 +619,15 @@ def t5(receipt: dict, corpus: dict) -> dict:
         "rows": samples,
         "predicate_histogram": {p: sum(1 for s in samples if s["predicate"] == p)
                                 for p in {s["predicate"] for s in samples}},
+        "predicate_axis": {
+            "graded": False,
+            "why": ("D6 — the graph's predicates are ontology names and the corpus is "
+                    "prose, so a wording test scores a correct normalisation as an "
+                    "invention. RULE_T5 grades the endpoints; this is the gap."),
+            "sampled": len(samples),
+            "predicate_wording_in_co_stated_docs": predicate_graded_in_corpus,
+            "rows": predicate_axis,
+        },
         "verdict": verdict,
     }
 

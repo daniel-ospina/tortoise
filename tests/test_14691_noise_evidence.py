@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -152,15 +153,134 @@ def test_the_occupancy_walk_ignores_connection_vocabulary_and_diagnostics():
 
 
 # ── the five verdicts ───────────────────────────────────────────────────────
+_VERDICT_CELL_RE = (r"^\|\s*\*\*(?P<name>T[1-5])\*\*\s*\|[^|\n]*\|"
+                    r"\s*\*\*(?P<v>[A-Z][A-Z-]*)\*\*\s*\|")
+
+
+def _report_verdicts() -> dict[str, str]:
+    """Each row's verdict, read from THAT row's own cell.
+
+    The earlier spelling asserted `f"**{row['verdict']}**" in report`, which is not
+    scoped to the row: the report carries BOTH `**FAIL**` and `**PASS**`, so any
+    single row's verdict could be flipped with the suite still green — the exact
+    drift this file exists to catch, and the one mutation the review measured as
+    surviving. Anchoring on `| **T3** |` and capturing the third cell is what ties
+    the verdict to its own row.
+    """
+    found = {m.group("name"): m.group("v")
+             for m in re.finditer(_VERDICT_CELL_RE, _report(), re.MULTILINE)}
+    assert set(found) == {"T1", "T2", "T3", "T4", "T5"}, (
+        f"REPORT.md's verdict table no longer parses per row: {sorted(found)}")
+    return found
+
+
 def test_the_five_verdicts_are_the_reports_verdicts():
     tests = _score()["tests"]
-    assert {name: row["verdict"] for name, row in tests.items()} == {
-        "T1": "FAIL", "T2": "FAIL", "T3": "PASS", "T4": "PASS", "T5": "PASS",
+    committed = {name: row["verdict"] for name, row in tests.items()}
+    assert committed == {
+        "T1": "FAIL", "T2": "FAIL", "T3": "FAIL", "T4": "PASS", "T5": "PASS",
     }
-    report = _report()
-    for name, row in tests.items():
-        assert f"| **{name}** |" in report
-        assert f"**{row['verdict']}**" in report, f"REPORT.md no longer says {name} is {row['verdict']}"
+    # ROW-SCOPED: a flip in one row cannot be satisfied by another row's word.
+    assert _report_verdicts() == committed, (
+        "REPORT.md's verdict row disagrees with the score artifact; the cell is read "
+        "from the row it belongs to, so one row's `**PASS**` cannot stand in for "
+        "another's")
+
+
+def test_the_scorer_RECOMPUTES_the_committed_verdicts():
+    """Drive the scorer; do not only trust the bytes it once wrote.
+
+    Before #14812's review every verdict test compared the committed
+    `out/t1-t5-score.json` to literals and `_score_module()` was defined and never
+    called, so changing a `RULE_*` or dropping a conjunct from a verdict changed no
+    committed number and reddened nothing. That is precisely why two unevaluated
+    conjuncts (T3's second leg, T4's decision leg) shipped invisibly. This runs the
+    scorer's own functions over the committed artifacts and demands the verdicts it
+    computes are the verdicts the artifact and REPORT.md carry.
+    """
+    module = _score_module()
+    receipt, corpus = _receipt(), _corpus()
+    computed = {
+        "T1": module.t1(receipt)["verdict"],
+        "T2": module.t2(receipt, corpus)["verdict"],
+        "T3": module.t3(receipt, corpus)["verdict"],
+        "T4": module.t4(receipt, corpus)["verdict"],
+        "T5": module.t5(receipt, corpus)["verdict"],
+    }
+    assert computed == {name: row["verdict"] for name, row in _score()["tests"].items()}, (
+        "the scorer no longer computes the verdicts its own artifact states — a rule "
+        "changed under figures that were not re-derived")
+    assert computed == _report_verdicts()
+
+
+def test_every_conjunct_of_a_rule_changes_its_verdict(monkeypatch):
+    """Each rule's conjunct must be READ, not merely computed and printed.
+
+    Both findings were found from a report field that existed and was ignored: T3's
+    `orphan_traceability` (its second conjunct) and T4's `event_point_kind_rows` (its
+    decision clause). A field nobody reads is a rule that cannot fail, so each leg is
+    driven here in the direction that must FAIL — the shape the pre-fix code passed.
+    """
+    module = _score_module()
+
+    # ── T3: the share leg passes (1 of 2 orphans is 0.5, not >0.5) and only the
+    #        second conjunct can fail: `a thing the corpus never says` is untraceable.
+    readback_t3 = {
+        "entities": [{"id": "e1", "name": "Priya Nair", "kind": "core:naturalPerson",
+                      "layer": "subject"},
+                     {"id": "e2", "name": "a thing the corpus never says",
+                      "kind": "core:strategy", "layer": "object"}],
+        "neighbours": {},
+    }
+    receipt_t3 = {"passes": [{"pass": 1, "documents": [{"doc_id": "doc-01", "result": {
+        "relation_write": {"edges": [{"src_id": "e1", "dst_id": "e1"}]}}}]}]}
+    monkeypatch.setattr(module, "load", lambda name: readback_t3)
+    row = module.t3(receipt_t3, _corpus())
+    assert row["orphan_legs"]["majority_are_not_orphans"] is True, \
+        "the fixture must keep the SHARE leg passing, so only the second conjunct decides"
+    assert row["orphan_legs"]["every_orphan_explained_in_corpus"] is False
+    assert row["verdict"] == "FAIL", (
+        "T3 PASSes an orphan whose name the corpus never states — its second conjunct "
+        "is being computed and dropped, which is the defect the review measured")
+    # …and the same fixture with a TRACEABLE orphan must PASS, so the arm cannot be
+    #   satisfied by making T3 fail unconditionally.
+    readback_t3["entities"][1]["name"] = "Priya Nair"
+    row = module.t3(receipt_t3, _corpus())
+    assert row["verdict"] == "PASS", (
+        "T3 fails a traceable orphan — the second conjunct is not reading the corpus")
+
+    # ── T4: every OTHER leg holds (all four layers, 6 Sources, 10 Subjects); only
+    #        the decision leg is missing (no event-kind Point), which the pre-fix
+    #        verdict ignored.
+    readback_t4 = {
+        "overview": {"taxonomy": {"Point": 100, "Event": 26, "Subject": 10,
+                                   "Object": 25, "Source": 6},
+                     "structure": {"total": 90, "operators": 30},
+                     "pointkinds": {"by_kind": {"statement": 100}},
+                     "sources": {"total": 6, "with_points": 6}},
+        "entities": [{"id": "s1", "name": "Marta Reyes", "layer": "subject"}],
+    }
+    # A decision worded in a Point, so the `decision_points` half of the leg holds and
+    # the arm isolates the event-KIND half.
+    receipt_with_decision = {"passes": [{"pass": 1, "documents": [{"doc_id": "doc-01",
+        "result": {"points": [{"kind": "event",
+                               "text": "we decided to revert to NordicFreight"}]}}]}]}
+    monkeypatch.setattr(module, "load", lambda name: readback_t4)
+    row = module.t4(receipt_with_decision, _corpus())
+    assert row["flat_distribution"].get("Event") == 26, "the fixture must satisfy the layer leg"
+    assert row["decision_leg"]["event_point_kind_rows"] == 0
+    assert row["verdict"] == "FAIL", (
+        "T4 PASSes a run whose decisions never landed as an event-kind row — the rule's "
+        "decision clause is computed and dropped")
+    readback_t4["overview"]["pointkinds"] = {"by_kind": {"event": 80}}
+    assert module.t4(receipt_with_decision, _corpus())["verdict"] == "PASS", (
+        "T4 fails with an event-kind Point present — the decision leg is not reading the "
+        "distribution")
+    # …and the leg's OTHER half: event-kind Points exist, but no decision is worded
+    # anywhere they could have landed from.
+    assert module.t4({}, _corpus())["verdict"] == "FAIL", (
+        "T4 PASSes a graph holding no decision at all — the `decision_points` half of "
+        "its decision clause is not read")
 
 
 def test_t1_the_second_ingestion_numbers_are_the_artifacts_numbers():
@@ -246,15 +366,54 @@ def test_the_scorer_keeps_no_data_of_its_own():
         assert forbidden not in source, f"scorer must stay artifact-only: found {forbidden!r}"
 
 
-def test_the_five_rules_are_quoted_in_the_report_and_stay_rule_shaped():
+def test_the_five_rules_state_BOTH_their_conjuncts_and_the_report_discloses_the_ungraded_axis():
+    """Every conjunct a rule names must be one the scorer ENFORCES, and every axis it
+    does NOT enforce must be disclosed to the reader.
+
+    The earlier spelling of this test was named "the five rules are quoted in the
+    report" and did neither half: it looped `assert needle in report`, which any single
+    mention satisfies (four other T2 mentions keep it green after deleting one), and the
+    report quotes no rule at all. #14812's review measured both. What is graded instead
+    is the pair of claims the findings landed on: T3's rule must keep BOTH conjuncts (its
+    second is the one that was dropped), and T5's rule must say the predicate axis is
+    not graded — because a rule that silently omits an axis it cannot see is the
+    fail-open shape this bundle exists to prevent.
+    """
     score = _score()
-    report = _report()
+    rules, report = score["rules"], _report()
     for name in ("T1", "T2", "T3", "T4", "T5"):
-        rule = score["rules"][name]
-        assert rule.startswith(("PASS iff", "Reported as a share", "PASS iff")), \
+        assert rules[name].startswith(("PASS iff", "Reported as a share")), \
             f"{name}'s rule must state its criterion, not a narrative"
-    assert "0.8" in score["rules"]["T1"], "T1's restatement band is part of the criterion"
-    assert "two sources" in score["rules"]["T2"]
-    assert "majority" in score["rules"]["T3"]
-    for needle in ("T1", "T2", "T3", "T4", "T5"):
-        assert needle in report
+    assert "0.8" in rules["T1"], "T1's restatement band is part of the criterion"
+    assert "two sources" in rules["T2"]
+    # T3 has TWO conjuncts and both are graded — the surviving defect's own guard.
+    assert "majority" in rules["T3"]
+    assert "every orphan" in rules["T3"], (
+        "RULE_T3 lost its second conjunct — that is the clause the scorer dropped, and "
+        "deleting it from the rule instead of implementing it re-opens the same "
+        "rule-says-one-thing/verdict-does-another gap")
+    assert "every orphan" in score["tests"]["T3"]["rule"]
+    # T4's decision clause is named in the rule and graded by the verdict.
+    assert "decision" in rules["T4"]
+    assert is_t4_decision_graded(score), "T4's rule names a decision clause the verdict skips"
+    # T5 grades the endpoints and SAYS the predicate axis is not graded; the report
+    # carries the same disclosure and the number behind it.
+    assert "PREDICATE axis is NOT graded" in rules["T5"], (
+        "RULE_T5 no longer discloses that it cannot grade a relation's predicate — the "
+        "bundle would then read as covering the invention axis it does not cover")
+    assert "D6" in report and "predicate axis is not graded" in report.lower(), (
+        "REPORT.md lost D6, so the ungraded predicate axis is no longer disclosed")
+    axis = score["tests"]["T5"]["predicate_axis"]
+    assert axis["graded"] is False and axis["sampled"] == 26
+    assert axis["predicate_wording_in_co_stated_docs"] == 0, (
+        "the reported predicate-gap number moved — re-read D6 rather than assuming the "
+        "axis is still unmeasurable")
+
+
+def is_t4_decision_graded(score: dict) -> bool:
+    """T4's verdict must FAIL when its own decision leg is false.
+
+    `decision_leg.graded` is the scorer's own record of the evaluation, so the rule and
+    the verdict cannot disagree about whether the clause was read.
+    """
+    return score["tests"]["T4"]["decision_leg"].get("graded") is True

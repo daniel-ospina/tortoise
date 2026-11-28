@@ -60,11 +60,11 @@
           "sources_with_points": 12
         },
         "delta_pass_1": {
-          "taxonomy.Point": 134,
-          "taxonomy.Object": 25,
           "taxonomy.Event": 12,
+          "taxonomy.Object": 25,
           "taxonomy.Source": 6,
           "taxonomy.Subject": 10,
+          "taxonomy.Point": 134,
           "points_by_kind.statement": 61,
           "points_by_kind.event": 40,
           "structure_total": 101,
@@ -73,10 +73,10 @@
           "sources_with_points": 6
         },
         "delta_pass_2": {
-          "taxonomy.Point": 109,
-          "taxonomy.Object": 4,
           "taxonomy.Event": 14,
+          "taxonomy.Object": 4,
           "taxonomy.Source": 6,
+          "taxonomy.Point": 109,
           "points_by_kind.statement": 50,
           "points_by_kind.event": 40,
           "structure_total": 90,
@@ -451,10 +451,10 @@
       "wording_a": "Our goal is to reach 40 restaurant accounts by December. We currently hold 18 restaurant accounts, so we need 22 more.",
       "wording_b": "We are still chasing the same number as at the start of the year, forty restaurant accounts by the end of December. We hold eighteen today, so twenty-two are outstanding.",
       "delta_across_doc_06_ingest": {
-        "taxonomy.Point": 15,
-        "taxonomy.Object": 1,
         "taxonomy.Event": 1,
+        "taxonomy.Object": 1,
         "taxonomy.Source": 1,
+        "taxonomy.Point": 15,
         "points_by_kind.statement": 8,
         "points_by_kind.event": 6,
         "structure_total": 14,
@@ -788,7 +788,22 @@
           ]
         }
       ],
-      "verdict": "PASS"
+      "orphan_legs": {
+        "majority_are_not_orphans": true,
+        "every_orphan_explained_in_corpus": false,
+        "unexplained": [
+          {
+            "name": "the cold-chain rules as operational preferences",
+            "kind": "core:strategy"
+          },
+          {
+            "name": "chilled-goods operation",
+            "kind": "core:workflow"
+          }
+        ],
+        "note": "both conjuncts of RULE_T3 are graded; a row here has no exact or near document hit, so the corpus never says it"
+      },
+      "verdict": "FAIL"
     },
     "T4": {
       "test": "T4",
@@ -1117,6 +1132,7 @@
         "event:venture:actionItemCompleted": 0
       },
       "decision_leg": {
+        "graded": true,
         "events": 26,
         "event_point_kind_rows": 80,
         "decision_wording_points": [
@@ -1156,7 +1172,7 @@
     },
     "T5": {
       "test": "T5",
-      "rule": "PASS iff every sampled relation is stated or directly implied by the corpus text \u2014 both endpoints named in one document, and the predicate's wording present. One invented edge fails the test.",
+      "rule": "PASS iff every sampled relation is stated or directly implied by the corpus text: both ENDPOINTS named in one document \u2014 verbatim, or the extractor's re-wording at >= 0.6 content-token overlap with that document. One relation whose endpoints are never co-stated fails the test. \u26d4 The PREDICATE axis is NOT graded: the corpus is prose and the graph's predicates are ontology names (`ownedBy`, `related`, \u2026), so a wording test would score a correct normalisation as an invention \u2014 the count of rows whose predicate wording appears in its co-stated documents is reported as gap D6 instead of being passed silently.",
       "sampled": 26,
       "tiers": {
         "verbatim": 17,
@@ -2304,11 +2320,149 @@
         }
       ],
       "predicate_histogram": {
+        "IMPL": 2,
         "produces": 1,
         "related": 4,
-        "IMPL": 2,
-        "dependsOn": 3,
-        "ownedBy": 16
+        "ownedBy": 16,
+        "dependsOn": 3
+      },
+      "predicate_axis": {
+        "graded": false,
+        "why": "D6 \u2014 the graph's predicates are ontology names and the corpus is prose, so a wording test scores a correct normalisation as an invention. RULE_T5 grades the endpoints; this is the gap.",
+        "sampled": 26,
+        "predicate_wording_in_co_stated_docs": 0,
+        "rows": [
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "related",
+            "stated_predicate": "related",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "IMPL",
+            "stated_predicate": "causes",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "IMPL",
+            "stated_predicate": "causes",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "produces",
+            "stated_predicate": "produces",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "dependsOn",
+            "stated_predicate": "dependsOn",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "dependsOn",
+            "stated_predicate": "dependsOn",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "related",
+            "stated_predicate": "related",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "related",
+            "stated_predicate": "related",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "related",
+            "stated_predicate": "related",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "dependsOn",
+            "stated_predicate": "dependsOn",
+            "wording_in_co_stated_docs": []
+          }
+        ]
       },
       "verdict": "PASS"
     }
@@ -2318,6 +2472,6 @@
     "T2": "PASS iff the restatement (doc-06) adds 0 entities, and the goal fact resolves to ONE point/entity carrying two sources; a second same-meaning entity or an unlinked second point is FAIL.",
     "T3": "Reported as a share, with an explicit population. PASS iff the majority of created entities are NOT orphans AND every orphan named is standalone in the corpus text; otherwise FAIL, with the door's own answer reported beside the write receipt's so a door defect cannot be laundered as an extractor defect.",
     "T4": "PASS iff none of the ontology's types is collapsed: the flat (Point/Event/Subject/Object/Source) distribution is non-degenerate, decisions land as the event/decision kind rather than as a bare statement, roles land as Subjects, and documents land as Sources.",
-    "T5": "PASS iff every sampled relation is stated or directly implied by the corpus text \u2014 both endpoints named in one document, and the predicate's wording present. One invented edge fails the test."
+    "T5": "PASS iff every sampled relation is stated or directly implied by the corpus text: both ENDPOINTS named in one document \u2014 verbatim, or the extractor's re-wording at >= 0.6 content-token overlap with that document. One relation whose endpoints are never co-stated fails the test. \u26d4 The PREDICATE axis is NOT graded: the corpus is prose and the graph's predicates are ontology names (`ownedBy`, `related`, \u2026), so a wording test would score a correct normalisation as an invention \u2014 the count of rows whose predicate wording appears in its co-stated documents is reported as gap D6 instead of being passed silently."
   }
 }

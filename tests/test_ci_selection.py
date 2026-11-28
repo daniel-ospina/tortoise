@@ -15457,6 +15457,17 @@ ROWED_BY_THIS_FOLD = (
     # push-to-main runs, so a file a PR ADDS cannot have a junit figure yet
     # (`#3400/#4348`).
     "test_14691_structure_evidence.py",
+    # #14691 (PR #14812) — the T1-T5 noise bundle's falsifiers, the SIBLING of the row
+    # above and named for the same reason. It IS registered in both `surfaces[core]` and
+    # `durations:` (so `manifest-integrity` is green and selection reaches it), but its
+    # `durations:` row was not listed here, so deleting that row redded nothing — the
+    # ENTRY-RULE pin iterates this EXPLICIT tuple, which is the only place a row's
+    # EXISTENCE is graded (the coverage floor is a ratio with ~70 files of headroom, as
+    # the block comment above records). Benign only by accident today: the value equals
+    # `DEFAULT_FAST_WEIGHT`, so the shard weight would not move if the row vanished —
+    # and a shard weight that cannot move is not a pin. ⛔ The row is the flat
+    # `DEFAULT_FAST_WEIGHT`, not a local reading (`#3400/#4348`).
+    "test_14691_noise_evidence.py",
 )
 
 
