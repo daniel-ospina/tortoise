@@ -3909,37 +3909,39 @@ class StaleHolder:
         if rc != 0:
             return (True, (f"`{ref}` exists but its commit {sha[:9]} could not be read — "
                            "treated as LIVE, NOT demoted"), True)
-        # ⛔ THE CLAIM'S LEASE IS ONE TOKEN, AND `claims.sh` READS THE FIRST LINE'S FIRST ONE
-        # (`_claim_commit_parse`; `_claim_commit` writes exactly `claim owner=…
-        # lease_until=… nonce=…`). Collecting EVERY token and keeping the LAST — what this
-        # reader used to do — lets any later mention (`lease_until=` in a note, a renewal
-        # line, a quoted older claim) become the number printed as the claim's lease, in
-        # either direction: a later FUTURE value reports a phantom live lease and refuses a
-        # free dispatch, a later PAST value would demote a live one. Two distinct values are
-        # therefore an AMBIGUOUS record, and an unjudgeable record is LIVE, exactly like the
-        # absent/`0`/non-numeric/19-digit class below.
-        leases = [
-            token.split("=", 1)[1]
-            for line in out.splitlines()
-            for token in line.split()
-            if token.startswith("lease_until=")
-        ]
-        distinct = list(dict.fromkeys(leases))
-        lease = leases[0] if leases else ""
-        if len(distinct) > 1:
-            return (True, (f"`{ref}` (sha {sha[:9]}) carries {len(distinct)} different "
-                           f"lease_until values ({', '.join(distinct)}){moved_note} — the "
-                           "claim's own lease is AMBIGUOUS, treated as LIVE, NOT demoted"),
-                    True)
-        # claims.sh:_lease_unparseable — an absent value, the `0` sentinel, any
-        # non-digit (a negative collapses to `0`) and a 19+-digit value (the `[`
-        # 18-digit bound exists so a full-width lease cannot wrap) are all "a claim
-        # EXISTS whose lease this reader cannot parse" — i.e. LIVE, never free.
+        # ⛔ THE LEASE IS ONE TOKEN OF ONE LINE, AND IT IS SCOPED EXACTLY AS THE OWNER READER
+        # SCOPES IT (`claims.sh:_lease_of`, agent-infra#3203 review rounds 11–12): the BODY's FIRST
+        # non-empty line, and the FIRST faithful token of that line. Two peer-writable escapes are
+        # closed by that scoping, both FAIL-OPEN in the other direction:
+        #   * `cat-file commit` prints the HEADERS too, and `author`/`committer` NAMES are
+        #     peer-writable bytes — a `lease_until=<past>` planted there was read here as "the
+        #     claim's lease" and freed the claim, while `_lease_of` answers absent → `0` →
+        #     unparseable → LIVE;
+        #   * a later line is peer-planted junk and may not contribute at all — honouring one made
+        #     this reader take a value the writer never minted, on exactly the "claim-commit bytes
+        #     are peer-writable" premise `claims.sh` builds two guards on.
+        # ⛔ AND A REPEATED FIELD IS RESOLVED THE SAME WAY `_lease_of` RESOLVES IT — FIRST token
+        # wins. A second, different token on the minted line is NOT given a third state here: the
+        # polarity has ONE owner (`_claim_lease_state`), and a reader that invented "ambiguous"
+        # would disagree with the authority about the same bytes, which is the class of disagreement
+        # agent-infra#3203 exists to end.
+        body = out.split("\n\n", 1)[1] if "\n\n" in out else ""
+        minted = next((line for line in body.splitlines() if line.strip()), "")
+        lease = next((token.split("=", 1)[1] for token in minted.split()
+                      if token.startswith("lease_until=")), "")
+        # claims.sh:_lease_unparseable — an absent value, the `0` sentinel, **a LEADING ZERO**, any
+        # non-digit (a negative collapses to `0`) and a 19+-digit value (the 18-digit bound exists
+        # so a full-width lease cannot wrap) are all "a claim EXISTS whose lease this reader cannot
+        # parse" — i.e. LIVE, never free.
+        # ⛔ THE LEADING-ZERO ARM IS NOT COSMETIC (#13727 review, measured against `claims.sh:1302`):
+        # `int("0000009999")` is 9999, a 1970 window, so its absence freed a claim whose term this
+        # reader cannot judge — the exact value `claims.sh` was hardened against, and a field the
+        # comment above this predicate used to claim it carried.
         # `isascii() and isdigit()`, not `isdigit()`: `int()` requires *Decimal*
         # digits and raises on a Unicode *Digit* such as `'²'`, which would escape
         # as an uncaught ValueError — a crash standing in for a verdict.
         if (not lease or not (lease.isascii() and lease.isdigit())
-                or len(lease) > 18 or lease == "0"):
+                or lease.startswith("0") or len(lease) > 18):
             return (True, (f"`{ref}` (sha {sha[:9]}) is held with a lease this reader "
                            f"cannot parse (lease_until={lease or 'absent'}){moved_note} — "
                            "treated as LIVE, NOT demoted"), True)

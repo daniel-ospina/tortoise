@@ -8948,28 +8948,32 @@ class CollisionPreflightTest(unittest.TestCase):
         _git(self.repo, "worktree", "add", "-q", str(path), branch)
         return path
 
-    def live_claim(self, lease_until: int | None, *, message: str | None = None) -> None:
+    def live_claim(self, lease_until: int | None, *, message: str | None = None,
+                   author: str | None = None) -> None:
         """Write a real `refs/claims/issue-<ISSUE>` into the bare origin.
 
         The commit's MESSAGE is the lease (`claims.sh:_claim_commit`), and the empty
         tree is the one git defines for exactly this shape. `message` overrides the
         lease-shaped body, which is how the unparseable-lease polarity is exercised.
         """
-        self.set_claim_ref(self.claim_sha(lease_until, message=message))
+        self.set_claim_ref(self.claim_sha(lease_until, message=message, author=author))
 
     def claim_sha(self, lease_until: int | None, *,
-                  message: str | None = None) -> str:
+                  message: str | None = None, author: str | None = None) -> str:
         """Build a claim commit IN THE ORIGIN and return its sha, moving NO ref.
 
         Separate from `live_claim` so a test can hold two commits and decide which one
         the ref points at, and WHEN — the read under test is two git steps wide, and the
         ref moving between them is the shape #13727 turns on.
+
+        `author` sets the AUTHOR NAME, which is where a peer-planted `lease_until=` hides from
+        a reader that scans the whole commit object instead of the body (`claims.sh:_lease_of`).
         """
         origin = self.tmp / "remotes" / "test-owner" / "test-repo.git"
         empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
         env = {
             **os.environ,
-            "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_AUTHOR_NAME": author or "Test", "GIT_AUTHOR_EMAIL": "test@example.com",
             "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.com",
         }
         # ⛔ THE COMMIT IS BUILT IN THE ORIGIN, not in the clone: `update-ref` in a bare
@@ -9300,30 +9304,112 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("cannot be BOUND", basis)
         self.assertNotIn("s left", basis, f"no lease may be quoted here:\n{basis}")
 
-    def test_a_claim_carrying_two_leases_never_prints_a_countdown(self):
-        """TWO lease tokens is an AMBIGUOUS record, not "the last one wins".
+    def claim_read(self, message: str | None = None, lease_until: int | None = None,
+                   *, author: str | None = None):
+        """One real read of a claim this fixture mints, through `_claim_live`."""
+        mod = _tool_module()
+        self.bare_origin()
+        self.live_claim(lease_until, message=message, author=author)
+        holder = mod.StaleHolder("git", str(self.repo), ISSUE, 60, [])
+        return holder._claim_live()
 
-        `claims.sh` writes ONE token on the first line and its own reader takes the FIRST
-        (`_claim_commit_parse`). A reader that collects every token and keeps the LAST lets
-        any later mention become "the claim's lease" — and when that later token is in the
-        FUTURE it prints a live countdown for a claim whose own lease expired, which is the
-        reported symptom of #13727 with no race needed at all. The polarity is unchanged
-        (an unjudgeable record is LIVE, never free): what changes is that the tool says so
-        instead of quoting a number it cannot attribute.
+    def test_a_lease_token_off_the_minted_line_never_becomes_the_lease(self):
+        """The lease is the BODY's first non-empty line, first token — `claims.sh:_lease_of`.
+
+        `cat-file commit` prints the HEADERS too, and `author`/`committer` names are
+        peer-writable bytes; a later line is peer-planted junk. Scanning the whole object let
+        either one become "the claim's lease" — and when it was a PAST value the claim read
+        EXPIRED here while `_lease_of` answers absent → `0` → unparseable → LIVE, i.e. the tool
+        told the fleet to dispatch on a claim its own reader still holds (the FAIL-OPEN
+        direction, found in review of #13727).
+        """
+        past = int(time.time()) - 86400
+        # ARM 1 — a later line may not contribute: the minted line carries no lease at all.
+        claimed, basis, unreadable = self.claim_read(
+            message=f"claim owner=box-a nonce=9806\nrenewal note, previous lease_until={past}")
+        self.assertTrue(claimed, basis)
+        self.assertTrue(unreadable, basis)
+        self.assertIn("cannot parse (lease_until=absent)", basis)
+        self.assertNotIn("EXPIRED", basis, f"a junk line must not free the claim:\n{basis}")
+        # ARM 2 — a HEADER may not contribute either: the author NAME carries the token.
+        claimed, basis, unreadable = self.claim_read(
+            message="claim owner=box-a nonce=9806", author=f"peer lease_until={past}")
+        self.assertTrue(claimed, basis)
+        self.assertTrue(unreadable, basis)
+        self.assertIn("cannot parse (lease_until=absent)", basis)
+        self.assertNotIn("EXPIRED", basis, f"a header must not free the claim:\n{basis}")
+
+    def test_a_repeated_lease_field_is_resolved_first_token_wins(self):
+        """A repeated field on the minted line is FIRST-wins, exactly as `_lease_of` reads it.
+
+        Deliberately NOT a third state: the polarity has one owner (`_claim_lease_state`), and a
+        reader that invented "ambiguous" would disagree with the authority about the same bytes —
+        the disagreement agent-infra#3203 exists to end. The token AFTER the first one is
+        peer-planted junk that must not contribute, in either direction.
+        """
+        past, future = int(time.time()) - 86400, int(time.time()) + 86400
+        claimed, basis, _unreadable = self.claim_read(
+            message=f"claim owner=box-a lease_until={past} lease_until={future} nonce=9806")
+        self.assertFalse(claimed, basis)
+        self.assertIn(f"EXPIRED at {past}", basis)
+        self.assertNotIn(str(future), basis,
+                         f"the second token must not contribute:\n{basis}")
+        self.assertNotIn("s left", basis, f"no countdown from a junk token:\n{basis}")
+
+    def test_a_leading_zero_lease_is_unparseable_not_a_1970_window(self):
+        """`claims.sh:_lease_unparseable`'s `0?*` arm, which this reader was missing.
+
+        `int("0000009999")` is 9999 — a 1970 window — so a planted leading-zero term read
+        EXPIRED here and freed a claim whose term cannot be judged, while `claims.sh` answers
+        `unreadable` → LIVE. The exact value the owner reader was hardened against.
+        """
+        claimed, basis, unreadable = self.claim_read(
+            message="claim owner=box-a lease_until=0000009999 nonce=9806")
+        self.assertTrue(claimed, basis)
+        self.assertTrue(unreadable, basis)
+        self.assertIn("cannot parse (lease_until=0000009999)", basis)
+        self.assertNotIn("EXPIRED", basis, f"a 1970 window must not free the claim:\n{basis}")
+
+    def test_the_expired_arm_names_the_commit_it_measured(self):
+        """Coverage for the EXPIRED arm's sha (the LIVE arm's is in the CAS test).
+
+        The PR's claim is that the sha is named in BOTH arms; before this fixture only the live
+        one was asserted, so the expired row could have lost its sha unnoticed.
+        """
+        expired_lease = int(time.time()) - 86400
+        self.bare_origin()
+        self.live_claim(expired_lease)
+        sha = self.claim_ref_sha()
+        mod = _tool_module()
+        holder = mod.StaleHolder("git", str(self.repo), ISSUE, 60, [])
+        claimed, basis, unreadable = holder._claim_live()
+        self.assertFalse(claimed, basis)
+        self.assertFalse(unreadable, basis)
+        self.assertIn(f"sha {sha[:9]}", basis)
+        self.assertIn(f"EXPIRED at {expired_lease}", basis)
+
+    def test_a_fetched_commit_that_cannot_be_named_is_an_abstention(self):
+        """`_ref_sha` returning `""` is fail-closed (LIVE), and it was the one uncovered arm.
+
+        Without a nameable commit there is nothing to bind a lease to, so no lease may be quoted:
+        the answer is the abstention, never a number read out of a commit the tool cannot name.
         """
         mod = _tool_module()
         self.bare_origin()
-        past, future = int(time.time()) - 86400, int(time.time()) + 86400
-        self.live_claim(None, message=(
-            f"claim owner=box-a lease_until={past} nonce=9806\n"
-            f"renewal note, previous lease_until={future}"))
+        self.live_claim(int(time.time()) + 3600)
+        real_run = mod._run
+
+        def _run_hook(cmd, cwd, timeout, env=None):
+            if len(cmd) > 1 and cmd[1] == "rev-parse":
+                return (1, "", "boom", False)
+            return real_run(cmd, cwd, timeout, env)
+
         holder = mod.StaleHolder("git", str(self.repo), ISSUE, 60, [])
-        claimed, basis, unreadable = holder._claim_live()
+        with mock.patch.object(mod, "_run", _run_hook):
+            claimed, basis, unreadable = holder._claim_live()
         self.assertTrue(claimed, basis)
         self.assertTrue(unreadable, basis)
-        self.assertIn("AMBIGUOUS", basis)
-        self.assertIn(str(past), basis)
-        self.assertIn(str(future), basis)
+        self.assertIn("cannot be named", basis)
         self.assertNotIn("s left", basis, f"no lease may be quoted here:\n{basis}")
 
     def test_a_claim_ref_with_an_unparseable_lease_never_demotes(self):
