@@ -1276,6 +1276,21 @@ def test_a_commitment_question_on_a_non_object_family_is_reported(sdk):
         "misdescribe the question the caller asked")
     assert report["hint"] == MISSED_ROUTE_COMMITMENTS_HINT
 
+    # ⛔ THE REMEDY MUST ADDRESS BOTH CONSTRAINTS THE CALLER CAN CARRY (#14780
+    # review, cycle 4 finding 1). A caller who passed BOTH a non-object
+    # `entity_type` and a non-commitment `kind` follows this sentence into a
+    # SECOND refusal, so a remedy naming only `entity_type` is a door that does
+    # not resolve — the defect class this hint was written to fix.
+    assert "`kind`" in MISSED_ROUTE_COMMITMENTS_HINT, (
+        "the entity_type remedy omits the `kind` constraint a caller may also "
+        "carry, and following it then returns a second refusal with zero rows")
+    both_out: dict = {}
+    sdk._tortoise_fts_query("what are we currently committed to",
+                           entity_type="point", kind="claim",
+                           _state_question_out=both_out)
+    both_report = both_out.get("state_question")
+    assert both_report is not None and both_report["routed"] is False
+
     # …and the same question on the family that HAS the arm is routed, not refused.
     routed_out: dict = {}
     sdk._tortoise_fts_query("what are we currently committed to",

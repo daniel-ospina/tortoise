@@ -1237,7 +1237,9 @@ MISSED_ROUTE_COMMITMENTS_HINT = (
     "(ONTOLOGY \u00a75) and this read's entity_type has no arm for them, so the "
     "RELEVANCE read answered instead \u2014 a point-scoped commitment question already "
     "returns the live claims, so this may be the answer you wanted. For the "
-    "commitment population itself, re-read with entity_type='object' through the "
+    "commitment population itself, re-read with entity_type='object' AND, if you "
+    "passed a `kind` filter, with it omitted or set to one of "
+    "strategy/plan/goal/target through the "
     "`tortoise_search_knowledge` tool or the SDK's "
     "`search_knowledge(entity_type='object')`; the hosted `GET /v1/search` "
     "route takes no entity_type, so asking again there returns this same notice. "
@@ -1255,9 +1257,10 @@ MISSED_ROUTE_KIND_HINT = (
     "kinds are OBJECT kinds (ONTOLOGY \u00a75) named strategy, plan, goal and "
     "target: re-read with `kind` omitted (or one of those) and "
     "entity_type='object' through the `tortoise_search_knowledge` tool or the "
-    "SDK's `search_knowledge(entity_type='object')`; the hosted `GET /v1/search` "
-    "route takes neither entity_type nor kind, so asking again there returns "
-    "this same notice. Every row then carries the kind and the stage it stands on."
+    "SDK's `search_knowledge(entity_type='object')`. The hosted `GET /v1/search` "
+    "route takes neither entity_type nor kind, so it cannot apply this fix \u2014 "
+    "asking again there returns the `entity_type` notice instead. Every row then "
+    "carries the kind and the stage it stands on."
 )
 
 #: The reasons a strong cue can be seen without the population being served.
