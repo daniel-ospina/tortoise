@@ -3983,7 +3983,15 @@ class StaleHolder:
                            f"cannot parse (lease_until={lease or 'absent'}){moved_note} — "
                            "treated as LIVE, NOT demoted"), True)
         until = int(lease)
-        if until > int(self.now):
+        # ⛔ THE BOUNDARY IS THE AUTHORITY'S, AND IT IS INCLUSIVE (#13727 review round 5,
+        # measured against `claims.sh:_claim_lease_state`). The owner classifies with
+        # `[ "$2" -le "$1" ]` — `now <= until` is `live` — so `_lease_is_live` answers
+        # DO NOT STEAL at `until == now`, and `_claim_acquire_at`'s reclaim refuses on that
+        # answer. `until > now` therefore FREED a claim its owner still held, for the whole
+        # one-second window `[until, until+1)`; ordinary expiry reaches it, no hostile input
+        # needed. Only `until < now` frees — which is also what the module's own polarity
+        # sentence says, and what this line previously contradicted.
+        if until >= int(self.now):
             # ⛔ THE SHA IS NAMED IN *BOTH* ARMS. A lease printed without the commit it was
             # read from cannot be checked against the ref by anyone reading the output —
             # that is how a lease from a different commit passed as a measurement (#13727).

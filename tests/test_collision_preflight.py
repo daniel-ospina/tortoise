@@ -9459,6 +9459,38 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn(f"sha {sha[:9]}", basis)
         self.assertIn(f"EXPIRED at {expired_lease}", basis)
 
+    def test_the_expiry_boundary_is_the_authority_boundary(self):
+        """`until == now` is LIVE — `claims.sh:_claim_lease_state` compares `now <= until`.
+
+        The reader freed the claim at exact equality (`until > now` → LIVE, so equality fell to
+        EXPIRED), while the authority answers DO NOT STEAL there and `_claim_acquire_at`'s
+        reclaim refuses on it. So a claim whose lease ran out in the current second was reported
+        EXPIRED and a dispatch went ahead on a claim its owner's reader still holds. Ordinary
+        expiry reaches that window; no peer-planted byte is needed, which is what makes it a
+        gate direction rather than a hostile-input case.
+
+        Both directions, one second apart on the same clock, so the row cannot pass by making the
+        reader permanently LIVE: `until == now` LIVE, `until == now - 1` EXPIRED.
+        """
+        now = 1_800_000_000
+        self.bare_origin()
+        self.live_claim(now)
+        mod = _tool_module()
+        holder = mod.StaleHolder("git", str(self.repo), ISSUE, 60, [], now=now)
+        claimed, basis, unreadable = holder._claim_live()
+        self.assertTrue(claimed, basis)
+        self.assertFalse(unreadable, basis)
+        self.assertIn("LIVE claim", basis)
+        self.assertIn("lease 0s left", basis)
+
+        # ONE SECOND EARLIER the same lease IS expired — the discriminating direction.
+        self.live_claim(now - 1)
+        holder = mod.StaleHolder("git", str(self.repo), ISSUE, 60, [], now=now)
+        claimed, basis, unreadable = holder._claim_live()
+        self.assertFalse(claimed, basis)
+        self.assertFalse(unreadable, basis)
+        self.assertIn("EXPIRED at", basis)
+
     def test_a_fetched_commit_that_cannot_be_named_is_an_abstention(self):
         """`_ref_sha` returning `""` is fail-closed (LIVE), and it was the one uncovered arm.
 
