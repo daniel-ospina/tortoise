@@ -2452,9 +2452,12 @@ STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
 assert_rc 1 "(t30) an UNREADABLE branch-side graph refuses (a missing sha must never read as 'came from the base')"
 assert_contains "(t30) …and says the graph could not be READ" "could not READ this PR's commit graph"
 assert_not_contains "(t30) …and does NOT claim the branch was rewritten" "REWRITTEN (force-push"
-# (b) BOTH halves of the pair removed → the same authored-commit fixture CARRIES, which is
-# the false pass the pair prevents. This is what makes the class attributable even though
-# neither half can be pinned on its own.
+# (b) The FIVE-guard sweep below removes the same authored-commit fixture's refusals and it
+# CARRIES, which is the false pass those guards prevent. ⛔ NOT "the pair": removing only
+# `[ -z "$p_bside" ]` + the branch-side arity check does NOT carry (measured: `rc=1`, the
+# only red is this row's own `bad`), and restoring `p_bside` into the sweep still refuses —
+# `p_bside` is load-bearing only INSIDE the set. This is what makes the class attributable
+# even though no single member can be pinned on its own.
 MUT_BSIDE="$T/mutant-no-bside-guards.sh"
 # Three separate `-e`s, each with NO capture group used in the replacement: an
 # alternation across two patterns with different group counts silently mangles the
@@ -2478,9 +2481,9 @@ else
         STUB_ANCESTOR_COMMITS="dddddddddddd:1" STUB_BRANCH_FAIL=1 run_gate "$BSIDE_BODY"
     RUN_BLOCK="$_saved_block"
     if [ "$GATE_RC" = "0" ]; then
-        ok "(t30) with BOTH halves removed an API failure CARRIES an authored commit — so the pair is load-bearing"
+        ok "(t30) with those FIVE guards removed an API failure CARRIES an authored commit — so the SET is jointly load-bearing (no single member is)"
     else
-        bad "(t30) the double mutant still refused (rc=$GATE_RC) — something else refuses this, so the (t30) pair is not what the row claims"
+        bad "(t30) the five-guard mutant still refused (rc=$GATE_RC) — something else refuses this, so the row's claim about that set is wrong"
     fi
 fi
 
