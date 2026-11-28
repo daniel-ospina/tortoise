@@ -27,6 +27,12 @@ from typing import Any, Callable, Optional  # noqa: UP035
 
 from mcp.types import ToolAnnotations
 
+# #14033: the caller-facing predictability block is owned by the recogniser module
+# (`tortoise/state_intent.py`, stdlib-only — so this import cannot cycle). The
+# SERVED text and the routing test read the same string; see `ROUTING_NOTE`'s own
+# note on why it is not served from a docstring.
+from tortoise.state_intent import ROUTING_NOTE
+
 
 @dataclass(frozen=True)
 class RestSpec:
@@ -1666,7 +1672,17 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "entry_points = natural-language query → matching entities; "
                     "issue_insight = 'there is more in the graph' for a would-be issue "
                     "(title/body/repo), call BEFORE filing. For a single known id use "
-                    "tortoise_get_entity.",
+                    "tortoise_get_entity.\n\n"
+                    # ⛔ #14033: the state-question routing table is part of the SERVED
+                    # description, on the LIVE door. `mode="hybrid"` forwards to
+                    # `_tortoise_fts_query`, which is where the state router lives, so
+                    # this is the description a caller reads to predict whether their
+                    # ending question will be answered from the ended population. It is
+                    # owned in `state_intent` (a stdlib-only module, so no cycle) and
+                    # served from here rather than from a handler docstring: FastMCP
+                    # uses an explicit `description=` INSTEAD of the docstring, so
+                    # prose in `mcp_server.tortoise_search.__doc__` reaches no caller.
+                    + ROUTING_NOTE,
         # ⛔ maintenance, NOT read: its `full_text` arm delegates to `list_knowledge`,
         # whose `source_reliability` arm reaches the caching `get_source_reliability` —
         # and #4122 refuses a read-only hint over a declared read-through write (the

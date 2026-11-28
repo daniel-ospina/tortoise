@@ -46204,6 +46204,18 @@ class TortoiseSDK:
         # read-status term. Default None = not computed, so every existing
         # caller is byte-identical (and pays nothing).
         _truncation_out: dict | None = None,
+        # #14033: PRIVATE — the STATE-QUESTION sink, the same caller-owned pattern
+        # ``_truncation_out`` uses. The state router either SERVES a state population
+        # (`ended` / `commitments`) or declines and lets the relevance read answer, and
+        # a declined state question is otherwise indistinguishable from an honest
+        # empty: the caller reads rows and cannot tell "the route did not engage" from
+        # "nothing has ended". When a cue was seen this sink carries ``state_question``
+        # (``tortoise/state_intent.py`` is the payload's ONE home). Always written when
+        # a cue was seen — NOT flag-gated, for the same reason #8447's truncation marker
+        # is not: gating it off would preserve exactly the defect it fixes. Default
+        # None = not computed, so every existing caller is byte-identical (and pays
+        # nothing).
+        _state_question_out: dict | None = None,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -46682,8 +46694,15 @@ class TortoiseSDK:
         _commitment_scope = False
         if (query is not None and not ended_scope and not include_terminal
                 and not [k for k in _retrieval_knobs() if k != "query"]):
-            from .state_intent import COMMITMENTS, ENDED, detect_state_question
-
+            from .state_intent import (
+                COMMITMENTS,
+                ENDED,
+                MISSED_ROUTE_KIND_HINT,
+                detect_state_question,
+                missed_route_payload,
+                routed_payload,
+                state_cue,
+            )
             _state_q = detect_state_question(query)
             if _state_q.population == ENDED:
                 # The ended population exists for the families with a lifecycle
@@ -46695,6 +46714,19 @@ class TortoiseSDK:
                 if entity_type in _ENDED_FAMILIES:
                     ended_scope = True
                     _scope_from_question = query
+                    # #14033: a ROUTED read says so. The population is served, and a
+                    # caller who mistook the rows for relevance hits has no other way
+                    # to know the words selected a population rather than ranked them.
+                    if _state_question_out is not None:
+                        _state_question_out["state_question"] = routed_payload(_state_q)
+                elif _state_question_out is not None:
+                    # #14033: a shape DID fire and the family refusal below is what
+                    # declined it. That is a different remedy from "no shape applied"
+                    # (the caller already asked a recognised question, so telling them
+                    # to ask one would be a runaround), which is why the reason is its
+                    # own closed token rather than the generic hint.
+                    _state_question_out["state_question"] = missed_route_payload(
+                        _state_q.cue or "", "family")
             elif _state_q.population == COMMITMENTS:
                 # The commitment kinds are OBJECT kinds (ONTOLOGY §5), and the
                 # arm below intersects them with the caller's own `kind` — so a
@@ -46705,6 +46737,39 @@ class TortoiseSDK:
                 if entity_type == "object":
                     _commitment_scope = True
                     _scope_from_question = query
+                    # ⛔ THE REPORT IS WRITTEN AT THE SERVING SITE, NOT HERE
+                    # (#14780 review, cycle 3 finding 1). `kind` is not a
+                    # retrieval knob, so a `kind=` narrowing that excludes every
+                    # commitment kind leaves this arm and falls through to the
+                    # relevance read. A payload written at the routing decision
+                    # would then publish `routed: True` for a population this
+                    # read abandoned — on the one key the served note tells
+                    # callers to branch on. The ENDED arm cannot have this hole
+                    # (`ended_scope` is a serve, not a scope flag), so the report
+                    # belongs beside the serve for both.
+                elif _state_question_out is not None:
+                    # #14033: the shape DID fire and this read's ``entity_type`` is
+                    # what declined the population \u2014 the commitment kinds are
+                    # Object kinds (ONTOLOGY \u00a75), so a point/event/subject read
+                    # has no arm for them. Reported for the same reason the family
+                    # refusal above is: silence here reads as "nothing is
+                    # committed", and this arm is reachable on the ONLY publishing
+                    # channel (`GET /v1/search` never passes ``entity_type``, so its
+                    # default `point` is what a customer's commitment question gets).
+                    _state_question_out["state_question"] = missed_route_payload(
+                        _state_q.cue or "", "family", COMMITMENTS)
+            elif _state_question_out is not None:
+                # #14033: NO shape applied. The relevance read below answers, and
+                # that answer is silent about the fact that the caller's state cue
+                # was seen and declined — so an empty or unrelated page reads as
+                # "nothing has ended". `state_cue` is deliberately WIDER than the
+                # shapes (it is a signal, not a router), so re-opening the hijack
+                # class is impossible here: it only adds a sentence to a reply whose
+                # rows the relevance read already decided.
+                _cue = state_cue(query)
+                if _cue:
+                    _state_question_out["state_question"] = missed_route_payload(
+                        _cue, "shape")
 
         if ended_scope:
             _refused_ended = _retrieval_knobs()
@@ -47243,6 +47308,10 @@ class TortoiseSDK:
             # relevance read it asked for instead of being told nothing is
             # committed. `query` is still intact — only the ended arm consumes it.
             if _commit_kinds:
+                if _state_question_out is not None:
+                    # Routed for real: the enumeration below IS the answer, so the
+                    # report is written here, immediately before it serves.
+                    _state_question_out["state_question"] = routed_payload(_state_q)
                 try:
                     _fatter = _commitments.enumerate_live_commitments(
                         graph, kinds=_commit_kinds, limit=limit + 1,
@@ -47270,6 +47339,17 @@ class TortoiseSDK:
                 _trunc["candidates"] = len(_fatter)
                 _trunc["exact"] = len(_fatter) <= limit
                 return _with_read_status(_fatter[:limit])
+            elif _state_question_out is not None:
+                # The caller's `kind` filter excludes every commitment kind, so
+                # this arm cannot serve the population. Report the refusal rather
+                # than a route that was abandoned. ⛔ It refuses on a DIFFERENT
+                # AXIS than `entity_type` above, so it serves that axis's own
+                # sentence: the entity_type hint would assert a cause that is
+                # false here (this read IS `object`) and prescribe a re-read that
+                # returns a byte-identical payload.
+                _state_question_out["state_question"] = missed_route_payload(
+                    _state_q.cue or "", "family", COMMITMENTS,
+                    remedy=MISSED_ROUTE_KIND_HINT)
 
         # C6 (#2520): resolve the freshness intent ONCE and derive the
         # DENSE-leg query. The anchor touches the embedding only — the

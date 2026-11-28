@@ -1176,3 +1176,243 @@ def test_the_ended_scope_still_refuses_an_explicit_query(sdk):
         sdk._tortoise_fts_query("anything withdrawn", entity_type="point",
                                ended_scope=True)
     assert "ended_scope" in str(err.value)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# #14033 acceptance 4 — the read path REPORTS a state question it declined
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# The detector's own half is pinned hermetically in
+# `tests/test_14033_state_cue_gap.py`. What can only be measured HERE is the
+# WIRING: that the read path actually writes the report to the caller-owned sink,
+# on both sides of the decision, and writes nothing for a query that carries no
+# state cue (so every other caller stays byte-identical). Without this the payload
+# would be a module constant nobody publishes — the "capability that must be
+# invoked with a caller's special words is not a read surface" defect #13558 is
+# about, one level down.
+
+@_docker_only
+def test_a_declined_state_question_is_reported_beside_the_rows(sdk):
+    """The relevance read still answers — and now says the state route declined.
+
+    `what has ended recently` is #14033's own measured miss: the shapes decline it
+    (the adverb tail is deferred on the handler-docstring gate), so the caller gets
+    relevance rows. Before this, an empty page here was byte-identical to an honest
+    "nothing has ended". ⛔ The rows are unchanged — only the report is new.
+    """
+    from tortoise.state_intent import MISSED_ROUTE_HINT
+
+    out: dict = {}
+    rows = sdk._tortoise_fts_query("what has ended recently",
+                                   _state_question_out=out)
+    assert isinstance(rows, list), (
+        "the declined read must still return its rows — the report is additive")
+    report = out.get("state_question")
+    assert report is not None, (
+        "the read saw an ENDING cue and declined a shape, and wrote no report: "
+        "the caller cannot tell that from 'nothing has ended' (#14033 item 4)")
+    assert report["routed"] is False
+    assert report["reason"] == "shape"
+    assert report["population"] is None
+    assert report["cue"] == "ended"
+    assert report["hint"] == MISSED_ROUTE_HINT
+
+
+@_docker_only
+def test_a_routed_state_question_IS_declared_through_the_same_sink(sdk):
+    """A ROUTED read says so too — that is the half that must never be silent.
+
+    A caller who receives the ended population has no other way to know the words
+    selected a population rather than ranked rows; the rows look like hits either
+    way.
+    """
+    from tortoise.state_intent import ENDED
+
+    out: dict = {}
+    rows = sdk._tortoise_fts_query("what ended", _state_question_out=out)
+    assert isinstance(rows, list)
+    report = out.get("state_question")
+    assert report is not None, "a routed state read reported nothing"
+    assert report["routed"] is True
+    assert report["population"] == ENDED
+    assert report["shape"] == "wh_whole_question"
+    assert "hint" not in report, (
+        "a routed read carries no remedy — a hint on it would read as a problem")
+
+
+@_docker_only
+def test_a_commitment_question_on_a_non_object_family_is_reported(sdk):
+    """A commitment shape the read's entity_type refuses says so, instead of silence.
+
+    #14033 acceptance 4, one population over (#14780 review, finding 1). The
+    commitment kinds ARE Object kinds, so a `point`-scoped commitment question is
+    answered by the relevance read \u2014 deliberately, and it may be the answer the
+    caller wanted. What was missing is the REPORT: the shape fired, the population
+    was refused, and the sink stayed empty, so a caller could not tell that from
+    "nothing is committed".
+
+    \u26d4 This is the ONLY publishing channel's shape: `GET /v1/search` never passes
+    `entity_type`, so its default `point` is what a customer's commitment question
+    gets. Without this arm the hosted report is absent for every such question.
+    """
+    from tortoise.state_intent import COMMITMENTS, MISSED_ROUTE_COMMITMENTS_HINT
+
+    out: dict = {}
+    rows = sdk._tortoise_fts_query("what are we currently committed to",
+                                   entity_type="point", _state_question_out=out)
+    assert isinstance(rows, list), (
+        "the declined read must still return its rows \u2014 the report is additive")
+    report = out.get("state_question")
+    assert report is not None, (
+        "the read recognised a commitment question and refused the population on "
+        "entity_type, and wrote no report: a caller cannot tell that from 'nothing "
+        "is committed' (#14033 item 4)")
+    assert report["routed"] is False
+    assert report["reason"] == "family", (
+        "a shape DID fire \u2014 this is a family/entity_type refusal, not 'no shape "
+        "applied'")
+    assert report["population"] == COMMITMENTS, (
+        "the decline must name the population IT refused; ENDED here would "
+        "misdescribe the question the caller asked")
+    assert report["hint"] == MISSED_ROUTE_COMMITMENTS_HINT
+
+    # ⛔ THE REMEDY MUST ADDRESS BOTH CONSTRAINTS THE CALLER CAN CARRY (#14780
+    # review, cycle 4 finding 1). A caller who passed BOTH a non-object
+    # `entity_type` and a non-commitment `kind` follows this sentence into a
+    # SECOND refusal, so a remedy naming only `entity_type` is a door that does
+    # not resolve — the defect class this hint was written to fix.
+    assert "`kind`" in MISSED_ROUTE_COMMITMENTS_HINT, (
+        "the entity_type remedy omits the `kind` constraint a caller may also "
+        "carry, and following it then returns a second refusal with zero rows")
+    both_out: dict = {}
+    sdk._tortoise_fts_query("what are we currently committed to",
+                           entity_type="point", kind="claim",
+                           _state_question_out=both_out)
+    both_report = both_out.get("state_question")
+    assert both_report is not None and both_report["routed"] is False
+
+    # …and the same question on the family that HAS the arm is routed, not refused.
+    routed_out: dict = {}
+    sdk._tortoise_fts_query("what are we currently committed to",
+                           entity_type="object", _state_question_out=routed_out)
+    routed_report = routed_out.get("state_question")
+    assert routed_report is not None and routed_report["routed"] is True
+    assert routed_report["population"] == COMMITMENTS
+
+
+@_docker_only
+def test_a_kind_filter_with_no_commitment_kind_does_not_publish_a_route(sdk):
+    """A `kind=` narrowing that abandons the population must not say it served it.
+
+    #14780 review, cycle 3 finding 1. `kind` is NOT a retrieval knob (it is absent
+    from `_retrieval_knobs()`), so it cannot suppress the router: the commitment
+    arm sets its scope flag, and the enumerator is then filtered to the caller's
+    own kinds. When NONE of them is a commitment kind the arm falls through to the
+    relevance read \u2014 deliberately \u2014 but a report written at the routing
+    decision had already published `routed: True`, and the served note tells
+    callers to branch on `routed` (`state_intent.ROUTING_NOTE`). That is a false
+    success on the one key the contract names.
+
+    \u26d4 Reachable from the live doors: `search_knowledge(mode='hybrid')`
+    forwards `kind` to this read (`sdk.py`, the hybrid arm), and the MCP search
+    tool forwards it to `search_knowledge`.
+    """
+    from tortoise.state_intent import (
+        COMMITMENTS,
+        MISSED_ROUTE_COMMITMENTS_HINT,
+        MISSED_ROUTE_KIND_HINT,
+    )
+
+    out: dict = {}
+    rows = sdk._tortoise_fts_query("what are we currently committed to",
+                                   entity_type="object", kind="claim",
+                                   _state_question_out=out)
+    assert isinstance(rows, list), (
+        "the narrowed read must still return its rows \u2014 the relevance answer is "
+        "what the caller's own filter asked for")
+    report = out.get("state_question")
+    assert report is not None, (
+        "the shape fired and the population was declined by the caller's kind "
+        "filter: silence here reads as 'nothing is committed'")
+    assert report["routed"] is False, (
+        f"the read abandoned the population but reported {report!r}: `routed: "
+        f"True` is a false success on the key the served note says to branch on")
+    assert report["reason"] == "family", (
+        "a shape DID fire; this is a refusal, not 'no shape applied'")
+    assert report["population"] == COMMITMENTS
+
+    # ⛔ THE HINT MUST NAME THIS AXIS (#14780 review, cycle 3, finding 3). The
+    # refusal here is the caller's `kind` filter — the read ALREADY is `object` —
+    # so the entity_type sentence asserts a false cause and prescribes a re-read
+    # that returns a byte-identical payload.
+    assert report["hint"] == MISSED_ROUTE_KIND_HINT, (
+        "the kind-caused decline served another axis's remedy: "
+        f"{report['hint'][:90]!r}")
+    assert report["hint"] != MISSED_ROUTE_COMMITMENTS_HINT, (
+        "the `entity_type` sentence is false here: the caller passed "
+        "entity_type='object', which is exactly what its remedy prescribes")
+    follow_up: dict = {}
+    sdk._tortoise_fts_query("what are we currently committed to",
+                            entity_type="object", _state_question_out=follow_up)
+    assert follow_up != out, (
+        "the emitted remedy must CHANGE the report when followed — dropping the "
+        "kind filter does, which is what makes it a remedy rather than a "
+        "restatement of the refusal")
+
+    # …and a kind that IS a commitment kind still routes (the fix must not
+    # silence the arm it is protecting).
+    ok_out: dict = {}
+    sdk._tortoise_fts_query("what are we currently committed to",
+                            entity_type="object", kind="plan",
+                            _state_question_out=ok_out)
+    ok_report = ok_out.get("state_question")
+    assert ok_report is not None and ok_report["routed"] is True, (
+        f"a `plan`-narrowed commitment question must still ROUTE, got {ok_report!r}")
+
+
+@_docker_only
+def test_a_family_decline_reports_the_question_as_its_cue(sdk):
+    """The served note's second clause, MEASURED on the read (#14780 cycle 3).
+
+    The note says `cue` is "the matched question on a ROUTED read AND on a
+    `reason: family` decline", and the ending word only on a `reason: shape`
+    decline. This asserts the READ's payload rather than a payload builder handed
+    an argument by the test: a builder row cannot see a call site that passes a
+    different string, and that is exactly how the sentence was wrong before.
+    """
+    from tortoise.state_intent import state_cue
+
+    question = "is the onboarding flow retired?"
+    assert state_cue(question) == "retired", (
+        "the row is only meaningful while the ending word and the matched "
+        "question differ")
+    out: dict = {}
+    sdk._tortoise_fts_query(question, entity_type="event",
+                            _state_question_out=out)
+    report = out.get("state_question")
+    assert report is not None and report["reason"] == "family", (
+        f"this read must DECLINE on the family axis, got {report!r}")
+    assert report["cue"] == question, (
+        f"a family decline publishes the matched question as `cue`; got "
+        f"{report['cue']!r}, and the note says it is the question")
+    assert report["cue"] != state_cue(question), (
+        "if this arm ever passes `state_cue(query)` the note's second clause "
+        "becomes false again — the note and this payload move together")
+
+
+@_docker_only
+def test_a_query_with_no_state_cue_writes_nothing(sdk):
+    """The sink stays empty for every ordinary read, so nothing else changes.
+
+    This is the byte-identical claim: a caller who never asks about state cannot
+    observe this feature at all.
+    """
+    out: dict = {}
+    sdk._tortoise_fts_query("launch event", _state_question_out=out)
+    assert out == {}, (
+        f"an ordinary content query wrote {out!r} — the report must ride only a "
+        f"query that carries an ENDED-STATE cue")
+
+    # …and the same read with no sink at all is unchanged (the default every
+    # existing caller gets).
+    assert isinstance(sdk._tortoise_fts_query("what has ended recently"), list)
