@@ -1584,19 +1584,15 @@ _DISCLAIMER_RE = re.compile(
     r"|follow[\s-]?ups?|deferred|out\s+of\s+scope|excluded|except|apart\s+from|other\s+than",
     re.IGNORECASE)
 
-# ⛔ A TOTALISING PHRASE NAMES THE ISSUE'S ROWS WITHOUT SPELLING AN ID (review round 26, found by
-# enumerating the placement x spelling matrix rather than one spelling per review). The own-line
-# disclaimer read requires the line to NAME a row before a cue on it counts — so `all six rows are
-# proved — not by this PR` named nothing, `disclaimed` stayed False, and beside a complete claim
-# (a `(rows V1–V6)` close, or a complete `Satisfies`) the body read `clean`. `_AFFIRM_RE` already
-# recognises `all six` / `every row` as the same idea on the POSITIVE side; this is the negative-side
-# counterpart, kept narrow so it can only ever widen a disclaimer (never a claim).
-# ⛔ `only` IS DELIBERATELY ABSENT (pinned since round 7): `Closes #N (row V2 only)` LIMITS an
-# affirmative claim and must stay a claim on V2, so `only` is not a disclaimer cue anywhere.
-_TOTALISING_RE = re.compile(
-    r"\ball\s+(?:six|\d+|the\s+rows|of\s+(?:them|the\s+rows))|\bevery\s+row\b"
-    r"|\bboth\s+rows\b|\bthe\s+whole\s+issue\b|\beach\s+row\b",
-    re.IGNORECASE)
+# ⛔ `only` IS A DISCLAIMER CUE ON AN OWN LINE AND MUST STAY INERT ON A CLOSING LINE (review round 26,
+# P2). The two readings are genuinely different. On the closing line `only` is the verb's qualifier and
+# LIMITS an affirmative claim — `Closes #N (row V2 only)` claims V2, pinned since round 7 — so it is not
+# a negative cue there and this regex is consulted only in the OWN-LINE branch. On an own line there is
+# no claim for it to limit: `V1, V2 only.` and `rows V3-V6 only.` beside a `Closes #N (rows V1–V6)` are
+# disclosures of the rest, and both read `clean` before this cue existed.
+# It is deliberately NOT folded into `_DISCLAIMER_RE`: that regex is shared with the closing-line and
+# clause reads, where the pinned `(row V2 only)` claim would break.
+_ONLY_RE = re.compile(r"\bonly\b", re.IGNORECASE)
 
 # ⛔ THE POSITIVE MARKER FOR *IDs* (review round 9): round 8 retired the prose-cue blocklist for
 # RANGES, but the ids read still decided polarity by vocabulary — anything `_DISCLAIMER_RE` did not
@@ -1838,18 +1834,28 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # file's own ranking an over-abstention is the cheap error and a false PASS is the
             # expensive one, so the floor stays fail-closed and clause scoping is NOT reapplied
             # unless it can tell ellipsis from a new subject — which `_ELSEWHERE_RE` cannot.
-            # ⛔ AND "NAMES A ROW" IS READ WITHOUT THE CLAIM-SIDE RANGE BLANKING (review round 25, P1).
-            # This is a NEGATIVE read, but it was gated on `_ids_in`, whose rule BLANKS the endpoints of
-            # any range that is not the whole claim — a rule that exists so a range cannot INFLATE a
-            # claim. On a disclaimer line the range is never the whole claim, so `_ids_in` returned
-            # empty and the cue was never seen: `V3–V6 remain unmeasured` on its own line left
-            # `disclaimed` False, while the identical sentence comma-spelled was caught. Every range
-            # spelling (`V3–V6`, `V3-V6`, `V3..V6`, `V3 to V6`, `rows V3 through V6`) read `clean`
-            # beside a `Closes #N (rows V1–V6)` that closes all six — the headline false PASS. A range
-            # MENTION is row-naming for a negative read; only the claim side may discount it.
-            if ((_explicit_ids(line, rows) or _range_matches(line, rows)
-                    or _TOTALISING_RE.search(line))
-                    and (_DISCLAIMER_RE.search(line) or _ELSEWHERE_RE.search(line))):
+            # ⛔ THIS READ NO LONGER ASKS WHETHER THE LINE NAMES A ROW, AND THAT IS THE FIX (review
+            # round 26). "Names a row" was implemented as a SPELLING LIST — ids, then ranges, then a
+            # totalising regex — and each review round found the next spelling that fell outside it:
+            # `V3–V6` (round 25), `all six rows` (round 26), then `the six rows`, `all rows`, `the
+            # rest`, `the others`, `3 of them`, `the other five`, `V1, V2 only`. A vocabulary list
+            # cannot bound an English disclosure, so the requirement is DROPPED: a cue-bearing line of
+            # the PR body IS a disclosure of the rows the body is claiming, and its antecedent is the
+            # body itself rather than a token on that line. This is the same move the file makes
+            # everywhere else — refuse on the structural marker, never on a guessed vocabulary.
+            # ⛔ THE COST IS OVER-ABSTENTION AND IT IS THE CHEAP SIDE: a complete close whose evidence
+            # lines happen to carry a reassuring negative word (`nothing outstanding`, `no follow-ups
+            # needed`) now reads AMBIGUOUS instead of `clean`. In this file's own ranking that is the
+            # acceptable error and a false PASS is the expensive one, and the alternative — an
+            # ever-growing cue/noun enumeration — is precisely what produced five rounds of the same
+            # defect class one spelling deep.
+            # ⛔ `only` COUNTS AS A CUE HERE, ON AN OWN LINE ONLY. On a CLOSING line `only` LIMITS an
+            # affirmative claim (`Closes #N (row V2 only)` claims V2) and must stay inert — that path
+            # never reaches this branch, so the pinned decision is untouched. On an own line there is
+            # no claim for it to limit, so `V1, V2 only.` / `rows V3-V6 only.` beside a complete close
+            # disclose the rest and must not read as a pass (round 26 P2: that residual was wrong).
+            if (_DISCLAIMER_RE.search(line) or _ELSEWHERE_RE.search(line)
+                    or _ONLY_RE.search(line)):
                 disclaimed = True
             continue
         # ⛔ THE LINE IS THE UNIT, the clause is the polarity boundary: the range read needs the whole

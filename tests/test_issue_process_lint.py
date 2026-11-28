@@ -3943,9 +3943,12 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
     # (`all six rows are proved — not by this PR` names no row ID, so the cue was invisible). Every
     # cell here must be non-`clean`: a body that discloses undelivered rows must never read as a
     # complete close, whichever side of the keyword the disclosure sits on.
-    # ⛔ THE ONE DELIBERATE EXCEPTION is `only` (see `_TOTALISING_RE`'s note): `Closes #N (row V2
-    # only)` LIMITS an affirmative claim and is pinned as a claim on V2 by its own test, so `only` is
-    # not treated as a disclosure cue. That residual is recorded here rather than left to be found.
+    # ⛔ THE ONE DELIBERATE EXCEPTION WAS `only`, AND ROUND 26 SHOWED IT WAS WRONG (see `_ONLY_RE`):
+    # `Closes #N (row V2 only)` LIMITS an affirmative claim on the CLOSING line and stays pinned as a
+    # claim on V2 — that path never reaches the own-line read — but on an OWN line `V1, V2 only.` beside
+    # a complete close discloses the rest and must not read as a pass. So `only` is a cue here too, and
+    # the family below includes the pronoun/quantifier spellings (`the rest`, `3 of them`, `the other
+    # five`) that defeated the earlier spelling-list version of this read.
     disclosures = (
         "V1, V3, V4, V5, V6 remain unmeasured", "V1, V3, V4, V5, V6 are follow-ups",
         "V1, V3, V4, V5, V6 are separate PRs", "V1, V3, V4, V5, V6 landed in later PRs",
@@ -3956,22 +3959,43 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
         "V3 to V6 stay open in later PRs", "Rows V3 through V6 remain unmeasured",
         "all six rows are proved — not by this PR",
         "all six are proved — in the predecessor PR",
+        "THE six rows are proved — not by this PR",
+        "The 6 rows are proved — not by this PR",
+        "all rows are proved — not by this PR",
+        "all of these rows are proved elsewhere",
+        "each of the six rows is a follow-up", "every row is a follow-up",
+        "The rest are follow-ups.", "The others landed in later PRs.",
+        "3 of them are pending.", "The remaining five rows are follow-ups.",
+        "The other five remain unmeasured.", "The remaining rows are tracked in #14715.",
+        "One row is proved here; the balance is queued.",
+        "The six rows are proved in the predecessor PR.",
+        "V3, V4, V5, V6 only.", "rows V3-V6 only.", "V1, V2 only.",
         "V3–V6 are in the predecessor PR", "V1–V6 — see the predecessor PR",
         "V3-V6 are tracked in #14715",
     )
     placements = (
-        lambda d: f"Closes #13036\n\n{d}.\n",
-        lambda d: f"Closes #13036 (rows V1–V6)\n{d}.\n",
-        lambda d: (f"Closes #13036\n\nSatisfies #13036: V1, V2, V3, V4, V5, V6\n{d}.\n"),
+        lambda d: f"Closes #13036\n\n{d}\n",
+        lambda d: f"Closes #13036 (rows V1–V6)\n{d}\n",
+        lambda d: (f"Closes #13036\n\nSatisfies #13036: V1, V2, V3, V4, V5, V6\n{d}\n"),
         lambda d: f"Closes #13036 ({d})\n",
         lambda d: f"Closes #13036 (rows V1–V6); {d}\n",
-        lambda d: f"{d}.\n\nCloses #13036\n",
+        lambda d: f"{d}\n\nCloses #13036\n",
     )
     for disclosure in disclosures:
         for place in placements:
             body = place(disclosure)
             findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
             assert stats["clean"] == 0, (body, stats)
+    # ⛔ AND THE SPLIT FORM MUST AGREE WITH THE ONE-LINE FORM (round 26). The enumeration was only
+    # catching the one-line spelling because an id from the PREVIOUS sentence happened to land on the
+    # same line; one-sentence-per-line is the natural PR-body style, so the split form is the common
+    # one and read `clean`.
+    for body in (
+        "Closes #13036 (rows V1–V6)\n\nOnly V2 landed here. The other five remain unmeasured.\n",
+        "Closes #13036 (rows V1–V6)\n\nOnly V2 landed here.\nThe other five remain unmeasured.\n",
+    ):
+        findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
+        assert findings == [] and stats["clean"] == 0, (body, stats)
 
 
 def test_naming_every_row_ANYWHERE_is_a_complete_close():
