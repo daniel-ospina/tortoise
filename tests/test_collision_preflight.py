@@ -9408,6 +9408,25 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("cannot parse", basis)
         self.assertNotIn("EXPIRED", basis, f"an NBSP must not free the claim:\n{basis}")
 
+    def test_a_junk_token_before_a_faithful_one_does_not_block_the_reading(self):
+        """`_lease_of`'s `sed` matches a WHOLE all-digit value, so a junk token is SKIPPED.
+
+        `lease_until=junk lease_until=<digits>` reads as `<digits>` for the authority; a reader that
+        took the first `lease_until=` token regardless would answer unparseable → LIVE and abstain
+        where the authority answers `expired` (over-block) or `live` (agreement by luck). Both
+        directions are asserted, so reverting `faithful[0]` to `tokens[0]` reddens the row.
+        """
+        past, future = int(time.time()) - 86400, int(time.time()) + 86400
+        claimed, basis, _unreadable = self.claim_read(
+            message=f"claim owner=box-a lease_until=junk lease_until={past} nonce=9806")
+        self.assertFalse(claimed, basis)
+        self.assertIn(f"EXPIRED at {past}", basis)
+        claimed, basis, _unreadable = self.claim_read(
+            message=f"claim owner=box-a lease_until=junk lease_until={future} nonce=9806")
+        self.assertTrue(claimed, basis)
+        self.assertIn("is a LIVE claim", basis)
+        self.assertNotIn("cannot parse", basis, f"the junk token must be skipped:\n{basis}")
+
     def test_a_leading_zero_lease_is_unparseable_not_a_1970_window(self):
         """`claims.sh:_lease_unparseable`'s `0?*` arm, which this reader was missing.
 
