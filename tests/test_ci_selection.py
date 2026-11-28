@@ -15094,6 +15094,11 @@ ROWED_BY_THIS_FOLD = (
     "test_closes_landing.py",
     "test_metering_capture_usage_reader.py",
     "test_rail_detach.py",
+    # #14304 (PR #14790) — the relation write path's ORIENTATION leg. A file this
+    # fold ADDED, so it cannot have a row from anywhere else; named here so the
+    # entry-rule pin sees it and a later edit cannot drop its `durations:` row
+    # silently (the defect `#13110` and `#13826` each shipped).
+    "test_relation_orientation_14304.py",
     # #13110 (PR #13116) — the fold that registered `goalState` on both public doors.
     # `test_13110_goalstate_doors.py` is a file this fold ADDED; the second is `main`'s own
     # file, which the round-5 review reported rowless and this fold registered — `main` has

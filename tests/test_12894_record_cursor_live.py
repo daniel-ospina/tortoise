@@ -1190,6 +1190,32 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
     Driven deterministically: `replay_plan` is made to raise, which reaches the
     generic arm without inventing a schema state; the flag is then mirrored OFF
     so the enumerated arm's original sentence is pinned too.
+
+    ⚠️ THE STAND-IN MUST BE AN EXECUTION FAILURE, not any raise (#11783): the
+    live door now counts a failure raised INSIDE the plan build as
+    `plan_refused` (no statement ran; a replay re-refuses), so a bare
+    `RuntimeError` here no longer reaches this arm at all — it is stamped at the
+    phase boundary and counted there. `RecordStatementError` is the class the
+    generic arm exists for (a statement executed and failed) and is explicitly
+    excluded from that stamp, so it still lands here and the sentence pinned
+    below keeps being the one an operator reads on it.
+
+    ⛔ AND NEITHER ARM'S SENTENCE MAY PROMISE A HEAL THIS CLASS DENIES. On the
+    enumerated arm the old copy read *"a replay heals the record UNLESS … a
+    `record_cursor` row"*; on the ARMED arm the old copy named an allocating
+    replay as the remedy for the WHOLE population (round 31 P3), and the leg
+    here PINNED that omission with its inverse assertion
+    (`"EXECUTED and failed" not in text`), so the correct message reddened it.
+    The writer below reaches both arms AS a `RecordStatementError` — one whose
+    remedy is *not* a replay: a replay RE-EXECUTES the same statement and
+    re-fails until the data or the constraint is fixed. (⛔ NOT "the ONE class
+    whose remedy is not a replay": the store/CONFIG half is the other, which is
+    why the shipped sentence names BOTH — round 28 P2.) The old sentences sent
+    that operator to a chain that cannot work, which is the SAME defect this
+    branch fixes in the vocabulary home (`status_vocabulary.py`) and on
+    `/health` (`monitoring.py`).
+    Both arms are driven on the SAME exception so the assertion is about the
+    arm's SENTENCE, not about which failure was produced.
     """
     org, graph = tenant
     _append_positions(schema, org, graph, [1, 2])
@@ -1201,7 +1227,9 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
                        _app_role_dsn(os.environ["TEST_RECORD_DB_URI"]))
 
     def _explode(*a, **k):
-        raise RuntimeError("the statement exploded")
+        # A RecordStatementError, NOT a bare RuntimeError: see this test's
+        # docstring — the generic arm's population is execution failures.
+        raise rp.RecordStatementError("the statement exploded")
 
     monkeypatch.setattr(rp, "replay_plan", _explode)
     for flag, armed in (("1", True), ("0", False)):
@@ -1220,10 +1248,292 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
             assert "a replay heals the record" not in text, (
                 f"the enumerated arm's sentence leaked onto the armed arm: "
                 f"{text[-400:]!r}")
+            # ⛔ THE SPLIT IS PINNED ON THIS ARM TOO (round 31 P3, corrected by
+            # round 32). The assertion that stood here originally was its INVERSE
+            # — `"EXECUTED and failed" not in text` — so it reddened on the
+            # CORRECT message and enforced the defect it should have caught.
+            # `allocate` names which WRITE ARM ran, not which CAUSE failed: this
+            # arm's population is FOUR, not three, and the allocating replay is
+            # the remedy for the FIRST only, IN THE MODE THE ROW IS IN.
+            assert "which FORM follows the " in text and "cursor ROW" in text, (
+                "the ARMED arm's outage half must key the FORM on the cursor "
+                "ROW — `journal_skipped=False` does not imply an active row "
+                f"(`UNCUT_GRAPHS_SQL` is `no row OR mode <> active`): {text[-400:]!r}")
+            # ⛔ THE COUNT TWIN (review P3, round 40). The ENUMERATED arm got a
+            # count guard for this claim; the ARMED arm had none, so a
+            # duplicated bare "an outage is healed by a replay" could be
+            # prepended here with the leg green (measured: `1 passed`).
+            assert text.lower().count("an outage is healed by a replay") == 1, (
+                "the ARMED arm states the heal claim more than once — the "
+                "qualified form is the only one it may state: "
+                f"{text[-400:]!r}")
+            assert "with NO `record_cursor` row a plain replay writes unchanged" in text, (
+                "the NO-ROW half is the one a plain replay heals; steering it to "
+                f"an allocating replay is refused there: {text[-400:]!r}")
+            assert "with mode='active' an ALLOCATING replay" in text, (
+                "the ACTIVE half still needs the allocating form — a plain "
+                f"replay is refused on a cut-over graph: {text[-400:]!r}")
+            assert (
+                "`seeded`/`halted` row takes re-seed (`halted` after "
+                "`reopen`) and then `arm` FIRST, or the allocation itself "
+                "refuses"
+            ) in text, (
+                "a seeded/halted cursor needs re-seed (+`reopen`) and `arm` "
+                f"FIRST, and nothing here said so: {text[-400:]!r}")
+            # ⛔ THE RETRYABLE HALF, BOTH DIRECTIONS (round-32 P2 -> round-34 P3
+            # -> round-35 P3 -> round-36 P3). This pin has been wrong in BOTH
+            # directions and the history is the reason it now pins the mapping
+            # rather than a slogan:
+            #   * round 32 pinned `"nothing to fix" in text`, which LOCKED IN an
+            #     overclaim: `40001`/`40P01` are conflicts whose uncontended
+            #     retry wins, but `57014` is `query_canceled`
+            #     (`record_allocator.RETRYABLE_STATES`), and a `statement_timeout`
+            #     or a lock still held makes the identical replay re-fail;
+            #   * round 34 replaced it with a class-wide "re-fails on the
+            #     identical replay", which is false for the OTHER `57014` member
+            #     (`record_allocator.py:46-48`: "a local timeout, or an operator
+            #     cancel") — measured with `pg_cancel_backend`, whose identical
+            #     replay SUCCEEDED;
+            #   * round 36 found the polarity itself unguarded (`"both re-fail
+            #     on that retry"` left this leg GREEN), so `both succeed on that
+            #     retry` is now needled too.
+            # What is pinned is the SHIPPED mapping: the retry for the conflicts
+            # and the one-shot cancel, a persisting cause for the rest. ⛔ THE
+            # MAPPING NEEDS ADJACENCY, NOT JUST VOCABULARY (round-37 review P3):
+            # the two members are only BOUND to their outcomes by the phrases
+            # below, and a swap of the two `57014` members — a `statement_timeout`
+            # succeeding and an operator cancel re-failing — satisfied every
+            # single-token needle and stayed GREEN. Each of the next two entries
+            # spans the member AND its outcome for exactly that reason.
+            for needle in ("40001", "40P01", "57014", "rolled the counter back",
+                           "starts from the same number", "retry it",
+                           "both succeed on that retry",
+                           "operator or driver cancel",
+                           "only while its cause persists",
+                           "re-fails on the identical replay",
+                           # the member->outcome bindings (round-37):
+                           "was an operator or driver cancel, both succeed on that retry",
+                           "only while its cause persists (a `statement_timeout`",
+                           # and the sentence may not re-attach the cascade:
+                           "a `57014` re-fails on the identical replay only while"):
+                assert needle in text, (
+                    "the ARMED arm's RETRYABLE half is missing — an aborted "
+                    "allocation rolls the counter back, so a replay starts "
+                    "from the same number, and the retry heals a conflict or a "
+                    "one-shot cancel while a PERSISTING cause (a budget, a held "
+                    f"lock) re-fails it: {needle!r} absent from {text[-400:]!r}")
+            # ⛔ THE NEGATIVE PIN IS SCOPED, NOT CLASS-WIDE (round-37). A bare
+            # `assert "nothing to fix" not in text` forbids a phrase that is TRUE
+            # for the conflict half — the paragraph above the shipped sentence
+            # says so in as many words, and the shipped clause itself says the
+            # retry IS the remedy there — so a later fixer writing the correct
+            # conflict clause ("retry it … nothing to fix beyond that") would red
+            # a leg whose sentence is right. That is this PR's own defect class
+            # pointing the other way (a pin whose claim does not match the
+            # sentence it guards), and an over-block is still a defect. What
+            # must never come back is the BLANKET form — the claim attached to
+            # the whole retryable class, which is how round 33 shipped it
+            # ("… SUCCEEDS — nothing to fix; a statement that EXECUTED …"). Both
+            # historical spellings are banned; the conflict-half phrasing is not.
+            for blanket in ("SUCCEEDS — nothing to fix", "nothing to fix;"):
+                assert blanket not in text, (
+                    "the ARMED arm is back to telling the WHOLE retryable "
+                    "class there is nothing to fix — a `57014` whose cause "
+                    "persists (a `statement_timeout` this write does not fit, "
+                    "a lock still held) re-fails on the identical replay, so "
+                    f"the blanket claim is false for that member: {blanket!r} "
+                    f"in {text[-400:]!r}")
+            assert (
+                "statement that EXECUTED and failed on its own data or a "
+                "constraint re-fails on that replay until that cause is fixed"
+            ) in text, (
+                "the ARMED arm still promises a heal to a statement that "
+                "executed and failed — any replay RE-EXECUTES it and re-fails "
+                f"on the same data: {text[-400:]!r}")
+            assert "STORE/CONFIG refusal" in text, (
+                "the ARMED arm does not name the store/CONFIG half of its own "
+                "population: a tenant-scope/role refusal raised after the plan "
+                "build lands here on the allocated arm too, and its remedy is a "
+                f"DSN/role fix, not any replay: {text[-400:]!r}")
+            # ⛔ EVERY EXAMPLE THE SENTENCE NAMES MUST BE REACHABLE ON THE ARM
+            # THAT NAMES IT (round-33 P3). The enumerated arm's copy of this
+            # parenthetical includes "the cutover guard's own read"; THIS arm is
+            # the `allocate=True` one, and `record_projection.py:9105` gates
+            # `_refuse_an_enumerated_replay` on `position and not allocate and
+            # records` — so that SELECT never runs here. A cause the arm cannot
+            # produce is the same claim/arm mismatch this PR exists to fix, so
+            # this leg reddens on the pre-fix text and stays green on the fix.
+            assert "the cutover guard's own read" not in text, (
+                "the ARMED arm names a cause it cannot produce — the cutover "
+                "guard is gated on `not allocate`, and this arm exists because "
+                f"`allocate=True` was passed: {text[-400:]!r}")
+            for reachable in ("the tenant scope", "a role that bypasses RLS"):
+                assert reachable in text, (
+                    "dropping the unreachable example must not take the "
+                    "`scope_connection` causes with it — the tenant GUC and the "
+                    "role gate run unconditionally on both arms: "
+                    f"{reachable!r} absent from {text[-400:]!r}")
+            # ⛔ AND THE ISOLATION MEMBER IS NAMED AND ITS REPLAY SCOPE
+            # QUALIFIED (round-34 P3). `IsolationRefused` IS this arm's (the
+            # guard is gated on `allocate`, `record_projection.py:9092`), and
+            # the comment says this clause is where an operator reads it — but
+            # the old shipped clause ended `on any replay`, which is false for
+            # it: a NON-allocating replay (`record_runner.cmd_apply` refuses
+            # `--allocate` unconditionally) is never asked the isolation
+            # question. Both directions pinned, so neither the member nor the
+            # qualifier can be dropped, and the blanket quantifier cannot come
+            # back.
+            assert "a transaction isolation this arm refuses" in text, (
+                "the ARMED arm's STORE/CONFIG clause stopped naming the "
+                "isolation member — `IsolationRefused` is raised on this arm "
+                "by construction (`require_read_committed` is gated on "
+                f"`allocate`): {text[-400:]!r}")
+            assert "only a REPLAY that allocates is asked the isolation question" in text, (
+                "the isolation clause lost its replay scope — `on any replay` "
+                "would tell a REPEATABLE-READ operator that a non-allocating "
+                f"replay re-raises, and it does not: {text[-400:]!r}")
+            # ⛔ AND THE VERB EXCEPTION IS NAMED (delta review P3, measured).
+            # The universal was false for the allocator's own entry points —
+            # `seed()`/`_transition()`(arm,halt,reopen)/`execute_allocation()`
+            # call `require_read_committed` UNCONDITIONALLY
+            # (`record_allocator.py:486,690,816`) while only the projection call
+            # site is gated on `allocate` — and THIS sentence sends a
+            # seeded/halted operator to `re-seed` then `arm`. Pinned in both
+            # directions: the exception is present, and the bare universal
+            # cannot come back.
+            for verb in ("`seed`/`arm`/`halt`/`reopen`",
+                         "they refuse identically at REPEATABLE READ"):
+                assert verb in text, (
+                    "the isolation clause must name the allocator verbs that "
+                    "are asked the question UNCONDITIONALLY — a REPEATABLE-READ "
+                    "operator is sent to `seed`+`arm` by this very sentence, "
+                    f"and both refuse: {verb!r} absent from {text[-400:]!r}")
+            assert "only an ALLOCATING write is asked" not in text, (
+                "the scoped universal is back — `seed`, `arm`/`halt`/`reopen` "
+                "and `execute_allocation` are ALL asked the isolation "
+                "question, so 'only an allocating write is asked it' is false "
+                f"for the verbs this sentence names: {text[-400:]!r}")
+            assert "on any replay" not in text, (
+                "the unqualified `on any replay` quantifier is back — it is "
+                "false for the isolation member, which is asked only on an "
+                f"allocating write: {text[-400:]!r}")
         else:
-            assert "a replay heals the record" in text, (
-                "the ENUMERATED arm lost its original remedy, which IS correct "
-                f"there: {text[-400:]!r}")
+            # ⛔ EVERY CLAUSE OF THE SPLIT IS PINNED, because this sentence is
+            # read on THREE populations (an outage, a statement that executed
+            # and failed, a store/CONFIG refusal) and the exception driven here
+            # is the middle one. The old text pinned nothing and claimed the
+            # first for all three. ⚠️ The store/CONFIG clause is pinned too —
+            # before round 28 this leg asserted two of the three and the third
+            # lived only in a code comment, so a regression that dropped it from
+            # the SHIPPED sentence was invisible.
+            assert (
+                "an OUTAGE is healed by a replay, but which FORM follows the "
+                "cursor ROW"
+            ) in text, (
+                "the ENUMERATED arm stopped qualifying the heal by the FORM "
+                "the cursor row allows — this sentence refuses a plain replay "
+                f"in its own last clause: {text[-400:]!r}")
+            # ⛔ COUNT-BASED, NOT SPELLING-BASED (review P3, round 39). A
+            # `; `-bound negative let the unconditional claim back in with a
+            # period, shipping BOTH the bare and the qualified claim with the
+            # leg green (measured: `1 passed`). One occurrence is the qualified
+            # form itself; any re-added bare claim makes it two. The
+            # retryable-half negative is spelled twice for this same reason.
+            # ⛔ `.lower()` (review P2, round 40): a CASE-SENSITIVE count missed
+            # a second bare claim written as its own sentence — "An OUTAGE is
+            # healed by a replay.", the most natural way to prepend one, and the
+            # all-lowercase spelling too. Both measured `1 passed`. Case-folding
+            # is what makes the count match the SHAPE rather than one spelling.
+            assert text.lower().count("an outage is healed by a replay") == 1, (
+                "the ENUMERATED arm states the heal claim more than once — "
+                "which FORM follows the cursor row is the ONLY heal it may "
+                f"state: {text[-400:]!r}")
+            # The twin of the ARMED arm's consequence pin, widened the same way
+            # (review P3, round 39): the needle used to stop at "re-fails", so
+            # deleting "until its own cause … is fixed" left the leg GREEN.
+            assert (
+                "statement that EXECUTED and failed re-fails until its own "
+                "cause (its data or a constraint) is fixed"
+            ) in text, (
+                "the ENUMERATED arm still promises a heal to a statement that "
+                "executed and failed — a `RecordStatementError` re-fails on a "
+                f"replay: {text[-400:]!r}")
+            assert "STORE/CONFIG refusal" in text, (
+                "the ENUMERATED arm does not name the store/CONFIG half of its "
+                "own population: a tenant-scope/role refusal raised after the "
+                "plan build also lands on `write_failed`, and its remedy is a "
+                f"DSN/role fix, not any replay: {text[-400:]!r}")
+            assert "a replay heals the record" not in text, (
+                "the blanket 'a replay heals the record' claim is back on a "
+                "population that includes a statement that executed and "
+                f"failed: {text[-400:]!r}")
+            # ⛔ AND THE CURSOR-ROW CLAUSE CARRIES THE SAME SCOPE (review pass at
+            # `a4ce608545`, P2). Scoping the guard clause alone made the SENTENCE
+            # CONTRADICT ITSELF: twelve words earlier it now says the cutover
+            # guard is asked "only on one that carries a position", while this
+            # clause claimed EVERY enumerated replay on a cut-over graph is
+            # refused. It is not — `_refuse_an_enumerated_replay` is gated
+            # `position and not allocate and records`
+            # (`record_projection.py:9105`) and `position=False` is a real mode
+            # on this arm (`position=True if allocate else seq is not None`,
+            # `record_writer.py:4346`, with `seq is None` a NAMED skip via
+            # `_note_unproven_position` at `:4288`). So the remedy pointer after it was a
+            # dead end for that population. Pinned in the scoped form, so the
+            # over-broad text cannot come back and the CORRECT text does not red.
+            assert ("ENUMERATED replay that carries a position is refused when "
+                    "this graph has a `record_cursor` row") in text, (
+                "the enumerated arm lost the cursor-row condition that makes "
+                "the allocating replay the remedy on a cut-over graph, or "
+                "lost its POSITION scope — `position=False` never reaches "
+                f"`_refuse_an_enumerated_replay`: {text[-400:]!r}")
+            # ⛔ AND THE MEMBER'S OWN REMEDY IS A MIGRATION (review pass at
+            # `0c98eb0ea6`, P3). The parenthetical grouped the cutover guard's
+            # read with the two `scope_connection` causes under "until the DSN or
+            # the role is fixed" — and that remedy matches NONE of the guard's
+            # reachable shapes: when the read FAILS the only real shape is a
+            # database the counter migration has not reached (`42P01`, whose
+            # remedy `record_projection.py:8382-8390` names itself: apply
+            # `20261116000001_record_cursor_allocator.sql`), and when it
+            # SUCCEEDS the remedy is the row's MODE, stated by the next clause.
+            # Both directions pinned, so the migration remedy cannot be dropped
+            # and cannot silently revert to a DSN/role claim.
+            assert "ordinal-allocator migration is applied to this database" in text, (
+                "the cutover guard's read must carry its OWN remedy — a `42P01` "
+                "is a MISSING MIGRATION, and neither a DSN nor a role fixes "
+                f"it: {text[-400:]!r}")
+            assert "a `42P01` is a MISSING MIGRATION, not a DSN or a role" in text, (
+                "the member's remedy is drifting back under the DSN/role claim "
+                "that matches none of its shapes: "
+                f"{text[-400:]!r}")
+            assert "an ENUMERATED replay is refused" not in text, (
+                "the UNSCOPED form is back — the guard is gated on `position`, "
+                "and a `position=False` enumerated replay on a cut-over graph "
+                f"is not refused at all: {text[-400:]!r}")
+            # …and the guard that condition gates IS reachable here, so its
+            # example stays: removing it from BOTH arms would over-correct
+            # (round-33 P3 fixed the ARMED arm only).
+            assert "the cutover guard's own read" in text, (
+                "the enumerated arm (`allocate=False`) is where "
+                "`_refuse_an_enumerated_replay` actually runs, so its example "
+                f"belongs in this sentence: {text[-400:]!r}")
+            # ⛔ AND ITS QUANTIFIER IS SCOPED TOO (delta review P3). This arm's
+            # copy said the whole clause re-raises `, on any replay;` — but the
+            # cutover guard is gated `position and not allocate and records`
+            # (`record_projection.py:9105`) and its own docstring says
+            # `position=False` never reaches it (`:8337-8338`), while
+            # `position=False` is a real mode (`record_writer.py:4332-4335` takes
+            # it whenever a durable journal cannot prove the position). So the
+            # blanket was over-broad for the one example this arm keeps; the
+            # tenant scope and the role really ARE asked on every replay. Pinned
+            # in both directions so neither the scope nor the example is lost.
+            assert "the cutover guard only on one that carries a position" in text, (
+                "the enumerated arm's store/CONFIG clause lost the scope on the "
+                "cutover guard — `position=False` never reaches "
+                f"`_refuse_an_enumerated_replay`: {text[-400:]!r}")
+            assert "asked on every replay" in text, (
+                "scoping the cutover guard must not take the `scope_connection` "
+                "causes with it — the tenant GUC and the role gate run "
+                f"unconditionally: {text[-400:]!r}")
     monkeypatch.delenv(rw.RECORD_ALLOCATE_ENV, raising=False)
 
 
@@ -1236,9 +1546,11 @@ def test_a_mis_armed_counter_is_refused_with_a_remedy_that_applies(
     collision refusal. The docstring claimed ``refusal`` distinguished them; it
     does not, and now says so.
 
-    Both halves asserted: the token stays in the closed vocabulary (`write_failed`
-    — a new token would be a surface change), and the LOG names the state and the
-    remedy that applies. A "heals the record" line here reds this test.
+    Both halves asserted: the token stays on `write_failed` (`#11783`: these two
+    allocator refusals stay one bucket BY CHOICE — not because the vocabulary
+    cannot grow, which it did: `plan_refused` — see `write_live_record`), and
+    the LOG names the state and the remedy that applies. A "heals the record"
+    line here reds this test.
     """
     org, graph = tenant
     # `seeded`, NOT armed: the counter exists and refuses to issue.

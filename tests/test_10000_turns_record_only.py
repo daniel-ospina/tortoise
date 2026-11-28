@@ -3102,6 +3102,13 @@ def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
     # returns: leave it out and the vocabulary map may spell a size one short
     # (the #10021 defect this pin exists for) without reddening.
     returned.append("journal_collision")
+    # ⛔ #11783: `plan_refused` is the SECOND post-write token — the projector
+    # could not BUILD a plan for the record, so no statement ran — split out of
+    # `write_failed` because 182 plan-build refusals in production read exactly
+    # like a transport outage. It is a refusal a consumer must branch on (its
+    # remedy is a producer/record-shape fix, never a replay), so leaving it out
+    # here is the same one-value-short closed list this pin exists to catch.
+    returned.append("plan_refused")
     missing = [t for t in returned if t not in doc]
     assert not missing, (
         f"`record_writer` can return refusal={missing} and "
@@ -3112,6 +3119,16 @@ def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
         "the map must point at the set's declaration (`record_writer."
         "LIVE_WRITE_REFUSALS` + the attempt's `write_failed`) instead of being "
         "mistaken for it — a typed count in the map is what drifted")
+    # ⛔ THE BULLET, NOT JUST THE TOKEN (#14746 mutation pass, MEASURED): the
+    # `missing` check above is satisfied by the set-size sentence further down the
+    # docstring, so the `plan_refused` BULLET could be deleted outright and this
+    # test stayed GREEN. That bullet is the ONLY place in the map that states what
+    # a consumer should DO about the token, so losing it silently loses the
+    # guidance the token was split out of `write_failed` to give.
+    assert "names its own remedy (fix the cause; a replay re-refuses)" in " ".join(doc.split()), (
+        "the `plan_refused` bullet must survive WITH its remedy sentence — a "
+        "presence check on the token alone cannot see it go, because the size "
+        "sentence spells the token too")
     # The count is DERIVED, never typed here either: a hard-coded "six" in the
     # pin would re-stale exactly the way the doc's did when the door grew.
     _WORD = {4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
@@ -3192,6 +3209,158 @@ def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
             f"the `/health` remedy table says '{word}' values and lists "
             f"{len(bullets)} ({bullets}) — the same one-set-two-sizes defect "
             f"this pin exists for")
+
+
+def test_the_write_path_vocabulary_does_not_call_a_statement_failure_an_outage():
+    """⛔ #11783: `degraded` is defined in this same module as the store being
+    configured but NOT REACHED — so the `write_failed` bullet must not claim
+    that token, as a whole, is a literal `degraded`.
+
+    `write_failed` carries TWO halves and its neighbours say so: the record
+    UNREACHABLE, and a STATEMENT that ran and FAILED after the store answered
+    (a CHECK over the record's own data, #13207; a driver error; a connection
+    dropped mid-transaction — `record_writer._plan_refusal_cause` keeps all of
+    them on this token, and measures that the store WAS reached). Only the
+    first half is `degraded`; the second is a store that answered and refused
+    the row — the same misattribution #11783 exists to remove (a record
+    failure read as a transport outage), one layer down in the module that
+    calls itself the vocabulary's ONE home.
+
+    ⛔ FOUR ASSERTIONS, FOUR DIFFERENT READINGS — measured in-process against
+    this module's own ``__doc__`` (no tree edit; re-measured 2026-11-27, #11783
+    round 28). They are the four rows of ``_WRITE_FAILED_NEEDLES``, asserted by
+    the ONE loop below rather than four inline `assert`s, so a reading cannot be
+    dropped from the assertions while the table above still promises it
+    (round 29 P3). In table order:
+
+    * the branch's PREDECESSOR bullet (``* ``write_failed`` is the record being
+      UNREACHABLE, or a connection/statement failing — ``degraded``
+      literally;``, `427e410f91`) reddens the THIRD assertion first — it has no
+      ``not an outage`` clause; the first assertion is GREEN on it, because it
+      spells the half ``UNREACHABLE`` upper-cased, not lower-cased;
+    * ``origin/main``'s two-cause bullet reddens the FIRST (it says
+      ``unreachable`` lower-cased), the SECOND (no ``statement`` at all) and the
+      fourth;
+    * dropping the word ``statement`` from the CURRENT bullet reddens the SECOND
+      alone — that needle IS load-bearing;
+    * ``FOR THAT HALF`` → ``FOR THAT`` reddens the FOURTH alone, the scope of
+      the ``degraded``-literal claim.
+
+    ⚠️ An earlier revision of this note claimed the predecessor bullet reddened
+    the FIRST assertion, then claimed ``statement`` could be dropped without
+    going red and that the predecessor already carried ``not an outage``. Each
+    of those is false at source and each was a review finding applied without
+    re-measuring the mutation it names — do not re-instate them.
+    """
+    from tortoise import status_vocabulary
+
+    doc = status_vocabulary.__doc__ or ""
+    start = doc.find("* ``write_failed``")
+    assert start != -1, "the vocabulary map no longer lists `write_failed`"
+    bullet = doc[start:]
+    nxt = bullet.find("\n* ``", 1)
+    bullet = bullet[:nxt] if nxt != -1 else bullet
+    # ⛔ THE NEEDLES ARE ONE LIST, ITERATED HERE AND GRADED BELOW — not two
+    # copies of the same four readings. `_WRITE_FAILED_NEEDLES` is the single
+    # definition: THIS loop asserts every row of it, and
+    # `_write_failed_bullet_reds` scores the same rows, so neither the four
+    # assertions nor the mutation table above can be narrowed by deleting a
+    # needle from one side (round 29 P3: an AST-drop of
+    # `assert "FOR THAT HALF" in bullet` from this body left the leg GREEN,
+    # because the four assertions and the table were separate definitions).
+    for needle, case_insensitive, message in _WRITE_FAILED_NEEDLES:
+        haystack = bullet.lower() if case_insensitive else bullet
+        assert needle in haystack, message
+
+    # ⛔ THE MUTATION TABLE ABOVE IS ENFORCED HERE, not merely written down:
+    # two revisions of this docstring stated mutations that were never
+    # re-measured (round 27 P3, round 28 P2). Each historical bullet below is
+    # the RECORDED text it claims to be, so a needle edit that invalidates the
+    # table reddens this leg instead of leaving a false claim for the next
+    # reviewer to trust.
+    #
+    # ⛔ A `_write_failed_bullet_reds(bullet) == []` ASSERTION STOOD HERE AND IT
+    # COULD NEVER FAIL (delta review P3 / mutation pass F2, agent-infra#3442
+    # rule 3). The helper scores the SAME `_WRITE_FAILED_NEEDLES` against the
+    # SAME `bullet` with the SAME `in` predicate as the loop immediately above,
+    # so once that loop passes the returned list is necessarily empty — measured:
+    # dropping a needle reds the loop, never this call, and its own message
+    # conceded it ("this can only mean a needle was made unreadable"). It was
+    # dead weight that read as coverage, so it is DELETED rather than reworded;
+    # the loop is the assertion, and the historical bullets below are what make
+    # the table itself fail when a needle moves.
+    assert _write_failed_bullet_reds(PREDECESSOR_WRITE_FAILED_BULLET) == [3, 4], (
+        "the predecessor bullet no longer reddens the THIRD and FOURTH "
+        "assertions — re-measure the table in this docstring rather than "
+        "re-stating it (it has been wrong twice)")
+    assert _write_failed_bullet_reds(ORIGIN_MAIN_WRITE_FAILED_BULLET) == [1, 2, 4]
+    assert _write_failed_bullet_reds(
+        bullet.replace("STATEMENT", "THING").replace("statement", "thing")
+    ) == [2], (
+        "dropping the word `statement` must red the SECOND assertion alone — "
+        "an earlier note claimed it survived; it does not")
+    assert _write_failed_bullet_reds(
+        bullet.replace("FOR THAT HALF", "FOR THAT")
+    ) == [4], (
+        "`FOR THAT HALF` must be the FOURTH assertion's discriminator")
+
+
+# The three bullets the docstring above grades. Recorded VERBATIM — line breaks
+# and indent included — so the table is a measurement over text that cannot
+# drift with the branch. (`git show 427e410f91:tortoise/status_vocabulary.py`
+# holds the first one across TWO lines; a version that joined them with a space
+# and still called itself VERBATIM was not one, which is the class of claim this
+# table exists to stop — #11783 round 29.)
+PREDECESSOR_WRITE_FAILED_BULLET = (
+    "* ``write_failed`` is the record being UNREACHABLE, or a connection/statement\n"
+    "  failing — ``degraded`` literally;")
+ORIGIN_MAIN_WRITE_FAILED_BULLET = (
+    "* ``write_failed`` covers two causes: the record was unreachable\n"
+    "  (``degraded`` literally), OR the record was reached and refused the\n"
+    "  projection — an impairment, not an outage;")
+
+
+# ⛔ THE FOUR NEEDLES, ONCE. `(needle, case_insensitive, failure_message)` in
+# the order the docstring's mutation table calls them 1-4. The leg's assertion
+# LOOP iterates this tuple and `_write_failed_bullet_reds` grades it, which is
+# what makes "the mutation table is enforced here" true rather than aspirational
+# (round 29 P3). Add a reading by adding a row; do not re-inline an `assert`.
+_WRITE_FAILED_NEEDLES: tuple[tuple[str, bool, str], ...] = (
+    ("UNREACHABLE", False,
+     "the `write_failed` bullet no longer names the UNREACHABLE half"),
+    ("statement", True,
+     "the `write_failed` bullet no longer names the half that REACHED the "
+     "store and failed there — the population a replay re-refuses"),
+    ("not an outage", False,
+     "the `write_failed` bullet applies `degraded` to the STATEMENT half: "
+     "`degraded` is 'configured but could not be REACHED' (this module's "
+     "own definition) and a statement that ran proves the store WAS "
+     "reached, so that half is an impairment, not an outage"),
+    ("FOR THAT HALF", False,
+     "the `degraded`-literal claim is not scoped to the unreachable half — "
+     "as a whole `write_failed` is not the literal fit (the bullet above "
+     "says `circuit_open` is, and the size sentence derives its count as "
+     "the members that are NOT a measured outage); if the wording moved, "
+     "update this needle rather than dropping the scope"),
+)
+
+
+def _write_failed_bullet_reds(bullet: str) -> list[int]:
+    """Which of the four needles red on ``bullet``, 1-based.
+
+    The SAME rows the leg's assertion loop iterates (``_WRITE_FAILED_NEEDLES``),
+    so the mutation table in
+    ``test_the_write_path_vocabulary_does_not_call_a_statement_failure_an_outage``
+    is measured rather than asserted in prose — and deleting a row from the list
+    narrows both the assertions and the table at once, instead of leaving one of
+    the two claiming a reading the other no longer makes.
+    """
+    return [
+        index
+        for index, (needle, case_insensitive, _message) in enumerate(
+            _WRITE_FAILED_NEEDLES, 1)
+        if needle not in (bullet.lower() if case_insensitive else bullet)
+    ]
 
 
 # ── the demo seeders are writers too (the population, not the capture path) ──
