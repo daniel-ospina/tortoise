@@ -1659,6 +1659,20 @@ def test_a_plan_refusal_on_the_record_only_arm_does_not_claim_a_journal_line(
         "the remedy on this arm is a RE-EMIT, which is what `live_write.py` "
         f"already prescribes for it — got: {message}"
     )
+    # ⛔ THE REMEDY CLAUSE, NOT JUST THE PROVIDER PHRASE (#14746 mutation pass,
+    # MEASURED): the pin above is satisfied by `journal_clause`'s own
+    # "re-emit the record", so `remedy_clause` could be collapsed to the
+    # replay-only branch and this row stayed GREEN. These two statements bind the
+    # RECORD-ONLY arm's remedy sentence specifically, and red if the flag stops
+    # selecting it.
+    assert "A re-emit of the same record re-refuses" in message, (
+        "on the record-only arm the REMEDY sentence must be the re-emit form — "
+        f"got: {message}"
+    )
+    assert "A replay of the same record re-refuses" not in message, (
+        "the record-only arm has no line to replay, so the replay-form remedy "
+        f"is false here: {message}"
+    )
 
     # ⛔ DISCRIMINATING, not presence-only (the "membership is not the pin" rule
     # the sibling arms already carry): the SAME door on the JOURNALED arm must

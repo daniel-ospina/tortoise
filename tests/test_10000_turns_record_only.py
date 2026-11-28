@@ -3119,6 +3119,16 @@ def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
         "the map must point at the set's declaration (`record_writer."
         "LIVE_WRITE_REFUSALS` + the attempt's `write_failed`) instead of being "
         "mistaken for it — a typed count in the map is what drifted")
+    # ⛔ THE BULLET, NOT JUST THE TOKEN (#14746 mutation pass, MEASURED): the
+    # `missing` check above is satisfied by the set-size sentence further down the
+    # docstring, so the `plan_refused` BULLET could be deleted outright and this
+    # test stayed GREEN. That bullet is the ONLY place in the map that states what
+    # a consumer should DO about the token, so losing it silently loses the
+    # guidance the token was split out of `write_failed` to give.
+    assert "names its own remedy (fix the cause; a replay re-refuses)" in " ".join(doc.split()), (
+        "the `plan_refused` bullet must survive WITH its remedy sentence — a "
+        "presence check on the token alone cannot see it go, because the size "
+        "sentence spells the token too")
     # The count is DERIVED, never typed here either: a hard-coded "six" in the
     # pin would re-stale exactly the way the doc's did when the door grew.
     _WORD = {4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
