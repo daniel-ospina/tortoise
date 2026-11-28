@@ -1035,6 +1035,11 @@ jobs:
             #   · reviewed-side list arity  -> 3 red rows, `(t32d)`      (pinned ALONE)
             #   · branch-side list arity    -> 3 red rows, `(t32e)`      (pinned ALONE)
             #   · `[ "$p_seen" -ge 1 ]`     -> 3 red rows, `(t32g)`      (pinned ALONE).
+            #   · branch-side `p_btotal >= 1` -> 3 red rows, `(t33)`      (pinned ALONE):
+            #     the reviewed side's zero guard one page over, and its own mutant covers
+            #     both sides. (`(t33)` also pins the `.sha[0:12]` WIDTH inside the pinned
+            #     `--jq` substrings — without it, mutating the width left the suite green
+            #     while every 12-char token missed the membership test.)
             #     Its control `(t32h)` is NOT a behavioural pin: with the guard already gone
             #     its own mutation finds nothing to strip and self-reports, which is why the
             #     `(t32g)` count is the one that matters.

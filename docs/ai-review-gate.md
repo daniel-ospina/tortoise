@@ -151,7 +151,7 @@ entry condition closes that path.
      unrecognised status is reported as an UNREADABLE graph, not as a rewrite, which
      would send you to buy a 20–40 minute re-review for an API blip (harness cases
      `(t32a)`–`(t32h)`, whose comments state which guard each row pins, by RED ROW COUNT
-     rather than by a PASS total: four are pinned alone, one is masked by two siblings
+     rather than by a PASS total: five are pinned alone, one is masked by two siblings
      (removing it reddens nothing, and removing it together with the arity check reddens
      `(t32d)` only — the other rows are refused by a further guard), and two are subsumed.
      `(t32f)` is the only control that strips the whole masked set at once, which is why a
