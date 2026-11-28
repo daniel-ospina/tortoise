@@ -4166,10 +4166,13 @@ def test_a_row_id_matches_as_a_whole_token_only():
     """`R1` must not be found inside `R10`, and a stated `R10` must not be read as `R1`."""
     assert L._ids_in("R10 and AR1", ["R1"]) == set()
     assert L._ids_in("R10 only", ["R1", "R10"]) == {"R10"}
-    # End to end: claiming R10 on a 3-row issue is not claiming R1.
-    findings, _ = L.classify_partial_close("Closes #14715 (R10 only)\n", 500,
-                                           {14715: _scope(["R1", "R2", "R3"])})
-    assert findings == []
+    # End to end: claiming R10 on a 3-row issue is not claiming R1 — and it is not a PASS either.
+    # The end-to-end half asserted only "not flagged", which cannot tell an honest AMBIGUOUS from a
+    # `clean` (review round 32, P3): a false PASS on an id the issue never declares would have shipped
+    # green. The verdict is now pinned, not just the absence of a finding.
+    findings, stats = L.classify_partial_close("Closes #14715 (R10 only)\n", 500,
+                                              {14715: _scope(["R1", "R2", "R3"])})
+    assert findings == [] and stats["ambiguous"] == 1 and stats["clean"] == 0, stats
 
 
 def test_a_quoted_closing_line_does_not_claim_rows():
@@ -4249,6 +4252,149 @@ def test_read_scope_reads_each_issue_once(monkeypatch):
     assert scopes[5]["satisfies"]["ticked"] == 1
 
 
+# --- arm 3, review round 32: a complete close spelled one way must not be accused by another ---
+
+
+@pytest.mark.parametrize("spelling", [
+    "V1–V2, V3, V4–V6",
+    "V1, V2–V3, V4, V5, V6",
+    "V1–V3, V4, V5, V6",
+    "V1, V2, V3, V4–V6",
+])
+def test_a_complete_close_spelled_as_ranges_beside_ids_is_clean(spelling):
+    """A PURE ID LIST IS ONE CLAIM, NOT A SET OF INDEPENDENT MENTIONS (review round 32, P1).
+
+    Measured at the reviewed head: `Closes #13036 (V1–V2, V3, V4–V6)` — the SIX rows, spelled as
+    three ranges beside a bare id — returned `claimed=['V3']` and accused a COMPLETE close of
+    claiming one row of six, with remediation telling its author to rewrite it into the partial form.
+    Each range failed the whole-claim PORTION test (a range inside a list has a non-empty `post`), so
+    none spanned and only the bare token survived. `_clause_is_a_pure_id_list` is the structural
+    test that separates this from a mention: `of`, `bar`, `see`, `landed` are residue, separators are
+    not. The four spellings below are the same claim four ways; the control pair is the partial.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(
+        f"Closes #13036 ({spelling})\n", 500, {13036: _scope(rows)})
+    assert findings == [], spelling
+    assert stats["clean"] == 1, spelling
+
+
+@pytest.mark.parametrize("spelling,claimed,unclaimed", [
+    ("V1–V2, V3", ["V1", "V2", "V3"], ["V4", "V5", "V6"]),
+    ("V1–V2, V3, V4–V5", ["V1", "V2", "V3", "V4", "V5"], ["V6"]),
+    ("V1, V2–V3", ["V1", "V2", "V3"], ["V4", "V5", "V6"]),
+    ("V2–V4", ["V2", "V3", "V4"], ["V1", "V5", "V6"]),
+])
+def test_an_id_list_that_names_a_proper_subset_still_finds_it(spelling, claimed, unclaimed):
+    """THE CONTROL PAIR for the id-list read: expanding a list's ranges must not blind the arm.
+
+    Without this pair a fix that simply expanded every range in a list would pass the clean test
+    above and silently stop finding the rows a list leaves out.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(
+        f"Closes #13036 ({spelling})\n", 500, {13036: _scope(rows)})
+    assert len(findings) == 1, spelling
+    assert findings[0].evidence["claimed"] == claimed, spelling
+    assert findings[0].evidence["unclaimed"] == unclaimed, spelling
+    assert stats["clean"] == 0, spelling
+
+
+@pytest.mark.parametrize("body", [
+    "Closes #13036 (V1–V6), closes #13037 (V2)\n",
+    "Closes #13036 (rows V1–V6), closes #13037 (row V2 only)\n",
+])
+def test_a_foreign_closing_clause_is_not_this_issue_s_narrowing_in_the_range_spelling(body):
+    """⛔ THE THIRD READER OF THE NARROWING QUESTION (review round 32, P1).
+
+    Round 31 fixed "a sibling that closes a DIFFERENT issue is not this issue's narrowing" for the
+    ID-LIST spelling only. `_narrowing_ids` — reached from `_closing_line_range_claim`, i.e. only on
+    the RANGE spelling — took no `issue`/`repo` and could not consult `_foreign_closing_clauses`, and
+    `_range_is_the_whole_claim` counted the foreign clause's row as a naming sibling. Both spellings
+    of the same sentence therefore disagreed: one complete close was accused of claiming V2 in the
+    range spelling and clean in the id-list spelling. `#13036` must be CLEAN here, and the one
+    finding must be about `#13037` — the issue the second clause really closes.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(
+        body, 500, {13036: _scope(rows), 13037: _scope(rows)})
+    assert [f.detail.startswith("closes #13037") for f in findings] == [True], \
+        [(f.detail[:40], f.evidence.get("claimed")) for f in findings]
+    assert stats["clean"] == 1, stats
+    assert stats["finding"] == 1, stats
+
+
+def test_a_declined_closing_ref_is_still_a_target_because_github_will_close_it():
+    """⛔ A DECLINE IS ARM 1'S ANSWER, NOT GITHUB'S (review round 32, P2).
+
+    `closing_targets` filtered the `declined` set out of the population, so the arm's OWN HEADLINE
+    shape plus the one honest disclosure sentence a careful author writes —
+
+        Closes #13036 (row V2 only).
+        This does not close #13036 as a whole.
+
+    — measured a population of ZERO, printed `0 closing ref(s) read — 0 clean, 0 flagged`, rc 0, and
+    said nothing about the drop. GitHub's parser does not read prose: the `Closes` still fires on
+    merge, which is the entire premise of this arm. The declined set stays arm 1's, where the
+    question really is "did you answer the claim?".
+    """
+    body = ("Closes #13036 (row V2 only).\n\nThis does not close #13036 as a whole.\n")
+    assert L.closing_targets(body, 500) == [13036]
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, _stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
+    assert len(findings) == 1
+    assert findings[0].evidence["claimed"] == ["V2"]
+    assert findings[0].evidence["unclaimed"] == ["V1", "V3", "V4", "V5", "V6"]
+    # CONTROL — the same decline beside a COMPLETE claim must not become a pass: a body that both
+    # closes all six and says it does not close the issue is the contradiction the arm already
+    # routes to UNANSWERABLE (round 24). Unchanged by this fix.
+    _, control = L.classify_partial_close(
+        "Closes #13036 (rows V1–V6).\n\nThis does not close #13036 as a whole.\n",
+        500, {13036: _scope(rows)})
+    assert control["clean"] == 0, control
+
+
+def test_the_tick_state_wins_when_the_issue_ALSO_declares_row_headings():
+    """The precedence rule was pinned only on a rows-less issue (review round 32, P2 pin gap).
+
+    `test_the_tick_state_wins_over_the_row_headings` uses `_scope(["V1","V2","V3"], _sat(3, []))`
+    — rows present, ALL TICKED — so the unticked-beats-headings direction was never executed on the
+    shape that matters: an issue carrying BOTH sources. A mutant that dropped the precedence in that
+    direction reddened only the rows-less fixture (which abstains on `len(rows) < 2` instead), i.e.
+    the hole was masked. This is the missing direction: five unticked boxes must beat a complete
+    closing-line claim that names the row headings.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(
+        "Closes #13036 (rows V1–V6)\n", 500,
+        {13036: _scope(rows, _sat(1, ["b", "c", "d", "e", "f"]))})
+    assert len(findings) == 1
+    assert findings[0].evidence["source"] == "satisfies"
+    assert stats["finding"] == 1 and stats["clean"] == 0, stats
+
+
+@pytest.mark.parametrize("spelling,claimed,unclaimed", [
+    ("row V2 only", ["V2"], ["V1", "V3", "V4", "V5", "V6"]),
+    ("V2 of V1–V6", ["V2"], ["V1", "V3", "V4", "V5", "V6"]),
+    ("rows V1–V6; V2 only", ["V2"], ["V1", "V3", "V4", "V5", "V6"]),
+])
+def test_a_finding_names_exactly_the_rows_it_claimed_and_the_rows_it_did_not(spelling, claimed,
+                                                                             unclaimed):
+    """The acceptance table pins the VERDICT of each `finding` row, never its CLAIM SET.
+
+    A regression that accused an author of not claiming a row they DID claim keeps that table green
+    while the remediation text (built from `named_rows`) tells them to claim rows they already
+    claimed — the defect the round-29 note records. These are the narrowing spellings the table
+    reaches, pinned on both halves of the claim set.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, _ = L.classify_partial_close(
+        f"Closes #13036 ({spelling})\n", 500, {13036: _scope(rows)})
+    assert len(findings) == 1, spelling
+    assert findings[0].evidence["claimed"] == claimed, spelling
+    assert findings[0].evidence["unclaimed"] == unclaimed, spelling
+
+
 # --- arm 3 at the CLI and in the workflow --------------------------------------------------
 def test_cli_pr_mode_flags_the_measured_shape_end_to_end(monkeypatch):
     """The whole path: fetch the PR, fetch the issue it closes, classify, report rc 3."""
@@ -4274,6 +4420,41 @@ def test_cli_offline_says_arm_3_did_not_run(tmp_path):
     r = _run("--body-file", str(body))
     assert r.returncode == L.RC_CLEAN
     assert "closing-scope arm did NOT RUN" in r.stdout
+
+
+@pytest.mark.parametrize("issue_body,counted", [
+    # no declared rows → UNANSWERABLE, the DOMINANT outcome on this repo's live population
+    ("## Something\n\nno declared row headings here\n", "UNANSWERABLE for 1"),
+    # rows declared, the PR names none → ambiguous
+    ("## R1 — a\n## R2 — b\n## R3 — c\n", ", 1 where the PR named no row"),
+])
+def test_the_counters_line_carries_the_NON_ZERO_abstention_counts(monkeypatch, capsys, issue_body,
+                                                                 counted):
+    """⛔ THE COUNTERS LINE IS THE ARM'S ONLY HUMAN/CI SURFACE, AND ONLY ITS ZEROS WERE PINNED.
+
+    Review round 32 (P2), measured: deleting the whole `UNANSWERABLE for N … {ambiguous} … {unread}`
+    segment from the printed line left `499 passed`. The dict counts were pinned in isolation and the
+    "could not read" note was pinned in isolation, but nothing asserted a NON-ZERO count reached the
+    line — which is the line `.github/workflows/closes-coherence.yml` mounts for, and the one that
+    makes a green step unable to read as "every close was checked". Both the human render and the
+    `::notice` carrying the same sentence are asserted, because they are the same string by design.
+    """
+    def fake_gh(args, timeout=60):
+        if args[:2] == ["pr", "view"]:
+            return json.dumps({"body": "Closes #13036\n", "labels": []})
+        if args[:2] == ["issue", "view"]:
+            return json.dumps({"body": issue_body, "comments": []})
+        if args[:2] == ["repo", "view"]:
+            return json.dumps({"nameWithOwner": "daniel-ospina/tortoise"})
+        raise AssertionError(args)
+
+    monkeypatch.setattr(L, "_gh", fake_gh)
+    assert L.main(["--pr", "13886", "--repo", "daniel-ospina/tortoise",
+                   "--arm", "pr-partial-close", "--annotate"]) in {L.RC_CLEAN, L.RC_FINDINGS}
+    out = capsys.readouterr().out
+    assert "1 closing ref(s) read" in out, out
+    assert counted in out, out
+    assert "::notice title=issue-process-lint::closing-scope arm: 1 closing ref(s) read" in out, out
 
 
 def test_cli_refuses_an_arm_the_mode_cannot_run(tmp_path):

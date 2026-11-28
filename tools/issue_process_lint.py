@@ -58,7 +58,7 @@ indistinguishable from a correct one until a human read the body.
 The fix this arm takes is **not** a fourth prose grammar over that parenthetical. The repo already
 recorded the machine-readable field the issue says is missing: SCOPING posts a ``## Satisfies``
 comment with one ``- [ ]`` per acceptance criterion, the lane TICKS each as it proves it, and
-``Closes`` is written only on the last one (``docs/ops/ISSUE-WORKING-PROCESS.md`` §3/§7/§9, #11077,
+``Closes`` is written only on the last one (``docs/ops/ISSUE-WORKING-PROCESS.md`` §4/§7/§9, #11077,
 2026-11-05). A tick state answers "which of this issue's rows are measured" exactly, so arm 3 reads
 THAT and reports the unticked criteria **by label** — the rows the PR did not claim, named.
 
@@ -1471,9 +1471,36 @@ def _range_matches(text: str, rows: list[str]) -> list[re.Match]:
     return list(pattern.finditer(text))
 
 
+_ID_LIST_FILLER_RE = re.compile(r"[\s,;/&+\-–—.()\[\]|]|\b(?:and|plus)\b", re.IGNORECASE)
+
+
+def _clause_is_a_pure_id_list(clause: str, rows: list[str]) -> bool:
+    """Is this clause NOTHING BUT declared rows, ranges over them, and separators — no prose at all?
+
+    ⛔ THE STRUCTURAL TEST THAT SEPARATES AN ID LIST FROM A MENTION (review round 32, P1). The
+    whole-claim test below decides a range by its own PORTION of the clause, which is right for prose
+    (`rows V1–V6, see the evidence doc` is a mention) and wrong for a list: `(V1–V2, V3, V4–V6)`
+    spells a six-row claim one range at a time, and every range in it has a non-empty portion, so
+    none spanned — the claim collapsed to the one bare token `V3` and a COMPLETE close was accused of
+    claiming one row of six, with remediation telling its author to rewrite a correct close into a
+    partial one. Nothing about the words is guessed: the clause is an id list exactly when its
+    residue is empty once the declared rows, the RANGES (endpoints AND the join) and separators are
+    removed, and that test needs no vocabulary — `of`, `bar`, `see`, `landed` are all residue.
+    """
+    ranges = _range_matches(clause, rows)
+    if not ranges and not _explicit_ids(clause, rows):
+        return False
+    residue = clause
+    for match in reversed(ranges):
+        residue = residue[:match.start()] + " " + residue[match.end():]
+    for row in sorted(rows, key=len, reverse=True):
+        residue = re.sub(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", " ", residue)
+    residue = _ID_LIST_FILLER_RE.sub(" ", residue).strip()
+    return residue == "" or bool(_BARE_PREFIX.match(residue))
+
+
 def _range_is_the_whole_claim(text: str, match: re.Match, rows: list[str],
-                              issue: int | None = None,
-                              repo: str | None = None) -> bool:
+                              issue: int | None = None, repo: str | None = None) -> bool:
     """Is this range the ENTIRE claim of the clause it sits in (see `_BARE_PREFIX`)?
 
     ⛔ AND NOT WHEN A SIBLING CLAUSE ON THE SAME LINE NAMES ROWS: `Closes #N (rows V1–V6; V2 is what
@@ -1481,17 +1508,31 @@ def _range_is_the_whole_claim(text: str, match: re.Match, rows: list[str],
     proves — the sentence a lane naturally writes while narrowing a partial close, and reading it as
     complete would be the false PASS this arm ranks worst. A naming sibling makes the bare range a
     MENTION, so the explicit ids decide the claim (safe: an understating finding, never a pass).
+
+    ⛔ AND A SIBLING THAT CLOSES A DIFFERENT ISSUE IS NOT A SIBLING AT ALL (review round 32, P1).
+    `Closes #13036 (V1–V6), closes #13037 (V2)` is ONE COMPLETE close of #13036 plus an unrelated
+    close; the foreign clause named `V2` — a declared row of #13036 too — so the bare range was
+    demoted, `_narrowing_ids` read the foreign qualifier as this issue's narrowing, and a COMPLETE
+    close was accused of claiming one row of six. The same exclusion `_narrowing_sibling_ids` and
+    `_a_clause_names_a_proper_subset` already make, applied at the one read that decides whether the
+    range spans: the three readers must agree about what a clause is ABOUT.
     """
     line_start = text.rfind("\n", 0, match.start()) + 1
     line_end = text.find("\n", match.end())
     line = text[line_start:line_end if line_end != -1 else len(text)]
     start, end = match.start() - line_start, match.end() - line_start
     spans = _clause_spans(line, rows)
+    foreign = _foreign_closing_clauses(line, rows, issue, repo)
     for c_start, c_end in spans:
         if c_start <= start and end <= c_end:
             pre = line[c_start:start].strip()
             post = line[end:c_end].strip(_FILLER)
-            if post != "" or not (pre == "" or bool(_BARE_PREFIX.match(pre))):
+            if (post != "" or not (pre == "" or bool(_BARE_PREFIX.match(pre)))) and not (
+                    # …UNLESS THE CLAUSE IS A PURE ID LIST (review round 32, P1): `(V1–V2, V3, V4–V6)`
+                    # claims the rows it spells, one range at a time, and the portion test alone
+                    # rejected EVERY range in it — leaving the bare `V3` as the whole claim on a
+                    # complete close.
+                    _clause_is_a_pure_id_list(line[c_start:c_end], rows)):
                 return False
             own = (c_start, c_end)
             break
@@ -1517,6 +1558,39 @@ def _range_is_the_whole_claim(text: str, match: re.Match, rows: list[str],
     # `clean` — a shape that was AMBIGUOUS before the boundary existed. A rider introduced by `but`
     # qualifies the claim, so the range is a mention and the line abstains.
     return not re.search(r"\bbut\b", line[own[1]:])
+
+
+def _all_range_spans(text: str, rows: list[str]) -> set[str]:
+    """Every DECLARED range's span in `text`, with NO whole-claim gate — the id-list read's expansion.
+
+    ⛔ THE ONE PLACE THIS IS SAFE, AND WHY (review round 32, P1). Expanding ranges unconditionally was
+    the round-8 defect (`(row V2 of V1–V6)` claimed all six, so the measured partial read `clean`),
+    which is why `_row_range_span` gates every span on `_range_is_the_whole_claim`. This helper is
+    reached ONLY behind `_naming_clauses_are_all_id_lists`, i.e. when every clause that names a row
+    is nothing but rows, ranges and separators — there is no sentence here for a range to be a mere
+    mention OF, so the union of what the list spells is its claim.
+    """
+    order = {row: i for i, row in enumerate(rows)}
+    spanned: set[str] = set()
+    for match in _range_matches(text, rows):
+        lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
+        spanned |= set(rows[lo:hi + 1])
+    return spanned
+
+
+def _naming_clauses_are_all_id_lists(unit: str, rows: list[str]) -> bool:
+    """Do the clauses of `unit` that name ANY row all consist of nothing but declared rows?
+
+    `unit` is a line or a single clause (the two granularities `_names_a_proper_subset_in` is asked
+    at). A unit whose naming clauses are all id lists is a CLAIM SPELLED OUT, so its ranges expand
+    and the union is judged as one candidate; a unit with any prose naming a row (a mention, a
+    disclosure, a narrowing) keeps the per-range reading, because there a subset range IS the claim.
+    """
+    naming = [line[a:b]
+              for line in unit.splitlines()
+              for a, b in _clause_spans(line, rows)
+              if _explicit_ids(line[a:b], rows) or _range_matches(line[a:b], rows)]
+    return bool(naming) and all(_clause_is_a_pure_id_list(c, rows) for c in naming)
 
 
 def _row_range_span(text: str, rows: list[str]) -> set[str]:
@@ -1647,6 +1721,15 @@ def _names_a_proper_subset_in(unit: str, rows: list[str]) -> bool:
     # complete because its only candidate is the full span.
     order = {row: i for i, row in enumerate(rows)}
     explicit = set(_explicit_ids(unit, rows))
+    # ⛔ AN ID LIST IS ONE CLAIM, NOT A SET OF INDEPENDENT MENTIONS (review round 32, P1). Judging
+    # `V1–V2` alone as a two-row subset accused a COMPLETE close spelled `(V1–V2, V3, V4–V6)` — the
+    # same false accusation, from the negative read that is supposed to catch false passes. Where
+    # every naming clause is a pure id list the ranges expand and the union is the single candidate;
+    # the per-range reading stays for prose, which is where a subset range really is the claim
+    # (`V1–V3 of V1–V6 landed in this PR.` must keep refusing — it is not an id list).
+    if _naming_clauses_are_all_id_lists(unit, rows):
+        claim = explicit | _all_range_spans(unit, rows)
+        return not set(rows) <= claim
     if explicit and not set(rows) <= explicit:
         return True
     for match in _range_matches(unit, rows):
@@ -1656,7 +1739,8 @@ def _names_a_proper_subset_in(unit: str, rows: list[str]) -> bool:
     return False
 
 
-def _names_a_proper_subset(text: str, rows: list[str]) -> bool:
+def _names_a_proper_subset(text: str, rows: list[str],
+                           issue: int | None = None, repo: str | None = None) -> bool:
     """Does any line of `text` name SOME but not ALL of the issue's declared rows?
 
     ⛔ THE STRUCTURAL PARTIALITY SIGNAL, AND THE REASON NO CUE VOCABULARY IS NEEDED FOR IT (review
@@ -1676,9 +1760,24 @@ def _names_a_proper_subset(text: str, rows: list[str]) -> bool:
     claim (`V1 … V6 verified in the programme. This PR: V2.`) — one line, so this line-level read
     sees all six and no subset. `_a_clause_names_a_proper_subset` asks the same question of the
     CLAUSES; the unit function above is shared so the two cannot answer it differently.
+    ⛔ AND A CLAUSE THAT CLOSES A DIFFERENT ISSUE IS BLANKED FIRST (review round 32, P1). Without it
+    `Closes #13036 (rows V1–V6), closes #13037 (row V2 only)` read `V2` as a subset of #13036's rows
+    and refused a COMPLETE close to UNANSWERABLE — the same wrong-claim-set defect the positive read
+    had, arriving through the negative one. Only `origin`-relevant clauses are read.
     """
-    return any(_names_a_proper_subset_in(line, rows)
-               for line in strip_code(text, strict=True)[0].splitlines())
+    for line in strip_code(text, strict=True)[0].splitlines():
+        foreign = _foreign_closing_clauses(line, rows, issue, repo)
+        if foreign:
+            spans = _clause_spans(line, rows)
+            chars = list(line)
+            for idx in foreign:
+                if idx < len(spans):
+                    a, b = spans[idx]
+                    chars[a:b] = " " * (b - a)
+            line = "".join(chars)
+        if _names_a_proper_subset_in(line, rows):
+            return True
+    return False
 
 
 def _a_clause_names_a_proper_subset(text: str, rows: list[str],
@@ -2383,7 +2482,7 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
     # ran, and `Closes #N (rows V1–V6)` + `V1 … V6 verified in the programme. This PR: V2.` read
     # `clean`. The datum was computed and then not read. Both granularities are asked here, so the
     # same sentence cannot get different answers from the two paths.
-    if set(rows) <= named and (_names_a_proper_subset(text, rows)
+    if set(rows) <= named and (_names_a_proper_subset(text, rows, issue, repo)
                                or _a_clause_names_a_proper_subset(text, rows, issue, repo)):
         named = set()
         refused = True
@@ -2412,7 +2511,7 @@ def criteria_state(comment_bodies: list[str]) -> dict:
 
     This is NOT the field #13946 says is missing (that claim is measured FALSE and `row_ids` carries
     the correction) — but it IS the field the process doc already mandates for the same question
-    (`docs/ops/ISSUE-WORKING-PROCESS.md` §3: SCOPING posts one ``- [ ]`` per acceptance criterion; §9:
+    (`docs/ops/ISSUE-WORKING-PROCESS.md` §4: SCOPING posts one ``- [ ]`` per acceptance criterion; §9:
     tick as proved, close only when all are ticked). So the arm reads it too, and it wins where it
     exists: a TICK is proof-or-not of a row, while a heading is only a declaration of one.
 
@@ -2466,6 +2565,9 @@ def closing_targets(body: str, number: int | str, repo: str | None = None,
     `Satisfies #N: <ids>` is deliberately NOT in this set: it is the PARTIAL form, and flagging it
     would demand a closing keyword from exactly the PR that followed the process.
 
+    ⛔ THE `declined` SET IS DELIBERATELY NOT APPLIED HERE — see the note at the return; it is arm 1's
+    answer, and filtering on it made the arm's own headline shape measure zero.
+
     `skipped`, when supplied, is handed to `_claims_in` so every `owner/repo#N` claim dropped because
     the repo was UNKNOWN reaches the caller. ⛔ WITHOUT IT THE DROP WAS INVISIBLE HERE AND ONLY HERE:
     arm 1 passes its own sink and notes the drop, but `--arm pr-partial-close` never calls arm 1 — so
@@ -2477,7 +2579,18 @@ def closing_targets(body: str, number: int | str, repo: str | None = None,
     own = number if isinstance(number, int) and number > 0 else None
     text, _hidden = strip_code(body, strict=True)
     c = _claims_in(text, own, repo, skipped)
-    return [n for n in c["closing"] if n not in set(c["declined"])]
+    # ⛔ A DECLINED REF IS STILL A REF GITHUB WILL CLOSE (review round 32, P2). This filtered the
+    # `declined` set out of the population, so
+    #     `Closes #13036 (row V2 only).` + `This does not close #13036 as a whole.`
+    # — the arm's HEADLINE instance plus the one honest disclosure sentence a careful author writes —
+    # measured a population of ZERO, printed `0 closing ref(s) read — 0 clean, 0 flagged`, and said
+    # nothing about the drop: a false PASS delivered by the arm written to refuse it. A decline is
+    # arm 1's answer to a DIFFERENT question (`did you answer the claim?`); GitHub's parser does not
+    # read prose, so a `Closes` beside a disclaimer still fires on merge — which is precisely why
+    # `_DISCLAIMER_RE` routes such a body to UNANSWERABLE instead of to a pass. Arm 3 therefore asks
+    # the question its own docstring states ("the refs a `Closes` will actually fire on") and leaves
+    # the declined set to arm 1.
+    return list(c["closing"])
 
 
 def classify_partial_close(body: str, number: int | str,
