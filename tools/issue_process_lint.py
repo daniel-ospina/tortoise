@@ -1592,6 +1592,36 @@ _DISCLAIMER_RE = re.compile(
 _ONLY_RE = re.compile(r"\bonly\b", re.IGNORECASE)
 
 
+def _names_a_proper_subset_in(unit: str, rows: list[str]) -> bool:
+    """Does this UNIT OF TEXT — a line, or a single clause — name SOME but not ALL of the rows?
+
+    One implementation, two granularities, because the two call sites disagree about what a unit is
+    and neither may grow its own vocabulary: `_names_a_proper_subset` asks it a LINE at a time (the
+    closing-line refusal), and `_a_clause_names_a_proper_subset` asks it a CLAUSE at a time (the
+    whole-body fallback, review round 29). A second implementation is how the two paths drifted into
+    disagreeing about the same sentence in the first place.
+    """
+    named = set(_explicit_ids(unit, rows))
+    # ⛔ A RANGE NAMES ITS WHOLE SPAN, NOT ITS ENDPOINTS — otherwise a complete range close
+    # (`Closes #N (rows V1–V6)` over a six-row issue) looks like a two-row subset here and the
+    # CORRECT close would be refused. Expanded from the issue's own order, so it cannot invent a
+    # row, and unconditionally (unlike `_row_range_span`): this is a NEGATIVE read, where the wide
+    # reading is the safe one.
+    order = {row: i for i, row in enumerate(rows)}
+    for match in _range_matches(unit, rows):
+        # ⛔ GATED, NOT UNCONDITIONAL (review round 28, P1). Expanding every range mention let a
+        # line that CONTAINS the full range mask a subset on that same line — `Only V2 of V1–V6
+        # landed.` and `Satisfies #N: V2 (of rows V1–V6)` both widened to all six here, so the
+        # subset signal vanished and the body read `clean`. For a NEGATIVE read, naming MORE rows
+        # is the UNSAFE direction: it suppresses the refusal this function exists to raise. The
+        # gate is the same one `_row_range_span` uses, so `(row V2 of V1–V6)` is V2 to both reads.
+        if not _range_is_the_whole_claim(unit, match, rows):
+            continue
+        lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
+        named |= set(rows[lo:hi + 1])
+    return bool(named) and not set(rows) <= named
+
+
 def _names_a_proper_subset(text: str, rows: list[str]) -> bool:
     """Does any line of `text` name SOME but not ALL of the issue's declared rows?
 
@@ -1606,29 +1636,32 @@ def _names_a_proper_subset(text: str, rows: list[str]) -> bool:
     It is used ONLY as a NEGATIVE signal — it can refuse a complete claim, never add one — so it does
     not touch the round-18 precedence decision that `Satisfies` is consulted only where the closing
     line named nothing (see `_closing_line_claim`). Rows come from the issue, so it cannot invent one.
+
+    ⛔ LINE GRANULARITY IS NOT ENOUGH ON ITS OWN (review round 29, P2 — PR #14771). The whole-body
+    fallback needs the same signal where the narrowing sits in a DIFFERENT sentence from the complete
+    claim (`V1 … V6 verified in the programme. This PR: V2.`) — one line, so this line-level read
+    sees all six and no subset. `_a_clause_names_a_proper_subset` asks the same question of the
+    CLAUSES; the unit function above is shared so the two cannot answer it differently.
     """
-    for line in strip_code(text, strict=True)[0].splitlines():
-        named = set(_explicit_ids(line, rows))
-        # ⛔ A RANGE NAMES ITS WHOLE SPAN, NOT ITS ENDPOINTS — otherwise a complete range close
-        # (`Closes #N (rows V1–V6)` over a six-row issue) looks like a two-row subset here and the
-        # CORRECT close would be refused. Expanded from the issue's own order, so it cannot invent a
-        # row, and unconditionally (unlike `_row_range_span`): this is a NEGATIVE read, where the wide
-        # reading is the safe one.
-        order = {row: i for i, row in enumerate(rows)}
-        for match in _range_matches(line, rows):
-            # ⛔ GATED, NOT UNCONDITIONAL (review round 28, P1). Expanding every range mention let a
-            # line that CONTAINS the full range mask a subset on that same line — `Only V2 of V1–V6
-            # landed.` and `Satisfies #N: V2 (of rows V1–V6)` both widened to all six here, so the
-            # subset signal vanished and the body read `clean`. For a NEGATIVE read, naming MORE rows
-            # is the UNSAFE direction: it suppresses the refusal this function exists to raise. The
-            # gate is the same one `_row_range_span` uses, so `(row V2 of V1–V6)` is V2 to both reads.
-            if not _range_is_the_whole_claim(line, match, rows):
-                continue
-            lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
-            named |= set(rows[lo:hi + 1])
-        if named and not set(rows) <= named:
-            return True
-    return False
+    return any(_names_a_proper_subset_in(line, rows)
+               for line in strip_code(text, strict=True)[0].splitlines())
+
+
+def _a_clause_names_a_proper_subset(text: str, rows: list[str]) -> bool:
+    """Does any CLAUSE of `text` name SOME but not ALL of the rows — the fallback's partiality test?
+
+    ⛔ WHY THE WHOLE-BODY FALLBACK NEEDS IT, AND WHY AT CLAUSE GRANULARITY (review round 29, P2).
+    The fallback accepts a body that names every row in an affirmative clause. It had NO negative
+    signal, so `Closes #N` + `V1, V2, V3, V4, V5, V6 verified in the programme. This PR: V2.` read
+    `clean` — a one-row close of a six-row capstone, reported as a complete one, with no cue word
+    anywhere (so no disclaimer and no `only`). The contradiction is between two CLAUSES of that
+    sentence, so the read has to be clause-shaped: the line names all six and only the clause split
+    shows the narrowing. Downstream the caller refuses the fallback and reports AMBIGUOUS — the cheap
+    error in this file's ranking — never a pass.
+    """
+    return any(_names_a_proper_subset_in(clause, rows)
+               for line in strip_code(text, strict=True)[0].splitlines()
+               for clause in _clauses(line, rows))
 
 # ⛔ THE POSITIVE MARKER FOR *IDs* (review round 9): round 8 retired the prose-cue blocklist for
 # RANGES, but the ids read still decided polarity by vocabulary — anything `_DISCLAIMER_RE` did not
@@ -1659,7 +1692,7 @@ _ELSEWHERE_RE = re.compile(
 # Where one CLAIM can end and a disclaimer can begin. A SPACED dash is a boundary (`#N — only V2 is
 # claimed`), but one sitting BETWEEN two declared row ids is a RANGE (`V1 — V6`) and must NOT split:
 # separating a range's endpoints would silently turn a complete claim into a partial one (`_clauses`).
-_CLAUSE_SPLIT_RE = re.compile(r"[;()\[\]]|\s+[—–]\s+|(?<=[.!?])\s+")
+_CLAUSE_SPLIT_RE = re.compile(r"[;()\[\]]|\s+[—–]\s+|\s+but\s+|(?<=[.!?])\s+")
 
 
 def _clause_spans(line: str, rows: list[str]) -> list[tuple[int, int]]:
@@ -1718,6 +1751,31 @@ def _narrowing_ids(line: str, match: re.Match, rows: list[str]) -> set[str]:
     return ids
 
 
+def _narrowing_sibling_ids(line: str, rows: list[str], claimable: set[int]) -> set[str]:
+    """The ids a NARROWING sibling clause names when NO RANGE matched — `(V1, …, V6; V2 only)` ⇒ V2.
+
+    ⛔ THIS IS `_narrowing_ids` WITHOUT A RANGE (review round 29, P2). `_narrowing_ids` is handed the
+    range MATCH and exempts the clause the range sits in; here the claim is the set of CLAIMABLE
+    clauses, so those are the ones exempted and every other clause is a candidate narrowing. The two
+    reads share their exclusions deliberately: a clause carrying a DISCLAIMER or an ELSEWHERE cue is
+    the negative signal those predicates already own (`disclaimed`), and reading its rows as the new
+    claim would point the finding at the rows the author said they were NOT closing.
+
+    Rows come from the issue, so a clause can only narrow to a declared row, and the caller applies
+    the strict-subset test (`narrowing < line_named`) so a sibling naming the WHOLE set — the
+    `V1 … V6 are separate PRs` shape — narrows nothing and earns no pass.
+    """
+    ids: set[str] = set()
+    for i, (a, b) in enumerate(_clause_spans(line, rows)):
+        if i in claimable:
+            continue
+        clause = line[a:b]
+        if _DISCLAIMER_RE.search(clause) or _ELSEWHERE_RE.search(clause):
+            continue
+        ids |= _explicit_ids(clause, rows)
+    return ids
+
+
 def _closing_line_range_claim(line: str, claim_text: str, rows: list[str]) -> set[str]:
     """The rows a RANGE earns on a closing line — read against THREE views of the same line.
 
@@ -1755,6 +1813,24 @@ def _closing_line_range_claim(line: str, claim_text: str, rows: list[str]) -> se
 _NOT_A_CLAIM_LINE_RE = re.compile(r"^\s*(?:[-*+]\s*\[[ ~-]?\]|>|#{1,6}\s)|\?\s*$", re.MULTILINE)
 
 
+def _is_an_id_list(clause: str, rows: list[str]) -> bool:
+    """Is this clause NOTHING BUT declared row ids and separators — `V3, V4, V5, V6`?
+
+    Used to decide which clauses of a `Satisfies` line are part of its CLAIM rather than a sibling
+    that may narrow it (review round 29): a `;`-separated continuation of the id list is the same
+    claim and must not be demoted, while a clause carrying prose (`this PR proves V2`) is a
+    narrowing. Decided structurally — the clause names at least one declared row and its residue
+    is empty once the rows and separators are removed — so it needs no vocabulary.
+    """
+    ids = _explicit_ids(clause, rows)
+    if not ids:
+        return False
+    residue = clause
+    for row in rows:
+        residue = re.sub(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", " ", residue)
+    return not re.sub(r"[\s,;:.\u2013\u2014\-()\[\]]", "", residue)
+
+
 def _satisfies_claim(text: str, issue: int, rows: list[str], repo: str | None) -> set[str]:
     """The rows a `Satisfies #<issue>: <ids>` clause CLAIMS — the documented partial form.
 
@@ -1779,7 +1855,27 @@ def _satisfies_claim(text: str, issue: int, rows: list[str], repo: str | None) -
         clause = SATISFIES_IDS_RE.sub(lambda m: m.group("ids"), line, count=1)
         if _DISCLAIMER_RE.search(clause) or _ELSEWHERE_RE.search(clause):
             continue
-        claimed |= _ids_in(match.group("ids"), rows)
+        claimed_ids = _ids_in(match.group("ids"), rows)
+        # ⛔ A NARROWING SIBLING DEMOTES THIS CLAIM TOO (review round 29, P2 — the second
+        # re-derivation path). `Satisfies #N: V1, V2, V3, V4, V5, V6 — this PR proves V2` returned all
+        # six: `SATISFIES_IDS_RE`'s `ids` group runs to end of line, so the sentence that narrows them
+        # was read as more ids, `named` came back complete, and the whole-body fallback (where the
+        # partiality test now lives) was UNREACHABLE — the false PASS one spelling from the
+        # closing-line one, on the path the review named. The demotion is the same read, on the same
+        # line, with the clause carrying the `Satisfies` keyword as its "own" clause.
+        # ⛔ "OWN" IS NOT THE MATCH SPAN: the greedy group would swallow the narrowing clause and
+        # exempt it. It is the clause that carries the KEYWORD, plus any clause that is nothing but
+        # ids (`Satisfies #N: V1, V2; V3, V4, V5, V6` — a `;`-separated LIST is still a claim, and
+        # demoting it would name the wrong rows). A clause with prose in it that names a strict subset
+        # is the narrowing.
+        spans = _clause_spans(line, rows)
+        own = {i for i, (a, b) in enumerate(spans)
+               if _is_an_id_list(line[a:b], rows)
+               or a <= match.start() - start < b}
+        narrowing = _narrowing_sibling_ids(line, rows, own)
+        if narrowing and narrowing < claimed_ids:
+            claimed_ids = narrowing
+        claimed |= claimed_ids
     return claimed
 
 
@@ -1969,8 +2065,28 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # proof the range is a mention. Judging the range on the masked view made
             # `(rows V1–V6; V2 only)` a complete claim, i.e. `clean` on a one-row close.
             claim_text = "".join(chars)
-            named |= _explicit_ids(claim_text, rows)
-            named |= _closing_line_range_claim(line, claim_text, rows)
+            line_named = (_explicit_ids(claim_text, rows)
+                          | _closing_line_range_claim(line, claim_text, rows))
+            # ⛔ A NARROWING ON THE LINE DECIDES THE CLAIM WHETHER OR NOT A RANGE MATCHED (review
+            # round 29, P2 — the recorded false PASS on PR #14771). The sibling read above lived
+            # only inside `_closing_line_range_claim`, i.e. only where a RANGE was present, so the
+            # same sentence with the rows spelled as an ID LIST never met it: `Closes #N (V1, V2,
+            # V3, V4, V5, V6; V2 only)` named all six on a claimable clause, the `; V2 only` sibling
+            # carries no positive marker and was masked, and the line read as a complete claim —
+            # `clean` on a one-row close, ONE SPELLING away from the shape the arm was filed for.
+            # The range match must not be what grants the pass: a sibling clause that names a strict
+            # SUBSET of the claimed rows demotes the claim to those rows, exactly as the range
+            # spelling already did, and the finding then names the rows left unclaimed.
+            # ⛔ THE COST IS THE FILE'S ACCEPTED ONE: a complete close whose same line carries a
+            # narrowing-sounding sibling naming one row (`… ; V6 needed a migration`) is read as
+            # claiming V6, i.e. a finding rather than a pass. A false finding on a correct close is
+            # the cheap error here and a false PASS on a partial one is the expensive one, and the
+            # alternative — deciding which sibling `means` a narrowing by its vocabulary — is the
+            # enumeration five earlier rounds each leaked through.
+            narrowing = _narrowing_sibling_ids(line, rows, claimable)
+            if narrowing and narrowing < line_named:
+                line_named = narrowing
+            named |= line_named
     # ⛔ THE CLOSING LINE WINS, AND `Satisfies` IS READ ONLY WHEN IT SAID NOTHING (review round 17,
     # F1). The `Satisfies` loop ran FIRST and UNIONED, with no clause context at all — so an
     # unticked `- [ ] Satisfies #N: V1..V6`, a future-tense plan (`A later PR will write Satisfies
@@ -2239,7 +2355,15 @@ def classify_partial_close(body: str, number: int | str,
                         break
                 if affirmative_all:
                     break
-            if affirmative_all:
+            # ⛔ AND THE FALLBACK CARRIES THE PARTIALITY TEST TOO (review round 29, P2) — a fallback
+            # that skips it is the same bug in a second place. `affirmative_all` asks only whether
+            # SOME clause names every row; the question this arm answers is whether the PR claims to
+            # have proved them, and a body whose other clause narrows to one row has answered that
+            # NO. `Closes #N` + `V1, V2, V3, V4, V5, V6 verified in the programme. This PR: V2.` read
+            # `clean` at the reviewed head with no cue word anywhere, which is why the test has to be
+            # structural. Refusing here yields AMBIGUOUS (the caller's next branch) — a counted
+            # abstention, never a pass.
+            if affirmative_all and not _a_clause_names_a_proper_subset(body, rows):
                 stats["clean"] += 1
                 continue
             stats["ambiguous"] += 1

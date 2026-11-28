@@ -4661,3 +4661,129 @@ def test_the_satisfies_form_is_read_under_its_own_polarity(body, expected, claim
         # the precedence rows were added here.
         assert findings[0].evidence["claimed"] == claimed, findings[0].evidence
         assert findings[0].evidence["unclaimed"] == unclaimed, findings[0].evidence
+
+
+# ⛔ REVIEW ROUND 29 — THE P2 A RECORDED REVIEW FOUND ON PR #14771 (at `adfba9c4`): A ONE-ROW CLOSE
+# THAT SPELLS THE FULL SET AS AN ID LIST READ `clean`, ON BOTH RE-DERIVATION PATHS.
+#
+# The arm was filed from `Closes #13036 (row V2 only)` and it catches that shape. The same sentence,
+# with the six ids written out and `; V2 only` beside them, named all six — so the guard that stops a
+# one-row close of a six-row capstone passed the one-row close one spelling away. The cause is
+# structural, not lexical: `_narrowing_ids` was reachable only from `_closing_line_range_claim`, i.e.
+# only where a RANGE matched, so a narrowing written beside a full ID LIST never met it; and the
+# whole-body fallback (`classify_partial_close`) tested `_AFFIRM_RE` + "names all six" with NO
+# partiality test at all, so a bare `Closes #N` followed by an affirmative sentence that narrows was
+# accepted as a complete claim.
+#
+# ⛔ THE MINIMAL PAIR IS THE DISCRIMINATOR, AND BOTH HALVES ARE REQUIRED. The second row alone would
+# be satisfied by a tool that never passes anything; the first alone by one that never passes
+# anything CORRECT. `#13036`'s own six row headings are the scope in every case.
+MINIMAL_PAIR_ROUND_29 = [
+    # ONE row closed — must NOT be a pass, and must name the row it did claim.
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6; V2 only)\n",
+     "finding", ["V2"], ["V1", "V3", "V4", "V5", "V6"]),
+    # …and the FULL set closed — must be clean. Same tokens, same order, no narrowing sibling.
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6)\n", "clean", None, None),
+    # The narrowing is not the word `only`: a sibling clause that names a proper subset demotes the
+    # claim the same way the range spelling already did (`(rows V1–V6; V2 is what this PR proves)`).
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6; V2 is what this PR proves)\n",
+     "finding", ["V2"], ["V1", "V3", "V4", "V5", "V6"]),
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6; V2 in this PR)\n",
+     "finding", ["V2"], ["V1", "V3", "V4", "V5", "V6"]),
+    # CONTROL — a sibling that names NO row is not a narrowing, so the complete claim stands. Without
+    # this row a "refuse whenever a `;` clause exists" mutant would pass the rows above.
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6; the evidence doc is attached)\n", "clean", None, None),
+    # CONTROL — the range spelling the arm was already correct about, re-pinned here so both
+    # spellings of the same sentence are held to one verdict class.
+    ("Closes #13036 (rows V1–V6; V2 only)\n",
+     "finding", ["V2"], ["V1", "V3", "V4", "V5", "V6"]),
+]
+
+
+@pytest.mark.parametrize("body,expected,claimed,unclaimed", MINIMAL_PAIR_ROUND_29)
+def test_the_id_list_spelling_of_a_narrowed_close_is_held_to_the_range_spelling(
+        body, expected, claimed, unclaimed):
+    """Review round 29 (PR #14771 P2) — the minimal pair, both halves, on the CLOSING LINE.
+
+    `(V1, V2, V3, V4, V5, V6; V2 only)` claims all six ids in a claimable clause and puts the
+    narrowing in a sibling that carries no positive marker, so the masked claim read saw six claims
+    and `_names_a_proper_subset` saw a line that names every row — no subset, no refusal, `clean`.
+    A narrowing on the line must decide the claim whether the rows were spelled as a range or as a
+    list; the range match may not be what grants the pass.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)},
+                                              "daniel-ospina/tortoise")
+    assert stats[expected] == 1, (body, stats)
+    if expected == "finding":
+        assert stats["clean"] == 0, (body, stats)
+        assert findings[0].evidence["claimed"] == claimed, (body, findings[0].evidence)
+        assert findings[0].evidence["unclaimed"] == unclaimed, (body, findings[0].evidence)
+    else:
+        assert findings == [], body
+    # …and the public claim read agrees with the verdict, so a consumer of `claimed_row_ids` cannot
+    # be told a one-row close claimed six.
+    assert L.claimed_row_ids(body, 13036, rows) == (set(claimed) if claimed else set(rows)), body
+
+
+# ⛔ THE TWO RE-DERIVATION PATHS THE REVIEWER NAMED (repros B, C, D), PLUS THE CUE-FREE SPELLINGS
+# THAT ARE THE ACTUAL FALSE PASSES ON THEM. None of these may be `clean`; the verdict may be
+# `finding` or `ambiguous` (the honest non-answer), but never a pass, and never a finding that names
+# the row the author DID claim as unclaimed.
+#
+# ⛔ MEASURED, AND CORRECTED HERE RATHER THAN ASSUMED (review of this change, P2): at the reviewed
+# head B and D were ALREADY not `clean` — the round-28 own-line `only` cue sets `disclaimed` and the
+# round-19 `Satisfies` veto refuses them — so those two rows are RE-PINS, not the defect. Only C was
+# a false PASS at that head. Deleting the one word `only` from B and D produces R1 and R2 below, both
+# of which WERE `clean` at the reviewed head and are what this change closes: R1 needed the clause
+# boundary `but` (a contrary conjunction joins two claims exactly as `;` does), R2 needed the
+# narrowing demotion on the `Satisfies` source, whose claim set comes from the match alone and made
+# the whole-body fallback unreachable. Keeping all four rows is deliberate — B/D pin that the cue
+# path stays closed, C/R1/R2 pin the structural one — but only C/R1/R2 redden against the old code,
+# and the comment says so instead of implying four.
+FALLBACK_NARROWING_ROUND_29 = [
+    # B — affirmative-all sentence, then a clause that narrows to V2 (same clause, `only` present).
+    "Closes #13036\n\nAll six rows V1, V2, V3, V4, V5, V6 are covered by the programme, but this PR "
+    "only proves V2.\n",
+    # C — the same shape across two sentences, with no cue word in the narrowing at all: this is the
+    # one that read `clean` at the reviewed head, so it is the regression pin.
+    "Closes #13036\n\nV1, V2, V3, V4, V5, V6 verified in the programme. This PR: V2.\n",
+    # D — the same thing reached through the documented `Satisfies` form.
+    "Closes #13036\nSatisfies #13036: V1, V2, V3, V4, V5, V6 — this PR only proves V2\n",
+    # R1 — B with `only` deleted: `clean` at the reviewed head, and no cue for the cue path to catch.
+    "Closes #13036\n\nAll six rows V1, V2, V3, V4, V5, V6 are covered by the programme, but this PR "
+    "proves V2.\n",
+    # R2 — D with `only` deleted, i.e. the `Satisfies` re-derivation path with no cue word at all.
+    "Closes #13036\nSatisfies #13036: V1, V2, V3, V4, V5, V6 — this PR proves V2\n",
+]
+
+
+@pytest.mark.parametrize("body", FALLBACK_NARROWING_ROUND_29)
+def test_the_whole_body_fallback_applies_the_same_partiality_test(body):
+    """A fallback that skips the partiality check is the same bug in a second place (PR #14771 P2).
+
+    The fallback exists for a PR that never put a row id on its closing line, and it accepts a body
+    that names every row affirmatively. It had no negative signal, so a body that named all six AND
+    narrowed to one was read as a complete claim — a false PASS on exactly the shape #13886 wrote,
+    reached without any cue word at all (`This PR: V2.`), which is why a cue list cannot be the fix.
+    The partiality test is the same structural one the closing line uses, applied to the CLAUSES:
+    a clause that names SOME of the rows contradicts the complete claim beside it.
+
+    ⛔ THE CONTROL BELOW IS PART OF THE FIXTURE, not decoration: a body that names every row with no
+    narrowing clause must stay `clean`, or the new test would be satisfied by refusing the fallback
+    outright — which would abstain on every correct complete close that uses one.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)},
+                                              "daniel-ospina/tortoise")
+    assert stats["clean"] == 0, (body, stats)
+    assert stats["finding"] + stats["ambiguous"] == 1, (body, stats)
+    for finding in findings:
+        # A finding here may only accuse rows the author did not claim — never the row they did.
+        assert finding.evidence["claimed"] != rows, (body, finding.evidence)
+
+    # CONTROL — no narrowing clause, so the complete claim stands.
+    findings, stats = L.classify_partial_close(
+        "Closes #13036\n\nV1, V2, V3, V4, V5, V6 are all proved in this PR.\n", 500,
+        {13036: _scope(rows)}, "daniel-ospina/tortoise")
+    assert findings == [] and stats["clean"] == 1, stats
