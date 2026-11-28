@@ -146,6 +146,36 @@ def _window(text: str) -> list[dict]:
     return [{"role": "user", "content": text}]
 
 
+def _context(client, payload: dict, *, headers: dict | None = None,
+             attempts: int = 3):
+    """POST /v1/context, retrying a FAIL-OPEN degraded read (#3083).
+
+    The read path's hard ceiling is 2.4 s and a breach is the documented
+    fail-open shape — 200 with the empty block and ``degraded_reason='timeout'``
+    — so a content assertion made on ONE request is partly an assertion about
+    the box's speed. Measured on this file's own real-auth lane with a warm
+    embedder: **1.59 s** for the first read, **0.88-0.89 s** after, against that
+    2.4 s ceiling; a loaded shard crosses it and empties a perfectly healthy
+    response (observed here: ``test_two_teams_two_keys_zero_cross_team`` →
+    ``assert a_claim in []``).
+
+    The retry is the caller's own documented remedy — the read path is
+    stateless (``re-POST the same session_id adds 0 graph nodes``) and a 429 is
+    "client backoff, not a hard failure" — and it is BOUNDED, so a genuinely
+    broken read still fails, on the last response, with its
+    ``degraded_reason`` in hand. Status-only assertions never need this: use
+    the plain POST there, and use the plain POST in the degrade tests, which
+    ASSERT the degraded shape.
+    """
+    r = client.post("/v1/context", json=payload, headers=headers)
+    for _ in range(attempts - 1):
+        if r.status_code != 200 or r.json().get("degraded_reason") != "timeout":
+            break
+        time.sleep(0.05)
+        r = client.post("/v1/context", json=payload, headers=headers)
+    return r
+
+
 def _count_nodes(sdk) -> int:
     rows = sdk._get_proj().g.query("MATCH (n) RETURN count(n)").result_set
     return int(rows[0][0]) if rows else 0
@@ -171,7 +201,7 @@ def test_post_v1_context_contested_content_and_shape(client):
         "Acme security review was due May 1 and has not shipped",
         "Acme security review shipped on April 30 per the release log",
     )
-    r = client.post("/v1/context", json={
+    r = _context(client, {
         "window": _window("What is the status of the Acme security review? "
                           "Has it shipped?"),
         "session_id": "sess_http_acme", "why": True,
@@ -191,12 +221,12 @@ def test_post_v1_context_contested_content_and_shape(client):
 
 
 def test_clean_empty_and_courtesy(client):
-    r = client.post("/v1/context", json={"window": _window(
+    r = _context(client, {"window": _window(
         "What is the status of the Orion migration?")})
     assert r.status_code == 200
     assert r.json() == {"pointers": [], "why": [], "surfaced": [],
                         "block": "", "degraded_reason": None}
-    r2 = client.post("/v1/context", json={"window": _window(
+    r2 = _context(client, {"window": _window(
         "Thanks, that helps a lot.")})
     assert r2.json()["degraded_reason"] is None and r2.json()["pointers"] == []
 
@@ -211,8 +241,8 @@ def test_repost_same_session_identical_and_zero_new_nodes(client):
                                  "allocation?"),
                "session_id": "sess_idem", "why": True}
     before = _count_nodes(sdk)
-    r1 = client.post("/v1/context", json=payload)
-    r2 = client.post("/v1/context", json=payload)
+    r1 = _context(client, payload)
+    r2 = _context(client, payload)
     assert r1.status_code == r2.status_code == 200
     assert r1.json() == r2.json()
     assert _count_nodes(sdk) == before  # 0 new graph nodes
@@ -226,7 +256,7 @@ def test_zero_llm_read_path(client, monkeypatch):
     sdk = _seed_team_sdk()
     _plant_contested(sdk, "Widget Co closes escrow Friday",
                      "Widget Co escrow slipped a week")
-    r = client.post("/v1/context", json={
+    r = _context(client, {
         "window": _window("When does the Widget Co escrow close?"),
         "session_id": "sess_zero_http", "why": True})
     assert r.status_code == 200
@@ -241,7 +271,7 @@ def test_sdk_http_deep_equal_parity(client):
     window = _window("Is the Lumen canary shipping to five percent yet?")
     sdk_r = sdk._volunteer_context(window, session_id="sess_par",
                                   prior_context=None, why=True)
-    http_r = client.post("/v1/context", json={
+    http_r = _context(client, {
         "window": window, "session_id": "sess_par", "why": True,
     }).json()
     assert http_r["degraded_reason"] is None
@@ -261,7 +291,7 @@ def test_get_vs_post_context_never_collide(client):
     assert g.status_code == 200
     # The GET digest shape (session_context) is NOT the reflex contract.
     assert "pointers" not in g.json()
-    p = client.post("/v1/context", json={"window": _window(
+    p = _context(client, {"window": _window(
         "What do you remember from last session?")})
     assert p.status_code == 200
     assert set(p.json()) == {"pointers", "why", "surfaced", "block",
@@ -532,7 +562,7 @@ def test_two_teams_two_keys_zero_cross_team(provision_test_user, real_auth):
     client = real_auth.client()
     with client:
         # Team A asks about Acme's Harborlight allocation → sees its own.
-        r_a = client.post("/v1/context", json={
+        r_a = _context(client, {
             "window": _window("What is Harborlight's allocation from Acme "
                               "right now?"),
             "session_id": "sess_A"}, headers=auth_a)
@@ -540,7 +570,7 @@ def test_two_teams_two_keys_zero_cross_team(provision_test_user, real_auth):
         a_ids = [p["id"] for p in r_a.json()["pointers"]]
         assert a_claim in a_ids, a_ids
         # Team B asks the SAME question about Acme → never A's context.
-        r_b = client.post("/v1/context", json={
+        r_b = _context(client, {
             "window": _window("What is Harborlight's allocation from Acme "
                               "right now?"),
             "session_id": "sess_B"}, headers=auth_b)
@@ -548,7 +578,7 @@ def test_two_teams_two_keys_zero_cross_team(provision_test_user, real_auth):
         b_ids = [p["id"] for p in r_b.json()["pointers"]]
         assert a_claim not in b_ids, f"CROSS-TEAM LEAK: {b_ids}"
         # Sanity: B's key resolves B's graph (same window, own content).
-        r_b2 = client.post("/v1/context", json={
+        r_b2 = _context(client, {
             "window": _window("What is Harborlight's allocation from Beta "
                               "Corp right now?"),
             "session_id": "sess_B2"}, headers=auth_b)
