@@ -1,0 +1,2323 @@
+{
+  "provenance": {
+    "corpus": "docs/evidence/14691-noise-validation/corpus/noise-corpus.json",
+    "corpus_chars": 5280,
+    "graph": "xv14691_noise",
+    "db_uri": "127.0.0.1:16420/tortoise_test_matrix",
+    "scorer": "docs/evidence/14691-noise-validation/score_t1_t5.py"
+  },
+  "tests": {
+    "T1": {
+      "test": "T1",
+      "rule": "PASS iff the second ingestion adds no RE-STATED knowledge: 0 new Objects, 0 new Subjects, 0 same-name entities, and no Point whose text re-states an existing Point (>= 0.8 content-token overlap with a pass-1 Point). Events are reported SEPARATELY and are not counted as noise on the object axis: a re-ingestion IS an occurrence, so one Event per capture is expected \u2014 but an event-kind POINT re-minted for a sentence that was already stated is noise, and is counted.",
+      "counts": {
+        "empty_before": {
+          "taxonomy": {
+            "Point": 0,
+            "Event": 0,
+            "Subject": 0,
+            "Object": 0,
+            "Source": 0
+          },
+          "structure_total": 0,
+          "operators": 0,
+          "points_by_kind": {},
+          "source_rows": 0,
+          "sources_with_points": 0
+        },
+        "after_pass_1": {
+          "taxonomy": {
+            "Point": 134,
+            "Event": 12,
+            "Subject": 10,
+            "Object": 25,
+            "Source": 6
+          },
+          "structure_total": 101,
+          "operators": 33,
+          "points_by_kind": {
+            "statement": 61,
+            "event": 40
+          },
+          "source_rows": 6,
+          "sources_with_points": 6
+        },
+        "after_pass_2": {
+          "taxonomy": {
+            "Point": 243,
+            "Event": 26,
+            "Subject": 10,
+            "Object": 29,
+            "Source": 12
+          },
+          "structure_total": 191,
+          "operators": 52,
+          "points_by_kind": {
+            "statement": 111,
+            "event": 80
+          },
+          "source_rows": 12,
+          "sources_with_points": 12
+        },
+        "delta_pass_1": {
+          "taxonomy.Point": 134,
+          "taxonomy.Object": 25,
+          "taxonomy.Event": 12,
+          "taxonomy.Source": 6,
+          "taxonomy.Subject": 10,
+          "points_by_kind.statement": 61,
+          "points_by_kind.event": 40,
+          "structure_total": 101,
+          "operators": 33,
+          "source_rows": 6,
+          "sources_with_points": 6
+        },
+        "delta_pass_2": {
+          "taxonomy.Point": 109,
+          "taxonomy.Object": 4,
+          "taxonomy.Event": 14,
+          "taxonomy.Source": 6,
+          "points_by_kind.statement": 50,
+          "points_by_kind.event": 40,
+          "structure_total": 90,
+          "operators": 19,
+          "source_rows": 6,
+          "sources_with_points": 6
+        }
+      },
+      "entities": {
+        "object_subject_event_pass_1": 47,
+        "object_subject_event_pass_2": 65,
+        "delta": 18,
+        "object_delta": 4,
+        "subject_delta": 0,
+        "new_endpoints_pass_2": [
+          {
+            "id": "1a22119735f-968ff39479f9",
+            "name": "the validated cold-chain certificate",
+            "kind": "core:standard",
+            "type": null
+          },
+          {
+            "id": "1a2211a65ee-321f32da8b3f",
+            "name": "monthly account count report",
+            "kind": "other",
+            "type": null
+          }
+        ]
+      },
+      "restated_points_pass_2": {
+        "pass_2_points": 61,
+        "restating_a_pass_1_point": 38,
+        "share": 0.623,
+        "rows": [
+          {
+            "point_id": "pt_67e9fa97ecdff2a945959a1563f6dcc299e55eddeb03da4a80ba3318f50362",
+            "doc_id": "doc-01",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "NordicFreight's 6pm order cutoff cannot make our morning restaurant slots",
+            "restates": "NordicFreight's 6pm order cutoff cannot make our morning restaurant slots, and we missed four slots in January because of it"
+          },
+          {
+            "point_id": "pt_d469fbd6cf2ab48a219b72994f9eaf6d1fb03f75086ab43dc6654dcb9343df",
+            "doc_id": "doc-01",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "We missed four morning restaurant slots in January because of NordicFreight's 6pm order cutoff",
+            "restates": "NordicFreight's 6pm order cutoff cannot make our morning restaurant slots, and we missed four slots in January because of it"
+          },
+          {
+            "point_id": "pt_e5893ddc5d1cbf3544bdfd6d8ab4b3585b17e4c7f3de4203b43c3aff05e036",
+            "doc_id": "doc-01",
+            "dedup": "new",
+            "overlap": 0.91,
+            "text": "ColdPath Logistics offers a 9pm order cutoff and a validated cold-chain certificate",
+            "restates": "ColdPath Logistics offers a 9pm cutoff that meets the morning restaurant slots and holds a validated cold-chain certificate"
+          },
+          {
+            "point_id": "pt_c45f0aed1a75b1e4165fd7ca53520183a6e1502d0f0327935e363c19585991",
+            "doc_id": "doc-01",
+            "dedup": "new",
+            "overlap": 0.89,
+            "text": "The own-van option requires 48,000 pounds of capital spending",
+            "restates": "The own refrigerated van option needs 48,000 pounds of capital spending, which is more than our current cash buffer allows"
+          },
+          {
+            "point_id": "pt_63b0698dc4d3df06d74ab5afb55fa393a6447f6fd4a21d87708277d9abf80b",
+            "doc_id": "doc-01",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "Our cash buffer is 31,000 pounds and is committed to the March supplier payments",
+            "restates": "The cash buffer is 31,000 pounds and it is committed to the March supplier payments, so the capital spend for our own refrigerated van is not approvable this quarter"
+          },
+          {
+            "point_id": "pt_24cae8d90153ebb4e86ba05ef09b7cb85382b922c08caa527d8beb3fd276f4",
+            "doc_id": "doc-01",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "The capital spend for our own refrigerated van is not approvable this quarter",
+            "restates": "The cash buffer is 31,000 pounds and it is committed to the March supplier payments, so the capital spend for our own refrigerated van is not approvable this quarter"
+          },
+          {
+            "point_id": "pt_f0a2b9650921173ef84fa14fd3756343a55e309890c4b129158ca52c60d62d",
+            "doc_id": "doc-01",
+            "dedup": "content_hash_hit",
+            "overlap": 1.0,
+            "text": "We choose ColdPath Logistics as our delivery partner",
+            "restates": "We choose ColdPath Logistics as our delivery partner"
+          },
+          {
+            "point_id": "pt_cdad0730d21568a3eb488ee9a8c7a72c431e1840887ff249172b9065e88238",
+            "doc_id": "doc-01",
+            "dedup": "content_hash_hit",
+            "overlap": 1.0,
+            "text": "Marta Reyes owns negotiating the ColdPath contract",
+            "restates": "Marta Reyes owns negotiating the ColdPath contract"
+          },
+          {
+            "point_id": "pt_bd598929772ee2eeaf431e4bfbb69138d50555b7bf363ecde748062023ff7b",
+            "doc_id": "doc-01",
+            "dedup": "content_hash_hit",
+            "overlap": 1.0,
+            "text": "Dev Patel owns approving the capital spending line",
+            "restates": "Dev Patel owns approving the capital spending line"
+          },
+          {
+            "point_id": "pt_59e6984a6e3a90d2a3ac361a40deb445ae77597c5195f20a4b3547bf8a0af6",
+            "doc_id": "doc-02",
+            "dedup": "new",
+            "overlap": 0.87,
+            "text": "The cold chain must stay below 4 degrees Celsius at all times from the loading bay to the customer's door.",
+            "restates": "Chilled goods must stay below 4 degrees Celsius at all times from our loading bay to the customer's door."
+          },
+          {
+            "point_id": "pt_3a182fceeeb1e8a99783584f0d604c81f70b4c5c40a82ba599361280b50910",
+            "doc_id": "doc-02",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "The food safety auditor requires a temperature log for every single delivery, and the log must be retained for twelve months.",
+            "restates": "Our food safety auditor requires a temperature log for every single delivery, and the log must be retained for twelve months."
+          },
+          {
+            "point_id": "pt_2191e1c669904cbd008bb1b103c4b144eba383cdc67943f426e55e2ebc5fd4",
+            "doc_id": "doc-02",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "The wholesale licence forbids subcontracting the delivery of chilled goods to a partner that does not hold a validated cold-chain certificate.",
+            "restates": "Our wholesale licence forbids subcontracting the delivery of chilled goods to a partner that does not hold a validated cold-chain certificate."
+          },
+          {
+            "point_id": "pt_201d78948fdff3589241e16f65f0bf4f97d85604dfbc2376d01dbd3b013eeb",
+            "doc_id": "doc-03",
+            "dedup": "new",
+            "overlap": 0.86,
+            "text": "The growth goal is to reach 40 restaurant accounts by December",
+            "restates": "The goal is to reach 40 restaurant accounts by December."
+          },
+          {
+            "point_id": "pt_6f25611384ef4dde7ba428621b1743ec47a2859f901696e10d2aa5f12b2666",
+            "doc_id": "doc-03",
+            "dedup": "new",
+            "overlap": 0.89,
+            "text": "Delivery capacity limits how fast restaurant accounts can be added",
+            "restates": "Delivery capacity is the binding constraint on how fast restaurant accounts can be added, not demand or sales throughput."
+          },
+          {
+            "point_id": "pt_2161da5d0683ec672c107e89ae046159ef18d1d77054a637e5442efc392cef",
+            "doc_id": "doc-03",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "Every new restaurant account needs a morning delivery slot",
+            "restates": "Every new restaurant account needs a morning delivery slot."
+          },
+          {
+            "point_id": "pt_58eddc71e9334671db3c71aed7c0b3ab37d99eb265d55d1eb449b013e68f05",
+            "doc_id": "doc-03",
+            "dedup": "new",
+            "overlap": 0.81,
+            "text": "Cold-chain rules mean an account cannot be added unless the cold chain can be held below 4 degrees for that slot",
+            "restates": "An account cannot be added unless the cold chain can be held below 4 degrees for its morning delivery slot."
+          },
+          {
+            "point_id": "pt_7edb80e1eea7f2823ef5bf22e5ce291a760c5855da86514a297d1d0a417655",
+            "doc_id": "doc-03",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "Priya Nair owns account onboarding",
+            "restates": "Priya Nair owns account onboarding."
+          },
+          {
+            "point_id": "pt_2d8de38ebfb4618449450a3d79d683abb430efa89e26f6cbdb92c67d84fda9",
+            "doc_id": "doc-04",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "Marta Reyes owns delivery scheduling",
+            "restates": "Marta Reyes, Operations Lead, owns delivery scheduling"
+          },
+          {
+            "point_id": "pt_0e8c65b884d27ac0252f316d50392b6d5cbf5ca42d330c2823be24ea8affa1",
+            "doc_id": "doc-04",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "Marta Reyes owns the cold-chain temperature log",
+            "restates": "Marta Reyes, Operations Lead, owns the cold-chain temperature log"
+          },
+          {
+            "point_id": "pt_a5db0ab06b7625b82e410f5a8a5434a4be605616386990833eecf86d8aa11c",
+            "doc_id": "doc-04",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "Marta Reyes is accountable for a missing cold-chain log entry",
+            "restates": "Marta Reyes is accountable for any missing cold-chain temperature log entry"
+          },
+          {
+            "point_id": "pt_6395c0be5e482b8e9cb757ee612148d818510062c35d2b3d381fd27b12ff60",
+            "doc_id": "doc-04",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "Dev Patel owns supplier payments",
+            "restates": "Dev Patel, Finance Director, owns supplier payments"
+          },
+          {
+            "point_id": "pt_104b52861b7c3213f353b56c5e09de57da9ce715ee1db7158522ced24ffaab",
+            "doc_id": "doc-04",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "Dev Patel owns capital spending approvals",
+            "restates": "Dev Patel, Finance Director, owns capital spending approvals"
+          },
+          {
+            "point_id": "pt_7edb80e1eea7f2823ef5bf22e5ce291a760c5855da86514a297d1d0a417655",
+            "doc_id": "doc-04",
+            "dedup": "content_hash_hit",
+            "overlap": 1.0,
+            "text": "Priya Nair owns account onboarding",
+            "restates": "Priya Nair owns account onboarding."
+          },
+          {
+            "point_id": "pt_e78f71c2225ef696c8154141271852c46899066698866451e5eeeeefc99be0",
+            "doc_id": "doc-04",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "Priya Nair owns the restaurant account pipeline",
+            "restates": "Priya Nair, Sales Lead, owns the restaurant account pipeline"
+          },
+          {
+            "point_id": "pt_9f7335a266381282070b46dd1ae6c22d025ac784a69f1a0942e248375f25b5",
+            "doc_id": "doc-04",
+            "dedup": "content_hash_hit",
+            "overlap": 1.0,
+            "text": "Priya Nair reports the account count to the team every month",
+            "restates": "Priya Nair reports the account count to the team every month"
+          },
+          {
+            "point_id": "pt_c4ecca383881ae5ba21163564b0b21cecc7b640b9d72bf9b8ce33cb8271e09",
+            "doc_id": "doc-05",
+            "dedup": "new",
+            "overlap": 0.9,
+            "text": "We believed ColdPath Logistics was a viable delivery partner for chilled goods",
+            "restates": "ColdPath Logistics was believed to be a viable chilled-delivery partner for the wholesale push"
+          },
+          {
+            "point_id": "pt_94b2d0840c239501d3d8ae75090bc92300499a7ca9abe94d585f2a6eb600ca",
+            "doc_id": "doc-05",
+            "dedup": "new",
+            "overlap": 0.92,
+            "text": "Our wholesale licence forbids subcontracting chilled goods to a partner without a validated cold-chain certificate",
+            "restates": "Our wholesale licence forbids subcontracting the delivery of chilled goods to a partner that does not hold a validated cold-chain certificate."
+          },
+          {
+            "point_id": "pt_d1008a76210e80dc8ba9805fea4d5c6105e1648293f57eaba9cbc7fc613ee8",
+            "doc_id": "doc-05",
+            "dedup": "content_hash_hit",
+            "overlap": 1.0,
+            "text": "The ColdPath choice is not viable and we cannot keep using ColdPath Logistics for chilled deliveries",
+            "restates": "The ColdPath choice is not viable and we cannot keep using ColdPath Logistics for chilled deliveries"
+          },
+          {
+            "point_id": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f",
+            "doc_id": "doc-05",
+            "dedup": "content_hash_hit",
+            "overlap": 1.0,
+            "text": "We revert to NordicFreight as our delivery partner and stop using ColdPath Logistics",
+            "restates": "We revert to NordicFreight as our delivery partner and stop using ColdPath Logistics"
+          },
+          {
+            "point_id": "pt_0ffba412ed47976bb6d94ad9b0a74beea65fc6391502b25d2116d748e98681",
+            "doc_id": "doc-05",
+            "dedup": "content_hash_hit",
+            "overlap": 1.0,
+            "text": "Marta Reyes owns renegotiating with NordicFreight",
+            "restates": "Marta Reyes owns renegotiating with NordicFreight"
+          },
+          {
+            "point_id": "pt_28d13ddf722715c726f17c2f33cffe7f1cb198d602b1ac3ed2d0c182bffb72",
+            "doc_id": "doc-05",
+            "dedup": "content_hash_hit",
+            "overlap": 1.0,
+            "text": "The growth goal of 40 restaurant accounts by December stands",
+            "restates": "The growth goal of 40 restaurant accounts by December stands"
+          },
+          {
+            "point_id": "pt_69fc4a12cc21c55ac2fb297cf9430e8b7fe4a66112fd48b76cdf3727444b12",
+            "doc_id": "doc-05",
+            "dedup": "content_hash_hit",
+            "overlap": 1.0,
+            "text": "NordicFreight's 6pm cutoff still cannot make our morning restaurant slots",
+            "restates": "NordicFreight's 6pm cutoff still cannot make our morning restaurant slots"
+          },
+          {
+            "point_id": "pt_1fcd58fd4cb1fee04b374b7f7e9cf3c45852c0db993b840f7291e0465f6cd0",
+            "doc_id": "doc-05",
+            "dedup": "content_hash_hit",
+            "overlap": 1.0,
+            "text": "Delivery capacity is now the binding limit on the growth goal",
+            "restates": "Delivery capacity is now the binding limit on the growth goal"
+          },
+          {
+            "point_id": "pt_46b377fc0bebb253b28a69785263ec88dd9bcdeaf7b0c104ba78e7b12a42e5",
+            "doc_id": "doc-05",
+            "dedup": "content_hash_hit",
+            "overlap": 1.0,
+            "text": "ColdPath Logistics failed its cold-chain audit last week",
+            "restates": "ColdPath Logistics failed its cold-chain audit last week"
+          },
+          {
+            "point_id": "pt_eb0db94793749903d4d4adf957dbc5544b3cae86319f57f524c47dd3fd1d58",
+            "doc_id": "doc-05",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "Marta Reyes is Operations Lead",
+            "restates": "Marta Reyes, Operations Lead, owns delivery scheduling"
+          },
+          {
+            "point_id": "pt_75f66919c3e2d9e9fe44eeb0660b57bff04e117b90df32fdab708c641a3bfd",
+            "doc_id": "doc-05",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "Priya Nair is Sales Lead",
+            "restates": "Priya Nair, Sales Lead, owns account onboarding"
+          },
+          {
+            "point_id": "pt_c9d643e1545786c2bd58f87b7526aac325d134f10d4aadc1f7760b71f985be",
+            "doc_id": "doc-06",
+            "dedup": "new",
+            "overlap": 0.93,
+            "text": "Every restaurant account requires a morning delivery slot with the cold chain held below four degrees.",
+            "restates": "Each restaurant account requires a morning delivery slot with the cold chain held below four degrees."
+          },
+          {
+            "point_id": "pt_a473da68549c03c458d73256af395ac4024d53cd1a6bb2e2ca937e330cb2bd",
+            "doc_id": "doc-06",
+            "dedup": "new",
+            "overlap": 1.0,
+            "text": "Priya Nair (Sales Lead) owns both the restaurant account onboarding work and the restaurant account pipeline.",
+            "restates": "Priya Nair (Sales Lead) owns both the onboarding work and the restaurant account pipeline."
+          }
+        ]
+      },
+      "relations": {
+        "written_pass_1": 26,
+        "written_pass_2": 21,
+        "delta": -5,
+        "dropped_pass_1": 0,
+        "dropped_pass_2": 1
+      },
+      "sources": {
+        "pass_1": 6,
+        "pass_2": 12,
+        "delta": 6
+      },
+      "second_pass_product_accounting": {
+        "points_reported": 61,
+        "dedup_verdicts": {
+          "new": 49,
+          "content_hash_hit": 12
+        },
+        "merges": 0,
+        "deletions": 0
+      },
+      "same_name_entities_after_both_passes": {},
+      "verdict": "FAIL"
+    },
+    "T2": {
+      "test": "T2",
+      "rule": "PASS iff the restatement (doc-06) adds 0 entities, and the goal fact resolves to ONE point/entity carrying two sources; a second same-meaning entity or an unlinked second point is FAIL.",
+      "pair": [
+        "doc-03",
+        "doc-06"
+      ],
+      "wording_a": "Our goal is to reach 40 restaurant accounts by December. We currently hold 18 restaurant accounts, so we need 22 more.",
+      "wording_b": "We are still chasing the same number as at the start of the year, forty restaurant accounts by the end of December. We hold eighteen today, so twenty-two are outstanding.",
+      "delta_across_doc_06_ingest": {
+        "taxonomy.Point": 15,
+        "taxonomy.Object": 1,
+        "taxonomy.Event": 1,
+        "taxonomy.Source": 1,
+        "points_by_kind.statement": 8,
+        "points_by_kind.event": 6,
+        "structure_total": 14,
+        "operators": 1,
+        "source_rows": 1,
+        "sources_with_points": 1
+      },
+      "entities_before": {
+        "taxonomy": {
+          "Point": 119,
+          "Event": 11,
+          "Subject": 10,
+          "Object": 24,
+          "Source": 5
+        },
+        "structure_total": 87,
+        "operators": 32,
+        "points_by_kind": {
+          "statement": 53,
+          "event": 34
+        },
+        "source_rows": 5,
+        "sources_with_points": 5
+      },
+      "entities_after": {
+        "taxonomy": {
+          "Point": 134,
+          "Event": 12,
+          "Subject": 10,
+          "Object": 25,
+          "Source": 6
+        },
+        "structure_total": 101,
+        "operators": 33,
+        "points_by_kind": {
+          "statement": 61,
+          "event": 40
+        },
+        "source_rows": 6,
+        "sources_with_points": 6
+      },
+      "goal_point_candidates": [
+        {
+          "doc_id": "doc-03",
+          "point_id": "pt_51caf20e3c21327d58dad200695fb9001d3cecb4cb50037424d0b9c96238b7",
+          "kind": "statement",
+          "dedup": "new",
+          "text": "The goal is to reach 40 restaurant accounts by December.",
+          "overlap": 0.83
+        },
+        {
+          "doc_id": "doc-03",
+          "point_id": "pt_0f995c44a5ebe1763bfb8b443cc0f2d6e523ca6f57976e7c4087fa9b9b0802",
+          "kind": "statement",
+          "dedup": "new",
+          "text": "The company currently holds 18 restaurant accounts, so 22 more are needed to reach 40 by December.",
+          "overlap": 0.6
+        },
+        {
+          "doc_id": "doc-06",
+          "point_id": "pt_b8ae771b546025c400d69ae5cb74f7c3f5fdf7a3e1ba3be279dcbd14e5762a",
+          "kind": "statement",
+          "dedup": "new",
+          "text": "The restaurant-account goal is forty restaurant accounts by the end of December.",
+          "overlap": 0.75
+        },
+        {
+          "doc_id": "doc-06",
+          "point_id": "pt_4b63d2794f40a1a1e4727f136ce04932c9fa3f607ab7ae5e1bc07280cee110",
+          "kind": "statement",
+          "dedup": "new",
+          "text": "Eighteen restaurant accounts are held today, leaving twenty-two outstanding against the goal of forty.",
+          "overlap": 0.71
+        }
+      ],
+      "goal_point_ids": {
+        "doc_03": [
+          "pt_0f995c44a5ebe1763bfb8b443cc0f2d6e523ca6f57976e7c4087fa9b9b0802",
+          "pt_51caf20e3c21327d58dad200695fb9001d3cecb4cb50037424d0b9c96238b7"
+        ],
+        "doc_06": [
+          "pt_4b63d2794f40a1a1e4727f136ce04932c9fa3f607ab7ae5e1bc07280cee110",
+          "pt_b8ae771b546025c400d69ae5cb74f7c3f5fdf7a3e1ba3be279dcbd14e5762a"
+        ],
+        "shared": []
+      },
+      "sources": {
+        "before": 5,
+        "after": 6,
+        "delta": 1
+      },
+      "retrieval_probe_ids": {
+        "What is the goal of restaurant accounts?": [
+          "pt_201d78948fdff3589241e16f65f0bf4f97d85604dfbc2376d01dbd3b013eeb",
+          "pt_51caf20e3c21327d58dad200695fb9001d3cecb4cb50037424d0b9c96238b7",
+          "pt_b8ae771b546025c400d69ae5cb74f7c3f5fdf7a3e1ba3be279dcbd14e5762a",
+          "pt_0f995c44a5ebe1763bfb8b443cc0f2d6e523ca6f57976e7c4087fa9b9b0802",
+          "1a22118730c-91dd415d2e72",
+          "pt_957fb7c386f10335dc7b20447cf72640b54d215a2892be949a77ae491860e1",
+          "pt_2b5ef0c1a69c34e855ab23d26010cdb45ce62b44dd1724a77ebe5775f3fbb9",
+          "pt_a473da68549c03c458d73256af395ac4024d53cd1a6bb2e2ca937e330cb2bd"
+        ],
+        "How many restaurant accounts do we need by December?": [
+          "pt_201d78948fdff3589241e16f65f0bf4f97d85604dfbc2376d01dbd3b013eeb",
+          "pt_51caf20e3c21327d58dad200695fb9001d3cecb4cb50037424d0b9c96238b7",
+          "pt_957fb7c386f10335dc7b20447cf72640b54d215a2892be949a77ae491860e1",
+          "pt_28d13ddf722715c726f17c2f33cffe7f1cb198d602b1ac3ed2d0c182bffb72",
+          "pt_db1325fd25309a76bd223f5a678dbf104aebd2c7b056fb6acaf7018fdf8184",
+          "1a22118730c-91dd415d2e72",
+          "pt_b8ae771b546025c400d69ae5cb74f7c3f5fdf7a3e1ba3be279dcbd14e5762a",
+          "pt_4b63d2794f40a1a1e4727f136ce04932c9fa3f607ab7ae5e1bc07280cee110"
+        ]
+      },
+      "probe_texts": {
+        "What is the goal of restaurant accounts?": [
+          "The growth goal is to reach 40 restaurant accounts by December",
+          "The goal is to reach 40 restaurant accounts by December.",
+          "The restaurant-account goal is forty restaurant accounts by the end of December.",
+          "The company currently holds 18 restaurant accounts, so 22 more are needed to reach 40 by December."
+        ],
+        "How many restaurant accounts do we need by December?": [
+          "The growth goal is to reach 40 restaurant accounts by December",
+          "The goal is to reach 40 restaurant accounts by December.",
+          "The goal of 40 restaurant accounts by December stands",
+          "The growth goal of 40 restaurant accounts by December stands"
+        ]
+      },
+      "probe_sessions": {
+        "What is the goal of restaurant accounts?": [
+          "doc-03-replay",
+          "doc-03",
+          "doc-06",
+          "doc-03",
+          null,
+          "doc-05",
+          "doc-06-replay",
+          "doc-06-replay"
+        ],
+        "How many restaurant accounts do we need by December?": [
+          "doc-03-replay",
+          "doc-03",
+          "doc-05",
+          "doc-05",
+          "doc-06-replay",
+          null,
+          "doc-06",
+          "doc-06"
+        ]
+      },
+      "corpus_overlap": {
+        "wording_a_vs_doc03_text": 1.0,
+        "wording_b_vs_doc06_text": 1.0,
+        "wording_b_vs_wording_a": 0.21
+      },
+      "verdict": "FAIL"
+    },
+    "T3": {
+      "test": "T3",
+      "rule": "Reported as a share, with an explicit population. PASS iff the majority of created entities are NOT orphans AND every orphan named is standalone in the corpus text; otherwise FAIL, with the door's own answer reported beside the write receipt's so a door defect cannot be laundered as an extractor defect.",
+      "population": {
+        "entities_enumerated_by_full_scan": 30,
+        "note": "population is every ENTITY the typed full scan resolves; Points are excluded because a Point's edges are epistemic bindings the write receipt does not enumerate \u2014 recorded as a gap (REPORT \u00a76)"
+      },
+      "orphans_by_write_receipt": {
+        "count": 7,
+        "share": 0.233,
+        "rows": [
+          {
+            "id": "1a22117698c-3be9a144ec4b",
+            "name": "the ownership map",
+            "kind": "core:standard",
+            "linked_by_write_receipt": false,
+            "door_connected_total": 1,
+            "door_connected_counts": {
+              "points": 1,
+              "documents": 0,
+              "events": 0,
+              "subjects": 0,
+              "objects": 0
+            }
+          },
+          {
+            "id": "1a22117ee62-4e937d7fb87a",
+            "name": "revert to NordicFreight as delivery partner",
+            "kind": "core:strategy",
+            "linked_by_write_receipt": false,
+            "door_connected_total": 2,
+            "door_connected_counts": {
+              "points": 2,
+              "documents": 0,
+              "events": 0,
+              "subjects": 0,
+              "objects": 0
+            }
+          },
+          {
+            "id": "1a2211695cc-05a3edace225",
+            "name": "the cold-chain rules as operational preferences",
+            "kind": "core:strategy",
+            "linked_by_write_receipt": false,
+            "door_connected_total": 1,
+            "door_connected_counts": {
+              "points": 1,
+              "documents": 0,
+              "events": 0,
+              "subjects": 0,
+              "objects": 0
+            }
+          },
+          {
+            "id": "1a2211626e9-8f63386f2e77",
+            "name": "the own refrigerated van option",
+            "kind": "core:strategy",
+            "linked_by_write_receipt": false,
+            "door_connected_total": 5,
+            "door_connected_counts": {
+              "points": 5,
+              "documents": 0,
+              "events": 0,
+              "subjects": 0,
+              "objects": 0
+            }
+          },
+          {
+            "id": "1a2211966df-26d05c5fccbd",
+            "name": "chilled-goods operation",
+            "kind": "core:workflow",
+            "linked_by_write_receipt": false,
+            "door_connected_total": 8,
+            "door_connected_counts": {
+              "points": 8,
+              "documents": 0,
+              "events": 0,
+              "subjects": 0,
+              "objects": 0
+            }
+          },
+          {
+            "id": "1a2211692a0-01e3f8b80fce",
+            "name": "the 4 degrees Celsius cold-chain constraint",
+            "kind": "agent-ops:rule",
+            "linked_by_write_receipt": false,
+            "door_connected_total": 10,
+            "door_connected_counts": {
+              "points": 10,
+              "documents": 0,
+              "events": 0,
+              "subjects": 0,
+              "objects": 0
+            }
+          },
+          {
+            "id": "1a22117051d-2cdd85f1f2b2",
+            "name": "restaurant account",
+            "kind": "product-strategy:customerSegment",
+            "linked_by_write_receipt": false,
+            "door_connected_total": 6,
+            "door_connected_counts": {
+              "points": 6,
+              "documents": 0,
+              "events": 0,
+              "subjects": 0,
+              "objects": 0
+            }
+          }
+        ]
+      },
+      "orphans_by_door": {
+        "count": 0,
+        "share": 0.0,
+        "rows": []
+      },
+      "orphan_traceability": [
+        {
+          "name": "the ownership map",
+          "kind": "core:standard",
+          "exact_doc_hits": [],
+          "near_doc_hits": [
+            "doc-04"
+          ]
+        },
+        {
+          "name": "revert to NordicFreight as delivery partner",
+          "kind": "core:strategy",
+          "exact_doc_hits": [],
+          "near_doc_hits": [
+            "doc-05"
+          ]
+        },
+        {
+          "name": "the cold-chain rules as operational preferences",
+          "kind": "core:strategy",
+          "exact_doc_hits": [],
+          "near_doc_hits": []
+        },
+        {
+          "name": "the own refrigerated van option",
+          "kind": "core:strategy",
+          "exact_doc_hits": [],
+          "near_doc_hits": [
+            "doc-01"
+          ]
+        },
+        {
+          "name": "chilled-goods operation",
+          "kind": "core:workflow",
+          "exact_doc_hits": [],
+          "near_doc_hits": []
+        },
+        {
+          "name": "the 4 degrees Celsius cold-chain constraint",
+          "kind": "agent-ops:rule",
+          "exact_doc_hits": [],
+          "near_doc_hits": [
+            "doc-02"
+          ]
+        },
+        {
+          "name": "restaurant account",
+          "kind": "product-strategy:customerSegment",
+          "exact_doc_hits": [
+            "doc-03",
+            "doc-04",
+            "doc-05",
+            "doc-06"
+          ],
+          "near_doc_hits": [
+            "doc-03",
+            "doc-04",
+            "doc-06"
+          ]
+        }
+      ],
+      "verdict": "PASS"
+    },
+    "T4": {
+      "test": "T4",
+      "rule": "PASS iff none of the ontology's types is collapsed: the flat (Point/Event/Subject/Object/Source) distribution is non-degenerate, decisions land as the event/decision kind rather than as a bare statement, roles land as Subjects, and documents land as Sources.",
+      "flat_distribution": {
+        "Point": 243,
+        "Event": 26,
+        "Subject": 10,
+        "Object": 29,
+        "Source": 12
+      },
+      "points_by_kind": {
+        "statement": 111,
+        "event": 80
+      },
+      "structure_layer": {
+        "total": 191,
+        "operators": 52
+      },
+      "entity_kinds_seen": {
+        "core:Project": 1,
+        "core:agreement": 2,
+        "core:goal": 1,
+        "core:standard": 2,
+        "core:strategy": 3,
+        "core:workflow": 3,
+        "core:naturalPerson": 3,
+        "core:organization": 4,
+        "core:role": 3,
+        "core:decision": 1,
+        "agent-ops:rule": 3,
+        "product-strategy:customerSegment": 1,
+        "venture:actionItem": 3
+      },
+      "per_kind_full_scan": {
+        "object:core:Problem": 0,
+        "subject:core:Problem": 0,
+        "event:core:Problem": 0,
+        "object:core:Project": 1,
+        "subject:core:Project": 0,
+        "event:core:Project": 0,
+        "object:core:WorkItem": 0,
+        "subject:core:WorkItem": 0,
+        "event:core:WorkItem": 0,
+        "object:core:agent": 0,
+        "subject:core:agent": 0,
+        "event:core:agent": 0,
+        "object:core:agreement": 2,
+        "subject:core:agreement": 0,
+        "event:core:agreement": 0,
+        "object:core:goal": 1,
+        "subject:core:goal": 0,
+        "event:core:goal": 0,
+        "object:core:other": 0,
+        "subject:core:other": 0,
+        "event:core:other": 0,
+        "object:core:plan": 0,
+        "subject:core:plan": 0,
+        "event:core:plan": 0,
+        "object:core:skill": 0,
+        "subject:core:skill": 0,
+        "event:core:skill": 0,
+        "object:core:standard": 2,
+        "subject:core:standard": 0,
+        "event:core:standard": 0,
+        "object:core:strategy": 3,
+        "subject:core:strategy": 0,
+        "event:core:strategy": 0,
+        "object:core:tag": 0,
+        "subject:core:tag": 0,
+        "event:core:tag": 0,
+        "object:core:target": 0,
+        "subject:core:target": 0,
+        "event:core:target": 0,
+        "object:core:tool": 0,
+        "subject:core:tool": 0,
+        "event:core:tool": 0,
+        "object:core:user": 0,
+        "subject:core:user": 0,
+        "event:core:user": 0,
+        "object:core:workflow": 3,
+        "subject:core:workflow": 0,
+        "event:core:workflow": 0,
+        "object:core:legalPerson": 0,
+        "subject:core:legalPerson": 0,
+        "event:core:legalPerson": 0,
+        "object:core:naturalPerson": 0,
+        "subject:core:naturalPerson": 3,
+        "event:core:naturalPerson": 0,
+        "object:core:organization": 0,
+        "subject:core:organization": 4,
+        "event:core:organization": 0,
+        "object:core:role": 0,
+        "subject:core:role": 3,
+        "event:core:role": 0,
+        "object:core:team": 0,
+        "subject:core:team": 0,
+        "event:core:team": 0,
+        "object:core:AgentSession": 0,
+        "subject:core:AgentSession": 0,
+        "event:core:AgentSession": 0,
+        "object:core:decision": 1,
+        "subject:core:decision": 0,
+        "event:core:decision": 0,
+        "object:core:deployment": 0,
+        "subject:core:deployment": 0,
+        "event:core:deployment": 0,
+        "object:core:documentCreated": 0,
+        "subject:core:documentCreated": 0,
+        "event:core:documentCreated": 0,
+        "object:core:experiment": 0,
+        "subject:core:experiment": 0,
+        "event:core:experiment": 0,
+        "object:core:extraction": 0,
+        "subject:core:extraction": 0,
+        "event:core:extraction": 0,
+        "object:core:friction": 0,
+        "subject:core:friction": 0,
+        "event:core:friction": 0,
+        "object:core:humanApproval": 0,
+        "subject:core:humanApproval": 0,
+        "event:core:humanApproval": 0,
+        "object:core:meeting": 0,
+        "subject:core:meeting": 0,
+        "event:core:meeting": 0,
+        "object:core:milestone": 0,
+        "subject:core:milestone": 0,
+        "event:core:milestone": 0,
+        "object:core:occurrence": 0,
+        "subject:core:occurrence": 0,
+        "event:core:occurrence": 0,
+        "object:core:pointAdded": 0,
+        "subject:core:pointAdded": 0,
+        "event:core:pointAdded": 0,
+        "object:core:review": 0,
+        "subject:core:review": 0,
+        "event:core:review": 0,
+        "object:core:roleCreated": 0,
+        "subject:core:roleCreated": 0,
+        "event:core:roleCreated": 0,
+        "object:core:sessionCaptured": 0,
+        "subject:core:sessionCaptured": 0,
+        "event:core:sessionCaptured": 0,
+        "object:core:turn": 0,
+        "subject:core:turn": 0,
+        "event:core:turn": 0,
+        "object:agent-ops:rule": 3,
+        "subject:agent-ops:rule": 0,
+        "event:agent-ops:rule": 0,
+        "object:dev:epic": 0,
+        "subject:dev:epic": 0,
+        "event:dev:epic": 0,
+        "object:dev:issue": 0,
+        "subject:dev:issue": 0,
+        "event:dev:issue": 0,
+        "object:dev:code": 0,
+        "subject:dev:code": 0,
+        "event:dev:code": 0,
+        "object:dev:api": 0,
+        "subject:dev:api": 0,
+        "event:dev:api": 0,
+        "object:dev:database": 0,
+        "subject:dev:database": 0,
+        "event:dev:database": 0,
+        "object:dev:software": 0,
+        "subject:dev:software": 0,
+        "event:dev:software": 0,
+        "object:dev:infrastructure": 0,
+        "subject:dev:infrastructure": 0,
+        "event:dev:infrastructure": 0,
+        "object:dev:indicator": 0,
+        "subject:dev:indicator": 0,
+        "event:dev:indicator": 0,
+        "object:dev:theme": 0,
+        "subject:dev:theme": 0,
+        "event:dev:theme": 0,
+        "object:dev:pullRequest": 0,
+        "subject:dev:pullRequest": 0,
+        "event:dev:pullRequest": 0,
+        "object:dev:bug": 0,
+        "subject:dev:bug": 0,
+        "event:dev:bug": 0,
+        "object:dev:incident": 0,
+        "subject:dev:incident": 0,
+        "event:dev:incident": 0,
+        "object:portfolio:mandate": 0,
+        "subject:portfolio:mandate": 0,
+        "event:portfolio:mandate": 0,
+        "object:portfolio:allocationTarget": 0,
+        "subject:portfolio:allocationTarget": 0,
+        "event:portfolio:allocationTarget": 0,
+        "object:marketing:campaign": 0,
+        "subject:marketing:campaign": 0,
+        "event:marketing:campaign": 0,
+        "object:marketing:content": 0,
+        "subject:marketing:content": 0,
+        "event:marketing:content": 0,
+        "object:marketing:channel": 0,
+        "subject:marketing:channel": 0,
+        "event:marketing:channel": 0,
+        "object:marketing:audience": 0,
+        "subject:marketing:audience": 0,
+        "event:marketing:audience": 0,
+        "object:marketing:keyword": 0,
+        "subject:marketing:keyword": 0,
+        "event:marketing:keyword": 0,
+        "object:marketing:competitorContent": 0,
+        "subject:marketing:competitorContent": 0,
+        "event:marketing:competitorContent": 0,
+        "object:product-strategy:product": 0,
+        "subject:product-strategy:product": 0,
+        "event:product-strategy:product": 0,
+        "object:product-strategy:feature": 0,
+        "subject:product-strategy:feature": 0,
+        "event:product-strategy:feature": 0,
+        "object:product-strategy:customer": 0,
+        "subject:product-strategy:customer": 0,
+        "event:product-strategy:customer": 0,
+        "object:product-strategy:competitor": 0,
+        "subject:product-strategy:competitor": 0,
+        "event:product-strategy:competitor": 0,
+        "object:product-strategy:customerSegment": 1,
+        "subject:product-strategy:customerSegment": 0,
+        "event:product-strategy:customerSegment": 0,
+        "object:product-strategy:market": 0,
+        "subject:product-strategy:market": 0,
+        "event:product-strategy:market": 0,
+        "object:product-strategy:requirement": 0,
+        "subject:product-strategy:requirement": 0,
+        "event:product-strategy:requirement": 0,
+        "object:product-strategy:architecture": 0,
+        "subject:product-strategy:architecture": 0,
+        "event:product-strategy:architecture": 0,
+        "object:product-strategy:customerProblem": 0,
+        "subject:product-strategy:customerProblem": 0,
+        "event:product-strategy:customerProblem": 0,
+        "object:pm:issue": 0,
+        "subject:pm:issue": 0,
+        "event:pm:issue": 0,
+        "object:pm:sprint": 0,
+        "subject:pm:sprint": 0,
+        "event:pm:sprint": 0,
+        "object:pm:kanbanBoard": 0,
+        "subject:pm:kanbanBoard": 0,
+        "event:pm:kanbanBoard": 0,
+        "object:pm:card": 0,
+        "subject:pm:card": 0,
+        "event:pm:card": 0,
+        "object:venture:investment": 0,
+        "subject:venture:investment": 0,
+        "event:venture:investment": 0,
+        "object:venture:program": 0,
+        "subject:venture:program": 0,
+        "event:venture:program": 0,
+        "object:venture:asset": 0,
+        "subject:venture:asset": 0,
+        "event:venture:asset": 0,
+        "object:venture:fundingAgreement": 0,
+        "subject:venture:fundingAgreement": 0,
+        "event:venture:fundingAgreement": 0,
+        "object:venture:tranche": 0,
+        "subject:venture:tranche": 0,
+        "event:venture:tranche": 0,
+        "object:venture:condition": 0,
+        "subject:venture:condition": 0,
+        "event:venture:condition": 0,
+        "object:venture:actionItem": 3,
+        "subject:venture:actionItem": 0,
+        "event:venture:actionItem": 0,
+        "object:agent-ops:ruleRevised": 0,
+        "subject:agent-ops:ruleRevised": 0,
+        "event:agent-ops:ruleRevised": 0,
+        "object:dev:prOpened": 0,
+        "subject:dev:prOpened": 0,
+        "event:dev:prOpened": 0,
+        "object:dev:prReviewed": 0,
+        "subject:dev:prReviewed": 0,
+        "event:dev:prReviewed": 0,
+        "object:dev:prMerged": 0,
+        "subject:dev:prMerged": 0,
+        "event:dev:prMerged": 0,
+        "object:dev:prClosed": 0,
+        "subject:dev:prClosed": 0,
+        "event:dev:prClosed": 0,
+        "object:dev:incidentDeclared": 0,
+        "subject:dev:incidentDeclared": 0,
+        "event:dev:incidentDeclared": 0,
+        "object:dev:incidentResolved": 0,
+        "subject:dev:incidentResolved": 0,
+        "event:dev:incidentResolved": 0,
+        "object:portfolio:valuationMark": 0,
+        "subject:portfolio:valuationMark": 0,
+        "event:portfolio:valuationMark": 0,
+        "object:pm:cardCreated": 0,
+        "subject:pm:cardCreated": 0,
+        "event:pm:cardCreated": 0,
+        "object:pm:cardMoved": 0,
+        "subject:pm:cardMoved": 0,
+        "event:pm:cardMoved": 0,
+        "object:pm:sprintStarted": 0,
+        "subject:pm:sprintStarted": 0,
+        "event:pm:sprintStarted": 0,
+        "object:pm:sprintCompleted": 0,
+        "subject:pm:sprintCompleted": 0,
+        "event:pm:sprintCompleted": 0,
+        "object:pm:stepStarted": 0,
+        "subject:pm:stepStarted": 0,
+        "event:pm:stepStarted": 0,
+        "object:pm:stepCompleted": 0,
+        "subject:pm:stepCompleted": 0,
+        "event:pm:stepCompleted": 0,
+        "object:pm:gatePassed": 0,
+        "subject:pm:gatePassed": 0,
+        "event:pm:gatePassed": 0,
+        "object:pm:gateBlocked": 0,
+        "subject:pm:gateBlocked": 0,
+        "event:pm:gateBlocked": 0,
+        "object:venture:disbursement": 0,
+        "subject:venture:disbursement": 0,
+        "event:venture:disbursement": 0,
+        "object:venture:conditionMet": 0,
+        "subject:venture:conditionMet": 0,
+        "event:venture:conditionMet": 0,
+        "object:venture:actionItemCompleted": 0,
+        "subject:venture:actionItemCompleted": 0,
+        "event:venture:actionItemCompleted": 0
+      },
+      "decision_leg": {
+        "events": 26,
+        "event_point_kind_rows": 80,
+        "decision_wording_points": [
+          {
+            "doc_id": "doc-01",
+            "kind": "statement",
+            "text": "We choose ColdPath Logistics as our delivery partner"
+          },
+          {
+            "doc_id": "doc-05",
+            "kind": "statement",
+            "text": "We revert to NordicFreight as our delivery partner and stop using ColdPath Logistics"
+          }
+        ]
+      },
+      "role_leg": {
+        "subject_entities": 10,
+        "examples": [
+          "Priya Nair",
+          "Dev Patel",
+          "Marta Reyes",
+          "delivery partner",
+          "the food safety auditor",
+          "ColdPath Logistics",
+          "NordicFreight",
+          "Sales Lead",
+          "Finance Director",
+          "Operations Lead"
+        ]
+      },
+      "document_leg": {
+        "sources": 12,
+        "documents_ingested": 6,
+        "sources_with_points": 12
+      },
+      "verdict": "PASS"
+    },
+    "T5": {
+      "test": "T5",
+      "rule": "PASS iff every sampled relation is stated or directly implied by the corpus text \u2014 both endpoints named in one document, and the predicate's wording present. One invented edge fails the test.",
+      "sampled": 26,
+      "tiers": {
+        "verbatim": 17,
+        "paraphrase": 9,
+        "none": 0
+      },
+      "supported": 26,
+      "unsupported": [],
+      "rows": [
+        {
+          "doc_id": "doc-01",
+          "pass": 1,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "the ColdPath contract negotiation",
+          "dst": "Marta Reyes",
+          "src_kind": "venture:actionItem",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-01"
+            ],
+            "best_overlap": 0.75
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [],
+          "co_stated_paraphrase": [
+            "doc-01"
+          ],
+          "support": "paraphrase"
+        },
+        {
+          "doc_id": "doc-01",
+          "pass": 1,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "the capital spending line approval",
+          "dst": "Dev Patel",
+          "src_kind": "venture:actionItem",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-04"
+            ],
+            "best_overlap": 0.8
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-04"
+          ],
+          "support": "paraphrase"
+        },
+        {
+          "doc_id": "doc-01",
+          "pass": 1,
+          "predicate": "related",
+          "stated_predicate": "related",
+          "write_path": "structural",
+          "src": "the delivery partner decision",
+          "dst": "ColdPath Logistics",
+          "src_kind": "core:decision",
+          "dst_kind": "core:organization",
+          "src_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-03",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-05"
+          ],
+          "support": "paraphrase"
+        },
+        {
+          "doc_id": "doc-02",
+          "pass": 1,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "Marta Reyes",
+          "dst": "Operations Lead",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:role",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-01",
+            "doc-02",
+            "doc-04",
+            "doc-05"
+          ],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-02",
+            "doc-04",
+            "doc-05"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-02",
+          "pass": 1,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "Dev Patel",
+          "dst": "Finance Director",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:role",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-01",
+            "doc-02",
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-02",
+            "doc-04"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-02",
+          "pass": 1,
+          "predicate": "IMPL",
+          "stated_predicate": "causes",
+          "write_path": "direct",
+          "src": "the food safety auditor",
+          "dst": "the per-delivery temperature log requirement",
+          "src_kind": "core:organization",
+          "dst_kind": "agent-ops:rule",
+          "src_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-02"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-02",
+              "doc-03",
+              "doc-04"
+            ],
+            "best_overlap": 0.67
+          },
+          "co_stated_verbatim": [],
+          "co_stated_paraphrase": [
+            "doc-02"
+          ],
+          "support": "paraphrase"
+        },
+        {
+          "doc_id": "doc-02",
+          "pass": 1,
+          "predicate": "IMPL",
+          "stated_predicate": "causes",
+          "write_path": "direct",
+          "src": "the wholesale licence",
+          "dst": "the wholesale licence subcontracting restriction",
+          "src_kind": "core:agreement",
+          "dst_kind": "agent-ops:rule",
+          "src_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-02",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-02",
+              "doc-05"
+            ],
+            "best_overlap": 0.8
+          },
+          "co_stated_verbatim": [],
+          "co_stated_paraphrase": [
+            "doc-02",
+            "doc-05"
+          ],
+          "support": "paraphrase"
+        },
+        {
+          "doc_id": "doc-03",
+          "pass": 1,
+          "predicate": "produces",
+          "stated_predicate": "produces",
+          "write_path": "structural",
+          "src": "delivery partner",
+          "dst": "morning delivery slot",
+          "src_kind": "core:organization",
+          "dst_kind": "other",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-03",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-03",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-03",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-03"
+          ],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-03",
+            "doc-05"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-03",
+          "pass": 1,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "account onboarding",
+          "dst": "Priya Nair",
+          "src_kind": "core:workflow",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-03",
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-03",
+            "doc-04",
+            "doc-06"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-03",
+          "pass": 1,
+          "predicate": "dependsOn",
+          "stated_predicate": "dependsOn",
+          "write_path": "structural",
+          "src": "account onboarding",
+          "dst": "signed supply agreement",
+          "src_kind": "core:workflow",
+          "dst_kind": "core:agreement",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03"
+            ],
+            "paraphrase_docs": [
+              "doc-03"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-03"
+          ],
+          "co_stated_paraphrase": [
+            "doc-03"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-03",
+          "pass": 1,
+          "predicate": "dependsOn",
+          "stated_predicate": "dependsOn",
+          "write_path": "structural",
+          "src": "account onboarding",
+          "dst": "the per-delivery temperature log requirement",
+          "src_kind": "core:workflow",
+          "dst_kind": "agent-ops:rule",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-02",
+              "doc-03",
+              "doc-04"
+            ],
+            "best_overlap": 0.67
+          },
+          "co_stated_verbatim": [],
+          "co_stated_paraphrase": [
+            "doc-03",
+            "doc-04"
+          ],
+          "support": "paraphrase"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 1,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "Marta Reyes",
+          "dst": "Operations Lead",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:role",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-01",
+            "doc-02",
+            "doc-04",
+            "doc-05"
+          ],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-02",
+            "doc-04",
+            "doc-05"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 1,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "Dev Patel",
+          "dst": "Finance Director",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:role",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-01",
+            "doc-02",
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-02",
+            "doc-04"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 1,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "Priya Nair",
+          "dst": "Sales Lead",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:role",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-03",
+            "doc-04",
+            "doc-05",
+            "doc-06"
+          ],
+          "co_stated_paraphrase": [
+            "doc-03",
+            "doc-04",
+            "doc-05",
+            "doc-06"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 1,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "delivery scheduling",
+          "dst": "Marta Reyes",
+          "src_kind": "other",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-04"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 1,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "cold-chain temperature log",
+          "dst": "Marta Reyes",
+          "src_kind": "other",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-02",
+              "doc-03",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-02",
+            "doc-04"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 1,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "supplier payments",
+          "dst": "Dev Patel",
+          "src_kind": "other",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-01",
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-04"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 1,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "capital spending approvals",
+          "dst": "Dev Patel",
+          "src_kind": "other",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-04"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 1,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "account onboarding",
+          "dst": "Priya Nair",
+          "src_kind": "core:workflow",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-03",
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-03",
+            "doc-04",
+            "doc-06"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 1,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "restaurant account pipeline",
+          "dst": "Priya Nair",
+          "src_kind": "core:workflow",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-04",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-04",
+            "doc-06"
+          ],
+          "co_stated_paraphrase": [
+            "doc-03",
+            "doc-04",
+            "doc-06"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-05",
+          "pass": 1,
+          "predicate": "related",
+          "stated_predicate": "related",
+          "write_path": "structural",
+          "src": "ColdPath Logistics",
+          "dst": "the wholesale push",
+          "src_kind": "core:organization",
+          "dst_kind": "core:Project",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-02",
+              "doc-05"
+            ],
+            "best_overlap": 0.67
+          },
+          "co_stated_verbatim": [],
+          "co_stated_paraphrase": [
+            "doc-05"
+          ],
+          "support": "paraphrase"
+        },
+        {
+          "doc_id": "doc-05",
+          "pass": 1,
+          "predicate": "related",
+          "stated_predicate": "related",
+          "write_path": "structural",
+          "src": "NordicFreight",
+          "dst": "the wholesale push",
+          "src_kind": "core:organization",
+          "dst_kind": "core:Project",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-02",
+              "doc-05"
+            ],
+            "best_overlap": 0.67
+          },
+          "co_stated_verbatim": [],
+          "co_stated_paraphrase": [
+            "doc-05"
+          ],
+          "support": "paraphrase"
+        },
+        {
+          "doc_id": "doc-05",
+          "pass": 1,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "renegotiating with NordicFreight",
+          "dst": "Marta Reyes",
+          "src_kind": "venture:actionItem",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-05"
+          ],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-05"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-06",
+          "pass": 1,
+          "predicate": "related",
+          "stated_predicate": "related",
+          "write_path": "structural",
+          "src": "Priya Nair",
+          "dst": "Sales Lead",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:role",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-03",
+            "doc-04",
+            "doc-05",
+            "doc-06"
+          ],
+          "co_stated_paraphrase": [
+            "doc-03",
+            "doc-04",
+            "doc-05",
+            "doc-06"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-06",
+          "pass": 1,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "restaurant account pipeline",
+          "dst": "Priya Nair",
+          "src_kind": "core:workflow",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-04",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-04",
+            "doc-06"
+          ],
+          "co_stated_paraphrase": [
+            "doc-03",
+            "doc-04",
+            "doc-06"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-06",
+          "pass": 1,
+          "predicate": "dependsOn",
+          "stated_predicate": "dependsOn",
+          "write_path": "structural",
+          "src": "cold-chain morning delivery capacity",
+          "dst": "40 restaurant accounts by December",
+          "src_kind": "other",
+          "dst_kind": "core:goal",
+          "src_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [],
+          "co_stated_paraphrase": [
+            "doc-03",
+            "doc-05",
+            "doc-06"
+          ],
+          "support": "paraphrase"
+        }
+      ],
+      "predicate_histogram": {
+        "produces": 1,
+        "related": 4,
+        "IMPL": 2,
+        "dependsOn": 3,
+        "ownedBy": 16
+      },
+      "verdict": "PASS"
+    }
+  },
+  "rules": {
+    "T1": "PASS iff the second ingestion adds no RE-STATED knowledge: 0 new Objects, 0 new Subjects, 0 same-name entities, and no Point whose text re-states an existing Point (>= 0.8 content-token overlap with a pass-1 Point). Events are reported SEPARATELY and are not counted as noise on the object axis: a re-ingestion IS an occurrence, so one Event per capture is expected \u2014 but an event-kind POINT re-minted for a sentence that was already stated is noise, and is counted.",
+    "T2": "PASS iff the restatement (doc-06) adds 0 entities, and the goal fact resolves to ONE point/entity carrying two sources; a second same-meaning entity or an unlinked second point is FAIL.",
+    "T3": "Reported as a share, with an explicit population. PASS iff the majority of created entities are NOT orphans AND every orphan named is standalone in the corpus text; otherwise FAIL, with the door's own answer reported beside the write receipt's so a door defect cannot be laundered as an extractor defect.",
+    "T4": "PASS iff none of the ontology's types is collapsed: the flat (Point/Event/Subject/Object/Source) distribution is non-degenerate, decisions land as the event/decision kind rather than as a bare statement, roles land as Subjects, and documents land as Sources.",
+    "T5": "PASS iff every sampled relation is stated or directly implied by the corpus text \u2014 both endpoints named in one document, and the predicate's wording present. One invented edge fails the test."
+  }
+}

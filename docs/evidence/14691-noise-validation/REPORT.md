@@ -1,0 +1,189 @@
+# #14691 T1–T5 — the five noise tests, measured on a fresh graph
+
+**Head measured:** `31a320e392a7b7bed06d6a33d16b5cc34e7d76e9` (main, includes `#14790`'s write-path
+orientation fix). **Graph:** `xv14691_noise` on this lane's own container
+(`docker://:@127.0.0.1:16420/tortoise_test_matrix`) — never the shared 6379 instance, never `live-v5`.
+**Corpus:** `corpus/noise-corpus.json`, 6 documents, **5,280 chars ≈ 1.3k tokens**.
+**Model:** `deepseek-v4-flash` (the extraction default). **Tokens:** 157,787 prompt + 20,158 completion
+(23 calls) for pass 1; 161,487 + 18,948 (24 calls) for pass 2 — **358,380 total, 47 calls,
+≈272× amplification, `cost_usd: 0.0` on all 47 calls** (the product still cannot price its own
+extraction: `calls_without_cost: 47`).
+
+Every write went through `mine_knowledge_from_session`; every read went through `graph_overview`,
+`search_knowledge`, `get_entity`, `explore_connections` or `list_knowledge` — the SDK doors the MCP
+tools map onto. No Cypher, no hand-rolled HTTP. A question those doors could not answer is recorded
+in §7, never worked around.
+
+## 1. The answer in one sentence
+
+**No — this is not yet a logical model of that business: the entities are clean and correctly typed,
+but every fact is stored as a new sentence each time it is heard, so the graph doubles its Point layer
+on a second reading of the same six documents while its entity skeleton stays exactly the same size.**
+
+## 2. The five tests
+
+| # | test | verdict | the numbers |
+|---|---|---|---|
+| **T1** | duplicate multiplication | **FAIL** | pass 1 → `Point 134 · Event 12 · Subject 10 · Object 25 · Source 6`; pass 2 → `Point 243 · Event 26 · Subject 10 · Object 29 · Source 12`. **+109 Points (+81 %), +14 Events, +4 Objects, +6 Sources, +19 operators, +90 structure rows.** `Subject +0`, `0` same-name entity duplicates. **38 of the 61 Points created on pass 2 (62 %) re-state a pass-1 Point at ≥ 0.80 token overlap (29 of them at 1.00) — and all 38 were written anyway: 26 carry `dedup: "new"` (not recognised at all), and 12 took the `content_hash_hit` path, i.e. recognised as a duplicate and created regardless. Every one of the 12 content-hash hits is a restatement.** Relations did **not** grow: 26 written on pass 1, 21 on pass 2 (−5). |
+| **T2** | same fact, two wordings | **FAIL** | the goal fact ("40 restaurant accounts by December … 18 today, 22 to go") is stated in **doc-03** and restated in **doc-06**. Ingesting doc-06 added **+15 Points, +1 Object, +1 Event, +1 Source** and produced **2 distinct goal Points with no shared id** (`shared: []`). The retrieval probe's **top hit is `doc-03-replay`** — the pass-2 duplicate outranks the original. |
+| **T3** | orphan share | **PASS** | of the **30 entities the doors can enumerate**, **7 (23.3 %)** have **no entity→entity edge** in either write receipt. Every orphan is named in §5 with its traceability; 5 of 7 trace to the corpus, 2 carry names the corpus never says (a naming defect reported under T5's axis, not an orphan-share defect). The **door** says **0 of 30 are isolated** — because it counts a Point mention as a neighbour (§7 D4). |
+| **T4** | type collapse | **PASS** | flat distribution `Point 243 · Event 26 · Subject 10 · Object 29 · Source 12`; **13 distinct entity kinds used**: `core:naturalPerson` 3, `core:role` 3, `core:organization` 4, `core:workflow` 3, `core:strategy` 3, `core:agreement` 2, `core:standard` 2, `core:goal` 1, `core:decision` **1**, `core:Project` 1, `agent-ops:rule` 3, `venture:actionItem` 3, `product-strategy:customerSegment` 1. Decisions land as `core:decision` + event-kind Points (`statement` 111, `event` 80); roles land as **Subjects** (3 roles + 3 people); documents land as **Sources** (6 per pass). |
+| **T5** | invented connections | **PASS** | **26 relations sampled**, all 26 checked against the text: **17 verbatim co-stated** (both endpoint names appear in one document), **9 paraphrase** (one endpoint is the extractor's own name for a stated thing — e.g. *"the ColdPath contract negotiation"* for *"you negotiate the contract"*), **0 with no support**. Predicates: `ownedBy` 16, `related` 4, `dependsOn` 3, `IMPL` 2, `produces` 1. **No relation the text never makes.** The 9 paraphrases are the naming axis, not the invention axis — a one-tier substring test would have scored all 9 as invented. |
+
+Scorer: `score_t1_t5.py` (pure function of `out/ingest-receipt.json` + `out/readback.json`; no graph,
+no network, no model call). Each verdict is a rule over numbers, and the rule is quoted beside it in
+`out/t1-t5-score.json`.
+
+## 3. The premise: the graph really was empty
+
+`empty_before` in `out/ingest-receipt.json` is the full `graph_overview()` reply taken before any
+write: `taxonomy {"Point": 0, "Event": 0, "Subject": 0, "Object": 0, "Source": 0}`,
+`structure.total 0`, `operators 0`. `run_ingest.py::refuse_if_not_fresh` **raises** on any content
+found anywhere in that reply — it is a function so the bundle's suite drives the refusal itself, not
+its predicate. A run against a populated graph exits non-zero and writes no bundle.
+
+## 4. T1 — the noise test, and the mechanism behind it
+
+Pass 2 is not an idempotent replay: it uses distinct session ids (`doc-01-replay` … `doc-06-replay`),
+i.e. the same six documents uploaded again, which is the owner's failure mode ("previous graphs became
+all noise"). What grew:
+
+| axis | pass 1 | pass 2 | delta |
+|---|---|---|---|
+| `Point` | 134 | 243 | **+109** |
+| `Event` | 12 | 26 | +14 |
+| `Subject` | 10 | 10 | **0** |
+| `Object` | 25 | 29 | +4 |
+| `Source` | 6 | 12 | +6 (one per re-uploaded document — expected) |
+| `structure.total` | 101 | 191 | +90 |
+| `operators` | 33 | 52 | +19 |
+| relations written | 26 | 21 | **−5** |
+
+Two different layers behave in two different ways, and the difference is the finding:
+
+* **Entity identity holds.** `Subject +0`, `Object +4`, and **0** names that resolve to two ids. The
+  dedup that exists works at the *entity/name* layer.
+* **The Point layer does not.** 61 Points were created on pass 2; **38 of them re-state a pass-1
+  Point** at ≥ 0.80 content-token overlap — **29 of the 38 at 1.00** — and **26 of those 38 carry
+  `dedup: "new"`** (not recognised at all) while **12 took the `content_hash_hit` path and were
+  created regardless**; all 12 hash hits in the run are restatements. `merges: 0`, `deletions: 0` on every document
+  in both passes. Examples (full list in `out/t1-t5-score.json` → `tests.T1.restated_points_pass_2`):
+
+  | overlap | dedup | pass 2 said | pass 1 already held |
+  |---|---|---|---|
+  | 1.00 | new | "We missed four morning restaurant slots in January because of NordicFreight…" | "…NordicFreight's 6pm order cutoff cannot make our morning restaurant slots…" |
+  | 0.91 | new | "ColdPath Logistics offers a 9pm order cutoff and a validated cold-chain certificate" | "ColdPath Logistics offers a 9pm cutoff that meets…" |
+  | 1.00 | new | "Our cash buffer is 31,000 pounds and is committed to the March supplier payments" | same fact, pass 1 |
+
+* **Event-kind Points re-mint in lockstep.** `points_by_kind.event` goes **40 → 80** — every event-kind
+  Point minted on pass 1 is minted again on pass 2, exactly, which is the cleanest single witness of
+  the defect: nothing about a re-reading of the same sentence makes it a new event.
+* **Relations are the exception.** The relation layer did not grow (26 → 21). Whatever dedup the
+  writer applies to edges holds; it is the Point/claim layer above it that multiplies.
+
+`Graph audit` at the end: `node_count 243`, `edge_count 107`, and `missing_sourceKind_source` **67** —
+67 Source-bearing rows whose Source carries no `sourceKind`. That is a data-quality defect visible
+from the product's own audit and is reported as a gap (§7 D5), not folded into T1.
+
+## 5. T3 — the orphans, named
+
+Population: the 30 entities the typed full scan resolves (**20 of 29 Objects, 10 of 10 Subjects,
+0 of 26 Events** — §7 D2). Orphan = **no entity→entity edge** in either pass's `relation_write`.
+
+| orphan | kind | traceable? | why it is standalone |
+|---|---|---|---|
+| `the ownership map` | `core:standard` | paraphrase of doc-04 ("write down the ownership") | it is the *artifact* the meeting produced, not a business object |
+| `revert to NordicFreight as delivery partner` | `core:strategy` | paraphrase of doc-05 | names the reversal decision; the decision is a fact about the corpus's ending, not a node with parts |
+| `the own refrigerated van option` | `core:strategy` | paraphrase of doc-01 Option C | a rejected option — standalone by nature |
+| `the 4 degrees Celsius cold-chain constraint` | `agent-ops:rule` | paraphrase of doc-02 | a rule with no declared part-of edge to a parent policy |
+| `restaurant account` | `product-strategy:customerSegment` | **verbatim** (doc-03/04/05/06) | the segment counted by the goal; it has no containment edge because nothing in the corpus contains it |
+| `the cold-chain rules as operational preferences` | `core:strategy` | **name the corpus never says** | invented label — reported on T5's naming axis |
+| `chilled-goods operation` | `core:workflow` | **name the corpus never says** | invented label — same |
+
+**5 of 7 are genuinely standalone or plainly paraphrased; 2 carry a name no sentence states.** That
+does not fail T3's share criterion — 23 % is far from "the majority is orphaned" — but it is the same
+naming defect T5's paraphrase tier measures (9 of 26 edges have one renamed endpoint), and it is why
+T5's rule is stated in tiers instead of as a substring test.
+
+## 6. The other two failures in T2's shape
+
+T2's corpus pair is doc-03 (goal stated) / doc-06 (goal restated in different words, nothing new in
+it — it names Priya Nair, the 40 accounts, December, 18 held, 22 outstanding, the 4-degree rule, and
+"Marta and Dev have it in the ownership note"). Ingesting doc-06 — *during pass 1, on an
+already-populated graph* — added:
+
+`Point +15 · Object +1 · Event +1 · Source +1 · structure +14 · operators +1`, with the goal fact
+landing as **two Points with no shared id** and the retrieval probe's rank 1 coming from
+`doc-03-replay`. So the "+0 entities / +1 source link" bar is missed on **both** legs: entities grew,
+and the second source attached to a *second* thing rather than to the first.
+
+## 7. Door findings (measured, not worked around)
+
+* **D1 — `graph_overview("namespaces")` carries no kind names.** It returns `namespace` + `kind_count`
+  only (measured: `[{"namespace": "agent-ops", "kind_count": 4}, …]`). An agent asking "what kinds does
+  this graph hold" gets counts it cannot act on; the bundle builds its kind vocabulary from the
+  product's own `pack_registry` instead and says so (`readback.json` → `vocabulary_source`).
+* **D2 — Events are not enumerable.** `search_knowledge(entity_type="event")` over every declared
+  event kind resolves **0 of the 26 stored Events**. Anything an agent wants to know about events has
+  to be answered from a Point's text.
+* **D3 — a bare or absent kind answers an empty list, silently.** `search_knowledge(entity_type =
+  "object")` (no kind) → `[]`; `kind="core:organization"` → 4. T6 reported the bare-kind variant; this
+  is the same wall one layer out, and it is why the population coverage is stated as a number (30 of
+  65 = 46 %) instead of assumed.
+* **D4 — "connected" is not "modelled".** `explore_connections` reports **0 isolated entities** of the
+  same 30 that the write receipts show 7 with no entity→entity edge, because it counts a Point *mention*
+  as a neighbour. The door cannot distinguish "this thing is part of the model" from "this thing is
+  named in a sentence".
+* **D5 — the graph's own audit flags 67 rows** `missing_sourceKind_source`: Sources carry no
+  `sourceKind`. Not a T1–T5 verdict input, but it is the product reporting against itself and should
+  not be lost.
+
+## 8. Gaps — what this bundle does NOT measure
+
+1. **The same-session replay.** Pass 2 uses fresh session ids on purpose (§4). A retry of the *same*
+   capture may behave differently (it can key on the session), and that variant has no number here.
+2. **Point-level epistemic edges.** A Point's edges to its Subject/Object are not in
+   `relation_write`, so T3's orphan population is **entities only**; the share of orphaned *Points* is
+   unmeasured, and that is the layer where T1 fails worst.
+3. **Event semantics.** Whether one Event per capture is intended is not stated anywhere the lane could
+   read; the bundle reports the increment (+14) without judging it, and counts only *event-kind Points*
+   (+40) as noise.
+4. **One model, one run.** `deepseek-v4-flash`, one ingest per pass, no repetition — so extraction
+   variance is unknown and the numbers are one draw.
+5. **Cost is not measurable through the product**: `cost_usd: 0.0`, `calls_without_cost: 47`. The token
+   counts above are the only cost signal.
+6. **Retrieval quality**: this box's `embeddings` extra installs, but the run made no embedding
+   assertion; the probes are FTS-led and their ranking is a floor, not a measurement of hybrid recall.
+7. **The contradiction (doc-01 vs doc-05).** This bundle did not score whether the corpus's
+   contradiction is represented — that is `#14198`'s home and T6 recorded it as a known defect; T1–T5
+   do not depend on it.
+
+## 9. What a fix has to act on (not done here — this measures)
+
+The issue forbids changing the extractor in this lane. The measurements point at one seam and one
+missing rule:
+
+1. **The Point write path needs the rule the entity path already has.** 38 of 61 pass-2 Points restate
+   a pass-1 Point at ≥ 0.80 overlap — 26 tagged `new`, 12 recognised by content hash and written
+   anyway; the writer that reconciles a
+   *name* to an entity has no counterpart that reconciles a *claim* to an existing Point (the
+   `content_hash_hit` path exists and created the row anyway).
+2. **"Two wordings, one thing" needs a merge, not a dedup verdict.** T2's failure is not a failed hash
+   match — it is that no step asks "is this the same fact, said differently", which is the definition of
+   the test.
+3. **Deterministic document identity.** Each re-upload minted a Source and a full set of Points. Naming
+   the document by content (the corpus's `doc-01`…`doc-06` ids already exist) is what makes re-ingestion
+   idempotent rather than merely re-deduped — the comparable practice outside this repo
+   (`docs.falkordb.com/graphrag/ingestion`, `…/storage`: deterministic document/chunk ids, idempotent
+   `MERGE`, provenance edges, then cross-document entity resolution).
+
+## 10. Reproduce
+
+```bash
+export TORTOISE_DB_URI="$(uv run python tools/test_lane.py uri | sed -n "s/^export TORTOISE_DB_URI='\(.*\)'/\1/p")"
+bash docs/evidence/14691-noise-validation/run.sh docs/evidence/14691-noise-validation/run_ingest.py
+bash docs/evidence/14691-noise-validation/run.sh docs/evidence/14691-noise-validation/run_readback.py
+uv run python docs/evidence/14691-noise-validation/score_t1_t5.py
+```
+
+`run_ingest.py` refuses a non-empty graph; `score_t1_t5.py` needs no graph at all.
