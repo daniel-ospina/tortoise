@@ -4862,8 +4862,17 @@ def write_live_record(record: Mapping[str, Any], *,
                 # an INDEPENDENT axis across all of them, not a fourth. ⛔ EACH
                 # CAUSE IS NAMED IN THE SHIPPED SENTENCE, not only here — a
                 # comment does not reach the operator (round 28 P2).
-                "an OUTAGE is healed by a replay; a statement that EXECUTED and "
-                "failed re-fails until its own cause (its data or a constraint) "
+                # ⛔ THE HEAL IS NOT UNCONDITIONAL ON THIS ARM EITHER (round-38
+                # P2). The last clause of THIS SAME sentence refuses an
+                # enumerated replay that carries a position on a cut-over
+                # graph, so a bare "an outage is healed by a replay" promised
+                # what the sentence itself then withheld. The ARMED twin was
+                # qualified for exactly this reason rounds ago; this one kept
+                # the unconditional form.
+                "an OUTAGE is healed by a replay, but which FORM follows the "
+                "cursor ROW (see the last clause); a statement that EXECUTED "
+                "and failed re-fails until its own cause (its data or a "
+                "constraint) "
                 "is fixed; a STORE/CONFIG refusal (the tenant scope, a role that "
                 "bypasses RLS) re-raises until the DSN or the role is fixed; "
                 # ⛔ THE CUTOVER GUARD'S READ IS ITS OWN REMEDY AND IT IS NOT THE
@@ -5029,7 +5038,8 @@ def write_live_record(record: Mapping[str, Any], *,
                 "until the DSN or the role is fixed; only a REPLAY that "
                 "allocates is asked the isolation question, so a "
                 "non-allocating replay is not refused by it — `seed`/`arm`/"
-                "`reopen` ask it unconditionally, so they refuse identically "
+                "`halt`/`reopen` ask it unconditionally, so they refuse "
+                "identically "
                 "at REPEATABLE READ"
             )
         _logger.warning(

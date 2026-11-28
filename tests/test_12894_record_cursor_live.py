@@ -1265,7 +1265,11 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
             assert "with mode='active' an ALLOCATING replay" in text, (
                 "the ACTIVE half still needs the allocating form — a plain "
                 f"replay is refused on a cut-over graph: {text[-400:]!r}")
-            assert "`seeded`/`halted` row takes re-seed" in text, (
+            assert (
+                "`seeded`/`halted` row takes re-seed (`halted` after "
+                "`reopen`) and then `arm` FIRST, or the allocation itself "
+                "refuses"
+            ) in text, (
                 "a seeded/halted cursor needs re-seed (+`reopen`) and `arm` "
                 f"FIRST, and nothing here said so: {text[-400:]!r}")
             # ⛔ THE RETRYABLE HALF, BOTH DIRECTIONS (round-32 P2 -> round-34 P3
@@ -1331,7 +1335,10 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
                     "a lock still held) re-fails on the identical replay, so "
                     f"the blanket claim is false for that member: {blanket!r} "
                     f"in {text[-400:]!r}")
-            assert "statement that EXECUTED and failed on its own data or a constraint" in text, (
+            assert (
+                "statement that EXECUTED and failed on its own data or a "
+                "constraint re-fails on that replay until that cause is fixed"
+            ) in text, (
                 "the ARMED arm still promises a heal to a statement that "
                 "executed and failed — any replay RE-EXECUTES it and re-fails "
                 f"on the same data: {text[-400:]!r}")
@@ -1386,7 +1393,7 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
             # seeded/halted operator to `re-seed` then `arm`. Pinned in both
             # directions: the exception is present, and the bare universal
             # cannot come back.
-            for verb in ("`seed`/`arm`/`reopen`",
+            for verb in ("`seed`/`arm`/`halt`/`reopen`",
                          "they refuse identically at REPEATABLE READ"):
                 assert verb in text, (
                     "the isolation clause must name the allocator verbs that "
@@ -1411,9 +1418,21 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
             # before round 28 this leg asserted two of the three and the third
             # lived only in a code comment, so a regression that dropped it from
             # the SHIPPED sentence was invisible.
-            assert "an OUTAGE is healed by a replay" in text, (
-                "the ENUMERATED arm stopped naming the outage half — a replay "
-                f"IS the remedy there: {text[-400:]!r}")
+            assert (
+                "an OUTAGE is healed by a replay, but which FORM follows the "
+                "cursor ROW"
+            ) in text, (
+                "the ENUMERATED arm stopped qualifying the heal by the FORM "
+                "the cursor row allows — this sentence refuses a plain replay "
+                f"in its own last clause: {text[-400:]!r}")
+            # ⛔ THE UNCONDITIONAL FORM CANNOT COME BACK (review P2, round 38).
+            # The last clause of THIS sentence refuses an enumerated replay that
+            # carries a position on a cut-over graph, so the bare claim promises
+            # a heal the same sentence withholds.
+            assert "an OUTAGE is healed by a replay;" not in text, (
+                "the ENUMERATED arm is back to the UNCONDITIONAL heal claim, "
+                "which its own cutover clause contradicts: "
+                f"{text[-400:]!r}")
             assert "statement that EXECUTED and failed re-fails" in text, (
                 "the ENUMERATED arm still promises a heal to a statement that "
                 "executed and failed — a `RecordStatementError` re-fails on a "

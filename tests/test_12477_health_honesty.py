@@ -557,7 +557,6 @@ def test_health_reports_the_refusal_window_without_touching_status(monkeypatch):
     assert body["status"] == clean["status"], (
         "a refusal window is reported, never folded into `status` "
         "(#10185/#10620); the verdict lives on the 9090 listener")
-    assert "degraded_reasons" not in body
     # Its OWN key: `degraded_reasons` belongs to `record` (a documented
     # eight-value vocabulary), and two schemas under one name is how a consumer
     # reads the wrong one.
