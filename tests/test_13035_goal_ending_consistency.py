@@ -1100,6 +1100,84 @@ def test_the_SWEEP_clears_a_goal_retired_by_the_LEGACY_outdated_flag(sdk):
     assert sdk.get_entity(goal["id"]).get("goalState") in (None, "")
 
 
+@pytest.mark.parametrize("write", [
+    "SET n.isClosed = true",
+    "SET n.pipelineSlot = 'terminal'",
+])
+def test_the_SWEEP_clears_a_goal_retired_on_the_POSITION_axis(sdk, write):
+    """#14796 — the THIRD input of the same predicate, and the one nothing read.
+
+    `_retired_by_status` answered from the lifecycle word (`status` in the
+    terminal vocabulary, or the legacy `outdated` flag) while design §6 has TWO
+    sources and either one alone is an ending. A goal ended on the POSITION axis
+    therefore short-circuited to `consistent` and kept a `goalState` word the
+    door clears — the same false PASS rounds 5 and 6 fixed for the word's two
+    halves, one axis over.
+
+    ⛔ The live judgement is what makes this able to FAIL (round 8's vacuity
+    class): without one `expected` is already `None`, both spellings reach the
+    repair, and the test proves nothing about the predicate it names.
+    """
+    from tortoise.derived_invalidation import reconcile_goal_states
+
+    goal = _goal(sdk, tag=f"sweep-position-{write[-12:]}")
+    indicator = sdk._create_object("CI pipeline duration [pos]",
+                                 objectKind="workflow")
+    target = sdk._create_object("CI <= 10m [pos]", objectKind="target",
+                              comparator="<=", threshold=10.0, dwell=1)
+    sdk._create_event("CI run 2026-11-11T10:00:00Z", "measurement", value=9.0,
+                     unit="minutes", startedAt="2026-11-11T10:00:00Z",
+                     aboutObject=indicator["id"])
+    made = judge_and_record(sdk, goal_id=goal["id"],
+                            indicator_id=indicator["id"],
+                            target=Target.from_node(target))
+    assert made["goalState"] == "met", made        # the cache word STANDS
+    # ...and the goal is then ENDED on the position axis only: `status` stays
+    # live and the legacy flag stays unset, so the word-axis read cannot see it.
+    sdk._get_proj().g.query(f"MATCH (n {{id:$id}}) {write}",
+                            params={"id": goal["id"]})
+    assert sdk.get_entity(goal["id"]).get("status") in (None, "live")
+    out = reconcile_goal_states(sdk)
+    assert out["counts"]["consistent"] == 0, out["counts"]
+    assert out["counts"]["cleared"] >= 1, out["counts"]
+    assert sdk.get_entity(goal["id"]).get("goalState") in (None, ""), (
+        "a goal ended on the position axis kept its derived word: "
+        f"{sdk.get_entity(goal['id'])['goalState']!r}")
+
+
+def test_a_goal_closed_on_the_POSITION_axis_is_NOT_judged(sdk):
+    """#14796 — the OTHER measurement-chain site, same question.
+
+    `goal_judgement._goal_retired_on_status` guards the cache write that stops a
+    PARTIAL write (the `ValueError` lands after the judgement Point and its
+    `IMPL` arrow). It read `(status, outdated)` only, so a goal closed by
+    `isClosed` was still judged and its `goalState` cache was repaired as live.
+
+    The discriminator is `made["goalState"] is None`: the helper returns the
+    word it WROTE, and `None` is the guard's own signal that it wrote nothing —
+    a same-value rewrite (`met` over `met`) would be invisible.
+    """
+    indicator, target, goal = _world(sdk, tag="judge-position")
+    sdk._create_event("CI run", "measurement", value=9.0, unit="minutes",
+                     startedAt="2026-11-11T10:00:00Z",
+                     aboutObject=indicator["id"])
+    first = judge_and_record(sdk, goal_id=goal["id"],
+                             indicator_id=indicator["id"],
+                             target=Target.from_node(target))
+    assert first["goalState"] == "met", first
+
+    sdk._get_proj().g.query(
+        "MATCH (n {id:$id}) SET n.isClosed = true", params={"id": goal["id"]})
+    made = judge_and_record(sdk, goal_id=goal["id"],
+                            indicator_id=indicator["id"],
+                            target=Target.from_node(target))
+    assert made["goalState"] is None, made      # the cache was NOT written
+    node = sdk.get_entity(goal["id"])
+    assert node["goalState"] == "met", node     # nothing was stamped over it
+    assert node["isClosed"] is True, node        # ...and the ending survived
+    assert node.get("status") in (None, "live"), node
+
+
 # ── 13. review round 13 ─────────────────────────────────────────────────────
 
 def test_a_READ_MODIFY_WRITE_echo_of_a_terminal_status_is_admitted(sdk):

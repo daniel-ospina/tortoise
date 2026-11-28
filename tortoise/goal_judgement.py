@@ -114,6 +114,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .live import TERMINAL_EXCLUDED_STATUSES as _TERMINAL_EXCLUDED_STATUSES
+# #14796: the reader rule is ONE predicate. A goal's own retirement question is
+# the same question, so it is asked of the same function instead of a
+# vocabulary test written beside it — the spelling that answered from the word
+# axis alone.
+from .live import is_terminal_status
 
 __all__ = [
     "BOUNDARY_UNREADABLE",
@@ -1529,6 +1534,23 @@ def _goal_retired_on_status(sdk: Any, goal_id: str) -> bool:
     Reads ``status`` — never ``goalState``, which this module still does not
     read — and applies the type-first terminal test so a malformed stored value
     cannot turn a judgement into a ``TypeError`` (#13065 review finding 1).
+
+    ⛔ AND THE POSITION AXIS (#14796). The question is "is this goal retired?",
+    not "does its lifecycle word say so": design §6 answers it from two sources
+    and either one alone is an ending. Answered from the word alone, a goal
+    closed by ``isClosed`` (or parked in a stage whose slot is ``terminal``) was
+    still JUDGED and had its ``goalState`` cache stamped as live. The dict comes
+    from ``get_entity`` — ``properties(n)`` — so both markers are already in
+    hand, and ``is_closed``/``stage_slot`` are passed rather than re-decided
+    here (``live.is_terminal_status``'s own docstring asks exactly this of a
+    caller that has them).
+
+    The type-first guard survives the conversion and is why a NON-``str`` status
+    is handed on as the empty word: the shared predicate's word half is a
+    ``frozenset`` membership test, so a stored ARRAY would raise ``TypeError``
+    out of a judgement — ``""`` is what the pre-#14796 spelling answered for
+    every non-``str`` too, and it still reads the position axis, which no
+    malformed status can speak for.
     """
     try:
         node = sdk.get_entity(goal_id, cache_only=True) or {}
@@ -1548,9 +1570,12 @@ def _goal_retired_on_status(sdk: Any, goal_id: str) -> bool:
         # `test_a_goal_whose_status_CANNOT_BE_READ_is_treated_as_RETIRED`.
         return True
     status = node.get("status")
-    return ((issubclass(type(status), str)
-             and str.__str__(status) in _TERMINAL_EXCLUDED_STATUSES)
-            or bool(node.get("outdated")))
+    return is_terminal_status(
+        str.__str__(status) if issubclass(type(status), str) else "",
+        bool(node.get("outdated")),
+        # #14796: the position axis, from the same properties dict.
+        is_closed=node.get("isClosed"),
+        stage_slot=node.get("pipelineSlot"))
 
 
 def _ensure_judgement_edge(sdk: Any, point_id: str, goal_id: str) -> str | None:
