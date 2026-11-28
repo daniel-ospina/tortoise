@@ -1415,19 +1415,24 @@ def test_the_demo_seeder_records_its_target(monkeypatch, tmp_path):
     _drop_uri(monkeypatch)
     sdk = _embedded_sdk(tmp_path)
     try:
-        proj = sdk._get_proj()
         reset_cache_write_targets()
         created = hosted_api._seed_demo_graph("org12943demo", sdk=sdk)
         assert created["status"] == "demo_created", created
-        nodes = proj.g.query("MATCH (n) RETURN count(n)").result_set[0][0]
-        assert nodes > 0, "the seeder wrote nothing, so this test proves nothing"
         assert sum(cache_write_targets().values()) >= 1, (
             "the demo seeder wrote the graph and recorded no target — the "
             f"sentry reads healthy over an uncounted lane: {cache_write_targets()!r}")
 
+        # The SECOND arm proves the first one actually wrote, without a raw
+        # census query of its own (a `proj.g.query` here would raise this repo's
+        # untyped-receiver ratchet, `tools/sdk_privatise.py --check`): the
+        # sentinel short-circuit only answers `already_seeded` when the seeding
+        # run landed the sentinel node. A seeder that wrote nothing would answer
+        # `demo_created` again and this assertion would red.
         before = dict(cache_write_targets())
         again = hosted_api._seed_demo_graph("org12943demo", sdk=sdk)
-        assert again["status"] == "already_seeded", again
+        assert again["status"] == "already_seeded", (
+            "the seeding run wrote no sentinel, so the registry assertion above "
+            f"proves nothing: {again!r}")
         assert cache_write_targets() == before, (
             "the sentinel short-circuit issues only a READ, so it must not "
             f"register a write: {cache_write_targets()!r} != {before!r}")
