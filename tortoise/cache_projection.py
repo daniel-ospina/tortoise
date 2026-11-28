@@ -1000,7 +1000,7 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   ⛔ ONE of its two orderings is CLOSED, and the other is NOT — do not read this
 #:   as "the harm direction is fixed":
 #:   (a-1) the OVERWRITE ordering (above) is CLOSED. The birth arm now honours
-#:   the terminal latch (`_is_terminal_status`) every other in-stream fold here
+#:   the terminal latch (`_is_terminal_object_word`) every other in-stream fold here
 #:   honours, so it can no longer overwrite a terminal the REPLAY ALREADY HOLDS.
 #:   (a-2) the DELETE-THEN-RE-CREATE ordering is STILL OPEN, and the latch
 #:   cannot reach it: it is the `birth_seen` earliest-only rule that discards the
@@ -1145,7 +1145,7 @@ DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, tuple[str, ...], Any], ...]] = {
 #:   NULL OR NOT (o.status IN $excluded)`, applied to EVERY `SET`, so it is a
 #:   state machine rather than a last-writer pick: once a write makes the Object
 #:   terminal, the later folds are refused. This replays the stream with that
-#:   same guard per event (:func:`_is_terminal_status`), so a pack fold that
+#:   same guard per event (:func:`_is_terminal_object_word`), so a pack fold that
 #:   targets a terminal word (`archived`) latches instead of being overwritten
 #:   by the next event — and a supersession (`superseded`, from
 #:   :data:`DERIVED_FROM_RECORD`) still wins in either temporal order. Replaying
@@ -3106,7 +3106,7 @@ _LIFECYCLE_EVENTS_SQL = (
     # ⛔ NO `<> ''` HERE, deliberately (#9974 review round 7, P1 — the first
     # draft added one and it CREATED the divergence it claimed to avoid).
     # `update_entity(obj, status='')` is accepted on `:Object` and the graph
-    # STORES the empty string, where `_is_terminal_status('')` is false — i.e. the
+    # STORES the empty string, where `_is_terminal_object_word('')` is false — i.e. the
     # graph reads LIVE. Excluding it at the reader then keeps an earlier terminal
     # fold, so the rebuilt cache HIDES a name the graph resolves: the same
     # hide-a-live-name direction, produced by the "repair". Folding `''` as the
@@ -3258,7 +3258,7 @@ def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
             # the payload has no `label` to read, and a guessed one would let a
             # birth record fold onto the other family's node of the same id.
             # ⚠️ `''` IS carried, exactly as in the state-op arm below: the
-            # graph stores it and `_is_terminal_status('')` is false. Only a
+            # graph stores it and `_is_terminal_object_word('')` is false. Only a
             # NON-STRING (an absent or null payload `status`) is `None`, and
             # `None` here still MEANS something — it is the creation record that
             # decides the ON CREATE arm, so it must be carried either way.
@@ -3279,13 +3279,13 @@ def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
             # #9974: the caller's explicit lifecycle write. It carries NO
             # `eventKind`, so the connector/pack branch below cannot see it and
             # this arm is the only reader. Any STRING folds — `''` included,
-            # because the graph STORES `''` and `_is_terminal_status('')` is
+            # because the graph STORES `''` and `_is_terminal_object_word('')` is
             # false, so skipping it would keep an earlier terminal fold and hide
             # a name the graph resolves (review round 7). Only a NON-STRING is
             # skipped, and that shape is R4's declared bound.
             node_id = row.get("node_id")
             # ⚠️ `''` IS a value here: the graph stores it (`status=''` is an
-            # accepted write) and `_is_terminal_status('')` is false, so a reader
+            # accepted write) and `_is_terminal_object_word('')` is false, so a reader
             # that skipped it would keep an earlier terminal fold and hide a name
             # the graph resolves. Only a NON-STRING is skipped (R4's bound).
             if not isinstance(restatus, str):
@@ -3373,8 +3373,26 @@ def _lifecycle_index():
     return _status_fold_index()
 
 
-def _is_terminal_status(value: Any) -> bool:
+def _is_terminal_object_word(value: Any) -> bool:
     """Is this an Object status the live fold's guard refuses to overwrite?
+
+    ⛔ THIS IS NOT THE READER RULE (#14796). Its input is a WORD from a journal
+    record, never a row, so it has no position axis to pass and no caller could
+    give it one: the replay latches the position axis by a DIFFERENT mechanism
+    (`apply_stage_fold` with ``reopen=False``, and the ``stage["isClosed"]``
+    marker it carries — see the two latches in ``apply_event_stream_folds``),
+    which is why the two questions do not have to be one function here.
+
+    ⛔ AND IT IS CASE-FOLDED while `live.is_terminal_status` is not, so it cannot
+    be replaced by it either — this is the OBJECT family's own vocabulary
+    (`commit_ops.OBJECT_TERMINAL_STATUSES`), a different family from the Point
+    set the reader rule defaults to.
+
+    It used to be called ``_is_terminal_status``, which name-collided with the
+    shared predicate for the currency question and is exactly how an AST census
+    of "does every currency call site pass an axis?" came to count five sites in
+    this module that ask a different question. The rename is the fix: one name,
+    one question — so the census (and a reader) can tell them apart.
 
     The ONE reading of `commit_ops.OBJECT_TERMINAL_STATUSES` on this path —
     the live guard's `$excluded` (`_terminal_object_statuses()` in
@@ -3527,7 +3545,7 @@ def apply_event_stream_folds(
         # written that way or written out of band (#12869). An undeclared STRING
         # word is still accepted — the `:Object` vocabulary hole (#10371, #8166),
         # a different surface.
-        if _is_terminal_status(current):
+        if _is_terminal_object_word(current):
             out.append(node)
             continue
         kind = node.props.get("objectKind")
@@ -3623,7 +3641,7 @@ def apply_event_stream_folds(
                 #   (a-1) `restatus → silent birth` (`[restatus(seq 1,
                 #   'archived'), birth(seq 2, None)]`) is CLOSED. MEASURED at this
                 #   head: it rebuilds `archived`, because `if not
-                #   _is_terminal_status(status)` refuses to let the silent birth
+                #   _is_terminal_object_word(status)` refuses to let the silent birth
                 #   clear a terminal the replay already holds (pre-latch it
                 #   rebuilt with NO status, which reads LIVE).
                 #   (a-2) `delete-then-re-create` is STILL OPEN —
@@ -3649,7 +3667,7 @@ def apply_event_stream_folds(
                 #     [restatus(seq 5, 'archived'), birth(seq 9, 'live')]
                 #       → rebuilt `live`; the graph holds `archived`.
                 # So the birth arm honours the SAME latch every other in-stream
-                # fold in this function honours (`_is_terminal_status`): a terminal
+                # fold in this function honours (`_is_terminal_object_word`): a terminal
                 # the replay already holds is not overwritten by a later birth.
                 # ⚠️ The non-terminal case is NOT affected — the round-6 fix
                 # above still applies there, because a non-terminal pre-birth fold
@@ -3692,7 +3710,7 @@ def apply_event_stream_folds(
                         # the live graph carries at that point.
                         stage_props = {p: node.props[p] for p in STAGE_PROPS
                                        if p in node.props}
-                    if not _is_terminal_status(status):
+                    if not _is_terminal_object_word(status):
                         # ⛔ #11824 S0 measured this, and it must NOT canonicalise:
                         # the DOOR writes the canonical word into the record
                         # itself (`create_object(status='archived')` journals
@@ -3732,7 +3750,7 @@ def apply_event_stream_folds(
                         # sees — so it is applied here, mirroring the status arm
                         # below. Without it a rebuild moved a stage the live fold
                         # refused (live ≢ rebuilt on the position axis, #11824).
-                        if not _is_terminal_status(status):
+                        if not _is_terminal_object_word(status):
                             _reason, _props = apply_stage_fold(
                                 stage, fold_target.kind,
                                 index.pipeline_for(fold_target.kind),
@@ -3745,7 +3763,7 @@ def apply_event_stream_folds(
                                 }
                                 stage_props = _props
                         continue
-                    if not _is_terminal_status(status):
+                    if not _is_terminal_object_word(status):
                         status = fold_target.target
             if event.object_name == name:
                 builtin_stage = builtin_fold_stage(event.event_kind)
@@ -3753,7 +3771,7 @@ def apply_event_stream_folds(
                 # (`entities.py::_fold_object_status`: a terminal stored word
                 # latches, so a later event cannot resurrect the row).
                 if builtin_stage is not None and not owns \
-                        and not _is_terminal_status(status):
+                        and not _is_terminal_object_word(status):
                     _reason, _props = apply_stage_fold(
                         stage, BUILTIN_CONNECTOR_PIPELINE_KEY,
                         BUILTIN_CONNECTOR_PIPELINE, builtin_stage,

@@ -2268,7 +2268,7 @@ def test_a_terminal_status_latches_the_STAGE_arms_of_the_replay_too():
     arm alike).
 
     The replay kept only the first on its stage arms (the status arm already
-    carried `if not _is_terminal_status(status)`), so a stream that made the row
+    carried `if not _is_terminal_object_word(status)`), so a stream that made the row
     terminal mid-flight — a `restatus` record, the order-blind window this
     module already documents — was REFUSED a stage move live and GIVEN one by a
     rebuild: the rebuilt Object held `pipelineStageId='done'` the graph never
@@ -2311,14 +2311,14 @@ def test_the_terminal_status_latch_binds_the_DECLARED_stage_arm_too():
 
     `apply_event_stream_folds` has TWO stage arms (a pack's declared `stage:`
     target, and the built-in core work-item fold) and each carries its own
-    `if not _is_terminal_status(status)`. The test above exercises the BUILT-IN
+    `if not _is_terminal_object_word(status)`. The test above exercises the BUILT-IN
     arm only (`github.issue.closed`), and it was measured that deleting the
     declared arm's conjunct reds NOTHING there — so without this row the fix is
     one `if True:` from silently returning, on the arm the shipped packs
     actually use (`packs/venture` folds `disbursement` to `stage: released`,
     a `slot: terminal` stage).
 
-    Mutant: `if not _is_terminal_status(status):` -> `if True:` at the
+    Mutant: `if not _is_terminal_object_word(status):` -> `if True:` at the
     `fold_target.axis == FOLD_AXIS_STAGE` branch.
     """
     from tortoise.status_folds import FOLD_AXIS_STAGE, FoldTarget, StatusFoldIndex
@@ -2393,7 +2393,7 @@ def test_a_birth_record_cannot_resurrect_a_terminal_the_graph_holds():
     `start_seq`), and `_upsert_object` then takes the ON MATCH arm, which writes
     no `status` (`projection/entities.py`).
 
-    MEASURED without the latch (`if not _is_terminal_status(status)`): the first
+    MEASURED without the latch (`if not _is_terminal_object_word(status)`): the first
     assertion below reads `'live'`.
     """
     obj = cp.node_from_row("Object", {"id": "o-1", "name": "Acme",
@@ -3740,7 +3740,7 @@ def test_a_pre_birth_fold_cannot_survive_the_creation_record():
         f"the creation record's status did not survive the pre-birth fold "
         f"({folded.props!r}) — the record's own value is stored verbatim (no "
         "second spelling rule on the read side)")
-    assert cp._is_terminal_status(folded.props.get("status"))
+    assert cp._is_terminal_object_word(folded.props.get("status"))
     # ⚠️ The pre-birth fold here is TERMINAL (`released` is the venture tranche's
     # terminal stage), and the replay KEEPS it — the same fail-safe trade the
     # status latch above documents: the rebuild claims LESS life rather than
@@ -3831,7 +3831,7 @@ def test_the_birth_status_is_on_create_only_like_the_live_fold():
     # credited a `status is None` gate, which the birth arm does not have — there
     # is no such gate there (`apply_event_stream_folds`'s `status is None` is the
     # OUTPUT gate that decides whether anything is written at all). The protector
-    # is the `_is_terminal_status(current)` early return, which skips the whole
+    # is the `_is_terminal_object_word(current)` early return, which skips the whole
     # stream for a node whose carrier already made it terminal. A reader who
     # "restored" the gate this note used to name would re-open the round-6 bug
     # (`test_a_pre_birth_fold_cannot_survive_the_creation_record`). A `status`
@@ -3998,7 +3998,7 @@ def test_an_empty_string_status_is_folded_because_the_graph_stores_it():
     """Parity, not tidiness: `status=''` is a value the graph holds.
 
     `update_entity(obj, status='')` is accepted on `:Object` and the graph stores
-    the empty string; `_is_terminal_status('')` is false, so the graph reads LIVE.
+    the empty string; `_is_terminal_object_word('')` is false, so the graph reads LIVE.
     Excluding `''` at the reader (the first draft's "repair") kept an earlier
     terminal fold, so the rebuilt cache HID a name the graph resolves — the very
     direction the exclusion claimed to avoid. Folding it reproduces the graph.
