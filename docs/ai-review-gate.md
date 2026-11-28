@@ -206,11 +206,13 @@ entry condition closes that path.
   with a consumer digest at runtime, so drift between the two halves is invisible
   until someone recomputes the pinned literals — which is how the position-bearing
   frame could be quietly reverted. The harness therefore probes a local producer
-  (via `AGENT_INFRA_PATH` or `~/.pi/agent/scripts`) and reports four distinct
+  (via `AGENT_INFRA_PATH` or `~/.pi/agent/scripts`) and reports five distinct
   outcomes: agree is a PASS; a **producer that fails to run** is its own named
   non-pass (its exit code is probed on every input the section reads — a crash
   also emits no `@@` line, so absorbing it as "the old shape" would hide the
-  drift most worth seeing); the pre-#4261 frame-less shape is a named SKIP; and a
+  drift most worth seeing); a producer that **exits 0 and produces no output** is
+  named separately (a zero-byte projection is the empty-digest hazard, not an old
+  frame); the pre-#4261 frame-less shape is a named SKIP; and a
   position-bearing mismatch is a FAIL. A box with no producer says agreement was
   **not measured** and never claims a pass.
 

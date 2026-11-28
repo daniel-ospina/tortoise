@@ -1899,6 +1899,19 @@ STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
 assert_rc 1 "(t22) a decoy line beside a REWRITTEN branch still FAILS CLOSED"
 assert_contains "(t22) …and the operator is STILL told the branch was rewritten (a pasted line does not silence the diagnosis)" \
     "is NOT an ancestor of this PR's head"
+# …and the ACCURATE reason must come BEFORE the HMAC-mismatch line, not after it. The
+# diagnostics used to sit inside the no-candidate classification block, so a decoy — the
+# very population the acceptable-marker entry condition serves — preempted them and the
+# operator read "HMAC mismatch" with no reason above it. Order, not presence: both lines
+# can be true at once, and only the order says which one is the blocker.
+_rew_ln="$(grep -n 'is NOT an ancestor of this PR' "$T/gate.out" | head -1 | cut -d: -f1)"
+_hmac_ln="$(grep -n 'does not verify against AI_REVIEW_GATE_KEY' "$T/gate.out" | head -1 | cut -d: -f1)"
+if [ -n "$_rew_ln" ] && { [ -z "$_hmac_ln" ] || [ "$_rew_ln" -lt "$_hmac_ln" ]; }; then
+    ok "(t22) …and the reason PRECEDES any HMAC-mismatch line (the decoy does not bury the diagnosis)"
+else
+    bad "(t22) the rewrite diagnosis at line ${_rew_ln:-none} does not precede the HMAC line ${_hmac_ln:-none} — a decoy buries the reason"
+fi
+unset _rew_ln _hmac_ln
 # (b) The other direction on the SAME bytes: an ADVANCED branch (the head descends from
 # the reviewed commit) still carries, so the refusal above is the rewrite and not a
 # rule that refuses everything. Without this half, deleting rule (c) would look green.
@@ -2275,9 +2288,17 @@ else
     _pp_rc=0
     python3 "$_pp_producer" --patch-only < "$REVIEWED_DIFF_FILE" >/dev/null 2>&1 || _pp_rc=$?
     _pp_rc2=0
-    python3 "$_pp_producer" --patch-only < "$T/pp-shape.diff" >/dev/null 2>&1 || _pp_rc2=$?
+    python3 "$_pp_producer" --patch-only < "$T/pp-shape.diff" > "$T/pp-shape.out" 2>/dev/null || _pp_rc2=$?
+    _pp_out=$(wc -c < "$T/pp-shape.out" 2>/dev/null || echo 0)
     if [ "$_pp_rc" -ne 0 ] || [ "$_pp_rc2" -ne 0 ]; then
         echo "  ⏭  (t) the LOCAL producer at $_pp_producer FAILED (rc=${_pp_rc}/${_pp_rc2}) — cross-repo agreement NOT measured (this is not a pass, NOT the pre-#4261 shape, and NOT drift)"
+    elif [ "${_pp_out:-0}" -eq 0 ]; then
+        # rc=0 with NO OUTPUT is not a shape, it is a broken producer: a zero-byte
+        # projection is the `sha256("")` hazard the gate refuses one level up, and
+        # reporting it as "the pre-#4261 shape" would hide exactly the drift this probe
+        # exists to see. Named separately, and counted as neither a pass nor a skip of
+        # the shape class.
+        echo "  ⏭  (t) the LOCAL producer at $_pp_producer exited 0 but produced NO OUTPUT — cross-repo agreement NOT measured, and this is NOT the pre-#4261 shape (a zero-byte projection is the empty-digest hazard, not an old frame)"
     elif [ "$_pp_prod_digest" = "$PP_REVIEWED" ]; then
         ok "(t) the LOCAL producer ($_pp_producer) agrees with the consumer on the reviewed fixture — the cross-repo contract holds on this box"
     elif [ "${_pp_frames:-0}" -eq 0 ]; then
@@ -2286,7 +2307,7 @@ else
         bad "(t) the LOCAL producer is position-bearing but disagrees with the consumer ($_pp_prod_digest vs $PP_REVIEWED) — the two halves of the contract have drifted"
     fi
 fi
-unset _cand _pp_producer _pp_prod_digest _pp_frames _pp_rc _pp_rc2
+unset _cand _pp_producer _pp_prod_digest _pp_frames _pp_rc _pp_rc2 _pp_out
 
 echo "  PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { echo "  ❌ FAILURES — fix and re-run"; exit 1; }
