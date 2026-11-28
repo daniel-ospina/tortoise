@@ -55,6 +55,16 @@ def _report() -> str:
     return (BUNDLE / "REPORT.md").read_text()
 
 
+def _source_rows(docs: tuple[str, ...]) -> dict:
+    """A `sources` door reply whose rows name the documents they came from.
+
+    T4 grades PER-DOCUMENT coverage off these rows, so a fixture that hands it a global
+    count alone is no longer a valid subject for the leg.
+    """
+    return {"ok": True, "reply": [{"url": f"session:{d}", "sourceKind": "agentSession",
+                                   "points": 3} for d in docs]}
+
+
 def _corpus_tokens() -> set[str]:
     """Every content token in the corpus, through the SCORER's own tokenizer.
 
@@ -341,6 +351,7 @@ def test_t3_share_leg_is_graded_at_the_majority_boundary(monkeypatch):
                      "structure": {"total": 90, "operators": 30},
                      "pointkinds": {"by_kind": {"statement": 100, "event": 80}},
                      "sources": {"total": 6, "with_points": 6}},
+        "sources": _source_rows(("doc-01", "doc-02", "doc-03", "doc-04", "doc-05", "doc-06")),
         "entities": [{"id": "s1", "name": "Marta Reyes", "layer": "subject",
                       "kind": "core:naturalPerson"},
                      {"id": "s2", "name": "Sales Lead", "layer": "subject",
@@ -401,7 +412,7 @@ def test_t3_share_leg_is_graded_at_the_majority_boundary(monkeypatch):
         "the goal leg did not see the forced resolution — the arm is not driving the leg")
     assert forced["legs"]["entity_delta_zero"] is False
     assert forced["verdict"] == "FAIL", (
-        "T2 PASSes with a non-zero entity delta and one shared id — its entity-delta "
+        "T2 PASSes a COMPLETE merge that still grew entities — its entity-delta "
         "conjunct is dropped")
 
 
@@ -512,11 +523,13 @@ def test_t4_every_ontology_layer_is_used_and_the_kinds_are_not_collapsed():
 
 def test_t5_every_sampled_relation_is_traced_and_the_tiers_are_separate():
     row = _score()["tests"]["T5"]
-    # ⛔ THE POPULATION IS BOTH PASSES. The first cut of this bundle sampled pass 1 only
-    # (`relation_rows(receipt, 1)`), which excluded all 21 pass-2 edges — and pass 2 is
-    # precisely where re-extraction invents names, so the one unsupported edge in this
-    # run lived in the unexamined half. A sample that omits the pass the defect lives in
-    # is not a sample, so `sampled` here is the number of edges BOTH receipts wrote.
+    # ⛔ THE POPULATION IS BOTH PASSES. The first cut sampled pass 1 only
+    # (`relation_rows(receipt, 1)`), which excluded all 21 pass-2 edges. ⛔ Pass-1-only
+    # sampling does NOT rescue the verdict — it reports 2 unsupported edges and still
+    # FAILs — so the wider population is here because two thirds of the run's relations
+    # went unexamined, not because the FAIL depends on it: it strengthened the evidence
+    # from 2 to 3. (An earlier spelling of this comment said the only failing edge lived
+    # in the excluded half; measured, two of the three are pass-1.)
     assert row["sampled"] == 47, (
         "T5 must sample every relation the receipts say was written (26 pass 1 + 21 "
         "pass 2); sampling one pass hides the pass where invention happens")
@@ -660,7 +673,7 @@ def test_the_artifact_is_byte_identical_under_a_different_hash_seed():
     # to dict KEY ORDER, so an artifact re-sorted in place stayed green while a reviewer's
     # re-run produced a diff — the one property this arm is named for (measured: rewriting
     # the committed file with `sort_keys=True` left the earlier version of this test green).
-    fresh = json.dumps(module_build(), indent=2, default=str) + "\n"
+    fresh = _score_module().render(module_build())
     committed = (BUNDLE / "out" / "t1-t5-score.json").read_text()
     assert fresh == committed, (
         "the committed artifact is not byte-for-byte what the scorer writes — re-run "
@@ -776,29 +789,32 @@ def test_the_conjuncts_that_never_decide_on_this_run_are_still_pinned():
         "T2 PASSes a restatement that produced no goal point at all — the leg's "
         "non-emptiness guard is dropped, so total loss satisfies a containment test")
 
-    # ── T4: Sources below one-per-document must FAIL, everything else true.
+    # ── T4: every ingested document must carry a Source — PER-DOCUMENT coverage, not a
+    #    global count. Six Sources all from doc-01 is `Source >= documents` and must FAIL
+    #    (review round 6, finding 1: the global count was fail-open).
     readback = copy.deepcopy(_readback())
     readback["overview"]["taxonomy"] = {"Point": 100, "Event": 26, "Subject": 10,
-                                        "Object": 25, "Source": 5}
-    readback["overview"]["sources"] = {"total": 5, "with_points": 5}
+                                        "Object": 25, "Source": 6}
+    readback["overview"]["sources"] = {"total": 6, "with_points": 6}
+    readback["sources"] = _source_rows(("doc-01",) * 6)
     readback["entities"] = [
         {"id": "s1", "name": "Sales Lead", "layer": "subject", "kind": "core:role"},
         {"id": "s2", "name": "the delivery partner decision", "layer": "object",
          "kind": "core:decision"},
     ]
     with mock.patch.object(module, "load", return_value=readback):
-        short = module.t4({}, corpus)
-        assert short["flat_distribution"]["Source"] == 5, "the fixture must be short one Source"
-        assert short["decision_leg"]["graded"] is True
-        assert short["role_leg"]["graded"] is True
-        assert short["verdict"] == "FAIL", (
-            "T4 PASSes with fewer Sources than ingested documents — its "
-            "`Source >= documents` conjunct is dropped")
-        readback["overview"]["taxonomy"]["Source"] = 6
-        readback["overview"]["sources"] = {"total": 6, "with_points": 6}
+        hoarded = module.t4({}, corpus)
+        assert hoarded["document_leg"]["sources"] == 6, \
+            "the fixture satisfies the global COUNT, so only coverage can decide"
+        assert hoarded["document_leg"]["documents_with_a_source"] == 1
+        assert hoarded["verdict"] == "FAIL", (
+            "T4 PASSes six Sources that all came from ONE document — the leg grades a "
+            "global count, not RULE_T4's per-document coverage")
+        readback["sources"] = _source_rows(
+            ("doc-01", "doc-02", "doc-03", "doc-04", "doc-05", "doc-06"))
         assert module.t4({}, corpus)["verdict"] == "PASS", (
-            "T4 fails at one Source per document — the conjunct is not reading the "
-            "taxonomy, or is over-strict")
+            "T4 fails when every document carries a Source — the coverage leg is "
+            "over-strict")
 
     # ── T1's OTHER three conjuncts: `object_delta <= 0`, `subject_delta <= 0` and
     #    `not dup_names` (review round 3, finding 4). All three are TRUE on the
@@ -963,6 +979,8 @@ def test_t4s_role_leg_requires_the_subject_layer_and_t2_allows_a_net_deletion():
     readback["overview"]["taxonomy"] = {"Point": 100, "Event": 26, "Subject": 10,
                                         "Object": 25, "Source": 6}
     readback["overview"]["sources"] = {"total": 6, "with_points": 6}
+    readback["sources"] = _source_rows(
+        ("doc-01", "doc-02", "doc-03", "doc-04", "doc-05", "doc-06"))
     readback["entities"] = [
         {"id": "s1", "name": "Sales Lead", "layer": "object", "kind": "core:role"},
         {"id": "s2", "name": "the delivery partner decision", "layer": "object",
@@ -999,3 +1017,38 @@ def test_t4s_role_leg_requires_the_subject_layer_and_t2_allows_a_net_deletion():
     assert row["verdict"] == "PASS", (
         "T2 fails a complete merge that nets a deletion — `adds 0 entities` means delta "
         "<= 0, the reading RULE_T1 already uses")
+
+
+def test_t2s_candidate_band_has_a_falsifier():
+    """T2's 0.45 candidate band is the one stated band nothing drove.
+
+    Every committed candidate scores 1.00/0.62/0.71/0.67, so bands up to 0.62 move no
+    number and `0.45 -> 0.55` survived a whole suite. The band is load-bearing in the
+    fail-open direction: raising it drops candidates, and a dropped candidate is a dropped
+    `unresolved` id — an easier PASS. This drives a text that clears 0.45 but not 0.55 and
+    demands it stays a CANDIDATE, so raising the band reds.
+    """
+    module = _score_module()
+    corpus = _corpus()
+    fact = corpus["_declared_facts"]["goal"]
+
+    # Half of the probe's content tokens are wording_a's and half are nonsense, so the
+    # overlap is ~0.50 in every direction — a subset-only probe scores 1.00 and would not
+    # exercise the band at all.
+    a_tokens = sorted(module.tokens(fact["wording_a"]))
+    half = max(1, len(a_tokens) // 2)
+    probe = " ".join(a_tokens[:half] + [f"zqx{i}quux" for i in range(half)])
+    score = module.overlap(probe, module.norm(fact["wording_a"]))
+    assert 0.45 <= score < 0.55, (
+        f"the probe scores {score:.2f}; it must sit in [0.45, 0.55) so the band is what "
+        "decides whether it is a candidate")
+
+    receipt = json.loads(json.dumps(_receipt()))
+    doc3 = next(d for d in receipt["passes"][0]["documents"] if d["doc_id"] == "doc-03")
+    (doc3.get("result") or {}).setdefault("points", []).append(
+        {"point_id": "pt_band_probe", "kind": "statement",
+         "dedup": "new", "text": probe})
+    row = module.t2(receipt, corpus)
+    assert "pt_band_probe" in [c["point_id"] for c in row["goal_point_candidates"]], (
+        "a text scoring >= 0.45 was not a candidate — the band has been raised, which "
+        "drops candidates and therefore drops `unresolved` ids (fail-open)")

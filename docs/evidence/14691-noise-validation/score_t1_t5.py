@@ -34,8 +34,11 @@ OUT = HERE / "out"
 #: place and the report quotes them verbatim.
 RULE_T1 = ("PASS iff the second ingestion adds no RE-STATED knowledge: 0 new "
            "Objects, 0 new Subjects, 0 same-name entities, and no Point whose text "
-           "re-states an existing Point (>= 0.8 content-token overlap with a "
-           "pass-1 Point). The POPULATION for the same-name leg is the entities the typed "
+           "re-states an existing Point, where the overlap is DIRECTIONAL: the share of "
+           "the PASS-2 Point's content tokens that occur in a pass-1 Point's text, maxed "
+           "over the pass-1 Points, at >= 0.8. (A symmetric or reversed band scores the "
+           "same data differently — 46 and 35 of the 61 — so the direction is part of the "
+           "criterion, not an implementation detail.) The POPULATION for the same-name leg is the entities the typed "
            "full scan RESOLVES — not every entity in the graph — so the coverage is "
            "reported beside the result; names the scan cannot enumerate are not examined. "
            "Events are reported SEPARATELY and are not counted as "
@@ -73,11 +76,15 @@ RULE_T3 = ("Reported as a share, with an explicit population. PASS iff the "
            "common English function words removed; the same near-match band T1 uses "
            "for a restatement); otherwise FAIL, with the door's own answer reported "
            "beside the write receipt's so a door defect cannot be laundered as an "
-           "extractor defect.")
+           "extractor defect. An EMPTY population reports NO-DATA: neither conjunct "
+           "holds when there is nothing to count, so a vacuous clean is refused.")
 RULE_T4 = ("PASS iff none of the ontology's types is collapsed: the flat "
            "(Point/Event/Subject/Object/Source) distribution is non-degenerate "
-           "(Event, Subject and Object all non-zero, and at least one Source per "
-           "document ingested), a decision is represented by a decision-kind "
+           "(Event, Subject and Object all non-zero, and every ingested document "
+           "carrying at least one Source — graded on the door's own Source rows, "
+           "whose session ids name the document, not on a global Source COUNT, "
+           "which an all-from-one-document run would satisfy), a decision is "
+           "represented by a decision-kind "
            "ENTITY, roles land as Subject-layer role entities, and documents land "
            "as Sources. ⛔ The decision's SENTENCES are Points and land as "
            "`statement` kind; this rule grades the decision ENTITY, and the "
@@ -95,7 +102,8 @@ RULE_T5 = ("PASS iff every sampled relation is stated or directly implied by the
            "names (`ownedBy`, `related`, …), so a wording test would score a correct "
            "normalisation as an invention — the count of rows whose predicate "
            "wording appears in its co-stated documents is reported as gap D6 "
-           "instead of being passed silently.")
+           "instead of being passed silently. Sampling NO relations reports NO-DATA, "
+           "never PASS — a vacuous clean is refused.")
 
 
 def load(name: str) -> dict:
@@ -687,13 +695,24 @@ def t4(receipt: dict, corpus: dict) -> dict:
     sources = c["source_rows"]
     docs = len(corpus["documents"])
 
+    # ⛔ PER-DOCUMENT coverage, not a global count. `Source >= docs` is satisfied by any
+    # `docs` Sources however they are distributed — a run where every Source came from one
+    # document PASSed the rule's "at least one Source per document", which is fail-open
+    # (review round 6, finding 1). Each Source row's `url` names its session/doc, so the
+    # coverage is readable; it is graded, and reported.
+    source_docs = set()
+    for src_row in ((readback.get("sources") or {}).get("reply") or []):
+        found = re.search(r"doc-\d+", str(src_row.get("url") or ""))
+        if found:
+            source_docs.add(found.group(0))
+    document_leg = len(source_docs) >= docs
+
     decision_leg = bool(decision_entities)
     role_leg = bool(role_entities)
     layers_leg = (c["taxonomy"].get("Event", 0) > 0
                   and c["taxonomy"].get("Subject", 0) > 0
-                  and c["taxonomy"].get("Object", 0) > 0
-                  and c["taxonomy"].get("Source", 0) >= docs)
-    verdict = "PASS" if (layers_leg and decision_leg and role_leg) else "FAIL"
+                  and c["taxonomy"].get("Object", 0) > 0)
+    verdict = "PASS" if (layers_leg and document_leg and decision_leg and role_leg) else "FAIL"
     return {
         "test": "T4",
         "rule": RULE_T4,
@@ -718,7 +737,11 @@ def t4(receipt: dict, corpus: dict) -> dict:
                              for p in decision_points[:12]]},
         "role_leg": {"graded": role_leg, "subject_entities": len(role_entities),
                      "examples": [e.get("name") for e in role_entities[:10]]},
-        "document_leg": {"sources": sources, "documents_ingested": docs,
+        "document_leg": {"graded": document_leg, "sources": sources,
+                         "documents_ingested": docs,
+                         "documents_with_a_source": len(source_docs),
+                         "documents_without_a_source": sorted(
+                             {f"doc-0{i}" for i in range(1, docs + 1)} - source_docs),
                          "sources_with_points": c["sources_with_points"]},
         "verdict": verdict,
     }
@@ -868,10 +891,21 @@ def build_result() -> dict:
     return result
 
 
+def render(result: dict) -> str:
+    """The artifact's exact bytes. `main()` writes this; the suite compares against it.
+
+    ⛔ ONE renderer, so the test grades the WRITER rather than a copy of its format
+    string. A test that rebuilt the bytes itself left `json.dumps(..., sort_keys=True)`
+    in `main()` surviving green — and the consequence was the friction the test exists to
+    prevent: running the scorer rewrote the artifact and `git status` showed a 4,708-line
+    diff that only the NEXT test run reddened (review round 6, finding 6).
+    """
+    return json.dumps(result, indent=2, default=str) + "\n"
+
+
 def main() -> int:
     result = build_result()
-    (OUT / "t1-t5-score.json").write_text(
-        json.dumps(result, indent=2, default=str) + "\n")
+    (OUT / "t1-t5-score.json").write_text(render(result))
 
     print("\n=== THE FIVE ===")
     for name, row in result["tests"].items():
