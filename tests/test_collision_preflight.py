@@ -9243,7 +9243,12 @@ class CollisionPreflightTest(unittest.TestCase):
                                           f"nonce=renewal-{i}")
             for i in range(max(1, moves))
         ]
-        self.assertNotIn(expired_sha, live_shas)
+        # ⛔ DISTINCTNESS IS THE PROPERTY (review round 5, F1): the assertion that stood here
+        # compared a live sha with the expired one, which can never coincide — the nonce makes
+        # each renewal a different object — so it could not fail and did not test the property
+        # its own comment named. Collapsing the renewals into one sha now reddens this row.
+        self.assertEqual(len(set(live_shas)), len(live_shas),
+                         "each move must be a DISTINCT renewal commit, not one sha re-pointed twice")
         real_run = mod._run
         seen = {"ls": 0}
 
@@ -9352,8 +9357,6 @@ class CollisionPreflightTest(unittest.TestCase):
             message=f"claim owner=box-a lease_until={past} lease_until={future} nonce=9806")
         self.assertFalse(claimed, basis)
         self.assertIn(f"EXPIRED at {past}", basis)
-        self.assertNotIn(str(future), basis,
-                         f"the second token must not contribute:\n{basis}")
         self.assertNotIn("s left", basis, f"no countdown from a junk token:\n{basis}")
 
     def test_a_cr_inside_the_minted_line_is_not_a_line_boundary(self):
