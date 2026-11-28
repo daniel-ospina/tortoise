@@ -147,7 +147,7 @@ def _window(text: str) -> list[dict]:
 
 
 def _context(client, payload: dict, *, headers: dict | None = None,
-             attempts: int = 3):
+             attempts: int = 6):
     """POST /v1/context, retrying a FAIL-OPEN degraded read (#3083).
 
     The read path's hard ceiling is 2.4 s and a breach is the documented
@@ -155,17 +155,24 @@ def _context(client, payload: dict, *, headers: dict | None = None,
     — so a content assertion made on ONE request is partly an assertion about
     the box's speed. Measured on this file's own real-auth lane with a warm
     embedder: **1.59 s** for the first read, **0.88-0.89 s** after, against that
-    2.4 s ceiling; a loaded shard crosses it and empties a perfectly healthy
+    2.4 s ceiling; a loaded box crosses it and empties a perfectly healthy
     response (observed here: ``test_two_teams_two_keys_zero_cross_team`` →
-    ``assert a_claim in a_ids`` failing with ``[]``).
+    ``assert a_claim in a_ids`` failing with ``[]``, and
+    ``test_sdk_http_deep_equal_parity`` degrading on the HTTP leg while the
+    direct SDK call on the same graph succeeded).
 
     The retry is the caller's own documented remedy — the read path is
     stateless (``re-POST the same session_id adds 0 graph nodes``) and a 429 is
     "client backoff, not a hard failure" — and it is BOUNDED, so a genuinely
     broken read still fails, on the last response, with its
-    ``degraded_reason`` in hand. Status-only assertions never need this: use
-    the plain POST there, and use the plain POST in the degrade tests, which
-    ASSERT the degraded shape.
+    ``degraded_reason`` in hand. The backoff GROWS (0.5 s doubling to 8 s,
+    ~15 s over six attempts) on purpose: the state being absorbed is a window —
+    a cold embedder load, or a box whose CPU is saturated by other lanes — so
+    an immediate re-POST lands inside the same window and buys nothing. 15 s
+    against the suite's 300 s per-item budget is safe.
+
+    Status-only assertions never need this: use the plain POST there, and use
+    the plain POST in the degrade tests, which ASSERT the degraded shape.
 
     ⛔ A retry that ends degraded returns the EMPTY block (``pointers``/
     ``why``/``surfaced`` = ``[]``, ``block`` = ``""``), and an empty response
@@ -176,11 +183,13 @@ def _context(client, payload: dict, *, headers: dict | None = None,
     class this repository classifies as A; a cross-team isolation assertion
     reading ``assert a_claim not in []`` is the worst case of it).
     """
+    delay = 0.5
     r = client.post("/v1/context", json=payload, headers=headers)
     for _ in range(attempts - 1):
         if r.status_code != 200 or r.json().get("degraded_reason") != "timeout":
             break
-        time.sleep(0.05)
+        time.sleep(delay)
+        delay = min(delay * 2, 8.0)
         r = client.post("/v1/context", json=payload, headers=headers)
     return r
 
