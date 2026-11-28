@@ -250,17 +250,22 @@ def test_every_conjunct_of_a_rule_changes_its_verdict(monkeypatch):
     """
     module = _score_module()
 
-    # ── T3: the share leg passes (1 of 2 orphans is 0.5, not >0.5) and only the
-    #        second conjunct can fail: `a thing the corpus never says` is untraceable.
+    # ── T3: the share leg passes (1 of 3 orphans is 0.333, a strict majority NOT
+    #        orphaned) and only the second conjunct can fail: `a thing the corpus
+    #        never says` is untraceable. ⛔ The fixture is deliberately NOT 1-of-2:
+    #        at exactly half neither side is a majority, so the share leg would fail
+    #        too and this arm would no longer isolate the traceability conjunct.
     readback_t3 = {
         "entities": [{"id": "e1", "name": "Priya Nair", "kind": "core:naturalPerson",
                       "layer": "subject"},
                      {"id": "e2", "name": "a thing the corpus never says",
-                      "kind": "core:strategy", "layer": "object"}],
+                      "kind": "core:strategy", "layer": "object"},
+                     {"id": "e3", "name": "Sales Lead", "kind": "core:role",
+                      "layer": "subject"}],
         "neighbours": {},
     }
     receipt_t3 = {"passes": [{"pass": 1, "documents": [{"doc_id": "doc-01", "result": {
-        "relation_write": {"edges": [{"src_id": "e1", "dst_id": "e1"}]}}}]}]}
+        "relation_write": {"edges": [{"src_id": "e1", "dst_id": "e3"}]}}}]}]}
     monkeypatch.setattr(module, "load", lambda name: readback_t3)
     row = module.t3(receipt_t3, _corpus())
     assert row["orphan_legs"]["majority_are_not_orphans"] is True, \
@@ -275,6 +280,42 @@ def test_every_conjunct_of_a_rule_changes_its_verdict(monkeypatch):
     row = module.t3(receipt_t3, _corpus())
     assert row["verdict"] == "PASS", (
         "T3 fails a traceable orphan — the second conjunct is not reading the corpus")
+
+
+def test_t3_share_leg_is_graded_at_the_majority_boundary(monkeypatch):
+    """A majority is MORE than half: at exactly half, neither side is one, so FAIL.
+
+    The code spelled the ORPHAN side as `share > 0.5` while the rule printed beside
+    the verdict says "PASS iff the majority are NOT orphans". At exactly 50 % it
+    therefore reported `majority_are_not_orphans: true` and PASSed where its own rule
+    says FAIL — and an earlier arm pinned that wrong side of the boundary (review
+    round 2, finding 2).
+    """
+    module = _score_module()
+
+    def row_for(n_entities: int, n_linked: int):
+        ents = [{"id": f"e{i}", "name": "Priya Nair", "kind": "core:naturalPerson",
+                 "layer": "subject"} for i in range(n_entities)]
+        # An edge marks BOTH endpoints linked; each edge therefore points at a name
+        # outside the population, leaving exactly `n_entities - n_linked` orphans.
+        edges = [{"src_id": f"e{i}", "dst_id": "outside"} for i in range(n_linked)]
+        monkeypatch.setattr(module, "load", lambda name: {"entities": ents, "neighbours": {}})
+        receipt = {"passes": [{"pass": 1, "documents": [{"doc_id": "doc-01", "result": {
+            "relation_write": {"edges": edges}}}]}]}
+        return module.t3(receipt, _corpus())
+
+    half = row_for(2, 1)          # 1 of 2 = 0.5 orphaned, every orphan traceable
+    assert half["orphans_by_write_receipt"]["share"] == 0.5
+    assert half["orphan_legs"]["every_orphan_explained_in_corpus"] is True, \
+        "the fixture must leave the traceability conjunct satisfied"
+    assert half["orphan_legs"]["majority_are_not_orphans"] is False, \
+        "at exactly half, 'the majority are not orphans' is false — that is what a majority means"
+    assert half["verdict"] == "FAIL", \
+        "T3 PASSes at exactly 50 % orphaned — the rule it prints requires a strict majority"
+    assert row_for(3, 2)["verdict"] == "PASS", \
+        "T3 fails a 0.333 orphan share with every orphan traceable — the rule's own PASS"
+    assert row_for(5, 2)["verdict"] == "FAIL", \
+        "T3 PASSes a 0.6 orphan share — the orphan side is not graded"
 
     # ── T4: every layer leg holds (all four layers, 6 Sources); only the DECISION
     #        leg is missing (no decision-kind entity), which the pre-fix verdict

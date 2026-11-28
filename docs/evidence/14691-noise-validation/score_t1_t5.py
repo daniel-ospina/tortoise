@@ -476,9 +476,19 @@ def t3(receipt: dict, corpus: dict) -> dict:
                    if not r["exact_doc_hits"] and not r["near_doc_hits"]]
     share_receipt = (len(orphans_receipt) / len(rows)) if rows else None
     share_door = (len(orphans_door) / len(rows)) if rows else None
-    majority_orphans = share_receipt is not None and share_receipt > 0.5
+    # A MAJORITY is MORE than half, so "the majority are not orphans" needs a strict
+    # `share < 0.5`. It was spelled as the ORPHAN side (`share > 0.5`), which returns
+    # PASS at exactly half — where NEITHER side is a majority, so the conjunct this
+    # rule prints is false and the verdict must be FAIL (review round 2, finding 2).
+    # The boundary is graded by `test_t3_share_leg_is_graded_at_the_majority_boundary`.
+    majority_are_not_orphans = share_receipt is not None and share_receipt < 0.5
     every_orphan_explained = not unexplained
-    verdict = "FAIL" if (majority_orphans or not every_orphan_explained) else "PASS"
+    if not rows:
+        verdict = "NO-DATA"   # an empty population satisfies neither side of the share
+    elif not majority_are_not_orphans or not every_orphan_explained:
+        verdict = "FAIL"
+    else:
+        verdict = "PASS"
     return {
         "test": "T3",
         "rule": RULE_T3,
@@ -500,7 +510,7 @@ def t3(receipt: dict, corpus: dict) -> dict:
                                      for r in orphans_door]},
         "orphan_traceability": named_in_corpus,
         "orphan_legs": {
-            "majority_are_not_orphans": not majority_orphans,
+            "majority_are_not_orphans": majority_are_not_orphans,
             "every_orphan_explained_in_corpus": every_orphan_explained,
             "unexplained": [{"name": r["name"], "kind": r["kind"]}
                             for r in unexplained],
