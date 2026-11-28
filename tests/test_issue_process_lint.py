@@ -3978,6 +3978,13 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
         "Satisfies #13036: V2 (of rows V1–V6)",
         # round 28 P1-a: id-free `only`, which the subset rule cannot see (it names no row)
         "Only the first row is proved here.", "Only part of this landed.",
+        # ⛔ round 30 P1: RANGE-ONLY SUBSETS. Every spelling above is cue-bearing or spells ids, so the
+        # matrix never executed the path a range takes through the subset read — and `V1–V3 landed in
+        # this PR.` (or `Satisfies #N: V1–V3`) beside a complete claim therefore read `clean` while
+        # the identical id-spelled subset was refused. A range-only subset is now a pinned axis, not
+        # an accident of the population.
+        "V1–V3 landed in this PR.", "V1 through V3 landed.", "V1..V3 landed.",
+        "V3–V1 landed.", "Satisfies #13036: V1–V3", "Only V1–V3 landed.",
         # round 28 P1-b/R1: a subset `Satisfies` beside a complete closing claim
         "Satisfies #13036: V2", "Satisfies #13036: V2, V3",
         "V3–V6 are in the predecessor PR", "V1–V6 — see the predecessor PR",

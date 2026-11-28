@@ -1601,25 +1601,33 @@ def _names_a_proper_subset_in(unit: str, rows: list[str]) -> bool:
     whole-body fallback, review round 29). A second implementation is how the two paths drifted into
     disagreeing about the same sentence in the first place.
     """
-    named = set(_explicit_ids(unit, rows))
-    # ⛔ A RANGE NAMES ITS WHOLE SPAN, NOT ITS ENDPOINTS — otherwise a complete range close
-    # (`Closes #N (rows V1–V6)` over a six-row issue) looks like a two-row subset here and the
-    # CORRECT close would be refused. Expanded from the issue's own order, so it cannot invent a
-    # row, and unconditionally (unlike `_row_range_span`): this is a NEGATIVE read, where the wide
-    # reading is the safe one.
+    # ⛔ TWO READINGS, EVALUATED INDEPENDENTLY — NEVER UNIONED INTO ONE SET (review round 30, P1).
+    # This function had one `named` set that ranges were folded into, and the fold had to be either
+    # gated or unconditional; each choice masked the other direction, and round 28 traded eleven false
+    # passes for twenty-four:
+    #   * unconditional  -> `Only V2 of V1–V6 landed.` widened to all six, masking its own subset;
+    #   * gated          -> `V1–V3 landed in this PR.` / `Satisfies #N: V1–V3` contributed NOTHING
+    #                       (`_explicit_ids` blanks every range), so a range-spelled subset beside a
+    #                       complete claim read `clean` while the identical id-spelled subset was
+    #                       correctly refused — the arm's headline class, and the round-27 headline
+    #                       `Satisfies` false PASS re-opened simply by spelling the subset as a range.
+    # The union was the bug: wide and narrow evidence are not alternatives to pick between, they are
+    # two independent questions, and a NEGATIVE read must refuse if EITHER answers "a proper subset".
+    #   wide   — explicit ids, plus every range expanded to its whole span (so a complete range close
+    #            is all six and is never mistaken for a two-row subset);
+    #   narrow — explicit ids, plus only ranges that ARE the whole claim (so `(row V2 of V1–V6)` is
+    #            V2 here, as it is to `_row_range_span`).
+    # Neither can invent a row: both expand from the issue's own order.
     order = {row: i for i, row in enumerate(rows)}
+    explicit = set(_explicit_ids(unit, rows))
+    wide, narrow = set(explicit), set(explicit)
     for match in _range_matches(unit, rows):
-        # ⛔ GATED, NOT UNCONDITIONAL (review round 28, P1). Expanding every range mention let a
-        # line that CONTAINS the full range mask a subset on that same line — `Only V2 of V1–V6
-        # landed.` and `Satisfies #N: V2 (of rows V1–V6)` both widened to all six here, so the
-        # subset signal vanished and the body read `clean`. For a NEGATIVE read, naming MORE rows
-        # is the UNSAFE direction: it suppresses the refusal this function exists to raise. The
-        # gate is the same one `_row_range_span` uses, so `(row V2 of V1–V6)` is V2 to both reads.
-        if not _range_is_the_whole_claim(unit, match, rows):
-            continue
         lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
-        named |= set(rows[lo:hi + 1])
-    return bool(named) and not set(rows) <= named
+        span = set(rows[lo:hi + 1])
+        wide |= span
+        if _range_is_the_whole_claim(unit, match, rows):
+            narrow |= span
+    return any(reading and not set(rows) <= reading for reading in (wide, narrow))
 
 
 def _names_a_proper_subset(text: str, rows: list[str]) -> bool:
