@@ -1,0 +1,1443 @@
+{
+  "label": "with-marker",
+  "graph": "xv14592_operating_model",
+  "db_uri": "127.0.0.1:16414/xv14592_operating_model",
+  "currency": {
+    "tool": "tortoise_search",
+    "args": {
+      "query": "Did ColdPath fail its cold-chain audit, and what did we do about it?",
+      "limit": 8
+    },
+    "reply": [
+      {
+        "id": "pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078",
+        "content": "ColdPath Logistics holds a validated cold-chain certificate",
+        "point_kind": "statement",
+        "match_source": "fts",
+        "relationships": [
+          {
+            "predicate": "",
+            "mechanism": "IMPL",
+            "operator_id": "1a21863f43d-af586b541e79",
+            "related_id": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f",
+            "related_kind": "statement",
+            "direction": "outgoing",
+            "role": "source",
+            "peer": {
+              "id": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.5,
+              "variance": 0.073891,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:06:41.182036+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          }
+        ],
+        "topics": [],
+        "summary": "",
+        "sessionId": "doc-01",
+        "eventId": "",
+        "sourcePath": "",
+        "similarity": 5.0,
+        "snippet": "ColdPath Logistics holds a validated cold-chain certificate",
+        "scores": {
+          "fts": 5.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 5.0
+        },
+        "ep": {
+          "confidence_mean": 0.5,
+          "ep_state": "measured",
+          "evidence": {
+            "impl_count": 0,
+            "nand_count": 0,
+            "total": 0
+          },
+          "contention": 0.0,
+          "variance": 0.083333,
+          "contested": true,
+          "has_ep": true,
+          "measured": true,
+          "baseline": false,
+          "informed_order": "not_consulted"
+        },
+        "status": "live",
+        "subject": {
+          "id": "1a21863e7b5-94bdbd8d9e25",
+          "name": "ColdPath Logistics",
+          "kind": "core:organization",
+          "status": "live"
+        },
+        "quote": "it holds a validated cold-chain certificate",
+        "source_turn_id": 7
+      },
+      {
+        "id": "pt_f682911c193a6ff2432ba7c00c633a8d0c43a54b7f7246bbffffaa85aa2252",
+        "content": "Cold-chain rules forbid adding an account unless the cold chain can be held below 4 degrees for that delivery slot.",
+        "point_kind": "statement",
+        "match_source": "fts",
+        "relationships": [],
+        "topics": [],
+        "summary": "",
+        "sessionId": "doc-03",
+        "eventId": "",
+        "sourcePath": "",
+        "similarity": 4.0,
+        "snippet": "Cold-chain rules forbid adding an account unless the cold chain can be held below 4 degrees for that delivery slot.",
+        "scores": {
+          "fts": 4.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 4.0
+        },
+        "ep": {
+          "confidence_mean": null,
+          "ep_state": "absent",
+          "evidence": {
+            "impl_count": 0,
+            "nand_count": 0,
+            "total": 0
+          },
+          "contention": 0.0,
+          "variance": 0.0,
+          "contested": false,
+          "has_ep": false,
+          "measured": false,
+          "baseline": false,
+          "informed_order": "not_consulted"
+        },
+        "status": "live",
+        "quote": "our cold-chain rules mean we cannot add an account unless we can hold the cold chain below 4 degrees for that slot",
+        "source_turn_id": 3,
+        "span_start": 118,
+        "span_end": 232
+      },
+      {
+        "id": "pt_bc95cd1ebe4549b9cc51b060b6196c92e9967c79034213377099462be4d409",
+        "content": "The wholesale licence forbids subcontracting the delivery of chilled goods to a partner that does not hold a validated cold-chain certificate",
+        "point_kind": "statement",
+        "match_source": "fts",
+        "relationships": [
+          {
+            "predicate": "",
+            "mechanism": "NAND",
+            "operator_id": "1a218643cec-791225de3cd4",
+            "related_id": "pt_f4dafe1ba004b75fd4e89ffe5bc6a65c4cb9faab5fb14148e59b782a6fcf64",
+            "related_kind": "statement",
+            "direction": "outgoing",
+            "role": "source",
+            "peer": {
+              "id": "pt_f4dafe1ba004b75fd4e89ffe5bc6a65c4cb9faab5fb14148e59b782a6fcf64",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.110465,
+              "variance": 0.014318,
+              "contested": false,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:05:51.174130+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          },
+          {
+            "predicate": "",
+            "mechanism": "IMPL",
+            "operator_id": "1a218643da2-2702f080e5f2",
+            "related_id": "pt_33c51c38530ad478a79db91aff50d628511516d19bf0535e22ad1f286fdd5f",
+            "related_kind": "statement",
+            "direction": "incoming",
+            "role": "target",
+            "peer": {
+              "id": "pt_33c51c38530ad478a79db91aff50d628511516d19bf0535e22ad1f286fdd5f",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.5,
+              "variance": 0.07091,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:05:51.699171+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          }
+        ],
+        "topics": [],
+        "summary": "",
+        "sessionId": "doc-02",
+        "eventId": "",
+        "sourcePath": "",
+        "similarity": 3.0,
+        "snippet": "The wholesale licence forbids subcontracting the delivery of chilled goods to a partner that does not hold a validated cold-chain certificate",
+        "scores": {
+          "fts": 3.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 3.0
+        },
+        "ep": {
+          "confidence_mean": 0.5,
+          "ep_state": "measured",
+          "evidence": {
+            "impl_count": 1,
+            "nand_count": 1,
+            "total": 2
+          },
+          "contention": 0.5,
+          "variance": 0.070618,
+          "contested": true,
+          "has_ep": true,
+          "measured": true,
+          "baseline": false,
+          "informed_order": "not_consulted"
+        },
+        "status": "live",
+        "quote": "The wholesale licence forbids subcontracting the delivery of chilled goods to a partner that does not hold a validated cold-chain certificate.",
+        "source_turn_id": 5
+      },
+      {
+        "id": "pt_5485d93d6e661200763f63ecb470ddff7c5afe68fbbdd48f5dd679cf1ed421",
+        "content": "Marta Reyes, Operations Lead, owns the cold-chain temperature log",
+        "point_kind": "statement",
+        "match_source": "fts",
+        "relationships": [],
+        "topics": [],
+        "summary": "",
+        "sessionId": "doc-04",
+        "eventId": "",
+        "sourcePath": "",
+        "similarity": 2.66666666666667,
+        "snippet": "Marta Reyes, Operations Lead, owns the cold-chain temperature log",
+        "scores": {
+          "fts": 2.66666666666667,
+          "vector": null,
+          "structural": null,
+          "rrf": 2.66666666666667
+        },
+        "ep": {
+          "confidence_mean": null,
+          "ep_state": "absent",
+          "evidence": {
+            "impl_count": 0,
+            "nand_count": 0,
+            "total": 0
+          },
+          "contention": 0.0,
+          "variance": 0.0,
+          "contested": false,
+          "has_ep": false,
+          "measured": false,
+          "baseline": false,
+          "informed_order": "not_consulted"
+        },
+        "status": "live",
+        "subject": {
+          "id": "1a21863e80b-d3a2a796da62",
+          "name": "Marta Reyes",
+          "kind": "core:naturalPerson",
+          "status": "live"
+        },
+        "quote": "Marta Reyes (Operations Lead): Marta Reyes owns delivery scheduling and Marta Reyes owns the cold-chain temperature log.",
+        "source_turn_id": 1
+      },
+      {
+        "id": "pt_f4dafe1ba004b75fd4e89ffe5bc6a65c4cb9faab5fb14148e59b782a6fcf64",
+        "content": "The chilled-goods operation was believed to be runnable on standard delivery practice, with the cold chain treated as a preference honoured where practical",
+        "point_kind": "statement",
+        "match_source": "fts",
+        "relationships": [
+          {
+            "predicate": "",
+            "mechanism": "NAND",
+            "operator_id": "1a218643c78-3ebe8b1ea279",
+            "related_id": "pt_7bd69d604cd4445a25e75a07586f14e80984b67f03972c19396675b8276132",
+            "related_kind": "statement",
+            "direction": "incoming",
+            "role": "target",
+            "peer": {
+              "id": "pt_7bd69d604cd4445a25e75a07586f14e80984b67f03972c19396675b8276132",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.5,
+              "variance": 0.083333,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:05:51.277333+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          },
+          {
+            "predicate": "",
+            "mechanism": "NAND",
+            "operator_id": "1a218643ccd-e3b344a26da9",
+            "related_id": "pt_171fb8b674b67267d036bce6bc2f89a3ecd3d0671736bb1c2dc4ef494d3f9f",
+            "related_kind": "statement",
+            "direction": "incoming",
+            "role": "target",
+            "peer": {
+              "id": "pt_171fb8b674b67267d036bce6bc2f89a3ecd3d0671736bb1c2dc4ef494d3f9f",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.5,
+              "variance": 0.070618,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:05:51.416482+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          },
+          {
+            "predicate": "",
+            "mechanism": "NAND",
+            "operator_id": "1a218643cec-791225de3cd4",
+            "related_id": "pt_bc95cd1ebe4549b9cc51b060b6196c92e9967c79034213377099462be4d409",
+            "related_kind": "statement",
+            "direction": "incoming",
+            "role": "target",
+            "peer": {
+              "id": "pt_bc95cd1ebe4549b9cc51b060b6196c92e9967c79034213377099462be4d409",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.5,
+              "variance": 0.070618,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:05:51.606764+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          }
+        ],
+        "topics": [],
+        "summary": "",
+        "sessionId": "doc-02",
+        "eventId": "",
+        "sourcePath": "",
+        "similarity": 2.4,
+        "snippet": "The chilled-goods operation was believed to be runnable on standard delivery practice, with the cold chain treated as a preference honoured where practical",
+        "scores": {
+          "fts": 2.4,
+          "vector": null,
+          "structural": null,
+          "rrf": 2.4
+        },
+        "ep": {
+          "confidence_mean": 0.1105,
+          "ep_state": "measured",
+          "evidence": {
+            "impl_count": 0,
+            "nand_count": 3,
+            "total": 3
+          },
+          "contention": 1.0,
+          "variance": 0.014318,
+          "contested": false,
+          "has_ep": true,
+          "measured": true,
+          "baseline": false,
+          "informed_order": "not_consulted"
+        },
+        "status": "live",
+        "quote": "We believed the chilled-goods operation could be run on standard delivery practice, with the cold chain treated as a preference to be honoured where practical."
+      },
+      {
+        "id": "pt_7bd69d604cd4445a25e75a07586f14e80984b67f03972c19396675b8276132",
+        "content": "The cold chain must stay below 4 degrees Celsius at all times from the loading bay to the customer's door, with no exception for short routes",
+        "point_kind": "statement",
+        "match_source": "fts",
+        "relationships": [
+          {
+            "predicate": "",
+            "mechanism": "NAND",
+            "operator_id": "1a218643c78-3ebe8b1ea279",
+            "related_id": "pt_f4dafe1ba004b75fd4e89ffe5bc6a65c4cb9faab5fb14148e59b782a6fcf64",
+            "related_kind": "statement",
+            "direction": "outgoing",
+            "role": "source",
+            "peer": {
+              "id": "pt_f4dafe1ba004b75fd4e89ffe5bc6a65c4cb9faab5fb14148e59b782a6fcf64",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.110465,
+              "variance": 0.014318,
+              "contested": false,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:05:51.174130+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          }
+        ],
+        "topics": [],
+        "summary": "",
+        "sessionId": "doc-02",
+        "eventId": "",
+        "sourcePath": "",
+        "similarity": 2.4,
+        "snippet": "The cold chain must stay below 4 degrees Celsius at all times from the loading bay to the customer's door, with no exception for short routes",
+        "scores": {
+          "fts": 2.4,
+          "vector": null,
+          "structural": null,
+          "rrf": 2.4
+        },
+        "ep": {
+          "confidence_mean": 0.5,
+          "ep_state": "measured",
+          "evidence": {
+            "impl_count": 0,
+            "nand_count": 1,
+            "total": 1
+          },
+          "contention": 1.0,
+          "variance": 0.083333,
+          "contested": true,
+          "has_ep": true,
+          "measured": true,
+          "baseline": false,
+          "informed_order": "not_consulted"
+        },
+        "status": "live",
+        "quote": "The cold chain must stay below 4 degrees Celsius at all times from our loading bay to the customer's door \u2014 there is no exception for short routes.",
+        "source_turn_id": 1
+      },
+      {
+        "id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+        "content": "Two of ColdPath's vehicles could not show a validated cold-chain certificate, so ColdPath does not hold a validated cold-chain certificate for our routes",
+        "point_kind": "statement",
+        "match_source": "fts",
+        "relationships": [
+          {
+            "predicate": "",
+            "mechanism": "NAND",
+            "operator_id": "1a21864fe8a-2deb9af6a4ef",
+            "related_id": "pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55a8abf",
+            "related_kind": "statement",
+            "direction": "incoming",
+            "role": "target",
+            "peer": {
+              "id": "pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55a8abf",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.5,
+              "variance": 0.083333,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:06:40.972338+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          }
+        ],
+        "topics": [],
+        "summary": "",
+        "sessionId": "doc-05",
+        "eventId": "",
+        "sourcePath": "",
+        "similarity": 2.11111111111111,
+        "snippet": "Two of ColdPath's vehicles could not show a validated cold-chain certificate, so ColdPath does not hold a validated cold-chain certificate for our routes",
+        "scores": {
+          "fts": 2.11111111111111,
+          "vector": null,
+          "structural": null,
+          "rrf": 2.11111111111111
+        },
+        "ep": {
+          "confidence_mean": 0.3294,
+          "ep_state": "measured",
+          "evidence": {
+            "impl_count": 0,
+            "nand_count": 1,
+            "total": 1
+          },
+          "contention": 1.0,
+          "variance": 0.073856,
+          "contested": true,
+          "has_ep": true,
+          "measured": true,
+          "baseline": false,
+          "informed_order": "not_consulted"
+        },
+        "status": "live",
+        "subject": {
+          "id": "1a21863e7b5-94bdbd8d9e25",
+          "name": "ColdPath Logistics",
+          "kind": "core:organization",
+          "status": "live"
+        },
+        "quote": "two of ColdPath's vehicles could not show a validated cold-chain certificate, so ColdPath does not hold a validated cold-chain certificate for our routes",
+        "source_turn_id": 1
+      },
+      {
+        "id": "pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55a8abf",
+        "content": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes",
+        "point_kind": "statement",
+        "match_source": "fts",
+        "relationships": [
+          {
+            "predicate": "",
+            "mechanism": "NAND",
+            "operator_id": "1a21864fe8a-2deb9af6a4ef",
+            "related_id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+            "related_kind": "statement",
+            "direction": "outgoing",
+            "role": "source",
+            "peer": {
+              "id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.329393,
+              "variance": 0.073856,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:06:41.006129+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          }
+        ],
+        "topics": [],
+        "summary": "",
+        "sessionId": "doc-05",
+        "eventId": "",
+        "sourcePath": "",
+        "similarity": 2.0,
+        "snippet": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes",
+        "scores": {
+          "fts": 2.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 2.0
+        },
+        "ep": {
+          "confidence_mean": 0.5,
+          "ep_state": "measured",
+          "evidence": {
+            "impl_count": 0,
+            "nand_count": 1,
+            "total": 1
+          },
+          "contention": 1.0,
+          "variance": 0.083333,
+          "contested": true,
+          "has_ep": true,
+          "measured": true,
+          "baseline": false,
+          "informed_order": "not_consulted"
+        },
+        "status": "live",
+        "subject": {
+          "id": "1a21863e7b5-94bdbd8d9e25",
+          "name": "ColdPath Logistics",
+          "kind": "core:organization",
+          "status": "live"
+        },
+        "quote": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes.",
+        "source_turn_id": 3
+      }
+    ]
+  },
+  "history": {
+    "tool": "tortoise_search",
+    "args": {
+      "query": "What did we originally decide about our delivery partner, and what superseded it?",
+      "limit": 8
+    },
+    "reply": [
+      {
+        "id": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f",
+        "content": "We revert to NordicFreight as our delivery partner and stop using ColdPath Logistics",
+        "point_kind": "statement",
+        "match_source": "fts",
+        "relationships": [
+          {
+            "predicate": "",
+            "mechanism": "IMPL",
+            "operator_id": "1a21863f3e0-5e74014edce5",
+            "related_id": "pt_1e576cba5dbcb00fdac778c0ef259ca9af4517b7b863d02b4fcdbf973f1147",
+            "related_kind": "statement",
+            "direction": "incoming",
+            "role": "target",
+            "peer": {
+              "id": "pt_1e576cba5dbcb00fdac778c0ef259ca9af4517b7b863d02b4fcdbf973f1147",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.5,
+              "variance": 0.083333,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:05:30.700169+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          },
+          {
+            "predicate": "",
+            "mechanism": "IMPL",
+            "operator_id": "1a21863f43d-af586b541e79",
+            "related_id": "pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078",
+            "related_kind": "statement",
+            "direction": "incoming",
+            "role": "target",
+            "peer": {
+              "id": "pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.5,
+              "variance": 0.083333,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:05:30.801600+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          },
+          {
+            "predicate": "",
+            "mechanism": "IMPL",
+            "operator_id": "1a21863f497-c84d9c80fc24",
+            "related_id": "pt_67e9fa97ecdff2a945959a1563f6dcc299e55eddeb03da4a80ba3318f50362",
+            "related_kind": "statement",
+            "direction": "incoming",
+            "role": "target",
+            "peer": {
+              "id": "pt_67e9fa97ecdff2a945959a1563f6dcc299e55eddeb03da4a80ba3318f50362",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.5,
+              "variance": 0.070912,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:05:30.895653+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          },
+          {
+            "predicate": "",
+            "mechanism": "IMPL",
+            "operator_id": "1a21863f5cd-05013a477a68",
+            "related_id": "pt_24cae8d90153ebb4e86ba05ef09b7cb85382b922c08caa527d8beb3fd276f4",
+            "related_kind": "statement",
+            "direction": "incoming",
+            "role": "target",
+            "peer": {
+              "id": "pt_24cae8d90153ebb4e86ba05ef09b7cb85382b922c08caa527d8beb3fd276f4",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.5,
+              "variance": 0.053216,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:05:31.300297+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          },
+          {
+            "predicate": "",
+            "mechanism": "IMPL",
+            "operator_id": "1a21863f626-5021958b90b2",
+            "related_id": "pt_7ae9bb606f01b6879dae7b8ac5b64ea15e8772a8f440f2dc4886c7625e440c",
+            "related_kind": "statement",
+            "direction": "incoming",
+            "role": "target",
+            "peer": {
+              "id": "pt_7ae9bb606f01b6879dae7b8ac5b64ea15e8772a8f440f2dc4886c7625e440c",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.5,
+              "variance": 0.083333,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:05:31.783807+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          },
+          {
+            "predicate": "",
+            "mechanism": "IMPL",
+            "operator_id": "1a21863f738-94d9c92e5237",
+            "related_id": "pt_e574dbc8150e4f9ee28eb8d6382aef6a6694e8839e49c403cf68cba67f5ab0",
+            "related_kind": "statement",
+            "direction": "incoming",
+            "role": "target",
+            "peer": {
+              "id": "pt_e574dbc8150e4f9ee28eb8d6382aef6a6694e8839e49c403cf68cba67f5ab0",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.5,
+              "variance": 0.083333,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:05:32.180526+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          },
+          {
+            "predicate": "",
+            "mechanism": "IMPL",
+            "operator_id": "1a21864feed-7fe6eea5dd25",
+            "related_id": "pt_e2d8ee7808db02302de8b18a148c216ce7ebe6138992c001beb35e464d4921",
+            "related_kind": "statement",
+            "direction": "incoming",
+            "role": "target",
+            "peer": {
+              "id": "pt_e2d8ee7808db02302de8b18a148c216ce7ebe6138992c001beb35e464d4921",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.5,
+              "variance": 0.083333,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:06:41.420631+00:00"
+            },
+            "family_size": 3,
+            "op_created_at": null
+          },
+          {
+            "predicate": "",
+            "mechanism": "mitigated_by",
+            "operator_id": "1a21864feed-7fe6eea5dd25",
+            "related_id": "1a21864ff56-74024df96384",
+            "related_kind": "mitigation",
+            "direction": "incoming",
+            "role": "target",
+            "peer": {
+              "id": "1a21864ff56-74024df96384",
+              "kind": "mitigation",
+              "status": "live",
+              "confidence": null,
+              "variance": null,
+              "contested": false,
+              "created_at": "2026-11-26T15:06:41.878080+00:00"
+            },
+            "family_size": 0,
+            "op_created_at": null
+          },
+          {
+            "predicate": "",
+            "mechanism": "CORRECTS",
+            "operator_id": "",
+            "related_id": "pt_be134ce17647febe4a047bec9c757f2a895e90e9c1b54c11f32d7b0544991f",
+            "related_kind": "point",
+            "direction": "outgoing",
+            "role": "source",
+            "peer": {
+              "id": "pt_be134ce17647febe4a047bec9c757f2a895e90e9c1b54c11f32d7b0544991f",
+              "kind": "point",
+              "status": "superseded",
+              "confidence": null,
+              "variance": null,
+              "contested": false,
+              "created_at": "2026-11-26T15:05:30.492596+00:00"
+            },
+            "family_size": 0,
+            "op_created_at": null
+          }
+        ],
+        "topics": [],
+        "summary": "",
+        "sessionId": "doc-05",
+        "eventId": "",
+        "sourcePath": "",
+        "similarity": 6.0,
+        "snippet": "We revert to NordicFreight as our delivery partner and stop using ColdPath Logistics",
+        "scores": {
+          "fts": 6.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 6.0
+        },
+        "ep": {
+          "confidence_mean": 0.5,
+          "ep_state": "measured",
+          "evidence": {
+            "impl_count": 7,
+            "nand_count": 0,
+            "total": 7
+          },
+          "contention": 0.0,
+          "variance": 0.073891,
+          "contested": true,
+          "has_ep": true,
+          "measured": true,
+          "baseline": false,
+          "informed_order": "not_consulted"
+        },
+        "status": "live",
+        "supersedes": [
+          {
+            "id": "pt_be134ce17647febe4a047bec9c757f2a895e90e9c1b54c11f32d7b0544991f",
+            "content_snippet": "We are switching our delivery partner to ColdPath Logistics",
+            "created_at": "2026-11-26T15:05:30.492596+00:00"
+          }
+        ],
+        "subject": {
+          "id": "1a21863e7b5-94bdbd8d9e25",
+          "name": "ColdPath Logistics",
+          "kind": "core:organization",
+          "status": "live"
+        },
+        "quote": "The decision: we revert to NordicFreight as our delivery partner and stop using ColdPath Logistics.",
+        "source_turn_id": 5
+      },
+      {
+        "id": "pt_d783f5204628edb1ea7373c1cb3718c44ea4e170d469293a0bca8b7373b04f",
+        "content": "Chilled-goods capacity is limited by certified partners, and delivery scheduling must accommodate log capture as a gate rather than an afterthought",
+        "point_kind": "statement",
+        "match_source": "fts",
+        "relationships": [
+          {
+            "predicate": "",
+            "mechanism": "IMPL",
+            "operator_id": "1a218643e03-a50520496760",
+            "related_id": "pt_33c51c38530ad478a79db91aff50d628511516d19bf0535e22ad1f286fdd5f",
+            "related_kind": "statement",
+            "direction": "outgoing",
+            "role": "source",
+            "peer": {
+              "id": "pt_33c51c38530ad478a79db91aff50d628511516d19bf0535e22ad1f286fdd5f",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.5,
+              "variance": 0.07091,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:05:51.699171+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          },
+          {
+            "predicate": "",
+            "mechanism": "IMPL",
+            "operator_id": "1a218643e5e-b648b2a14316",
+            "related_id": "pt_598d6785afd267e6bd71328837bf45d60a917696ead1b962f0913b3b99fe33",
+            "related_kind": "statement",
+            "direction": "outgoing",
+            "role": "source",
+            "peer": {
+              "id": "pt_598d6785afd267e6bd71328837bf45d60a917696ead1b962f0913b3b99fe33",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.5,
+              "variance": 0.07091,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:05:51.511273+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          }
+        ],
+        "topics": [],
+        "summary": "",
+        "sessionId": "doc-02",
+        "eventId": "",
+        "sourcePath": "",
+        "similarity": 4.33333333333333,
+        "snippet": "Chilled-goods capacity is limited by certified partners, and delivery scheduling must accommodate log capture as a gate rather than an afterthought",
+        "scores": {
+          "fts": 4.33333333333333,
+          "vector": null,
+          "structural": null,
+          "rrf": 4.33333333333333
+        },
+        "ep": {
+          "confidence_mean": 0.5,
+          "ep_state": "measured",
+          "evidence": {
+            "impl_count": 0,
+            "nand_count": 0,
+            "total": 0
+          },
+          "contention": 0.0,
+          "variance": 0.083333,
+          "contested": true,
+          "has_ep": true,
+          "measured": true,
+          "baseline": false,
+          "informed_order": "not_consulted"
+        },
+        "status": "live",
+        "subject": {
+          "id": "1a21864390a-48057fcffe64",
+          "name": "certified partners",
+          "kind": "core:organization",
+          "status": "live"
+        },
+        "quote": "The practical consequence is that chilled-goods capacity is limited by certified partners, and delivery scheduling must accommodate log capture as a gate rather than an afterthought.",
+        "source_turn_id": 2
+      },
+      {
+        "id": "pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55a8abf",
+        "content": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes",
+        "point_kind": "statement",
+        "match_source": "fts",
+        "relationships": [
+          {
+            "predicate": "",
+            "mechanism": "NAND",
+            "operator_id": "1a21864fe8a-2deb9af6a4ef",
+            "related_id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+            "related_kind": "statement",
+            "direction": "outgoing",
+            "role": "source",
+            "peer": {
+              "id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.329393,
+              "variance": 0.073856,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:06:41.006129+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          }
+        ],
+        "topics": [],
+        "summary": "",
+        "sessionId": "doc-05",
+        "eventId": "",
+        "sourcePath": "",
+        "similarity": 4.0,
+        "snippet": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes",
+        "scores": {
+          "fts": 4.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 4.0
+        },
+        "ep": {
+          "confidence_mean": 0.5,
+          "ep_state": "measured",
+          "evidence": {
+            "impl_count": 0,
+            "nand_count": 1,
+            "total": 1
+          },
+          "contention": 1.0,
+          "variance": 0.083333,
+          "contested": true,
+          "has_ep": true,
+          "measured": true,
+          "baseline": false,
+          "informed_order": "not_consulted"
+        },
+        "status": "live",
+        "subject": {
+          "id": "1a21863e7b5-94bdbd8d9e25",
+          "name": "ColdPath Logistics",
+          "kind": "core:organization",
+          "status": "live"
+        },
+        "quote": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes.",
+        "source_turn_id": 3
+      },
+      {
+        "id": "doc-05_t5",
+        "content": "[assistant] Decision: we revert to NordicFreight as our delivery partner and we stop using ColdPath Logistics. The reason is that ColdPath failed its cold-chain audit and our licence forbids subcontracting chilled goods to a partner without a validated cold-chain certificate. Marta Reyes owns renegotiating with NordicFreight.",
+        "point_kind": "event",
+        "match_source": "fts",
+        "relationships": [],
+        "topics": [],
+        "summary": "",
+        "sessionId": "doc-05",
+        "eventId": "",
+        "sourcePath": "",
+        "similarity": 4.0,
+        "snippet": "[assistant] Decision: we revert to NordicFreight as our delivery partner and we stop using ColdPath Logistics. The reason is that ColdPath failed its cold-chain audit and our licence forbids subcontra",
+        "scores": {
+          "fts": 4.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 4.0
+        },
+        "ep": {
+          "confidence_mean": null,
+          "ep_state": "absent",
+          "evidence": {
+            "impl_count": 0,
+            "nand_count": 0,
+            "total": 0
+          },
+          "contention": 0.0,
+          "variance": 0.0,
+          "contested": false,
+          "has_ep": false,
+          "measured": false,
+          "baseline": false,
+          "informed_order": "not_consulted"
+        },
+        "status": "draft"
+      },
+      {
+        "id": "pt_cbd35f30a3d6d7e43c4095abce831c728704736b30df117775a17a45730437",
+        "content": "Every new restaurant account needs a morning delivery slot, so morning delivery slot capacity is the binding limit on how fast accounts can be added.",
+        "point_kind": "statement",
+        "match_source": "fts",
+        "relationships": [],
+        "topics": [],
+        "summary": "",
+        "sessionId": "doc-03",
+        "eventId": "",
+        "sourcePath": "",
+        "similarity": 4.0,
+        "snippet": "Every new restaurant account needs a morning delivery slot, so morning delivery slot capacity is the binding limit on how fast accounts can be added.",
+        "scores": {
+          "fts": 4.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 4.0
+        },
+        "ep": {
+          "confidence_mean": null,
+          "ep_state": "absent",
+          "evidence": {
+            "impl_count": 0,
+            "nand_count": 0,
+            "total": 0
+          },
+          "contention": 0.0,
+          "variance": 0.0,
+          "contested": false,
+          "has_ep": false,
+          "measured": false,
+          "baseline": false,
+          "informed_order": "not_consulted"
+        },
+        "status": "live",
+        "quote": "Delivery capacity limits it. Every new restaurant account needs a morning delivery slot",
+        "source_turn_id": 3
+      },
+      {
+        "id": "doc-03_t3",
+        "content": "[assistant] Priya Nair (Sales Lead): Delivery capacity limits it. Every new restaurant account needs a morning delivery slot, and our cold-chain rules mean we cannot add an account unless we can hold the cold chain below 4 degrees for that slot. So the growth goal depends on the delivery partner keeping the morning slots.",
+        "point_kind": "event",
+        "match_source": "fts",
+        "relationships": [],
+        "topics": [],
+        "summary": "",
+        "sessionId": "doc-03",
+        "eventId": "",
+        "sourcePath": "",
+        "similarity": 3.5,
+        "snippet": "[assistant] Priya Nair (Sales Lead): Delivery capacity limits it. Every new restaurant account needs a morning delivery slot, and our cold-chain rules mean we cannot add an account unless we can hold ",
+        "scores": {
+          "fts": 3.5,
+          "vector": null,
+          "structural": null,
+          "rrf": 3.5
+        },
+        "ep": {
+          "confidence_mean": null,
+          "ep_state": "absent",
+          "evidence": {
+            "impl_count": 0,
+            "nand_count": 0,
+            "total": 0
+          },
+          "contention": 0.0,
+          "variance": 0.0,
+          "contested": false,
+          "has_ep": false,
+          "measured": false,
+          "baseline": false,
+          "informed_order": "not_consulted"
+        },
+        "status": "draft"
+      },
+      {
+        "id": "pt_f6d9aa04e8d9b3c8fbf381b8f6991cff1cd9f5ffbb402ae39d12ce7491c748",
+        "content": "Marta Reyes, Operations Lead, owns delivery scheduling",
+        "point_kind": "statement",
+        "match_source": "fts",
+        "relationships": [],
+        "topics": [],
+        "summary": "",
+        "sessionId": "doc-04",
+        "eventId": "",
+        "sourcePath": "",
+        "similarity": 3.2,
+        "snippet": "Marta Reyes, Operations Lead, owns delivery scheduling",
+        "scores": {
+          "fts": 3.2,
+          "vector": null,
+          "structural": null,
+          "rrf": 3.2
+        },
+        "ep": {
+          "confidence_mean": null,
+          "ep_state": "absent",
+          "evidence": {
+            "impl_count": 0,
+            "nand_count": 0,
+            "total": 0
+          },
+          "contention": 0.0,
+          "variance": 0.0,
+          "contested": false,
+          "has_ep": false,
+          "measured": false,
+          "baseline": false,
+          "informed_order": "not_consulted"
+        },
+        "status": "live",
+        "subject": {
+          "id": "1a21863e80b-d3a2a796da62",
+          "name": "Marta Reyes",
+          "kind": "core:naturalPerson",
+          "status": "live"
+        },
+        "quote": "Marta Reyes (Operations Lead): Marta Reyes owns delivery scheduling and Marta Reyes owns the cold-chain temperature log.",
+        "source_turn_id": 1
+      },
+      {
+        "id": "pt_1fcd58fd4cb1fee04b374b7f7e9cf3c45852c0db993b840f7291e0465f6cd0",
+        "content": "Delivery capacity is now the binding limit on the growth goal",
+        "point_kind": "statement",
+        "match_source": "fts",
+        "relationships": [
+          {
+            "predicate": "",
+            "mechanism": "IMPL",
+            "operator_id": "1a21864ff10-2f2c417a23ae",
+            "related_id": "pt_69fc4a12cc21c55ac2fb297cf9430e8b7fe4a66112fd48b76cdf3727444b12",
+            "related_kind": "statement",
+            "direction": "incoming",
+            "role": "target",
+            "peer": {
+              "id": "pt_69fc4a12cc21c55ac2fb297cf9430e8b7fe4a66112fd48b76cdf3727444b12",
+              "kind": "statement",
+              "status": "live",
+              "confidence": 0.5,
+              "variance": 0.083333,
+              "contested": true,
+              "ep_state": "measured",
+              "created_at": "2026-11-26T15:06:41.328734+00:00"
+            },
+            "family_size": 2,
+            "op_created_at": null
+          }
+        ],
+        "topics": [],
+        "summary": "",
+        "sessionId": "doc-05",
+        "eventId": "",
+        "sourcePath": "",
+        "similarity": 3.0,
+        "snippet": "Delivery capacity is now the binding limit on the growth goal",
+        "scores": {
+          "fts": 3.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 3.0
+        },
+        "ep": {
+          "confidence_mean": 0.5,
+          "ep_state": "measured",
+          "evidence": {
+            "impl_count": 1,
+            "nand_count": 0,
+            "total": 1
+          },
+          "contention": 0.0,
+          "variance": 0.070911,
+          "contested": true,
+          "has_ep": true,
+          "measured": true,
+          "baseline": false,
+          "informed_order": "not_consulted"
+        },
+        "status": "live",
+        "quote": "delivery capacity is now the binding limit on the growth goal",
+        "source_turn_id": 7
+      }
+    ]
+  },
+  "ended": {
+    "tool": "tortoise_ended",
+    "args": {
+      "limit": 20
+    },
+    "error": "ToolError: Unknown tool: 'tortoise_ended'"
+  },
+  "currency_rank": {
+    "n": 8,
+    "rank_order": [
+      {
+        "rank": 1,
+        "id": "pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078",
+        "content": "ColdPath Logistics holds a validated cold-chain certificate",
+        "status": "live",
+        "superseded_by": null,
+        "superseded_at": null,
+        "end_state": null,
+        "scores": {
+          "fts": 5.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 5.0
+        }
+      },
+      {
+        "rank": 2,
+        "id": "pt_f682911c193a6ff2432ba7c00c633a8d0c43a54b7f7246bbffffaa85aa2252",
+        "content": "Cold-chain rules forbid adding an account unless the cold chain can be held below 4 degrees for that delivery slot.",
+        "status": "live",
+        "superseded_by": null,
+        "superseded_at": null,
+        "end_state": null,
+        "scores": {
+          "fts": 4.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 4.0
+        }
+      },
+      {
+        "rank": 3,
+        "id": "pt_bc95cd1ebe4549b9cc51b060b6196c92e9967c79034213377099462be4d409",
+        "content": "The wholesale licence forbids subcontracting the delivery of chilled goods to a partner that does not hold a validated cold-chain certificate",
+        "status": "live",
+        "superseded_by": null,
+        "superseded_at": null,
+        "end_state": null,
+        "scores": {
+          "fts": 3.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 3.0
+        }
+      },
+      {
+        "rank": 4,
+        "id": "pt_5485d93d6e661200763f63ecb470ddff7c5afe68fbbdd48f5dd679cf1ed421",
+        "content": "Marta Reyes, Operations Lead, owns the cold-chain temperature log",
+        "status": "live",
+        "superseded_by": null,
+        "superseded_at": null,
+        "end_state": null,
+        "scores": {
+          "fts": 2.66666666666667,
+          "vector": null,
+          "structural": null,
+          "rrf": 2.66666666666667
+        }
+      },
+      {
+        "rank": 5,
+        "id": "pt_f4dafe1ba004b75fd4e89ffe5bc6a65c4cb9faab5fb14148e59b782a6fcf64",
+        "content": "The chilled-goods operation was believed to be runnable on standard delivery practice, with the cold chain treated as a preference honoured where practical",
+        "status": "live",
+        "superseded_by": null,
+        "superseded_at": null,
+        "end_state": null,
+        "scores": {
+          "fts": 2.4,
+          "vector": null,
+          "structural": null,
+          "rrf": 2.4
+        }
+      },
+      {
+        "rank": 6,
+        "id": "pt_7bd69d604cd4445a25e75a07586f14e80984b67f03972c19396675b8276132",
+        "content": "The cold chain must stay below 4 degrees Celsius at all times from the loading bay to the customer's door, with no exception for short routes",
+        "status": "live",
+        "superseded_by": null,
+        "superseded_at": null,
+        "end_state": null,
+        "scores": {
+          "fts": 2.4,
+          "vector": null,
+          "structural": null,
+          "rrf": 2.4
+        }
+      },
+      {
+        "rank": 7,
+        "id": "pt_b44d17132b7b0f1a4e0a3b0b0e3892f16fe98ea53bd3a808d6363442b36607",
+        "content": "Two of ColdPath's vehicles could not show a validated cold-chain certificate, so ColdPath does not hold a validated cold-chain certificate for our routes",
+        "status": "live",
+        "superseded_by": null,
+        "superseded_at": null,
+        "end_state": null,
+        "scores": {
+          "fts": 2.11111111111111,
+          "vector": null,
+          "structural": null,
+          "rrf": 2.11111111111111
+        }
+      },
+      {
+        "rank": 8,
+        "id": "pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55a8abf",
+        "content": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes",
+        "status": "live",
+        "superseded_by": null,
+        "superseded_at": null,
+        "end_state": null,
+        "scores": {
+          "fts": 2.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 2.0
+        }
+      }
+    ]
+  },
+  "history_rank": {
+    "n": 8,
+    "rank_order": [
+      {
+        "rank": 1,
+        "id": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f",
+        "content": "We revert to NordicFreight as our delivery partner and stop using ColdPath Logistics",
+        "status": "live",
+        "superseded_by": null,
+        "superseded_at": null,
+        "end_state": null,
+        "scores": {
+          "fts": 6.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 6.0
+        }
+      },
+      {
+        "rank": 2,
+        "id": "pt_d783f5204628edb1ea7373c1cb3718c44ea4e170d469293a0bca8b7373b04f",
+        "content": "Chilled-goods capacity is limited by certified partners, and delivery scheduling must accommodate log capture as a gate rather than an afterthought",
+        "status": "live",
+        "superseded_by": null,
+        "superseded_at": null,
+        "end_state": null,
+        "scores": {
+          "fts": 4.33333333333333,
+          "vector": null,
+          "structural": null,
+          "rrf": 4.33333333333333
+        }
+      },
+      {
+        "rank": 3,
+        "id": "pt_dffe3b5e729b9cc89bf2e62744bba1cc85abfa8f05462071108d64f55a8abf",
+        "content": "We believed ColdPath Logistics was a viable delivery partner for our chilled wholesale routes",
+        "status": "live",
+        "superseded_by": null,
+        "superseded_at": null,
+        "end_state": null,
+        "scores": {
+          "fts": 4.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 4.0
+        }
+      },
+      {
+        "rank": 4,
+        "id": "doc-05_t5",
+        "content": "[assistant] Decision: we revert to NordicFreight as our delivery partner and we stop using ColdPath Logistics. The reason is that ColdPath failed its cold-chain",
+        "status": "draft",
+        "superseded_by": null,
+        "superseded_at": null,
+        "end_state": null,
+        "scores": {
+          "fts": 4.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 4.0
+        }
+      },
+      {
+        "rank": 5,
+        "id": "pt_cbd35f30a3d6d7e43c4095abce831c728704736b30df117775a17a45730437",
+        "content": "Every new restaurant account needs a morning delivery slot, so morning delivery slot capacity is the binding limit on how fast accounts can be added.",
+        "status": "live",
+        "superseded_by": null,
+        "superseded_at": null,
+        "end_state": null,
+        "scores": {
+          "fts": 4.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 4.0
+        }
+      },
+      {
+        "rank": 6,
+        "id": "doc-03_t3",
+        "content": "[assistant] Priya Nair (Sales Lead): Delivery capacity limits it. Every new restaurant account needs a morning delivery slot, and our cold-chain rules mean we c",
+        "status": "draft",
+        "superseded_by": null,
+        "superseded_at": null,
+        "end_state": null,
+        "scores": {
+          "fts": 3.5,
+          "vector": null,
+          "structural": null,
+          "rrf": 3.5
+        }
+      },
+      {
+        "rank": 7,
+        "id": "pt_f6d9aa04e8d9b3c8fbf381b8f6991cff1cd9f5ffbb402ae39d12ce7491c748",
+        "content": "Marta Reyes, Operations Lead, owns delivery scheduling",
+        "status": "live",
+        "superseded_by": null,
+        "superseded_at": null,
+        "end_state": null,
+        "scores": {
+          "fts": 3.2,
+          "vector": null,
+          "structural": null,
+          "rrf": 3.2
+        }
+      },
+      {
+        "rank": 8,
+        "id": "pt_1fcd58fd4cb1fee04b374b7f7e9cf3c45852c0db993b840f7291e0465f6cd0",
+        "content": "Delivery capacity is now the binding limit on the growth goal",
+        "status": "live",
+        "superseded_by": null,
+        "superseded_at": null,
+        "end_state": null,
+        "scores": {
+          "fts": 3.0,
+          "vector": null,
+          "structural": null,
+          "rrf": 3.0
+        }
+      }
+    ]
+  },
+  "verdict": {
+    "current_in_currency": {
+      "rank": null
+    },
+    "stale_in_currency": {
+      "rank": 1,
+      "content": "ColdPath Logistics holds a validated cold-chain certificate",
+      "status": "live",
+      "superseded_by": null
+    },
+    "stale_in_history": {
+      "rank": null
+    },
+    "current_in_history": {
+      "rank": null
+    }
+  }
+}

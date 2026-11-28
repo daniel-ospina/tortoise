@@ -57,51 +57,37 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — the LAST `origin/main` fold on this branch, which
-# ALREADY carries `tests/test_14691_structure_evidence.py` (`core`, at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) as #14723's row, not as this lane's (#14587 review cycle 11, P2: the
-# possessive spelling here credited the fold's own row to this branch. ⛔ NOT because "the two
-# manifests are byte-identical" — that is FALSE, and what makes it false is a DURABLE fact rather than
-# a head-bound figure (#14587 review cycle 15, P2: this sentence carried a numstat pair for "this
-# head", which kept moving as its own prose was rewritten, so a
-# reader checking it got a different number and distrusted the claim it supported — which is why no
-# such pair is quoted here; `git log --numstat` is the reading): the two manifests' DATA rows differ
-# by ONE line in one row's inline note, while the
-# comment blocks account for the rest of the file's divergence — which is exactly why "byte-identical"
-# is the wrong test and ROW MEMBERSHIP is the right one. Measured so: the fold's own two parents
-# differ by `124/118` (a stable pair — `git diff a01675b50c 344a1c086e --
-# config/ci-surfaces.yml` -> `124 118`, both endpoints named so the reading is reproducible), and
-# the row is present in `origin/main`'s
-# manifest and ABSENT from the PRE-FOLD BASE's, so the fold brought it in) — and this lane registers
-# ONE row of its OWN (`tests/test_relation_orientation_14304.py`, `core`, at the same flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`), so the two rows are named separately rather than one standing for both.
-# With this lane's row on the tree, the verb packs five shards at 828.2 s (a, g, i, j, k) and six at
-# 828.1 s (b, c, d, e, f,
-# h), so `ceil(828.2/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST
-# shard's) — and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
-# (1680 / 828.2 = 2.0285) on every one of the eleven shards, so the two agree by construction
-# rather than by a hand re-read. ⛔ THE FIGURES ABOVE ARE A RE-MEASUREMENT ON THIS MERGED TREE with
-# `--emit-push-matrix`, not #14723's seven-and-four or this lane's own pre-fold five-and-six: a row
-# landing moves the bins, so neither earlier spelling describes this head.
-# ⛔ #14723 RE-DERIVED THIS SENTENCE ON `main` ITSELF, and the attribution is corrected here rather
-# than carried (#14587 review cycle 10, P2, MEASURED): `tests/test_14691_structure_evidence.py` is
-# `main`'s row — it is already in `git show 344a1c086e06:config/ci-surfaces.yml` — so it is NOT this
-# lane's delta, and the `nine-and-two -> seven-and-four` move that lane measured belongs to `main`'s
-# own commit. ⛔ THE POOL DELTA IS RE-COUNTED ON THE RESOLVED TREE AND STATED AS THE OPERATION —
-# never carried, and never as a pair of counts (⛔ no pool size: it is a live census, and this
-# sentence stated `1343` until #14587 review cycle 12, P2: true the day it was written, unfenced,
-# bound to no sha, and invisible to `_POOL_CENSUS_RE` because `gives` is not one of the verbs it
-# reads). Measured by loading each tree's OWN manifest through `fast_pool()` — `git show
-# origin/main:config/ci-surfaces.yml` for the other side:
-# `set(fast_pool(head)) - set(fast_pool(main))` returns exactly ONE entry,
-# `tests/test_relation_orientation_14304.py` (`core`, flat 2.0 s) — the row THIS lane registers — and
-# the reverse difference is empty. So the delta here is that one row and nothing else; on the
-# PRE-merge tree it was empty, which is why an earlier spelling of this paragraph said there was
-# none.
+# reader of the prose can see. On THIS tree the last `origin/main` fold brought in TWO rows that are
+# `main`'s, not this branch's — `tests/test_14691_structure_evidence.py` (#14723) and
+# `tests/test_relation_orientation_14304.py` (#14304), both `core` at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT` (#14587 review cycle 11, P2: the possessive spelling here credited a fold's
+# own row to this branch) — and this lane registers ONE row of its OWN,
+# `tests/test_14721_superseded_never_outranks.py` (`ep`, at the same flat weight). ⛔ NOT because
+# "the two manifests are byte-identical" — that is FALSE, and what makes it false is a DURABLE fact
+# rather than a head-bound figure (#14587 review cycle 15, P2: this sentence carried a numstat pair
+# for "this head", which kept moving as its own prose was rewritten, so a reader checking it got a
+# different number and distrusted the claim it supported — which is why no such pair is quoted here;
+# `git log --numstat` is the reading): the two manifests' DATA rows differ by ONE line in one row's
+# inline note, while the comment blocks account for the rest of the file's divergence — which is
+# exactly why "byte-identical" is the wrong test and ROW MEMBERSHIP is the right one.
+# ⛔ THE POOL DELTA IS RE-COUNTED ON THE RESOLVED TREE AND STATED AS THE OPERATION — never carried,
+# and never as a pair of counts (⛔ no pool size: it is a live census, and an earlier spelling of
+# this sentence stated `1343`, which was true the day it was written, unfenced, bound to no sha, and
+# invisible to `_POOL_CENSUS_RE` because `gives` is not one of the verbs it reads). Measured by
+# loading each tree's OWN manifest through `fast_pool()` (`git show origin/main:config/ci-surfaces.yml`
+# for the other side): `set(fast_pool(head)) - set(fast_pool(main))` returns exactly
+# `tests/test_14721_superseded_never_outranks.py` — this lane's own `ep` row — and the reverse
+# difference is empty. So the delta here is that one row and nothing else; on the PRE-merge tree it
+# was empty, which is why an earlier spelling of this paragraph said there was none.
+# On THIS tree the verb packs three shards at 828.4 s (a, j, k) and eight at 828.3 s
+# (b, c, d, e, f, g, h, i), so `ceil(828.4/60 x 2)` = 28 m governs (a shard's job-level wall clock
+# is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
+# `watchdog_headroom: 2.03` (1680 / 828.4 = 2.0280) on every one of the eleven shards, so the two
+# agree by construction rather than by a hand re-read.
 # ⛔ THAT IS WHY THE PARTITION IS STATED AND NOT ONLY THE MINUTE: an arithmetic check on `28 m`
-# cannot see a carried figure, and a reader comparing only minutes would call the move cosmetic. The
-# same lesson recurs one notice down: five-and-six is not #14723's seven-and-four, and the MINUTE and
-# the headroom are identical on all three spellings.
+# cannot see a carried figure, and a reader comparing only minutes would call the move cosmetic.
+# The minute and the headroom have been identical across the recent folds while the partition moved,
+# which is exactly the change the minute cannot show.
 # ⛔ No pool SIZE is restated BY THIS RE-DERIVATION, and the reason is a recorded ruling rather
 # than a preference (#14691 review, round 15, finding 4): the repo's own doctrine is at
 # `tests/test_ci_selection.py` — "a pool size is a measurement with several independent reasons to
@@ -111,9 +97,10 @@ version: 1
 # COUNTS, and that is not the same claim: each is written in the past tense OF THE FOLD THAT
 # MEASURED IT and names that fold's base, so it is a fact about that fold rather than a claim about
 # this head — which is what the sentence above forbids (#14723 review, P2: it read as an absolute
-# and a reader could grep three counts out of the block). ⛔ Every OTHER row this tree carries is `main`'s at this head — and so is that one, which is why
-# reading ANY of them as this lane's delta would attribute a partition move to a row that did not
-# cause it.
+# and a reader could grep three counts out of the block). ⛔ EVERY ROW THIS LANE DID NOT REGISTER IS
+# `main`'s at this head — #14723's and #14304's among them — so reading ANY of them as this branch's
+# delta would attribute a partition move to a row that did not cause it; the ONE row the difference
+# above names is this lane's own.
 # ⛔ THE GRADED CLAUSE IS A CLAIM ABOUT THIS HEAD; the rest of this paragraph is a MEASUREMENT
 # RULE. On THIS tree — `origin/main` folded in at this branch's last merge (`git log --first-parent
 # --merges` names it; the sha is deliberately NOT restated: it moves with every fold, nothing grades
@@ -10878,6 +10865,16 @@ surfaces:
   - test_source_credibility.py
   - test_source_inheritance_own.py
   - test_supersede_edges.py
+  # #14721 (#14737 review F1): the SUPERSESSION ORDER — a claim carrying
+  # `superseded_by` never outranks the claim that superseded it, chains resolve
+  # newest-first, and neither a page edge, a cycle, a non-injective id nor a
+  # self-named successor may drop or duplicate a row. Selects `ep` because the
+  # change is in `tortoise/ranking.py` (a named-surface match replaces the `core`
+  # fallback, #2938/#7951); the file is HERMETIC (it imports `tortoise.ranking`
+  # only — no graph, no Docker), so the fast shard is correct. Before this row,
+  # the file was selected by NO leg and the required `manifest-integrity` check
+  # redded on it — so the PR's own proof-of-fix ran in no CI job at all.
+  - test_14721_superseded_never_outranks.py
   - test_supplementary.py
   - test_w4_why_enrichment.py
   - test_weights.py
@@ -13824,6 +13821,7 @@ durations_floors:
 # but it is no longer a reason to refuse a PR for a fast-pool file.
 # Pinned by tests/test_ci_manifest.py::test_a_fast_file_with_no_row_is_a_default_not_a_defect.
 durations:
+  test_14721_superseded_never_outranks.py: 2.0  # unmeasured — new in #14721 (PR #14737). The #3400/#4348 trap applies: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so this is the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `ep` registration above is what puts the file in `fast_pool()`, and `--integrity` is a 0.90 RATIO check that stays green over an absent row, so only this row records the weight. Hermetic: it imports `tortoise.ranking` only — no DB, no graph, no docker, no network, no model call. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local seconds figure and no case count are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_relation_orientation_14304.py: 2.0  # new in #14304 (PR #14790) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts the file in `fast_pool()`, and `--integrity` stays green either way (the coverage check is a 0.90 RATIO with headroom), so only this row records the weight; it is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because that ENTRY-RULE pin iterates an EXPLICIT tuple and cannot see a file nobody listed. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file. What the weight covers, hermetic (no DB, no graph, no network, no model call — every case is a pure function of `(relations, entity_index, declared)` plus a recording fake writer): the ORIENTATION leg's verdict (BOTH premises: the exact declared pair asked in REVERSE — `reversed_orientation` with `evidence="declared-pair"`, pinned by `test_a_KIND_only_declared_pair_reversed_carries_the_DECLARED_PAIR_evidence`, and the THREE landing arms each declare it — including the hierarchy arm, pinned by `test_the_HIERARCHY_arm_declares_the_correction_it_applied` (whose absence let `orientation=orientation` be deleted from that arm with the suite still green, found by this PR's mutation-attribution pass) — and `reversed_orientation` when the label-spelled end — `Subject`, the label-spelled end and NOT "the owner": it is a PLACEMENT, not an ownership claim, and on `packs/venture`'s `holds` (`venture:investment -> Subject`, `<-`) the `:Subject` is the OWNED end — is on the SOURCE side, `as_asked` when it is already where the declaration spells it, and ABSTENTION only where NEITHER premise answers: a declared pair asked for different kinds with no label end, an undeclared predicate, an unresolved endpoint (`None` kind), both ends the labelled class, and an unreadable declaration set), the plan and write path (the declared orientation is what `link_entities` is handed, a correct statement is planned unchanged, the correction is DECLARED on the receipt row and on `warnings` and counted in `reoriented`, two statements of one fact become ONE edge, and no record PROSE can reach the payload), and the pin that `managedBy`/`authoredBy` abstain until a pack declares them rather than being hard-coded. ⛔ The CASE COUNT is deliberately not quoted: it moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_14357_fallback_thinking.py: 2.0  # new in #14357 (PR #14362) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` + `eval` registrations above are what put the file in `fast_pool()`, and `--integrity` stays green either way (the coverage check is a 0.90 RATIO with headroom), so only this row records the weight. ⛔ MEASURED at the #14362 review's head: the file was in `fast_pool()` with NO row here, and `--integrity` passed — the same absence `test_13422_object_subject_dense_leg.py`'s note records surviving a round, which is why the file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD` (the ENTRY-RULE pin iterates an EXPLICIT tuple and cannot see a file nobody listed). `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file. What the weight covers, hermetic — no DB, no graph, no network, no model call (every wire leg patches `requests.sessions.Session.post` and asserts the body it captured; the yield-guard legs drive a stub adapter in-process; the eval-grade leg reads `report.RECOVERABLE_CENSUS_CLASSES` directly): the three extractor pool members' WIRE BODIES all carrying a suppression (`thinking` on the direct member, `reasoning.effort: none` on openrouter, `venice_parameters.disable_thinking` on venice) while `deepseek-v4-pro` keeps its default on all three and the ask lane's hop members stay byte-identical; the lane gate being required AND keyword-only on the signature; the flash-FAMILY match over one literal; the failover-SERVED body and the keyless sole-member body; a bounded thinking budget still outranking suppression; and the yield guard's four arms — an empty `finish_reason=length` answer raising `_ReasoningCollapse` with its route/model interpolated, fatal by type (one call, no retry), censused as `reasoning_collapse`, an ESCALATED collapse not re-wrapped as a recoverable `truncated_parse_error`, a non-empty `length` answer still returned, and an empty `stop` answer still legitimate — plus the fail-closed eval grade and the end-to-end "no document, but recorded" extraction. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_14371_offline_embed_json.py: 2.0  # new in #14371 (this PR) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file. What the weight covers, hermetic (no DB, no graph, no network, no model call, no provider key — committed receipts plus `tortoise.extractor_v2`): the `embed-json` verb's per-emission before/after/delta and aggregate cells (77,561 -> 52,346, 25,215 saved, 1,801/emission), its per-document arithmetic (12,411.5 x 1.14 -> 14,149.1; -4,599.9/doc; 64,799 -> 60,199.1) and the floor counts it prints (46->49 / 61->66 / 370->398), the parsed-object + key-order round-trip of both layouts on all 14 real emissions, the posture guard in BOTH directions (a render-moving value is refused; a value resolving to the recorded render is not), the verb's no-provider-call and one-instrument structural pins, and the committed artifact's recorded cells. The end-to-end measurement leg SKIPS where no tiktoken BPE cache exists (fetching it is egress from a deterministic test) and pins the artifact instead. No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from.

@@ -692,6 +692,19 @@ response_fields:
     pre-#12184 payload could not express at all — the same constant boost was emitted whichever family had (not)
     answered'
   unchanged_when_off: NO — additive key on an existing payload (present only on entity rows). Not flag-gated
+- response: tortoise_search
+  field: superseded_by.superseded_at
+  emitted_when: 'PRESENT-ONLY, on a `superseded_by` block that already exists — the instant the replaced claim stopped
+    being valid, read from the SAME `validTo` bound `supersede_point` closes (E6 #1538 D2/D5), so the label states
+    WHEN beside WHAT. Absent on an undated window, so every legacy decoration stays byte-identical. #14721'
+  unchanged_when_off: NO — additive key inside an existing block, present only when the row carries the bound. Not flag-gated
+- response: tortoise_search
+  field: superseded_by.source
+  emitted_when: 'PRESENT-ONLY, on a `superseded_by` block that already exists — the provenance of the SUCCESSOR
+    (`coalesce(new.sessionId, new.session_id)`), i.e. which document established the correction. Without it the
+    label answered what replaced the claim and when, but not from where, which is the third element a reader
+    needs to judge the correction. Absent when the successor carries neither spelling. #14721'
+  unchanged_when_off: NO — additive key inside an existing block, present only when the successor names a session. Not flag-gated
 - response: tortoise_recall
   field: recall_ranking.draft
   emitted_when: 'the row is a Point with status `draft` — present only when true (the #1353 D8 / #2294 additive

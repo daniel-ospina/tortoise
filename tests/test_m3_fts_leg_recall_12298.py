@@ -1380,8 +1380,12 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # re-ran this one test to the exclusion of the rest, so one stale locator
     # made the required matrix red repo-wide). Re-derived against the live
     # file, not nudged by a constant, and the brief's §1 row moved with it.
-    ("tortoise/search_engine.py", 2945, "def run_fts_query(",
-     "`tortoise/search_engine.py:2945`"),
+    # ⛔ AND AGAIN AT #14721: its 4-line `SearchResult.superseded_by` hunk at `:2034` sits ABOVE
+    # every row in this group, so all four move **+4** together — re-derived with
+    # `sed -n "<n>p"` on the live file (2949/3161/2791/5078), never by adding 4 to the old number,
+    # and §1 of the brief was re-cut to the same four values.
+    ("tortoise/search_engine.py", 2949, "def run_fts_query(",
+     "`tortoise/search_engine.py:2949`"),
     # #11609 Phase 2 (PR #12951) repaired two comments inside this file, which
     # moves the two LATE rows and only them: the FTS call +1 and the rank loop
     # +2. Re-derived against the live file after the forward-merge, not nudged
@@ -1390,13 +1394,13 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # below are the only place this block may state one — the historical
     # numbers in the rows ABOVE are the record of a drift, not a locator to
     # trust.
-    ("tortoise/search_engine.py", 3157, "CALL db.idx.fulltext.queryNodes",
-     "`:3157-3166`"),
-    ("tortoise/search_engine.py", 2787, "def recency_tie_clause(",
-     "`search_engine.py:2787`"),
-    ("tortoise/search_engine.py", 5074,
+    ("tortoise/search_engine.py", 3161, "CALL db.idx.fulltext.queryNodes",
+     "`:3161-3170`"),
+    ("tortoise/search_engine.py", 2791, "def recency_tie_clause(",
+     "`search_engine.py:2791`"),
+    ("tortoise/search_engine.py", 5078,
      "for rank, (pid, _score) in enumerate(ranked):",
-     "`tortoise/search_engine.py:5074`"),
+     "`tortoise/search_engine.py:5078`"),
     # The three `projection/__init__.py` rows were stale on `main` too (both the
     # brief and this pin still named the pre-#13290 lines), and this branch's own
     # seam work moves them a further +23. Re-derived against the live file, so

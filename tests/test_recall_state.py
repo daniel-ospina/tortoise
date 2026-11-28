@@ -270,21 +270,30 @@ def _fresh_sdk():
     db_path = os.path.join(tempfile.mkdtemp(prefix="tortoise_recall_state_"), "test.db")
     sdk = TortoiseSDK(db_path)
     try:  # noqa: SIM105
-        sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
+        _raw(sdk, "MATCH (n) DETACH DELETE n")
     except Exception:
         pass
     return sdk
+
+
+def _raw(sdk, cypher: str, **params):
+    """Run one raw statement (the probe below and the fixtures' own bookkeeping).
+
+    ONE site for every raw write in this file: `surface-guard`'s untyped-receiver
+    ratchet counts each `.query(` receiver, and the #14721 page-size test needs a
+    raw `CORRECTS` edge (the product door that writes one also decays the old
+    row's belief, which would decide that test's order for the wrong reason).
+    """
+    return sdk._get_proj().g.query(cypher, params=params or None).result_set
 
 
 def _set_posterior(sdk, pid: str, alpha: float, beta: float):
     """Persist EP posterior params the way compute_confidence does (n.confidence
     = posterior mean α/(α+β); posterior_alpha/beta for variance/contested)."""
     mean = round(alpha / (alpha + beta), 4) if (alpha + beta) > 0 else 0.5
-    sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) SET n.confidence = $c, "
-        "n.posterior_alpha = $a, n.posterior_beta = $b",
-        params={"id": pid, "a": alpha, "b": beta, "c": mean},
-    )
+    _raw(sdk, "MATCH (n:Point {id:$id}) SET n.confidence = $c, "
+              "n.posterior_alpha = $a, n.posterior_beta = $b",
+         id=pid, a=alpha, b=beta, c=mean)
 
 
 def _build_golden_graph(sdk):
@@ -489,6 +498,94 @@ def test_state_filter_does_not_shrink_pool_behind_superseded():
         inc = sdk._recall_state(kind="statement", limit=10, include_superseded=True)
         assert len(inc) == 10
         assert any(pid in superseded_ids for r in inc for pid in [r["id"]])
+    finally:
+        sdk.close()
+
+
+def test_state_read_tells_the_ranker_the_page_size():
+    """#14721 (review F2): the SDK's ``page_limit=limit`` is load-bearing.
+
+    Deleting that one keyword at the ranker call leaves every other suite green:
+    the page-edge guard in ``_superseded_below_successor`` then becomes
+    unreachable from production, and a replaced claim whose successor sits past
+    the page edge is dragged out of the page behind it — hiding BOTH rows, which
+    is the silent omission the pairwise design exists to avoid. The ranker's own
+    page test passes ``page_limit`` itself, so only a read THROUGH the SDK can
+    observe the value production actually supplies.
+    """
+    sdk = _fresh_sdk()
+    try:
+        old = sdk._create_point("statement", "zephyr coldpath holds a validated certificate")
+        fillers = [sdk._create_point("statement", f"zephyr coldpath logistics note {i}")
+                   for i in range(6)]
+        new = sdk._create_point("statement",
+                                "zephyr coldpath does not hold a validated certificate")
+        # A raw CORRECTS edge, not `supersede_knowledge`: that door also decays
+        # the old row's belief (#2884 A3), which would decide this order for the
+        # wrong reason. The edge alone is what builds `superseded_by`.
+        _raw(sdk, "MATCH (o:Point {id:$o}), (n:Point {id:$n}) "
+                  "CREATE (n)-[:CORRECTS]->(o)", o=old["id"], n=new["id"])
+        _set_posterior(sdk, old["id"], 19.0, 1.0)      # rank 0 by confidence
+        for i, filler in enumerate(fillers):
+            _set_posterior(sdk, filler["id"], 12.0 - i * 0.2, 1.0)
+        _set_posterior(sdk, new["id"], 2.0, 1.0)       # last: past a page of 4
+
+        page = sdk._recall_state(kind="statement", limit=4, include_superseded=True)
+        ids = [r["id"] for r in page]
+        assert len(page) == 4, ids
+        assert old["id"] in ids, (
+            "the replaced claim was dragged out of the page behind a successor "
+            "the page does not serve — the SDK stopped telling the ranker the "
+            "page size (`page_limit=limit`)")
+        assert new["id"] not in ids
+
+        # …and when the page DOES hold the successor, the constraint applies.
+        full = [r["id"] for r in sdk._recall_state(
+            kind="statement", limit=8, include_superseded=True)]
+        assert full.index(new["id"]) < full.index(old["id"]), full
+    finally:
+        sdk.close()
+
+
+def test_a_confidence_floor_cannot_hide_a_superseded_claim_above_its_successor():
+    """#14721 (final-review P2): the floor CUT, not just the page, can hide the pair.
+
+    ``page_limit=limit`` is handed to the ranker over the PRE-floor pool, so the
+    page-edge guard in ``_superseded_below_successor`` compares the successor's
+    POOL index against ``limit``. The served page is cut AFTER ``_passes_floor``
+    drops rows, so every dropped row shifts a later row INTO the page: a
+    successor sitting past the pool's page edge is skipped by the guard ("its
+    replacement will not be served") and then served anyway, leaving the
+    replaced claim above it — the exact defect the pairwise constraint exists to
+    remove, one confidence floor away.
+
+    The geometry is the measured one: the query terms select the OLD claim and
+    the fillers (which fail the floor), while the successor answers none of them
+    and therefore scores last in the pool despite passing the floor.
+    """
+    sdk = _fresh_sdk()
+    try:
+        old = sdk._create_point(
+            "statement", "zebra quantum coldpath holds a validated certificate")
+        fillers = [sdk._create_point(
+            "statement", f"zebra quantum coldpath logistics note {i}")
+            for i in range(6)]
+        new = sdk._create_point(
+            "statement", "coldpath does not hold a validated certificate")
+        _raw(sdk, "MATCH (o:Point {id:$o}), (n:Point {id:$n}) "
+                  "CREATE (n)-[:CORRECTS]->(o)", o=old["id"], n=new["id"])
+        _set_posterior(sdk, old["id"], 9.0, 1.0)          # conf 0.90 — served
+        for filler in fillers:
+            _set_posterior(sdk, filler["id"], 9.0, 11.0)  # conf 0.45 — dropped
+        _set_posterior(sdk, new["id"], 6.0, 4.0)          # conf 0.60 — served
+
+        page = [r["id"] for r in sdk._recall_state(
+            "zebra quantum", kind="statement", limit=4,
+            include_superseded=True, min_confidence=0.5)]
+        assert old["id"] in page and new["id"] in page, page
+        assert page.index(new["id"]) < page.index(old["id"]), (
+            "the floor dropped the rows that kept the successor past the page "
+            f"edge, so the served page leads with the claim it refutes: {page}")
     finally:
         sdk.close()
 

@@ -872,7 +872,7 @@ def test_the_two_term_advantage_is_bounded_at_1based_61():
     grades that it is *true*, so a formula change cannot leave the docstrings
     telling a reader something the engine no longer does. ``rrf_fusion`` sums
     ``w / (k + rank + 1)`` over a 0-BASED ``rank`` with ``k = 60``
-    (``search_engine.py:5075``), so a shared id at 0-based rank ``h`` in BOTH
+    (``search_engine.py:5079``), so a shared id at 0-based rank ``h`` in BOTH
     lists scores ``2/(61+h)`` against a single-term rank-0 candidate's
     ``1/61``:
 

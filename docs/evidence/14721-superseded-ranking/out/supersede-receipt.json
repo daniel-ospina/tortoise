@@ -1,0 +1,10 @@
+{
+  "old": "pt_be134ce17647febe4a047bec9c757f2a895e90e9c1b54c11f32d7b0544991f",
+  "new": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f",
+  "result": {
+    "invalidated": true,
+    "id": "pt_be134ce17647febe4a047bec9c757f2a895e90e9c1b54c11f32d7b0544991f",
+    "corrected_by": "pt_9a75c36123b1c7d1c65abbaf3aa4f0e9051d87f188047559e3199a00ab878f",
+    "edges_transferred": 8
+  }
+}

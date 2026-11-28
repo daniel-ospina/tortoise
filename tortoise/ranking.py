@@ -737,6 +737,210 @@ def _parse_iso(value) -> datetime | None:
 # ontology §4.3), so point signals are the CORRECT signals for it.
 
 
+def _superseded_below_successor(ann: list[dict], *,
+                                page_limit: int | None = None) -> list[dict]:
+    """Keep a REPLACED claim below the claim that replaced it (#14721).
+
+    THE DEFECT THIS CLOSES. A score is a statement about *relevance*, and a
+    claim's relevance does not fall when a later document refutes it — so a
+    superseded claim could outrank its own successor, and did. MEASURED on the
+    #14592 corpus (``docs/evidence/14721-superseded-ranking``): for the corpus's
+    contradiction question ("Did ColdPath fail its cold-chain audit, and what
+    did we do about it?"), the SUPERSEDED claim "ColdPath Logistics holds a
+    validated cold-chain certificate" came back at **rank 1** on FTS similarity
+    alone (5.0 against every current row's ≤ 3.0), and the refutation that
+    replaced it was **not in the top 8**. A reader asking what is true now was
+    told the refuted thing.
+
+    WHY A PAIRWISE CONSTRAINT AND NOT A GLOBAL "ended sorts last" TIER. A tier
+    was built first and MEASURED: it does fix the order, and it also pushes every
+    ended row to the bottom — on this corpus the superseded claim fell out of a
+    ``limit=20`` page entirely. That trades one silent omission for another, and
+    it breaks the read the history question is FOR ("what did we originally
+    decide, and what superseded it?"), where the replaced claim is the thing the
+    caller asked for. The issue's requirement is precisely the pairwise one —
+    *a superseded claim must not outrank the claim that superseded it* — so that
+    is the constraint applied, and nothing else moves: every row keeps the
+    position the score gave it relative to every row that is not its successor.
+
+    WHAT DECIDES "SUPERSEDED". Nothing new, and nothing this module invents: the
+    row's own ``superseded_by`` carrier — ``{id, content_snippet, created_at,
+    superseded_at?, source?}`` — which ``search_engine.
+    fetch_point_epistemic_state`` builds from the Point's incoming ``CORRECTS``
+    edge, the same edge ``supersede_point`` writes. A row with no successor, or
+    whose successor is not in this result set, is untouched (there is nothing
+    for it to outrank). Retracted-correcting points are already excluded as
+    superseding authority at that source, so this does not re-decide it.
+
+    ⛔ THE INVARIANT IS "BELOW", NOT "IMMEDIATELY BELOW". A row is inserted
+    directly after its successor at the moment it moves, but a LATER move can
+    land rows in between — in the corpus evidence the replaced decision sits at
+    rank 7 below its successor at rank 3. That is the contract: order, not
+    adjacency. Do not read "immediately" into it and do not add a pass that
+    forces pairs together.
+
+    ⛔ IT CAN INVERT THE #11702 BELIEF TIER, DELIBERATELY. The score sort places
+    an absent-belief row below every belief-carrying one; this constraint runs
+    afterwards, so a superseded row that HAS a belief can end up below its
+    successor that has none. That is the point — R1 is about epistemic currency
+    (which claim is current), and a replaced claim must not lead with its belief
+    while doing so. The trade is stated here rather than hidden, because the
+    alternative (refusing to cross the belief tier) would leave the defect open
+    for exactly the claims that carry the most evidence.
+
+    CHAINS ARE RESOLVED BY DEPTH, IN ONE WALK. ``A <- B <- C <- D`` (A replaced
+    by B, …) must resolve to ``D, C, B, A``. Each row's DEPTH is its number of
+    links to a terminal successor (``D``=0, ``C``=1, ``B``=2, ``A``=3), and the
+    rows are placed shallowest-first, so a row is placed only after its own
+    successor has reached its final position. That is one placement per row —
+    ``O(n²)`` including the re-indexing — and it has no pass budget to get
+    wrong: the first version counted PASSES (``n`` of them, one move each) and
+    was measured wrong at four links (a ``k``-link chain needs moves in
+    decreasing depth order, not ``k`` passes — it came out ``B, A, D, C``,
+    leaving B above C), and the second bounded MOVES at ``n·(n-1)`` with an
+    ``O(n²)`` re-index per pass, i.e. ``O(n³)`` in moves and ``O(n⁴)``
+    overall — REVIEW-MEASURED at 10.2 s for a 160-row pool holding a cyclic
+    pair and 146 s at 320, against the 10 s wait bound #3834 pins. Depth
+    placement makes both the cost and the termination obvious.
+
+    A CYCLE in the data (X replaced by Y and Y by X — only raw/imported data
+    can write one: ``supersede_point`` refuses a terminal endpoint, #2498) has
+    NO valid order, so cycle members keep their positions and are not moved
+    (``_successor_depths`` reports them and the placement pass skips them
+    entirely, so this holds for cycles of any length and not just for a 2-cycle
+    whose two placements happen to cancel); a row that merely feeds the cycle is
+    still placed below it. That is stated rather than left to a budget running
+    out: an expensive pass that in the end changes nothing is the shape that
+    made this quadratic-to-the-fourth.
+
+    ``page_limit`` — the caller's page size, when it knows it. A replacement
+    that will NOT be served must not drag the replaced row out of the page
+    behind it, which would hide BOTH; on this corpus that is the difference
+    between a ``limit=8`` history read returning the labelled stale claim and
+    returning nothing. So a pair whose successor falls at or beyond the page
+    edge is left alone. ``None`` (the default) means "no page is being cut".
+    """
+    n = len(ann)
+    if n < 2:
+        return ann
+    # An id-to-index map is only usable when it is INJECTIVE. Every row with no
+    # ``id``/``node_id`` collapses onto ``""``, and two rows can share an id; in
+    # either case a positional move would take a DIFFERENT row than the one
+    # just inspected — duplicating one and silently dropping another (measured:
+    # three rows in, one of two id-less rows lost and the other doubled). Such
+    # rows are therefore not addressable and the constraint does not apply.
+    ids = [_row_id(r) for r in ann]
+    counts: dict[str, int] = {}
+    for rid in ids:
+        counts[rid] = counts.get(rid, 0) + 1
+    where = {rid: i for i, rid in enumerate(ids)
+             if rid and counts[rid] == 1}
+    succ_of: list[str | None] = []
+    for row, rid in zip(ann, ids, strict=True):
+        succ = row.get("superseded_by")
+        succ_id = str(succ.get("id")) if isinstance(succ, dict) and succ.get("id") else None
+        # Nothing this pass can hold the row below: no successor, a successor
+        # that is not in this result set, an unaddressable row, or a row that
+        # names ITSELF. The self-naming guard is load-bearing: without it the
+        # move below pops the row and then looks for the very id it removed, and
+        # the resulting exception propagates out of ``rerank`` into
+        # ``_recall_state`` — the WHOLE state read fails, not one row
+        # (``StopIteration`` from the previous shape's ``next(...)``;
+        # ``ValueError`` from this one's ``list.index`` — both reproduced).
+        if (succ_id is None or succ_id == rid
+                or rid not in where or succ_id not in where):
+            succ_of.append(None)
+            continue
+        succ_of.append(succ_id)
+    depths, in_cycle = _successor_depths(succ_of, where)
+    by_depth: dict[int, list[int]] = {}
+    for k, d in enumerate(depths):
+        if succ_of[k] is not None and k not in in_cycle:
+            by_depth.setdefault(d, []).append(k)
+    if not by_depth:
+        return ann
+    order = list(ann)
+    for depth in sorted(by_depth):
+        for k in by_depth[depth]:
+            # Re-locate BOTH rows by id on every placement: a previous move in
+            # this level shifted positions, and a dict comparison would land on
+            # a twin row with identical content (never on the addressable set).
+            now = [_row_id(r) for r in order]
+            here = now.index(ids[k])
+            there = now.index(succ_of[k])
+            if here > there:
+                continue                     # already correctly ranked
+            if page_limit is not None and there >= page_limit:
+                continue                     # the successor is not served: see above
+            row = order.pop(here)
+            order.insert([_row_id(r) for r in order].index(succ_of[k]) + 1, row)
+    return order
+
+
+def _successor_depths(succ_of: list[str | None],
+                      where: dict[str, int]) -> tuple[list[int], set[int]]:
+    """Links from each row to a terminal successor — one walk per chain.
+
+    ``A <- B <- C`` gives ``{C: 0, B: 1, A: 2}``. The walk is iterative and each
+    row is visited once, so the whole thing is ``O(n)``; the placement pass in
+    :func:`_superseded_below_successor` then needs one move per row, never
+    ``n·(n-1)`` passes.
+
+    Returns ``(depth, in_cycle)``. A row in a CYCLE is named in the second
+    element and is NEVER placed: no order satisfies every edge of a cycle, so
+    moving its members one at a time cannot converge on one — it just relocates
+    rows the data says are unordered (and a 2-cycle's two placements cancel,
+    which hides exactly that). A row that merely feeds the cycle is not in the
+    set and still gets the chain depth that leads into it, so it is still held
+    below the row it names.
+    """
+    n = len(succ_of)
+    depth = [0] * n
+    resolved = [False] * n
+    in_cycle: set[int] = set()
+    for start in range(n):
+        if resolved[start]:
+            continue
+        path: list[int] = []
+        on_path: dict[int, int] = {}
+        i = start
+        base = 0
+        while True:
+            if resolved[i]:
+                base = depth[i]
+                break
+            seen_at = on_path.get(i)
+            if seen_at is not None:
+                members = path[seen_at:]
+                in_cycle |= set(members)     # the cycle itself: unresolvable
+                for j in members:
+                    resolved[j] = True       # depth stays 0 ⇒ never moved
+                path = path[:seen_at]
+                base = 0
+                break
+            sid = succ_of[i]
+            if sid is None:
+                # A TERMINAL successor: depth 0 (it is never moved itself) and
+                # NOT part of the chain being counted below it.
+                depth[i] = 0
+                resolved[i] = True
+                base = 0
+                break
+            on_path[i] = len(path)
+            path.append(i)
+            i = where[sid]
+        for j in reversed(path):
+            base += 1
+            depth[j] = base
+            resolved[j] = True
+    return depth, in_cycle
+
+
+def _row_id(row: dict) -> str:
+    """A result row's id under either spelling the read paths use."""
+    return str(row.get("id") or row.get("node_id") or "")
+
+
 class UnsupportedEntitySignals(ValueError):
     """No graph signal set exists for this ``entity_type`` — refuse, never guess.
 
@@ -1635,6 +1839,7 @@ class StateRanker:
         *,
         entity_type: str = "point",
         query: str | None = None,
+        page_limit: int | None = None,
     ) -> list[dict]:
         """Re-rank results with the multiplicative gate.
 
@@ -1673,7 +1878,13 @@ class StateRanker:
         3. drafts sort AFTER every live row. Ordering is
            ``(is_draft, belief_informed_order, -final_score)`` — an EXPLICIT
            status tiebreaker (plus, since #11702, the absent-belief tier;
-           neither is a side effect of the numbers). Pre-#2598 the question
+           neither is a side effect of the numbers).
+           ⛔ #14721 adds ONE constraint applied AFTER that sort — a replaced
+           claim is moved below the claim that replaced it
+           (:func:`_superseded_below_successor`) — which can land a
+           belief-carrying row below an absent-belief successor. That inversion
+           of the #11702 tier is deliberate and stated at that function; the
+           score keys above are unchanged. Pre-#2598 the question
            was answered by whichever fabricated 0.5 happened to win: a draft's
            neutral 0.5 and a contested live claim's measured 0.5 are the SAME
            number, and at equal relevance a draft OUTRANKED a measured live
@@ -1903,6 +2114,15 @@ class StateRanker:
             0 if r["recall_ranking"].get("belief_informed_order") else 1,
             -r["recall_ranking"]["final_score"],
         ))
+        # #14721: the score sort above does not know that a claim has been
+        # REPLACED, so nothing kept a superseded claim below the claim that
+        # superseded it. MEASURED on the #14592 corpus
+        # (docs/evidence/14721-superseded-ranking): for the very question that
+        # refutes it, the superseded "ColdPath Logistics holds a validated
+        # cold-chain certificate" landed at rank 1 on FTS similarity alone
+        # (5.0 vs every current row) while its successor was not in the top 8.
+        # `_superseded_below_successor` applies that one constraint.
+        ann = _superseded_below_successor(ann, page_limit=page_limit)
         return ann
 
     # ── Signal computation ────────────────────────────────────────────

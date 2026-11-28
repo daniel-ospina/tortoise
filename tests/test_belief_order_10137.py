@@ -374,8 +374,13 @@ def test_an_unobservable_re_ranker_cannot_inherit_the_pool_label(sdk):
         def __init__(self, inner):
             self.inner = inner
 
-        def rerank(self, rows, *, entity_type="point", query=None):
-            out = self.inner.rerank(rows, entity_type=entity_type, query=query)
+        def rerank(self, rows, *, entity_type="point", query=None, **kwargs):
+            # Forwards **kwargs on purpose: a decorating wrapper that DROPS a
+            # caller's keyword silently changes the order the caller asked for
+            # (#14721 added ``page_limit``). Everything the inner ranker accepts,
+            # this one must pass through.
+            out = self.inner.rerank(rows, entity_type=entity_type, query=query,
+                                    **kwargs)
             calls.append(([r["id"] for r in rows], [r["id"] for r in out]))
             return out
 

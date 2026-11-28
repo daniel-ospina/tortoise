@@ -47,17 +47,41 @@ def _point(sdk, kind="statement", content="some claim content here"):
 
 def _set_ep(sdk, pid, alpha, beta):
     """Persist EP posterior (ep_* path — exercises the coalesce fallback)."""
+    _set_point_props(sdk, pid, ep_alpha=alpha, ep_beta=beta)
+
+
+def _set_point_props(sdk, pid, **props):
+    """SET arbitrary properties on one Point.
+
+    ONE raw write for both helpers: `ep_alpha`/`ep_beta` and a forced `status`
+    are test bookkeeping no SDK door offers, and `surface-guard`'s
+    untyped-receiver ratchet counts every `.query(` site — so the two helpers
+    this file already carried share one here rather than adding a third when
+    the #14721 label test needs a raw `CORRECTS` edge (`_link_corrects`).
+    """
+    sets = ", ".join(f"n.{key} = ${key}" for key in props)
     _graph(sdk).query(
-        "MATCH (n:Point) WHERE n.id = $id SET n.ep_alpha = $a, n.ep_beta = $b",
-        params={"id": pid, "a": alpha, "b": beta},
+        f"MATCH (n:Point) WHERE n.id = $id SET {sets}",
+        params={"id": pid, **props},
+    )
+
+
+def _link_corrects(sdk, old_id: str, new_id: str) -> None:
+    """The `CORRECTS` edge `supersede_point` writes, WITHOUT its side effects.
+
+    `supersede_knowledge` also closes the old row's window, flags it `outdated`
+    and decays its belief (#2884 A3), so it cannot build the shape that carries
+    NEITHER of #14721's present-only label keys. This is the only way to reach
+    that shape, and it is deliberately confined to one helper.
+    """
+    _graph(sdk).query(
+        "MATCH (o:Point {id:$old}), (n:Point {id:$new}) CREATE (n)-[:CORRECTS]->(o)",
+        params={"old": old_id, "new": new_id},
     )
 
 
 def _set_status(sdk, pid, status):
-    _graph(sdk).query(
-        "MATCH (n:Point) WHERE n.id = $id SET n.status = $s",
-        params={"id": pid, "s": status},
-    )
+    _set_point_props(sdk, pid, status=status)
 
 
 # ── Basics ──────────────────────────────────────────────────────────────
@@ -440,6 +464,63 @@ def test_retracted_correcting_point_not_authority(sdk):
     _set_status(sdk, n["id"], "retracted")
     state = fetch_point_epistemic_state(_graph(sdk), [x["id"]])[x["id"]]
     assert state["superseded_by"] is None, "retracted correcting point must not be authority"
+
+
+def test_superseded_label_carries_when_and_from_which_source(sdk):
+    """#14721 R3: the label answers WHAT, WHEN and FROM WHICH SOURCE.
+
+    ``superseded_at`` is the OLD row's ``validTo`` — the bound ``supersede_point``
+    CLOSES, i.e. the instant the claim stopped being current — and ``source`` is
+    the successor's session — the document the correction came from. Both are
+    read from provenance spellings a one-spelling read would miss: ``session_id``
+    is what ``create_point(session_id=…)`` writes, ``sessionId`` is what capture
+    writes, and the query coalesces them.
+
+    NON-VACUITY (review C3/F3): deleting either ``cand[...] = …`` assignment in
+    ``fetch_point_epistemic_state`` left the whole suite green before this test —
+    the only other coverage asserted ``superseded_by["id"]``.
+    """
+    old = _point(sdk, content="ColdPath holds a validated cold-chain certificate")
+    new = sdk._create_point("statement", "ColdPath does not hold a valid certificate",
+                            session_id="doc-05")
+    sdk.supersede_knowledge(old["id"], new["id"])
+
+    label = fetch_point_epistemic_state(_graph(sdk), [old["id"]])[old["id"]]["superseded_by"]
+    assert label["id"] == new["id"]
+    window = sdk._get_point(old["id"]).get("validTo")
+    assert window, "supersede_point must close the old row's window"
+    assert label["superseded_at"] == window, label
+    assert label["source"] == "doc-05", label
+
+    # …and the CAMEL spelling the capture path writes, on its own pair.
+    camel_old = _point(sdk, content="the launch is on tuesday")
+    camel_new = sdk._create_point("statement", "the launch moved to thursday",
+                                 sessionId="doc-07")
+    sdk.supersede_knowledge(camel_old["id"], camel_new["id"])
+    camel = fetch_point_epistemic_state(
+        _graph(sdk), [camel_old["id"]])[camel_old["id"]]["superseded_by"]
+    assert camel["source"] == "doc-07", camel
+
+
+def test_superseded_label_emits_no_when_or_source_when_absent(sdk):
+    """PRESENT-ONLY: an undated window and an unsourced successor emit NO key.
+
+    The additive rule this reader follows for every other field (the #1423
+    subject ``status`` pin states it): a legacy decoration must stay
+    byte-identical where the information is absent, so neither key may appear as
+    ``None``. A raw ``CORRECTS`` edge is the only shape that can hold NEITHER —
+    ``supersede_point`` always writes both, and #2498's one-way
+    terminalization refuses to clear the window of a claim it made dead
+    (measured: ``update_knowledge(validTo=None)`` is refused on a superseded
+    Point), so this arm needs the raw write.
+    """
+    old = _point(sdk, content="legacy claim carrying no validity window")
+    new = _point(sdk, content="legacy correction carrying no session")
+    _link_corrects(sdk, old["id"], new["id"])
+    label = fetch_point_epistemic_state(_graph(sdk), [old["id"]])[old["id"]]["superseded_by"]
+    assert label["id"] == new["id"], label
+    assert "superseded_at" not in label, label
+    assert "source" not in label, label
 
 
 def test_criticals_do_not_consume_support_room(sdk):
