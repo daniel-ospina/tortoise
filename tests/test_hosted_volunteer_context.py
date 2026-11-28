@@ -40,8 +40,9 @@ def _warm_read_path():
     """Pay the embedder's cold load ONCE, outside every asserted request.
 
     The read path's hard ceiling is ``SLO_MS * 8 / 1000`` = **2.4 s**
-    (``tortoise/volunteer.py:100`` → ``tortoise/hosted_api.py:42574``; a
-    breach returns the fail-open empty block with
+    (``SLO_MS`` in ``tortoise/volunteer.py``, applied as
+    ``timeout=SLO_MS * 8 / 1000.0`` inside ``hosted_api.volunteer_context``;
+    a breach returns the fail-open empty block with
     ``degraded_reason='timeout'``).  The suite pins
     ``TORTOISE_EMBEDDER_WARMUP=0`` for the whole session
     (``tests/conftest.py:86``), and under that declared opt-out the read
