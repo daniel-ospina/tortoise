@@ -46737,8 +46737,16 @@ class TortoiseSDK:
                 if entity_type == "object":
                     _commitment_scope = True
                     _scope_from_question = query
-                    if _state_question_out is not None:
-                        _state_question_out["state_question"] = routed_payload(_state_q)
+                    # ⛔ THE REPORT IS WRITTEN AT THE SERVING SITE, NOT HERE
+                    # (#14780 review, cycle 3 finding 1). `kind` is not a
+                    # retrieval knob, so a `kind=` narrowing that excludes every
+                    # commitment kind leaves this arm and falls through to the
+                    # relevance read. A payload written at the routing decision
+                    # would then publish `routed: True` for a population this
+                    # read abandoned — on the one key the served note tells
+                    # callers to branch on. The ENDED arm cannot have this hole
+                    # (`ended_scope` is a serve, not a scope flag), so the report
+                    # belongs beside the serve for both.
                 elif _state_question_out is not None:
                     # #14033: the shape DID fire and this read's ``entity_type`` is
                     # what declined the population \u2014 the commitment kinds are
@@ -47300,6 +47308,10 @@ class TortoiseSDK:
             # relevance read it asked for instead of being told nothing is
             # committed. `query` is still intact — only the ended arm consumes it.
             if _commit_kinds:
+                if _state_question_out is not None:
+                    # Routed for real: the enumeration below IS the answer, so the
+                    # report is written here, immediately before it serves.
+                    _state_question_out["state_question"] = routed_payload(_state_q)
                 try:
                     _fatter = _commitments.enumerate_live_commitments(
                         graph, kinds=_commit_kinds, limit=limit + 1,
@@ -47327,6 +47339,13 @@ class TortoiseSDK:
                 _trunc["candidates"] = len(_fatter)
                 _trunc["exact"] = len(_fatter) <= limit
                 return _with_read_status(_fatter[:limit])
+            elif _state_question_out is not None:
+                # The caller's `kind` filter excludes every commitment kind, so
+                # this arm cannot serve the population. Report the refusal rather
+                # than a route that was abandoned: it is the same decline the
+                # `entity_type` check above records, on the axis `kind` narrows.
+                _state_question_out["state_question"] = missed_route_payload(
+                    _state_q.cue or "", "family", COMMITMENTS)
 
         # C6 (#2520): resolve the freshness intent ONCE and derive the
         # DENSE-leg query. The anchor touches the embedding only — the

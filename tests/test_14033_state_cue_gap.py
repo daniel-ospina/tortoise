@@ -1481,6 +1481,7 @@ def test_the_served_note_describes_cue_on_both_arms():
     describe what they actually emit.
     """
     from tortoise.state_intent import (
+        ENDED,
         ROUTING_NOTE,
         detect_state_question,
         missed_route_payload,
@@ -1507,13 +1508,33 @@ def test_the_served_note_describes_cue_on_both_arms():
         "a routed read publishes the matched question as `cue`, so a note that "
         "calls it an ending word is false on the arm that matters most")
 
+    # The FAMILY-declined arm, measured the way the read builds it (#14780
+    # review, cycle 3 finding 2): the read passes `_state_q.cue` — the matched
+    # QUESTION — on a `reason: family` decline, so a note calling every decline's
+    # `cue` an ending word is false on exactly the arm this PR added. This row
+    # exists because the docstring above claimed BOTH arms were measured while
+    # only the routed one and the `shape` decline were.
+    family_question = "is the onboarding flow retired?"
+    family_shape = detect_state_question(family_question)
+    assert family_shape.population == ENDED, (
+        "the family row must be a question a shape DOES fire on")
+    assert state_cue(family_question) == "retired", (
+        "the row is only meaningful while the ending word and the matched "
+        "question differ")
+    family = missed_route_payload(family_shape.cue or "", "family", ENDED)
+    assert family["cue"] == family_question, (
+        "a `family` decline publishes the matched question as `cue`, so the note "
+        "cannot call it an ending word on that arm")
+
     served = " ".join(ROUTING_NOTE.split())
     assert "`cue` is the wording that was SEEN and selected the population" in served, (
         "the served note does not say what `cue` carries")
-    assert "the matched question on a routed read" in served, (
-        "the note omits the routed arm's value of `cue`")
-    assert "the ending word on a declined one" in served, (
-        "the note omits the declined arm's value of `cue`")
+    assert "the matched question on a ROUTED read AND on a `reason: family` decline" in served, (
+        "the note must say that `cue` is the matched question on both arms that "
+        "carry one (routed, and the family decline)")
+    assert "the ending word only on a `reason: shape` decline" in served, (
+        "the note must scope the ending-word form to the `shape` decline, the only "
+        "arm that publishes it")
     assert "NOT proof that the route fired" in served, (
         "the note must keep saying a `cue` is not proof the route fired")
     assert "the cue is the question's own PREDICATE" not in served, (

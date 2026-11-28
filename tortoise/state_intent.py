@@ -1172,11 +1172,14 @@ the same payload rides the private
 `TortoiseSDK._tortoise_fts_query(..., _state_question_out=...)` sink. The report's
 keys, exactly: `{routed, population, cue}` on every payload \u2014 `cue` is the
 wording that was SEEN and selected the population: the matched question on a
-routed read, the ending word on a declined one (where it may be one that only
+ROUTED read AND on a `reason: family` decline (a shape did fire there, so the
+question is what selected the population), and the ending word only on a
+`reason: shape` decline (where none applied, and it may be one that only
 MODIFIES a noun), so its presence is NOT proof that the route fired \u2014 plus
 `{shape}` on a routed read (the shape that fired), or `{reason, hint}` on a declined one
 (`reason` is a closed token: `shape` when no shape applied, `family` when a shape
-fired but the requested entity_type has no arm for that population; `hint` is the
+fired but the requested entity_type or `kind` filter has no arm for that
+population; `hint` is the
 remedy). Branch on `routed`, never on the presence of `shape`. So the line is:
 this MCP tool cannot report the distinction, the hosted route can.
 """

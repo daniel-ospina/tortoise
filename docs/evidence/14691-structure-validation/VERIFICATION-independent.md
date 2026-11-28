@@ -48,7 +48,7 @@ is not.
 
 `tortoise_get_entity(id, type="governance")` is the **supported** door for
 *"what does this Subject own?"* — it dispatches to
-`TortoiseSDK._get_owned_entities` (`tortoise/sdk.py:62819`), which is
+`TortoiseSDK._get_owned_entities` (`tortoise/sdk.py:62838`), which is
 `MATCH (s:Subject) … MATCH (s)<-[:ownedBy]-(e)`, i.e. ownership in exactly the
 orientation ONTOLOGY §3.6 declares. Measured on the four owners the corpus names:
 

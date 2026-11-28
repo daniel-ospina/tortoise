@@ -1370,7 +1370,7 @@ def _door_findings() -> list[dict]:
                          "code_path": "mcp_server.tortoise_get(type='governance') "
                                       "-> sdk._get_owned_entities: "
                                       "MATCH (s)<-[:ownedBy]-(e) "
-                                      "(sdk.py:62819-62839), i.e. the DECLARED "
+                                      "(sdk.py:62838-62858), i.e. the DECLARED "
                                       "orientation — the edges point the other way"},
         })
 

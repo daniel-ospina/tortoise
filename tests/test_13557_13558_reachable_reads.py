@@ -1286,6 +1286,54 @@ def test_a_commitment_question_on_a_non_object_family_is_reported(sdk):
 
 
 @_docker_only
+def test_a_kind_filter_with_no_commitment_kind_does_not_publish_a_route(sdk):
+    """A `kind=` narrowing that abandons the population must not say it served it.
+
+    #14780 review, cycle 3 finding 1. `kind` is NOT a retrieval knob (it is absent
+    from `_retrieval_knobs()`), so it cannot suppress the router: the commitment
+    arm sets its scope flag, and the enumerator is then filtered to the caller's
+    own kinds. When NONE of them is a commitment kind the arm falls through to the
+    relevance read \u2014 deliberately \u2014 but a report written at the routing
+    decision had already published `routed: True`, and the served note tells
+    callers to branch on `routed` (`state_intent.ROUTING_NOTE`). That is a false
+    success on the one key the contract names.
+
+    \u26d4 Reachable from the live doors: `search_knowledge(mode='hybrid')`
+    forwards `kind` to this read (`sdk.py`, the hybrid arm), and the MCP search
+    tool forwards it to `search_knowledge`.
+    """
+    from tortoise.state_intent import COMMITMENTS
+
+    out: dict = {}
+    rows = sdk._tortoise_fts_query("what are we currently committed to",
+                                   entity_type="object", kind="claim",
+                                   _state_question_out=out)
+    assert isinstance(rows, list), (
+        "the narrowed read must still return its rows \u2014 the relevance answer is "
+        "what the caller's own filter asked for")
+    report = out.get("state_question")
+    assert report is not None, (
+        "the shape fired and the population was declined by the caller's kind "
+        "filter: silence here reads as 'nothing is committed'")
+    assert report["routed"] is False, (
+        f"the read abandoned the population but reported {report!r}: `routed: "
+        f"True` is a false success on the key the served note says to branch on")
+    assert report["reason"] == "family", (
+        "a shape DID fire; this is a refusal, not 'no shape applied'")
+    assert report["population"] == COMMITMENTS
+
+    # …and a kind that IS a commitment kind still routes (the fix must not
+    # silence the arm it is protecting).
+    ok_out: dict = {}
+    sdk._tortoise_fts_query("what are we currently committed to",
+                            entity_type="object", kind="plan",
+                            _state_question_out=ok_out)
+    ok_report = ok_out.get("state_question")
+    assert ok_report is not None and ok_report["routed"] is True, (
+        f"a `plan`-narrowed commitment question must still ROUTE, got {ok_report!r}")
+
+
+@_docker_only
 def test_a_query_with_no_state_cue_writes_nothing(sdk):
     """The sink stays empty for every ordinary read, so nothing else changes.
 

@@ -212,7 +212,7 @@ table. It is below the table now, and the new test pins one row from each half.
 
    **The product's own ownership door proves it from the graph side.** `tortoise_get_entity(id,
    type="governance")` dispatches to `sdk._get_owned_entities`, whose query is
-   `MATCH (s)<-[:ownedBy]-(e)` (`tortoise/sdk.py:62819-62839`) — the **declared**
+   `MATCH (s)<-[:ownedBy]-(e)` (`tortoise/sdk.py:62838-62858`) — the **declared**
    orientation. Asked about all four owners the corpus names, it returns **`[]` for every one**
    (`out/readback.json` → `link_witness.*.governance_owned_by`), on a graph holding six `ownedBy`
    rows. So the inversion is not a convention violation a reader could notice — **it makes ownership
@@ -357,7 +357,7 @@ Every one of these was measured through MCP; none was worked around.
 | **D4** | does `expand_relationships` report the STRUCTURAL edges of an entity, the way it reports the epistemic ones? | **NO — it returns `[]` for a node that has edges, so a structurally-connected entity reads as isolated.** | Lumen Core: 1 row (its `IMPL` to `control-room customers`), 19 real neighbours. Amara Osei / Platform team / event-bus: **0 rows** each, while `explore_connections` sees 6 / 10 / 10. The read covers `IMPL\|NAND\|hasPart` only (`entity_reads.py:551-559`) — and `hasPart` only where it is an operator/point edge. |
 | **D3** | does the full-scan door accept the **bare** kind the packs declare? | **NO — a bare kind returns an EMPTY list with no error while the namespaced spelling returns rows.** | `search_knowledge(kind="product", entity_type="object")` → `[]`; `kind="product-strategy:product"` → 2 rows. Same for `team`/`core:team`. A caller who reads `objectKinds: [product]` in a manifest and asks for it is told *"there is nothing"* — an answer, not a refusal (AX: a surface must not answer where it cannot know). |
 | **D5** | does `graph_overview(section='topics', entity_id=…)` resolve an entity that `get_entity` and `explore_connections` both resolve? | **NO — it answers 'Entity … not found' for 7 of the 7 nodes asked about, including nodes those two doors return.** | Lumen Core, Amara Osei, Platform team, event-bus — all four resolve through `get_entity` and walk through `explore_connections`. |
-| **D6** | does the product's OWNERSHIP door — `tortoise_get_entity(id, type='governance')` — return what each person owns? | **NO — it returns `[]` for all 4 owners asked, on a graph holding 6 `ownedBy` rows.** | `tortoise_get_entity(id, type="governance")` → `_get_owned_entities` reads `MATCH (s)<-[:ownedBy]-(e)` (`sdk.py:62819-62839`), the declared orientation; the written rows point the other way, so nothing points *into* a Subject. |
+| **D6** | does the product's OWNERSHIP door — `tortoise_get_entity(id, type='governance')` — return what each person owns? | **NO — it returns `[]` for all 4 owners asked, on a graph holding 6 `ownedBy` rows.** | `tortoise_get_entity(id, type="governance")` → `_get_owned_entities` reads `MATCH (s)<-[:ownedBy]-(e)` (`sdk.py:62838-62858`), the declared orientation; the written rows point the other way, so nothing points *into* a Subject. |
 | **D2** | can a declared structure element be resolved by NAME through the MCP doors? | **NO for 2 of 32** | `out/readback.json` → `unresolved_elements` (2 rows) and `elements` (32 walks, `root_kind`); the *retrieval* half is a different artifact — `out/t6-score.json` → `A5_retrieval.probes[].walk_root_is_entity`, false on 5/5. ⚠️ The **walked** population is 32, **not** the 28 declared elements §1 names: `run_readback.ALL_ELEMENTS` is the 28 declared names plus every `ownedThing` in `_declared_structure.ownership`, and the 32 rows carry `Lumen Core` and `ingest-gateway` a second time each. Of those 32, 2 do not resolve — `explore_connections(query=…)` resolves names to **Points**, and `ingest-gateway`'s stored name is `ingest-gateway component` (from the sentence *"owns the ingest-gateway component"*). ⚠️ An earlier revision wrote `elements[].walk_root_kind`, a field that exists in neither file. Re-derived by `score_t6._door_findings`, so the artifact cannot state a count its own rows deny. |
 
 ⛔ **THE IDs ABOVE ARE THE ARTIFACT'S OWN** (`out/t6-score.json` → `door_findings`,
@@ -446,7 +446,7 @@ pairs — **13** — is the number this report's A2 line derives independently.
 
 **Its strongest finding was not in my first cut, and I re-measured it before adopting it**: the
 `type="governance"` ownership door returns `[]` for every owner (§3/A2, D6). That claim cited
-`sdk.py:62819` and I read the source, then asked the door in this bundle's own readback — four owners,
+the ownership range (cited in this bundle at the site it then read) and I read the source, then asked the door in this bundle's own readback — four owners,
 four empty answers — rather than take the finding on trust.
 
 ⚠️ **Two lanes were writing into one evidence directory and one git branch at the same time.** Its
@@ -1118,6 +1118,16 @@ longer opens on it either. Every LIVE citation in this bundle (`out/t6-score.jso
 and in the refused-shape list are records of the PREVIOUS site and are kept as such, stated
 relative to their own head rather than re-numbered. The 21-line span is unchanged
 (`62819`..`62839`), so the shape table's wall and GREEN vectors keep their meaning.
+
+⛔ **THE SITE MOVED A THIRD TIME, AND THE SAME RE-DERIVATION WAS REPEATED — `62819-62839` →
+`62838-62858` on this PR's own review-cycle fix.** The fix for a served-text defect (a `routed: True`
+report published for a commitments population the read then abandoned) and for the `cue` sentence is
++19 net lines in the same `_tortoise_fts_query` state block, so the `def` moved from `62819` to
+`62838` and the same every-LIVE-citation re-point was applied: `out/t6-score.json` →
+`door_findings[D6].code_path`, its producer `score_t6.py` (the artifact was REGENERATED by
+`score_t6.py`, not hand-edited), §3/A2's prose and `VERIFICATION-independent.md`. The 21-line span
+is unchanged (`62838`..`62858`). The two earlier references above and at §3/A2's narrative remain
+records of the site they were written at, stated relative to their own head rather than re-numbered.
 
 The one defect this pass found was in the rule's own description, not the rule. `_prose_tokens()`'s
 comment stated the excluded population as `### 8.1` to `### 8.19`; it was written when 8.19 was the
