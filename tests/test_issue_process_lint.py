@@ -3943,12 +3943,13 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
     # (`all six rows are proved — not by this PR` names no row ID, so the cue was invisible). Every
     # cell here must be non-`clean`: a body that discloses undelivered rows must never read as a
     # complete close, whichever side of the keyword the disclosure sits on.
-    # ⛔ THE ONE DELIBERATE EXCEPTION WAS `only`, AND ROUND 26 SHOWED IT WAS WRONG (see `_ONLY_RE`):
-    # `Closes #N (row V2 only)` LIMITS an affirmative claim on the CLOSING line and stays pinned as a
-    # claim on V2 — that path never reaches the own-line read — but on an OWN line `V1, V2 only.` beside
-    # a complete close discloses the rest and must not read as a pass. So `only` is a cue here too, and
-    # the family below includes the pronoun/quantifier spellings (`the rest`, `3 of them`, `the other
-    # five`) that defeated the earlier spelling-list version of this read.
+    # ⛔ `only` WAS A ONE-WORD CUE AND ROUND 27 SHOWED THAT WAS STILL THE ENUMERATION (see
+    # `_names_a_proper_subset`): `Just V2.`, `Solely V2.`, `V2 alone.`, `Nothing but V2.`, `So far, V2.`
+    # all read `clean`, one word away. The structural signal replaced it — a body naming SOME of the
+    # rows while claiming ALL of them is self-contradictory whatever the prose says — so this family
+    # now includes those siblings and the subset-`Satisfies` form (`Closes #N (rows V1–V6)` beside
+    # `Satisfies #N: V2`) that the same rule closes. `Closes #N (row V2 only)` still stays a CLAIM on V2,
+    # because that path is the closing line and the rule only ever REFUSES a complete claim.
     disclosures = (
         "V1, V3, V4, V5, V6 remain unmeasured", "V1, V3, V4, V5, V6 are follow-ups",
         "V1, V3, V4, V5, V6 are separate PRs", "V1, V3, V4, V5, V6 landed in later PRs",
@@ -3970,6 +3971,9 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
         "One row is proved here; the balance is queued.",
         "The six rows are proved in the predecessor PR.",
         "V3, V4, V5, V6 only.", "rows V3-V6 only.", "V1, V2 only.",
+        "Just V2 landed here.", "Solely V2.", "V2 alone.", "Nothing but V2.",
+        "So far, V2.", "Partial: V2 delivered.", "V2 exclusively.",
+        "Satisfies #13036: V2", "Satisfies #13036: V2, V3",
         "V3–V6 are in the predecessor PR", "V1–V6 — see the predecessor PR",
         "V3-V6 are tracked in #14715",
     )

@@ -1584,15 +1584,35 @@ _DISCLAIMER_RE = re.compile(
     r"|follow[\s-]?ups?|deferred|out\s+of\s+scope|excluded|except|apart\s+from|other\s+than",
     re.IGNORECASE)
 
-# ⛔ `only` IS A DISCLAIMER CUE ON AN OWN LINE AND MUST STAY INERT ON A CLOSING LINE (review round 26,
-# P2). The two readings are genuinely different. On the closing line `only` is the verb's qualifier and
-# LIMITS an affirmative claim — `Closes #N (row V2 only)` claims V2, pinned since round 7 — so it is not
-# a negative cue there and this regex is consulted only in the OWN-LINE branch. On an own line there is
-# no claim for it to limit: `V1, V2 only.` and `rows V3-V6 only.` beside a `Closes #N (rows V1–V6)` are
-# disclosures of the rest, and both read `clean` before this cue existed.
-# It is deliberately NOT folded into `_DISCLAIMER_RE`: that regex is shared with the closing-line and
-# clause reads, where the pinned `(row V2 only)` claim would break.
-_ONLY_RE = re.compile(r"\bonly\b", re.IGNORECASE)
+def _names_a_proper_subset(text: str, rows: list[str]) -> bool:
+    """Does any line of `text` name SOME but not ALL of the issue's declared rows?
+
+    ⛔ THE STRUCTURAL PARTIALITY SIGNAL, AND THE REASON NO CUE VOCABULARY IS NEEDED FOR IT (review
+    round 27, R1+R2). A body that names a subset of the rows while a closing line claims ALL of them
+    is self-contradictory however the surrounding prose words it — `Satisfies #N: V2` beside
+    `Closes #N (rows V1–V6)`, `Just V2 landed here.`, `Solely V2.`, `V2 alone.`, `Nothing but V2.`,
+    `So far, V2.`, `V1, V2 only.`. Five review rounds each added one more cue WORD to a list and each
+    found the next word; a subset needs no word at all, which is why this replaces the enumeration
+    rather than extending it.
+
+    It is used ONLY as a NEGATIVE signal — it can refuse a complete claim, never add one — so it does
+    not touch the round-18 precedence decision that `Satisfies` is consulted only where the closing
+    line named nothing (see `_closing_line_claim`). Rows come from the issue, so it cannot invent one.
+    """
+    for line in strip_code(text, strict=True)[0].splitlines():
+        named = set(_explicit_ids(line, rows))
+        # ⛔ A RANGE NAMES ITS WHOLE SPAN, NOT ITS ENDPOINTS — otherwise a complete range close
+        # (`Closes #N (rows V1–V6)` over a six-row issue) looks like a two-row subset here and the
+        # CORRECT close would be refused. Expanded from the issue's own order, so it cannot invent a
+        # row, and unconditionally (unlike `_row_range_span`): this is a NEGATIVE read, where the wide
+        # reading is the safe one.
+        order = {row: i for i, row in enumerate(rows)}
+        for match in _range_matches(line, rows):
+            lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
+            named |= set(rows[lo:hi + 1])
+        if named and not set(rows) <= named:
+            return True
+    return False
 
 # ⛔ THE POSITIVE MARKER FOR *IDs* (review round 9): round 8 retired the prose-cue blocklist for
 # RANGES, but the ids read still decided polarity by vocabulary — anything `_DISCLAIMER_RE` did not
@@ -1849,13 +1869,15 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # acceptable error and a false PASS is the expensive one, and the alternative — an
             # ever-growing cue/noun enumeration — is precisely what produced five rounds of the same
             # defect class one spelling deep.
-            # ⛔ `only` COUNTS AS A CUE HERE, ON AN OWN LINE ONLY. On a CLOSING line `only` LIMITS an
-            # affirmative claim (`Closes #N (row V2 only)` claims V2) and must stay inert — that path
-            # never reaches this branch, so the pinned decision is untouched. On an own line there is
-            # no claim for it to limit, so `V1, V2 only.` / `rows V3-V6 only.` beside a complete close
-            # disclose the rest and must not read as a pass (round 26 P2: that residual was wrong).
-            if (_DISCLAIMER_RE.search(line) or _ELSEWHERE_RE.search(line)
-                    or _ONLY_RE.search(line)):
+            # ⛔ `only` IS NOT A CUE — NAMING A PROPER SUBSET IS (review round 27, R2). Round 26 added
+            # `only` as a one-word cue, which was itself the vocabulary enumeration this file keeps
+            # having to replace: `Just V2 landed here.`, `Solely V2.`, `V2 alone.`, `Nothing but V2.`,
+            # `So far, V2.` all read `clean`, one word away. The structural signal needs no vocabulary
+            # and lives at the claim level (see `_names_a_proper_subset` below): a body that names SOME
+            # of the rows while claiming ALL of them is self-contradictory whatever the surrounding
+            # prose says. The cue read below still covers the implicit family (`The rest are
+            # follow-ups`), which names no row at all and so needs a word.
+            if _DISCLAIMER_RE.search(line) or _ELSEWHERE_RE.search(line):
                 disclaimed = True
             continue
         # ⛔ THE LINE IS THE UNIT, the clause is the polarity boundary: the range read needs the whole
@@ -1967,6 +1989,17 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
     # remain unmeasured`, `… are separate PRs`) is the careful author's correct form and still yields
     # the finding on V2 — that claim is not complete, so this refusal never fires on it.
     if disclaimed and set(rows) <= named:
+        named = set()
+    # ⛔ AND A PROPER SUBSET ANYWHERE IN THE BODY REFUSES A COMPLETE CLAIM (review round 27, R1+R2).
+    # `Closes #N (rows V1–V6)` beside `Satisfies #N: V2` claimed all six and read `clean` (the arm's
+    # headline false PASS, through the same path round 24 closed for `disclaimed`); `Just V2.` and its
+    # siblings did the same. Both are the SAME signal — some rows named, not all — so both are refused
+    # by one structural test instead of a cue per round.
+    # ⛔ THE COST, RECORDED: a legitimate complete close whose evidence prose mentions ONE row by id
+    # (`V2 needed the migration; V1-V3, V5, V6 were renames`) now reads AMBIGUOUS. That is the cheap
+    # error in this file's ranking — a counted abstention, never a pass — and it is the price of not
+    # shipping a false PASS that only a longer word list would have caught.
+    if set(rows) <= named and _names_a_proper_subset(text, rows):
         named = set()
     return named, disclaimed
 
