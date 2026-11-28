@@ -1523,12 +1523,14 @@ def test_the_declared_counted_set_is_the_ACTUAL_call_sites():
     assert discovered == declared, (
         "the counted live-write population drifted from its declaration.\n"
         f"  undeclared lane(s) — add a row to `cache_leg._COUNTED_LIVE_WRITE_LANES` "
-        f"and to both docstrings: {undeclared}\n"
+        f"and to its docstring count: {undeclared}\n"
         f"  stale row(s) — the lane was renamed/removed, drop the row: {stale}")
 
-    # `cache_leg.note_cache_write_target` and
-    # `projection.note_live_write_target` both state EIGHT; a new row must move
-    # that number in the same change or the prose is false again.
+    # Only `cache_leg.note_cache_write_target`'s docstring carries the numeral
+    # (EIGHT call sites / All eight live lanes); `projection.note_live_write_target`
+    # names the population by REFERENCE to `_COUNTED_LIVE_WRITE_LANES` and states
+    # no count — claiming it did was review round 8's P2. A new row must move the
+    # numeral in `cache_leg.py` in the same change, or that prose is false again.
     assert len(declared) == 8, (
-        f"both docstrings state EIGHT counted lanes; the declaration has "
-        f"{len(declared)}: {sorted(declared)}")
+        f"`cache_leg.py`'s docstrings state EIGHT counted lanes; the declaration "
+        f"has {len(declared)}: {sorted(declared)}")

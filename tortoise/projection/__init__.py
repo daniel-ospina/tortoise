@@ -4747,9 +4747,9 @@ def note_live_write_target(proj) -> None:
 
     The CLOSED, NAMED population is `tortoise.cache_leg._COUNTED_LIVE_WRITE_LANES`
     — an AST census in `tests/test_12943_cache_leg.py` checks that declaration
-    against the CALL SITES, so a lane that CALLS this helper cannot go undeclared
-    and a stale row cannot linger — and this helper is where every one of them
-    records. Stated, not implied:
+    against the CALL SITES under `tortoise/`, the walk's own scope, so a lane that
+    CALLS this helper there cannot go undeclared and a stale row cannot linger —
+    and this helper is where every one of them records. Stated, not implied:
 
     ⛔ It does NOT bind the OMISSION direction, and claiming it did was review
     round 1's P2-2: a lane that writes the cache and never calls this helper

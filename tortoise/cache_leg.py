@@ -235,8 +235,9 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     EIGHT call sites, and the list is CLOSED rather than implied. The authority is
     :data:`_COUNTED_LIVE_WRITE_LANES`, and an AST census
     (`tests/test_12943_cache_leg.py::test_the_declared_counted_set_is_the_ACTUAL_call_sites`)
-    checks the DECLARATION against the CALL SITES, so a lane that CALLS this
-    helper cannot go undeclared and a stale row cannot linger.
+    checks the DECLARATION against the CALL SITES under `tortoise/` — the walk's
+    own scope — so a lane that CALLS this helper there cannot go undeclared and a
+    stale row cannot linger.
     ``projection.note_live_write_target`` is the ONE helper all of them go
     through, so the endpoint resolution has a single owner.
 
@@ -250,6 +251,13 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     at the write handle's own statement census (`_GuardedGraph`), plus review.
     What this list buys is that the SET OF CALLERS is honest and stable, which is
     the half that can be checked mechanically.
+
+    ⛔ NOR the FILE SCOPE (review round 8, P2): the walk roots at
+    `(REPO_ROOT / "tortoise").rglob("*.py")`, so a caller added under `tools/`,
+    `graph-scripts/` or `tests/` produces no row and the census stays green. Every
+    call site today is under `tortoise/`; the claim is bounded to that tree rather
+    than to "any caller anywhere", because a universal is exactly what this list
+    replaced.
 
     * ``FalkorProjection.apply`` — the fold every door passes (SDK, REST, MCP,
       capture, the metadata lanes), counted once per fold that RETURNED and that
@@ -379,8 +387,8 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
 #: exactly one more lane). A named set makes the claim TRUE and terminates the
 #: search — `tests/test_12943_cache_leg.py::
 #: test_the_declared_counted_set_is_the_ACTUAL_call_sites` re-derives this list
-#: from the SOURCE with an AST census, so a ninth lane cannot slip in undeclared
-#: and a stale row cannot linger.
+#: from the SOURCE (under `tortoise/`, the walk's own scope) with an AST census,
+#: so a ninth lane THERE cannot slip in undeclared and a stale row cannot linger.
 #:
 #: A row is here if the lane issues its OWN statements against the cache graph
 #: and folds no record (or, for the two `apply`-side rows, IS the write seam). A
