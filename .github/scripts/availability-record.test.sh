@@ -649,7 +649,7 @@ assert_contains "$OUT" "#4002" "an incident whose block has NO kind= is still li
 assert_contains "$OUT" "#4003" "an incident whose block has NO first_failure_ts= is still listed (it used to vanish)"
 assert_contains "$OUT" "incident totals: down=1 degraded=0 unknown=1 restart_attempts=1" \
   "the DATED incidents missing a field are still counted (both used to vanish)"
-assert_contains "$OUT" "1 incident(s) carry no parseable first_failure_ts: listed below, counted in the TOTAL's unbounded_inc but on NO day row" \
+assert_contains "$OUT" "1 incident(s) carry no usable first_failure_ts (absent, unparseable, or AHEAD of now): listed below, counted in the TOTAL's unbounded_inc but on NO day row" \
   "the undated incident is listed and disclosed as counted in the TOTAL only — never silently dropped"
 assert_contains "$ERR" "has no parseable kind=" "the unparsable kind is warned about"
 assert_contains "$ERR" "has no parseable first_failure_ts — listed, counted in the TOTAL's unbounded_inc but on no day row" \
@@ -1112,10 +1112,15 @@ export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
        STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
 run_record 3 --print-only
 assert_eq "$RC" "0" "a future-dated stamp does not fail the record"
-assert_contains "$OUT" "down_for=unknown (first_failure_ts is in the FUTURE — NOT counted)" \
+assert_contains "$OUT" "down_for=unknown (first_failure_ts is in the FUTURE — not counted in any column)" \
   "the future stamp is named as such instead of being rendered as downtime"
 assert_not_contains "$OUT" "min elapsed, NOT counted)" \
   "no elapsed bound is computed from a stamp that is ahead of now"
+# ⛔ AND IT IS NOT COUNTED ANYWHERE (review round 9 P2): the label says "not counted", so
+# the aggregations must not have counted it either — this is the whole point of classifying
+# it at ingest with a non-numeric sentinel.
+assert_eq "$(printf '%s\n' "$OUT" | awk '$1 == "TOTAL" { print $NF }')" "1" \
+  "the future stamp lands in unbounded_inc, where the record says it goes"
 
 # ── 36: minutes from a span that began BEFORE the window — no "over 0 incidents" ──
 # `total_down_min` is window-scoped by the day the minute OCCURRED, while the count is
@@ -1152,10 +1157,35 @@ export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
        STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
 run_record 3 --print-only
 assert_eq "$RC" "0" "a future stamp with a readable end does not fail the record"
-assert_contains "$OUT" "down_for=unknown (first_failure_ts is in the FUTURE — NOT counted)" \
+assert_contains "$OUT" "down_for=unknown (first_failure_ts is in the FUTURE — not counted in any column)" \
   "the future stamp is named in the readable-end arm too"
 assert_not_contains "$OUT" "down_for=1226 min" \
   "no duration is invented from two future stamps"
+
+# ── 38: a future stamp INSIDE the window is counted nowhere, not just mislabelled ──
+# The round-8 guard only changed the LABEL, so a stamp a few seconds ahead of `now` —
+# an incident that opened and closed during this run's 28-day fetch — was still counted
+# in down_min, down_inc and the recovered subset while its own line said "NOT counted".
+# That is the self-contradiction class this PR exists to close, so the class is decided
+# ONCE at ingest now, and this fixture is the shape that used to slip through.
+echo
+echo "38. a future stamp inside the window contributes to NO column"
+reset_case
+# `now` = 1789646400 (2026-09-17T12:00:00Z); stamp = now+60s, closed 13:00 — a 59-minute
+# span that WOULD land on the in-progress 09-17 row if the counting passes saw it.
+export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
+ {"number":9950,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1789646460 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-17T13:00:00Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-17T11:00:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$RC" "0" "a future stamp inside the window does not fail the record"
+assert_eq "$(printf '%s\n' "$OUT" | awk '$1 ~ /^2026-09-17/ { print $(NF-2), $(NF-1), $NF }')" "0 0 0" \
+  "the row carries no minutes, no unbounded minute-row and no count"
+assert_eq "$(printf '%s\n' "$OUT" | awk '$1 ~ /^2026-09-17/ { print $(NF-6) }')" "0" \
+  "the incident is not counted in down_inc either"
+assert_contains "$OUT" "recovered downtime: 0 min DOWN and 0 min DEGRADED — never summed" \
+  "no downtime figure is published for a stamp that has not happened yet"
+assert_eq "$(printf '%s\n' "$OUT" | awk '$1 == "TOTAL" { print $NF }')" "1" \
+  "it is disclosed in the TOTAL's unbounded_inc instead of vanishing"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

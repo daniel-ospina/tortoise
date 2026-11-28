@@ -505,7 +505,18 @@ fetch_incidents() {
           inc_ff="$(to_int "$inc_ts" -)"
           case "$inc_ff" in
             ''|-|0) inc_ff="-" ;;
-            *) inc_day="$(fmt_day "$inc_ff")" ;;
+            *)
+              # ⛔ A STAMP AHEAD OF `now` IS NOT A MEASUREMENT (review round 9 P2). Neither
+              # counting pass can see the clock, so a stamp seconds in the future — an incident
+              # that opened and closed during this run's ~N-day fetch — was counted in the day
+              # columns, the recovered subset AND the minutes, while its own line said "NOT
+              # counted". Classified HERE, once, as its own class: no minutes, no day, disclosed
+              # in the TOTAL's unbounded_inc, and measured on the next run once `now` passes it.
+              # The `future` sentinel is deliberately NON-NUMERIC, so both passes skip the row
+              # structurally (a `case`/regex) rather than by remembering to check a clock.
+              if [ "$inc_ff" -gt "$now" ]; then inc_ff="future"; inc_day="n/a"
+              else inc_day="$(fmt_day "$inc_ff")"; fi
+              ;;
           esac
         fi
         ;;
@@ -935,16 +946,18 @@ render_record() { # <days> <now>
     # COUNTED in the TOTAL's `unbounded_inc` (`total_unbounded += undated_inc`) because
     # both the header and the legend name them as members of that class — so the old
     # "NOT counted in the window totals" sentence contradicted the row three lines above it.
-    printf '  %s incident(s) carry no parseable first_failure_ts: listed below, counted in the TOTAL%s unbounded_inc but on NO day row (attributable to no UTC day) — a human-edited state block is warned about, NEVER silently dropped.\n' "$undated_inc" "'s"
+    printf '  %s incident(s) carry no usable first_failure_ts (absent, unparseable, or AHEAD of now): listed below, counted in the TOTAL%s unbounded_inc but on NO day row — a human-edited state block is warned about, NEVER silently dropped.\n' "$undated_inc" "'s"
   fi
   if [ ! -s "$RUN_TMP/incidents.tsv" ]; then
     printf '  (none found in the ledger)\n'
   else
-    local inc_n inc_kind inc_day inc_ff inc_end inc_state inc_rest rest_disp restart_count down_disp ff_i now_i
+    local inc_n inc_kind inc_day inc_ff inc_end inc_state inc_rest rest_disp restart_count down_disp ff_i
     while IFS="$(printf '\t')" read -r inc_n inc_kind inc_day inc_ff inc_end inc_state inc_rest; do
       [ -n "$inc_n" ] || continue
       [ -n "$inc_day" ] || inc_day="n/a"
-      if [ "$inc_day" = "n/a" ]; then
+      if [ "$inc_ff" = "future" ]; then
+        warn "ledger incident #${inc_n} has a first_failure_ts AFTER now — listed, counted in the TOTAL's unbounded_inc but on no day row"
+      elif [ "$inc_day" = "n/a" ]; then
         warn "ledger incident #${inc_n} has no parseable first_failure_ts — listed, counted in the TOTAL's unbounded_inc but on no day row"
       fi
       if [ "$inc_kind" = "unknown" ]; then
@@ -976,21 +989,17 @@ render_record() { # <days> <now>
       # instead of being printed as minutes that no column contains.
       case "$inc_end" in
         -|'')
-          if [ "$inc_day" = "n/a" ] || [ "$inc_ff" = "-" ]; then
+          if [ "$inc_ff" = "future" ]; then
+            down_disp="unknown (first_failure_ts is in the FUTURE — not counted in any column)"
+          elif [ "$inc_day" = "n/a" ] || [ "$inc_ff" = "-" ]; then
             down_disp="unknown (no parseable first_failure_ts)"
           elif [ "$inc_state" = "closed" ]; then
             down_disp="closed, recovery stamp unreadable (NOT counted as downtime)"
           else
-            # ⛔ A STAMP AHEAD OF NOW IS NOT AN ELAPSED TIME (review round 7 P3). The width
-            # gate admits any 10-digit epoch, so a future `first_failure_ts` published
-            # `open (>= -3505893 min elapsed)` — a NEGATIVE duration offered as downtime
-            # evidence, the same false-statement class round 2 set out to remove.
-            ff_i="$(to_int "$inc_ff" 0)"; now_i="$(now_epoch)"
-            if [ "$ff_i" -gt "$now_i" ]; then
-              down_disp="unknown (first_failure_ts is in the FUTURE — NOT counted)"
-            else
-              down_disp="open (>= $(( (now_i - ff_i) / 60 )) min elapsed, NOT counted)"
-            fi
+            # The future class cannot reach here (it is classified at ingest), so `now - ff`
+            # is never negative — the negative-elapsed defect stays closed without a second
+            # clock comparison in the printer.
+            down_disp="open (>= $(( ($(now_epoch) - $(to_int "$inc_ff" 0)) / 60 )) min elapsed, NOT counted)"
           fi
           ;;
         x) down_disp="excluded (closed as not_planned/duplicate — not a recovery)" ;;
@@ -1002,15 +1011,14 @@ render_record() { # <days> <now>
               # arm the same way (`inc_end` is numeric), and the header promises each unbounded
               # class its OWN label — so an undated row was told it held a clock inversion that
               # does not exist, and pointed at the wrong field to repair.
-              # ⛔ AND A STAMP AHEAD OF NOW INVENTS A DURATION HERE TOO (review round 8, latent):
-              # a future `first_failure_ts` with a later readable `closed_at` printed
-              # `down_for=1226 min` for a day that is in no column. The guard is the same one,
-              # applied before this arm instead of only in the open arm.
+              # ⛔ AND A STAMP AHEAD OF NOW IS CLASSIFIED AT INGEST (review round 9 P2), so it
+              # never reaches this arm as a numeric span: the row is non-numeric (`future`) and
+              # is skipped by both counting passes. The label therefore only has to be truthful.
               ff_i="$(to_int "$inc_ff" 0)"
-              if [ "$inc_day" = "n/a" ] || [ "$inc_ff" = "-" ]; then
+              if [ "$inc_ff" = "future" ]; then
+                down_disp="unknown (first_failure_ts is in the FUTURE — not counted in any column)"
+              elif [ "$inc_day" = "n/a" ] || [ "$inc_ff" = "-" ]; then
                 down_disp="unknown (no parseable first_failure_ts)"
-              elif [ "$ff_i" -gt "$(now_epoch)" ]; then
-                down_disp="unknown (first_failure_ts is in the FUTURE — NOT counted)"
               elif [ "$inc_end" -ge "$ff_i" ]; then
                 down_disp="$(( (inc_end - ff_i) / 60 )) min"
               else
