@@ -1060,9 +1060,16 @@ _TERMINAL_CALL_EXCEPTIONS: dict[tuple[str, str], str] = {
 def _terminal_call_sites(path: str) -> list[tuple[str, int, frozenset[str]]]:
     """Every CALL to the currency predicate in ``path`` — code, never prose.
 
-    Returns ``(enclosing qualname, lineno, keyword names)`` per call. ``live.py``
-    is scanned too, and its own calls are grandfathered BY NAME in the test —
-    the module that DECLARES the rule is not a consumer that has to import it.
+    Returns ``(enclosing qualname, lineno, keyword names)`` per call.
+
+    ⛔ ``live.py`` is NOT scanned — see ``_census_modules``, which excludes the
+    module that DECLARES the rule outright (``p.name != "live.py"``). It is an
+    EXCLUSION, not a name-based grandfather list: there is no per-callable
+    allowance for that file anywhere in this test, so its own axis-less calls
+    (``:671``, ``:696``, ``:1295`` at this head) are UNSCANNED. Stated because an
+    earlier cut of this docstring said the opposite — that the file was scanned
+    and its calls grandfathered by name — which would tell a reader auditing
+    coverage that the declaring module is covered when it is not.
     """
     tree = ast.parse(Path(path).read_text(encoding="utf-8"))
     out: list[tuple[str, int, frozenset[str]]] = []
