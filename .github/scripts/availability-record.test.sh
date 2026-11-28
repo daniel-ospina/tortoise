@@ -828,7 +828,7 @@ assert_not_contains "$OUT" "#6004  first_observed=2026-09-16  kind=down  restart
 assert_contains "$OUT" "NOT counted" "the open incident's elapsed time is explicitly excluded from the total"
 assert_contains "$OUT" "excluded (closed as not_planned/duplicate — not a recovery)" \
   "a not_planned close is NOT read as a recovery (its closed_at would invent a span)"
-assert_contains "$OUT" "recovered downtime: 60 min DOWN and 0 min DEGRADED (never summed) over 1 incident(s)" \
+assert_contains "$OUT" "recovered downtime: 60 min DOWN over 1 DOWN incident(s) and 0 min DEGRADED over 0 DEGRADED incident(s)" \
   "the total is WINDOW-SCOPED: exactly the one recovered incident contributes"
 assert_contains "$OUT" "DOWN_MIN is a LOWER BOUND wherever UNBOUNDED_INC > 0" \
   "the total is declared a lower bound while any outage is unbounded"
@@ -845,7 +845,7 @@ export STUB_LEDGER_SEARCH_JSON='{"total_count":3,"items":[
  {"number":6103,"user":{"login":"github-actions[bot]"},"title":"c","body":"<!-- watchdog-state kind=down first_failure_ts=1789550000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":null,"state_reason":null}]}' \
        STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
 run_record 3 --print-only
-assert_contains "$OUT" "recovered downtime: 856 min DOWN and 0 min DEGRADED (never summed) over 2 incident(s)" \
+assert_contains "$OUT" "recovered downtime: 856 min DOWN over 2 DOWN incident(s) and 0 min DEGRADED over 0 DEGRADED incident(s)" \
   "30 min + 826 min of RECOVERED spans, and nothing for the open one"
 assert_contains "$OUT" "1 incident(s) have NO usable span" "the open incident is disclosed beside the total"
 
@@ -856,7 +856,7 @@ echo "24c. with no recovery stamp anywhere, downtime is 0 min and EVERY incident
 reset_case
 export STUB_LEDGER_SEARCH_JSON="$LEDGER_JSON"
 run_record 3 --print-only
-assert_contains "$OUT" "recovered downtime: 0 min DOWN and 0 min DEGRADED (never summed) over 0 incident(s)" "no recovery stamp means no invented minutes"
+assert_contains "$OUT" "recovered downtime: 0 min DOWN over 0 DOWN incident(s) and 0 min DEGRADED over 0 DEGRADED incident(s)" "no recovery stamp means no invented minutes"
 assert_contains "$OUT" "2 incident(s) have NO usable span" "both fixtures are disclosed as unbounded instead of reading as 0 downtime"
 assert_eq "$(row_downtime "$OUT" 2026-09-16)" "0 0 2" "the day row carries 0 minutes AND names the two unbounded incidents"
 
@@ -890,7 +890,7 @@ export STUB_LEDGER_SEARCH_JSON='{"total_count":2,"items":[
 run_record 3 --print-only
 assert_eq "$(row_downtime "$OUT" 2026-09-16)" "60 120 0" \
   "the DEGRADED span (120 min) is in degraded_min and NOT added to down_min (60 min)"
-assert_contains "$OUT" "recovered downtime: 60 min DOWN and 120 min DEGRADED (never summed) over 1 incident(s)" \
+assert_contains "$OUT" "recovered downtime: 60 min DOWN over 1 DOWN incident(s) and 120 min DEGRADED over 1 DEGRADED incident(s)" \
   "the summary states the two kinds separately and counts only DOWN as downtime"
 
 # ── 27: a span that cannot be used is DISCLOSED, never a clean-looking 0 ────
@@ -911,6 +911,67 @@ assert_eq "$(row_downtime "$OUT" 2026-09-16)" "0 0 1" \
   "the day row reports 0 minutes AND discloses the incident as unusable — never 0 and 0"
 assert_contains "$OUT" "unusable (recovery stamp precedes the first failure — NOT counted)" \
   "the incident line says why its span is not counted"
+
+# ── 28: overlapping spans are UNIONED, not added (round-2 review P2) ────────
+# The live ledger holds 39 overlapping DOWN pairs — two probe runs can open two
+# incidents for ONE outage (#13930/#13931, #14036/#14041, #14080/#14082,
+# #14116/#14117) — so a per-incident sum reports a wall-clock figure that never
+# existed (~+475 min, 12.5%, on the 28-day window). "Minutes down" is a union.
+echo
+echo "28. two OVERLAPPING DOWN spans count once, and a split span counts twice"
+reset_case
+# #8001 08:00:00->10:00:00 (120 min); #8002 09:00:00->11:00:00 (120 min, overlaps 1h)
+# → union 08:00->11:00 = 180 min, NOT 240.
+# #8003 12:00:00->12:30:00 and #8004 13:00:00->13:30:00 are DISJOINT → 60 min more.
+export STUB_LEDGER_SEARCH_JSON='{"total_count":4,"items":[
+ {"number":8001,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1789545600 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T10:00:00Z","state_reason":"completed","state":"closed"},
+ {"number":8002,"user":{"login":"github-actions[bot]"},"title":"b","body":"<!-- watchdog-state kind=down first_failure_ts=1789549200 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T11:00:00Z","state_reason":"completed","state":"closed"},
+ {"number":8003,"user":{"login":"github-actions[bot]"},"title":"c","body":"<!-- watchdog-state kind=down first_failure_ts=1789560000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T12:30:00Z","state_reason":"completed","state":"closed"},
+ {"number":8004,"user":{"login":"github-actions[bot]"},"title":"d","body":"<!-- watchdog-state kind=down first_failure_ts=1789563600 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T13:30:00Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$(row_downtime "$OUT" 2026-09-16)" "240 0 0" \
+  "the 1h overlap is counted ONCE: 180 union minutes + 60 disjoint, never 300 summed"
+assert_contains "$OUT" "recovered downtime: 240 min DOWN over 4 DOWN incident(s)" \
+  "the count is per-incident while the minutes are per-wall-clock — stated separately"
+
+# ── 29: a raw ledger epoch never reaches arithmetic (round-2 review P2) ─────
+# `first_failure_ts` is human-editable. Two reachable shapes: a numeric-but-
+# unrenderable epoch printed a NEGATIVE elapsed bound, and a leading-zero value is
+# bash OCTAL, which aborts the expansion under `set -u` and kills the render
+# (publishing nothing until a human edits the issue body).
+echo
+echo "29. an unrenderable or octal first_failure_ts cannot produce a false bound or kill the render"
+reset_case
+export STUB_LEDGER_SEARCH_JSON='{"total_count":2,"items":[
+ {"number":9001,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=99999999999999999 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":null,"state_reason":null,"state":"open"},
+ {"number":9002,"user":{"login":"github-actions[bot]"},"title":"b","body":"<!-- watchdog-state kind=down first_failure_ts=08 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":null,"state_reason":null,"state":"open"},
+ {"number":9003,"user":{"login":"github-actions[bot]"},"title":"c","body":"<!-- watchdog-state kind=down first_failure_ts=12345 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":null,"state_reason":null,"state":"open"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$RC" "0" "an octal first_failure_ts does NOT abort the render (it used to exit non-zero, publishing nothing)"
+assert_contains "$OUT" "RECORD-ONLY baseline" "the record is still rendered"
+assert_contains "$OUT" "unknown (no parseable first_failure_ts)" \
+  "the unrenderable epoch is labelled unparseable rather than given a NEGATIVE elapsed bound"
+assert_not_contains "$OUT" "min elapsed, NOT counted" "no elapsed bound is computed from a stamp the record called unparseable"
+# A SHORT numeric stamp is the trap a bare digit test walks into: GNU `date -d @12345`
+# renders 1970-01-01, so `first_failure_ts=12345` would be bucketed into a 1970 day and
+# claim a 56-YEAR elapsed bound. Only a WIDTH gate on the stamp (real ledger stamps are
+# 10 digits) prevents that, which is why the gate is not merely "all digits".
+assert_not_contains "$OUT" "1970-01-01" "a short numeric stamp is NOT rendered as a 1970 incident day"
+
+# ── 30: an unknown-kind span is not printed as minutes it never contributes ─
+echo
+echo "30. a usable span with NO parseable kind is disclosed, not printed as minutes"
+reset_case
+export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
+ {"number":9101,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state first_failure_ts=1789547000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T09:23:20Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
+run_record 3 --print-only
+assert_contains "$OUT" "unknown kind — NOT counted in any minutes column" \
+  "the print side agrees with the aggregate, which can only bucket down/degraded"
+assert_not_contains "$OUT" "down_for=60 min" "the span is NOT printed as minutes no column contains"
+assert_eq "$(row_downtime "$OUT" 2026-09-16)" "0 0 1" "it is counted in unbounded_inc instead of vanishing"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
