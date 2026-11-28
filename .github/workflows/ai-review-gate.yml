@@ -1126,12 +1126,13 @@ jobs:
               # it in" and the review carries. Measured `rc=0` before this line existed.
               [ "$(printf '%s' "$p_bshas" | wc -w)" = "$p_bcount" ] || { patch_ancestry_unreadable=1; return 1; }
               # ⛔ AND A ZERO TOTAL HERE IS MALFORMED TOO (sign-off review, F1 — the reviewed
-              # side got this guard, this side did not). This read only runs when the branch
+              # side already got this guard in an earlier commit, this side did not). This read only runs when the branch
               # gained at least one commit, and the merge that brought the base in is
               # head-side and NOT in the base — so `0` cannot describe it. Measured: a
               # response with `status` and no commit arrays rendered `ahead\t0\t0\t`, which
               # satisfies arity and equality, skipped the loop, and carried an AUTHORED
-              # commit. `(t33)` pins both sides and mutates both guards away.
+              # commit. `(t33)` pins THIS side; the REVIEWED side's zero guard is pinned by
+              # `(t32g)`/`(t32h)` and by nothing else — do not delete either as "covered".
               [ "${p_btotal:-0}" -ge 1 ] || { patch_ancestry_unreadable=1; return 1; }
               for p_tok in $p_added; do
                 p_psha="${p_tok%%:*}"

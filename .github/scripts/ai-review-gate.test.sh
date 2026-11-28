@@ -71,7 +71,7 @@
 #   (i3) verdict=clean-low on both acceptance paths (#4755)
 #   (t) acceptance rule (c) (#4255) — the PATCH projection survives a base advance:
 #       pinned projection vectors (reviewed/live/edited/whitespace/renamed/deleted),
-#       the anti-vacuity pairs, and (t1)-(t10)/(t20)-(t32), incl. (t10b), (t20b), (t29)-(t32) the end-to-end cases: the carry, the
+#       the anti-vacuity pairs, and (t1)-(t10)/(t20)-(t33), incl. (t10b), (t20b), (t29)-(t33) the end-to-end cases: the carry, the
 #       three fail-closed arms, the probe cost bounds, the ANCHOR, the ANCESTRY and
 #       authored-commit preconditions and their mutations, one HMAC verifier, the
 #       relocation refusal, and every refusal's operator-facing diagnostic
@@ -2580,7 +2580,6 @@ sed -E -e 's/^ *(\[\[ "\$p_rel" =~ \^\(ahead\|behind\|diverged\|identical\)\$ \]
        -e 's/^ *(\[\[ "\$p_total" =~ \^\[0-9\]\+\$ && "\$p_seen" =~ \^\[0-9\]\+\$ \]\] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
        -e 's/^ *(\[ "\$p_total" = "\$p_seen" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
        -e 's/^ *(\[ "\$\(printf .%s. "\$p_added" \| wc -w\)" = "\$p_seen" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
-       -e 's/^( *).*p_total:-0.*-ge 1.*$/\1:/' \
        -e 's/^ *(\[ "\$p_seen" -ge 1 \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
     "$RUN_BLOCK" > "$MUT_T32"
 if cmp -s "$RUN_BLOCK" "$MUT_T32"; then
