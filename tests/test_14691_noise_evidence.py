@@ -524,15 +524,17 @@ def test_t4_every_ontology_layer_is_used_and_the_kinds_are_not_collapsed():
 def test_t5_every_sampled_relation_is_traced_and_the_tiers_are_separate():
     row = _score()["tests"]["T5"]
     # ⛔ THE POPULATION IS BOTH PASSES. The first cut sampled pass 1 only
-    # (`relation_rows(receipt, 1)`), which excluded all 21 pass-2 edges. ⛔ Pass-1-only
-    # sampling does NOT rescue the verdict — it reports 2 unsupported edges and still
-    # FAILs — so the wider population is here because two thirds of the run's relations
-    # went unexamined, not because the FAIL depends on it: it strengthened the evidence
-    # from 2 to 3. (An earlier spelling of this comment said the only failing edge lived
-    # in the excluded half; measured, two of the three are pass-1.)
+    # (`relation_rows(receipt, 1)`), which excluded pass 2's 21 of the run's 47 relations
+    # (44.7 %) — measured, `relation_rows` over the committed receipt. ⛔ Pass-1-only
+    # sampling does NOT rescue the verdict: it samples 26 with tiers
+    # {verbatim 17, paraphrase 7, none 2} and still FAILs. So the wider population is here
+    # because a third of the run went unexamined, not because the FAIL depends on it — it
+    # strengthened the evidence from 2 unsupported edges to 3. (Two earlier spellings of
+    # this comment were wrong: one said the only failing edge lived in the excluded half,
+    # and its replacement said "two thirds of the run", which no denominator produces.)
     assert row["sampled"] == 47, (
         "T5 must sample every relation the receipts say was written (26 pass 1 + 21 "
-        "pass 2); pass-1-only sampling leaves a third of the run unexamined")
+        "pass 2); pass-1-only sampling leaves pass 2's 21 of 47 relations unexamined")
     assert {s["pass"] for s in row["rows"]} == {1, 2}
     assert row["tiers"] == {"verbatim": 34, "paraphrase": 10, "none": 3}
     # One invented edge, named — and its name is the point: doc-04 says Priya *reports*
