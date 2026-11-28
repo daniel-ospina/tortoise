@@ -71,7 +71,7 @@
 #   (i3) verdict=clean-low on both acceptance paths (#4755)
 #   (t) acceptance rule (c) (#4255) — the PATCH projection survives a base advance:
 #       pinned projection vectors (reviewed/live/edited/whitespace/renamed/deleted),
-#       the anti-vacuity pairs, and (t1)-(t10)/(t20)-(t28), incl. (t10b) and (t20b) the end-to-end cases: the carry, the
+#       the anti-vacuity pairs, and (t1)-(t10)/(t20)-(t31), incl. (t10b), (t20b), (t29)-(t31) the end-to-end cases: the carry, the
 #       three fail-closed arms, the probe cost bounds, the ANCHOR, the ANCESTRY and
 #       authored-commit preconditions and their mutations, one HMAC verifier, the
 #       relocation refusal, and every refusal's operator-facing diagnostic
@@ -443,6 +443,11 @@ cat > "$T/bin/gh" <<'STUB'
 if grep -qE -- "/compare/" <<<"$*" && ! grep -qF -- "application/vnd.github.v3.diff" <<<"$*"; then
     if [ "${STUB_COMPARE_JSON_FAIL:-0}" = "1" ]; then exit 1; fi
     if grep -qE -- "compare/${STUB_BASE_SHA:-}\.\.\." <<<"$*"; then
+        # ⛔ A PER-ARM failure switch. `STUB_COMPARE_JSON_FAIL` fails BOTH JSON compare
+        # arms together, which makes "the branch-side read failed ALONE" inexpressible —
+        # the guard at `[ -z "$p_bside" ]` was unpinned for exactly that reason (measured:
+        # removing it, and its `:x` default, reddened no row at all).
+        [ "${STUB_BRANCH_FAIL:-0}" = "1" ] && exit 1
         # The branch-side graph, post-`--jq`: <total_commits>\t<len(commits)>\t<s has>.
         # The middle field is the page length, so a case can reproduce a TRUNCATED
         # response (total > returned) and prove the gate refuses instead of treating a
@@ -2302,7 +2307,88 @@ else
 fi
 
 
-# ── (t26) REPEATED RECORDS COST ONE PROBE# ── (t26) REPEATED RECORDS COST ONE PROBE — AND WHAT IS NOT ATTRIBUTABLE ─────
+# ── (t31) NO LIVE PATCH HASH ⇒ NO PROBE, NO MISDIAGNOSIS ────────────────────
+# ⛔ THE THIRD UNPINNED GUARD (final review): `[ -n "$live_patch_hash" ] || return 1`.
+# Removing it reddened NOTHING, yet it is what stops a TRANSIENT live-diff failure from
+# (a) spending a rule-(c) probe — 3 `gh` calls become 6 against the shared 1,000/hour
+# budget — and (b) printing "the ANCHOR held … a fresh review IS owed", i.e. sending the
+# operator to buy a 20–40 minute review for an API blip. That is the exact misdiagnosis
+# the `patch_ancestry_unreadable` arm was added to prevent, one guard away.
+printf '%s\n' "$(diff_marker "$STALE" "$SAME_SCOPE_ANCHOR")" > "$T/body-t31"
+cp "$T/gh.log" "$T/gh-t31-before" 2>/dev/null || : > "$T/gh-t31-before"
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" STUB_DIFF_FAIL=1 \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" run_gate "$T/body-t31"
+assert_rc 1 "(t31) an unreadable LIVE diff still refuses"
+assert_not_contains "(t31) …and does NOT tell the operator a fresh review is owed for an API blip" \
+    "fresh review IS owed"
+_t31_calls="$(wc -l < "$T/gh.log" | tr -d ' ')"
+if [ "${_t31_calls:-99}" -le 3 ]; then
+    ok "(t31) …and spends NO rule-(c) probe (${_t31_calls} gh call(s)) — the budget is not spent on a failure"
+else
+    bad "(t31) ${_t31_calls} gh calls with no live patch hash — the probe ran on a transient failure"
+fi
+# MUTATION: drop the guard and both properties break.
+MUT_LPH="$T/mutant-no-live-patch-guard.sh"
+sed -E 's/^( *)\[ -n "\$live_patch_hash" \] \|\| return 1$/\1:/' "$RUN_BLOCK" > "$MUT_LPH"
+if cmp -s "$RUN_BLOCK" "$MUT_LPH"; then
+    bad "(t31) the live-patch-guard mutation did not apply — this control proves NOTHING"
+else
+    _saved_block="$RUN_BLOCK"; RUN_BLOCK="$MUT_LPH"
+    STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" STUB_DIFF_FAIL=1 \
+        STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" run_gate "$T/body-t31"
+    RUN_BLOCK="$_saved_block"
+    _mut_calls="$(wc -l < "$T/gh.log" | tr -d ' ')"
+    if [ "${_mut_calls:-0}" -gt 3 ] || grep -q "fresh review IS owed" <<<"$GATE_OUT"; then
+        ok "(t31) the MUTANT probes anyway (${_mut_calls} calls) and misdiagnoses — so the guard is load-bearing"
+    else
+        bad "(t31) the mutant behaved identically — the two assertions above attribute nothing"
+    fi
+fi
+
+
+# ── (t30) THE BRANCH-SIDE READ IS A GUARD, NOT A CONVENIENCE ────────────────
+# ⛔ THE SECOND UNPINNED PAIR (final review). `[ -z "$p_bside" ]` and the deliberate
+# `:x` default in `[ "${p_btotal:-0}" = "${p_bcount:-x}" ]` are what make an UNREADABLE
+# branch-side graph refuse instead of treating a missing sha as "the base brought it in".
+# Removing either alone reddened NO row, and removing BOTH let a single-parent AUTHORED
+# commit carry via PATCH match — a false pass of exactly the class this rule exists to
+# stop. It was untestable because the stub's `STUB_COMPARE_JSON_FAIL` fails both compare
+# arms together; `STUB_BRANCH_FAIL` (added above) fails only this one, as gh really can.
+BSIDE_BODY="$T/body-t30"
+printf '%s\n' "$(diff_marker "$STALE" "$SAME_SCOPE_ANCHOR")" > "$BSIDE_BODY"
+# (a) The read fails: REFUSED, with the read-failure diagnosis, not a rewrite.
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" \
+    STUB_ANCESTOR_STATUS=ahead STUB_ANCESTOR_TOTAL=1 STUB_ANCESTOR_SEEN=1 \
+    STUB_ANCESTOR_COMMITS="dddddddddddd:2" STUB_BRANCH_FAIL=1 run_gate "$BSIDE_BODY"
+assert_rc 1 "(t30) an UNREADABLE branch-side graph refuses (a missing sha must never read as 'came from the base')"
+assert_contains "(t30) …and says the graph could not be READ" "could not READ this PR's commit graph"
+assert_not_contains "(t30) …and does NOT claim the branch was rewritten" "REWRITTEN (force-push"
+# (b) BOTH halves of the pair removed → the same authored-commit fixture CARRIES, which is
+# the false pass the pair prevents. This is what makes the class attributable even though
+# neither half can be pinned on its own.
+MUT_BSIDE="$T/mutant-no-bside-guards.sh"
+sed -E -e 's/^( *)(if \[ -z "\$p_bside" \]; then patch_ancestry_unreadable=1; return 1; fi)$/\1:/' \
+       -e 's/^( *)\[ "\$\{p_btotal:-0\}" = "\$\{p_bcount:-x\}" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \}$/\1:/' \
+    "$RUN_BLOCK" > "$MUT_BSIDE"
+if cmp -s "$RUN_BLOCK" "$MUT_BSIDE"; then
+    bad "(t30) the branch-side guard mutation did not apply — the guards changed shape, so this control proves NOTHING"
+else
+    _saved_block="$RUN_BLOCK"; RUN_BLOCK="$MUT_BSIDE"
+    STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+        STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" \
+        STUB_ANCESTOR_STATUS=ahead STUB_ANCESTOR_TOTAL=1 STUB_ANCESTOR_SEEN=1 \
+        STUB_ANCESTOR_COMMITS="dddddddddddd:1" STUB_BRANCH_FAIL=1 run_gate "$BSIDE_BODY"
+    RUN_BLOCK="$_saved_block"
+    if [ "$GATE_RC" = "0" ]; then
+        ok "(t30) with BOTH halves removed an API failure CARRIES an authored commit — so the pair is load-bearing"
+    else
+        bad "(t30) the double mutant still refused (rc=$GATE_RC) — something else refuses this, so the (t30) pair is not what the row claims"
+    fi
+fi
+
+
+# ── (t26) REPEATED RECORDS COST ONE PROBE — AND WHAT IS NOT ATTRIBUTABLE ─────
 # The workflow header used to name four cases as pinning the two availability bounds;
 # the cycle-2 review measured that deleting the SIGNATURE-FIRST check reddens (t9)x2,
 # (t10)x2 and (t21) — not (t6)/(t8)/(t22) — and that deleting the in-loop (sha,diff)
