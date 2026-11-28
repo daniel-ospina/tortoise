@@ -1964,7 +1964,14 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # silent skip, never a warning and never a raised error.
             rows = proj.g.query(
                 "MATCH (n:Point) WHERE n.id IN $ids "
-                "RETURN n.id, n.status, coalesce(n.outdated, false)",
+                # #14796: the POSITION columns ride the same probe, so the
+                # verdict below asks the two-axis rule the `sdk.supersede_point`
+                # guard asks (its Cypher arms read `_live_only`, which has always
+                # carried both). Without them a ref closed only by `isClosed` / a
+                # `terminal` slot read live here and the call fell through to a
+                # door that RAISES — the spurious warning #2498 removed.
+                "RETURN n.id, n.status, coalesce(n.outdated, false), "
+                "coalesce(n.isClosed, false), n.pipelineSlot",
                 params={"ids": [ref, supersedes_by]},
             ).result_set
             # #7822: the verdict is over EVERY node carrying the id. The
@@ -1976,7 +1983,10 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             terminal: set[str] = set()
             for r in rows:
                 present.add(r[0])
-                if is_terminal_status(r[1], bool(r[2])):
+                if is_terminal_status(
+                        r[1], bool(r[2]),
+                        is_closed=r[3] if len(r) > 3 else None,
+                        stage_slot=r[4] if len(r) > 4 else None):
                     terminal.add(r[0])
             if ref not in present:
                 warn(f"point supersession ref {ref!r} not found — "
