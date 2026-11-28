@@ -3376,6 +3376,17 @@ STALE_TIP_DAYS = 7.0
 # not imported: agent-infra is a separate checkout this tool may not have.
 CLAIM_NS = "refs/claims"
 CLAIM_TMP_NS = "refs/claims-tmp"
+#: How many times a claim read is repeated when the ref MOVES under it (#13727).
+#:
+#: The read is TWO network steps — `ls-remote` names the sha, a `fetch` brings its commit
+#: into a temp ref — and a claim ref is force-updated IN PLACE by every renewal
+#: (`claims.sh:_claim_acquire_at` rebuilds the claim commit and pushes it to the same key),
+#: so the two steps can straddle a renewal and see two different commits. The pair
+#: (sha, lease) must then come from ONE of them: the tool re-enumerates and re-reads, and
+#: only reports a lease it has bound to the sha it names. Three reads cover a renewal
+#: (one move) with one spare; a ref that will not hold still is an ABSTENTION, never a
+#: number quoted about a commit the caller never enumerated.
+CLAIM_READ_ATTEMPTS = 3
 
 
 def _ref_tip_age_days(git_bin: str, repo: str, ref: str, timeout: float,
@@ -3816,47 +3827,110 @@ class StaleHolder:
         if self._claim is not None:
             return self._claim
         ref = f"{CLAIM_NS}/issue-{self.issue}"
-        rc, out, err, timed_out = _run(
-            [self.git_bin, "ls-remote", "origin", ref], self.repo, self.timeout,
-        )
-        if rc != 0:
-            why = "timeout" if timed_out else f"exit {rc}"
-            basis = (f"the claim registry could not be read ({ref}: "
-                     f"`git ls-remote` {why}: {_one_line(err)}) — NOT demoted")
-            self._claim = (True, basis, True)
-            return self._claim
-        sha = out.split()[0] if out.split() else ""
-        if not sha:
-            self._claim = (False, f"no `{ref}` on origin", False)
-            return self._claim
-        tmp = f"{CLAIM_TMP_NS}/preflight-{os.getpid()}-{int(self.now)}"
-        try:
-            frc, _fout, ferr, _fto = _run(
-                [self.git_bin, "fetch", "-q", "origin", f"+{ref}:{tmp}"],
-                self.repo, self.timeout,
+        # ⛔ A LEASE MUST BE READ FROM THE COMMIT THE REF NAMED, NOT FROM WHATEVER THE
+        # NAMESPACE HELD MOMENTS LATER (#13727). Every attempt below re-enumerates the ref
+        # and then requires the fetched commit to BE that sha before any lease is read out
+        # of it, so the number this tool prints and the sha it prints it about are one
+        # object. Without the check the two halves of the message come from two different
+        # reads: `ls-remote` supplies the sha, the `fetch` supplies the lease, and a
+        # renewal in between makes the report describe a commit nobody enumerated — an
+        # expired claim printed with a renewed (future) lease reads as LIVE and refuses a
+        # free dispatch, and the countdown looks like a measurement.
+        moved: list[str] = []
+        for attempt in range(CLAIM_READ_ATTEMPTS):
+            rc, out, err, timed_out = _run(
+                [self.git_bin, "ls-remote", "origin", ref], self.repo, self.timeout,
             )
-            if frc != 0:
-                basis = (f"`{ref}` exists but its lease could not be read "
-                         f"({_one_line(ferr)}) — treated as LIVE, NOT demoted")
+            if rc != 0:
+                why = "timeout" if timed_out else f"exit {rc}"
+                basis = (f"the claim registry could not be read ({ref}: "
+                         f"`git ls-remote` {why}: {_one_line(err)}) — NOT demoted")
                 self._claim = (True, basis, True)
                 return self._claim
-            return self._lease_from_ref(ref, tmp, sha)
-        finally:
-            _run([self.git_bin, "update-ref", "-d", tmp], self.repo, self.timeout)
+            sha = out.split()[0] if out.split() else ""
+            if not sha:
+                self._claim = (False, f"no `{ref}` on origin", False)
+                return self._claim
+            tmp = (f"{CLAIM_TMP_NS}/preflight-{os.getpid()}-{int(self.now)}"
+                   f"-{attempt}")
+            try:
+                frc, _fout, ferr, _fto = _run(
+                    [self.git_bin, "fetch", "-q", "origin", f"+{ref}:{tmp}"],
+                    self.repo, self.timeout,
+                )
+                if frc != 0:
+                    basis = (f"`{ref}` exists but its lease could not be read "
+                             f"({_one_line(ferr)}) — treated as LIVE, NOT demoted")
+                    self._claim = (True, basis, True)
+                    return self._claim
+                # Which commit did that fetch actually land? NOT assumed to be `sha`.
+                got = self._ref_sha(tmp)
+                if not got:
+                    self._claim = (True, (
+                        f"`{ref}` exists but the commit its lease would be read from "
+                        "cannot be named — treated as LIVE, NOT demoted"), True)
+                    return self._claim
+                if got == sha:
+                    self._claim = self._lease_from_ref(ref, got, moved)
+                    return self._claim
+                # The ref moved between the two steps (a renewal, or a release and a
+                # re-claim). Re-enumerate rather than report a lease about a commit this
+                # read never named.
+                moved.append(f"{sha[:9]} → {got[:9]}")
+            finally:
+                _run([self.git_bin, "update-ref", "-d", tmp], self.repo, self.timeout)
+        self._claim = (True, (
+            f"`{ref}` moved under {CLAIM_READ_ATTEMPTS} reads ({', '.join(moved)}) — its "
+            "lease cannot be BOUND to the commit it names, so no lease is reported: "
+            "treated as LIVE, NOT demoted"), True)
+        return self._claim
 
-    def _lease_from_ref(self, ref: str, tmp: str, sha: str) -> tuple[bool, str, bool]:
+    def _ref_sha(self, ref: str) -> str:
+        """The commit sha a (temp) ref resolves to, or `""` when it cannot be read."""
         rc, out, _err, _to = _run(
-            [self.git_bin, "cat-file", "commit", tmp], self.repo, self.timeout,
+            [self.git_bin, "rev-parse", "--verify", ref], self.repo, self.timeout,
         )
         if rc != 0:
-            self._claim = (True, (f"`{ref}` exists but its commit could not be read — "
-                                 "treated as LIVE, NOT demoted"), True)
-            return self._claim
-        lease = ""
-        for line in out.splitlines():
-            for token in line.split():
-                if token.startswith("lease_until="):
-                    lease = token.split("=", 1)[1]
+            return ""
+        return out.strip()
+
+    def _lease_from_ref(self, ref: str, sha: str,
+                        moved: list[str]) -> tuple[bool, str, bool]:
+        """(is a LIVE claim?, basis) for the claim commit `sha`, read BY THAT SHA.
+
+        `moved` is the reads this one survived (`<enumerated> → <fetched>`); it is reported
+        so a reader can tell that the ref was re-enumerated rather than silently bound to
+        the first sha it ever saw.
+        """
+        moved_note = f", re-read after it moved {', '.join(moved)}" if moved else ""
+        rc, out, _err, _to = _run(
+            [self.git_bin, "cat-file", "commit", sha], self.repo, self.timeout,
+        )
+        if rc != 0:
+            return (True, (f"`{ref}` exists but its commit {sha[:9]} could not be read — "
+                           "treated as LIVE, NOT demoted"), True)
+        # ⛔ THE CLAIM'S LEASE IS ONE TOKEN, AND `claims.sh` READS THE FIRST LINE'S FIRST ONE
+        # (`_claim_commit_parse`; `_claim_commit` writes exactly `claim owner=…
+        # lease_until=… nonce=…`). Collecting EVERY token and keeping the LAST — what this
+        # reader used to do — lets any later mention (`lease_until=` in a note, a renewal
+        # line, a quoted older claim) become the number printed as the claim's lease, in
+        # either direction: a later FUTURE value reports a phantom live lease and refuses a
+        # free dispatch, a later PAST value would demote a live one. Two distinct values are
+        # therefore an AMBIGUOUS record, and an unjudgeable record is LIVE, exactly like the
+        # absent/`0`/non-numeric/19-digit class below.
+        leases = [
+            token.split("=", 1)[1]
+            for line in out.splitlines()
+            for token in line.split()
+            if token.startswith("lease_until=")
+        ]
+        distinct = list(dict.fromkeys(leases))
+        lease = leases[0] if leases else ""
+        if len(distinct) > 1:
+            return (True, (f"`{ref}` (sha {sha[:9]}) carries {len(distinct)} different "
+                           f"lease_until values ({', '.join(distinct)}){moved_note} — the "
+                           "claim's own lease is AMBIGUOUS, treated as LIVE, NOT demoted"),
+                    True)
         # claims.sh:_lease_unparseable — an absent value, the `0` sentinel, any
         # non-digit (a negative collapses to `0`) and a 19+-digit value (the `[`
         # 18-digit bound exists so a full-width lease cannot wrap) are all "a claim
@@ -3866,18 +3940,19 @@ class StaleHolder:
         # as an uncaught ValueError — a crash standing in for a verdict.
         if (not lease or not (lease.isascii() and lease.isdigit())
                 or len(lease) > 18 or lease == "0"):
-            self._claim = (True, (f"`{ref}` is held with a lease this reader cannot "
-                                 f"parse (lease_until={lease or 'absent'}) — treated as "
-                                 "LIVE, NOT demoted"), True)
-            return self._claim
+            return (True, (f"`{ref}` (sha {sha[:9]}) is held with a lease this reader "
+                           f"cannot parse (lease_until={lease or 'absent'}){moved_note} — "
+                           "treated as LIVE, NOT demoted"), True)
         until = int(lease)
         if until > int(self.now):
-            self._claim = (True, (f"`{ref}` is a LIVE claim (lease {until - int(self.now)}s "
-                                 "left) — NOT demoted"), False)
-            return self._claim
-        self._claim = (False, (f"the only `{ref}` (sha {sha[:9]}) EXPIRED at {until}, "
-                              f"{(int(self.now) - until) // 3600}h ago"), False)
-        return self._claim
+            # ⛔ THE SHA IS NAMED IN *BOTH* ARMS. A lease printed without the commit it was
+            # read from cannot be checked against the ref by anyone reading the output —
+            # that is how a lease from a different commit passed as a measurement (#13727).
+            return (True, (f"`{ref}` (sha {sha[:9]}) is a LIVE claim (lease "
+                           f"{until - int(self.now)}s left){moved_note} — NOT demoted"),
+                    False)
+        return (False, (f"the only `{ref}` (sha {sha[:9]}) EXPIRED at {until}, "
+                        f"{(int(self.now) - until) // 3600}h ago{moved_note}"), False)
 
     # ── the four tests ───────────────────────────────────────────────────────
 

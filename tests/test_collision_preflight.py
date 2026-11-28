@@ -8955,6 +8955,16 @@ class CollisionPreflightTest(unittest.TestCase):
         tree is the one git defines for exactly this shape. `message` overrides the
         lease-shaped body, which is how the unparseable-lease polarity is exercised.
         """
+        self.set_claim_ref(self.claim_sha(lease_until, message=message))
+
+    def claim_sha(self, lease_until: int | None, *,
+                  message: str | None = None) -> str:
+        """Build a claim commit IN THE ORIGIN and return its sha, moving NO ref.
+
+        Separate from `live_claim` so a test can hold two commits and decide which one
+        the ref points at, and WHEN — the read under test is two git steps wide, and the
+        ref moving between them is the shape #13727 turns on.
+        """
         origin = self.tmp / "remotes" / "test-owner" / "test-repo.git"
         empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
         env = {
@@ -8967,15 +8977,32 @@ class CollisionPreflightTest(unittest.TestCase):
         # a bare repo needs no worktree at all.
         body = message if message is not None else (
             f"claim owner=box-a lease_until={lease_until} nonce=9806")
-        sha = subprocess.run(
+        return subprocess.run(
             ["git", "-C", str(origin), "commit-tree", empty_tree, "-m", body],
             check=True, capture_output=True, text=True, env=env,
         ).stdout.strip()
+
+    def set_claim_ref(self, sha: str) -> None:
+        """Point `refs/claims/issue-<ISSUE>` at `sha` — a renewal, in place."""
+        origin = self.tmp / "remotes" / "test-owner" / "test-repo.git"
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
         subprocess.run(
             ["git", "-C", str(origin), "update-ref",
              f"refs/claims/issue-{ISSUE}", sha],
             check=True, capture_output=True, text=True, env=env,
         )
+
+    def claim_ref_sha(self) -> str:
+        origin = self.tmp / "remotes" / "test-owner" / "test-repo.git"
+        return subprocess.run(
+            ["git", "-C", str(origin), "rev-parse",
+             f"refs/claims/issue-{ISSUE}"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
 
     def row(self, out: str, prefix: str) -> str:
         """The surface-table row for `prefix` — its NOTE lives here, not in the hit list."""
@@ -9187,6 +9214,117 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: COLLISION", out)
         self.assertNotIn("ADVISORY", self.hit(out, f"origin/feat/{ISSUE}-claimed"))
         self.assertIn("is a LIVE claim", self.row(out, "remote branches"))
+
+    # ── #13727: the lease reported IS the commit the ref named ──────────────
+
+    def claim_read_with_hook(self, *, moves: int = 1, live_lease: int | None = None):
+        """`StaleHolder._claim_live()` with the claim ref MOVING under the read.
+
+        The read is TWO git steps — `ls-remote` names a sha, `fetch` brings its commit —
+        and `claims.sh` renews a claim by force-updating the SAME ref, so the two steps
+        routinely straddle a renewal. This hook moves the ref after each of the first
+        `moves` `ls-remote` answers, which is the incident's own ordering: the enumerated
+        sha is the OLD (expired) commit while the fetch lands the renewed (live) one.
+        """
+        mod = _tool_module()
+        self.bare_origin()
+        # The committed, EXPIRED claim is what the enumeration names first.
+        self.live_claim(int(time.time()) - 86400)
+        expired_sha = self.claim_ref_sha()
+        lease = live_lease if live_lease is not None else int(time.time()) + 3600
+        # ONE DISTINCT COMMIT PER MOVE: a renewal builds a new claim commit, and `moves=2`
+        # has to be two renewals, not one ref re-pointed at the same sha twice.
+        live_shas = [
+            self.claim_sha(lease, message=f"claim owner=box-a lease_until={lease} "
+                                          f"nonce=renewal-{i}")
+            for i in range(max(1, moves))
+        ]
+        self.assertNotIn(expired_sha, live_shas)
+        real_run = mod._run
+        seen = {"ls": 0}
+
+        def _run_hook(cmd, cwd, timeout, env=None):
+            out = real_run(cmd, cwd, timeout, env)
+            if len(cmd) > 2 and cmd[1] == "ls-remote" and cmd[2] == "origin":
+                # Move the ref AFTER the enumeration answered — the renewal that lands
+                # between the read's two steps.
+                if seen["ls"] < moves:
+                    self.set_claim_ref(live_shas[min(seen["ls"], len(live_shas) - 1)])
+                seen["ls"] += 1
+            return out
+
+        holder = mod.StaleHolder("git", str(self.repo), ISSUE, 60, [])
+        with mock.patch.object(mod, "_run", _run_hook):
+            claimed, basis, unreadable = holder._claim_live()
+        return claimed, basis, unreadable, expired_sha, live_shas
+
+    def test_the_reported_lease_is_the_commit_the_ref_named(self):
+        """#13727: the printed lease is BOUND to the sha printed beside it.
+
+        MEASURED (2026-11-19, `refs/claims/issue-3484`): the ref's own commit carried
+        `lease_until=1792342915` (31 days PAST) while the tool twice reported
+        "is a LIVE claim (lease 34163s left)" → then "33386s left" 777 s later. Those two
+        numbers count down with the wall clock, so they look like a measurement — but they
+        describe a commit the CALLER never enumerated, because the sha comes from
+        `ls-remote` and the lease comes from a `fetch` that landed a DIFFERENT commit.
+
+        ⛔ A LEASE WITH NO SHA BESIDE IT IS NOT CHECKABLE BY THE READER, which is how a
+        number from another commit passed as a measurement. Both assertions below fail on
+        the unbound reader: the basis must name the sha whose lease it prints, and it must
+        say the ref moved rather than silently binding to one of the two commits.
+        """
+        claimed, basis, unreadable, expired_sha, live_shas = self.claim_read_with_hook()
+        live_sha = live_shas[0]
+        self.assertTrue(claimed, basis)
+        self.assertFalse(unreadable, basis)
+        # The lease reported belongs to the commit the ENUMERATION at that moment produced
+        # — and that commit is named, so a reader can re-read it.
+        self.assertIn(live_sha[:9], basis)
+        self.assertIn("is a LIVE claim", basis)
+        self.assertIn(f"{expired_sha[:9]} → {live_sha[:9]}", basis,
+                      "the move must be reported, not silently resolved")
+
+    def test_a_claim_ref_that_will_not_hold_still_is_an_abstention(self):
+        """A ref that moves on EVERY read gets no lease printed at all.
+
+        Binding the lease to a commit means the tool must be able to NAME the commit. When
+        every read is interrupted by a renewal it cannot, and the honest answer is the
+        fail-closed abstention this reader already uses for an unreadable datum: LIVE, NOT
+        demoted, with the moves named — never a number.
+        """
+        mod = _tool_module()
+        claimed, basis, unreadable, _expired_sha, _live_shas = (
+            self.claim_read_with_hook(moves=mod.CLAIM_READ_ATTEMPTS))
+        self.assertTrue(claimed, basis)
+        self.assertTrue(unreadable, basis)
+        self.assertIn("cannot be BOUND", basis)
+        self.assertNotIn("s left", basis, f"no lease may be quoted here:\n{basis}")
+
+    def test_a_claim_carrying_two_leases_never_prints_a_countdown(self):
+        """TWO lease tokens is an AMBIGUOUS record, not "the last one wins".
+
+        `claims.sh` writes ONE token on the first line and its own reader takes the FIRST
+        (`_claim_commit_parse`). A reader that collects every token and keeps the LAST lets
+        any later mention become "the claim's lease" — and when that later token is in the
+        FUTURE it prints a live countdown for a claim whose own lease expired, which is the
+        reported symptom of #13727 with no race needed at all. The polarity is unchanged
+        (an unjudgeable record is LIVE, never free): what changes is that the tool says so
+        instead of quoting a number it cannot attribute.
+        """
+        mod = _tool_module()
+        self.bare_origin()
+        past, future = int(time.time()) - 86400, int(time.time()) + 86400
+        self.live_claim(None, message=(
+            f"claim owner=box-a lease_until={past} nonce=9806\n"
+            f"renewal note, previous lease_until={future}"))
+        holder = mod.StaleHolder("git", str(self.repo), ISSUE, 60, [])
+        claimed, basis, unreadable = holder._claim_live()
+        self.assertTrue(claimed, basis)
+        self.assertTrue(unreadable, basis)
+        self.assertIn("AMBIGUOUS", basis)
+        self.assertIn(str(past), basis)
+        self.assertIn(str(future), basis)
+        self.assertNotIn("s left", basis, f"no lease may be quoted here:\n{basis}")
 
     def test_a_claim_ref_with_an_unparseable_lease_never_demotes(self):
         """The lease polarity is `claims.sh`'s, and it is the fail-CLOSED direction.
