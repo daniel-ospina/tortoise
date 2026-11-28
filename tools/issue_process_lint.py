@@ -1509,8 +1509,15 @@ def _blank_declared_ids(text: str, rows: list[str]) -> str:
     ⛔ ONE IMPLEMENTATION, TWO READERS (review round 35, P3). `_clause_is_a_pure_id_list` and the
     rider's count read both need "what does this clause say, once the rows are set aside", and they
     had grown two verbatim copies of the same five lines — the second-implementation drift this file
-    keeps removing. Ranges go first (their ENDPOINTS would otherwise be blanked as bare ids and leave
-    the join behind), then the ids, bounded so `V1` is never found inside `V10`/`AV1`.
+    keeps removing. Ranges go first so a range's ENDPOINTS are not treated as bare ids; the ids are
+    bounded so `V1` is never found inside `V10`/`AV1`.
+    ⚠️ MEASURED SCOPE OF THAT CLAIM (review round 36, P3): with THIS helper applied there, neither the
+    ordering nor the bound is individually load-bearing for a verdict — deleting the range pass or the
+    lookarounds changes no verdict across the suite's bodies, because `_ID_LIST_FILLER_RE` absorbs a
+    leftover join and `_clause_states_a_partial_count`'s own word-boundary lookbehind already blinds a range's
+    digits. They are correctness properties of the helper (a `V10` mention must not be blanked to
+    `0`), not the mechanism behind any pin — the dedup is what this change was for, and the two are
+    stated separately here so the next reader does not mistake one for the other.
     """
     blanked = text
     for match in reversed(_range_matches(text, rows)):
@@ -2421,6 +2428,7 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
         # skipped. Skipping them read each clause in isolation, where that bare range looked like a
         # claim on all six and the line reported `clean` on a one-row PR.
         spans = _clause_spans(line, rows)
+        foreign = _foreign_closing_clauses(line, rows, issue, repo)
         claimable: set[int] = set()
         for i, (a, b) in enumerate(spans):
             clause = line[a:b]
@@ -2437,7 +2445,13 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
                     # separators that introduce the verb's object. `;` and a sentence break END the
                     # claim, and a second sentence is emphatically not its object.
                     sep = line[spans[i][1]:spans[i + 1][0]].strip()
-                    if sep == "(" or sep in {"—", "–"} or "(" in sep:
+                    # ⛔ UNLESS THIS CLAUSE CLOSES ANOTHER ISSUE (review round 36, P2). A bracket after
+                    # a foreign closing ref is THAT close's qualifier, not this issue's claim — attributing
+                    # it here asserted a complete claim of all six rows on a body that names none for
+                    # this issue: `Closes #N, closes other-org/other-repo#M (V1–V6)` read `clean`, and
+                    # the `_foreign_closing_clauses` side had already attributed the same bracket the
+                    # other way, which is the two-readers-disagreeing drift this file keeps removing.
+                    if (sep == "(" or sep in {"—", "–"} or "(" in sep) and i not in foreign:
                         claimable.add(i + 1)
             # ⛔ A SIBLING CLAUSE MAY ONLY NARROW, NEVER ADD (review round 11). Promoting a sibling
             # that carries a completion verb made a DISCLOSURE a claim — `(row V2 only); V1 … V6
@@ -2448,7 +2462,6 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # or the documented `Satisfies #N:` form. `_AFFIRM_RE` survives for the WHOLE-BODY
             # fallback, where there is no closing verb to attach to.
         chars = list(line)
-        foreign = _foreign_closing_clauses(line, rows, issue, repo)
         for i, (a, b) in enumerate(spans):
             # ⛔ THE SAME PREDICATE ON BOTH PATHS (review round 12): a clause that points at other work
             # is a mention on the closing line exactly as it is in the body, so `_ELSEWHERE_RE` is
@@ -2461,23 +2474,24 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # is proved here.` read `clean`. The two are separable without a vocabulary, by the same
             # structural test the rest of this file uses: the qualifier form NAMES the rows it limits,
             # the disclosure form names none. So `only` counts only in a clause with no declared id.
-            if (_DISCLAIMER_RE.search(line[a:b]) or _ELSEWHERE_RE.search(line[a:b])
+            # ⛔ IN A CLAUSE THAT CLOSES ANOTHER ISSUE, ONLY `_ELSEWHERE_RE` IS SUPPRESSED — AND THAT
+            # IS THE WHOLE RULE (review rounds 34/35/36). Three attempts at this were each one shape
+            # too wide, and the reason is that the two cue families answer different questions:
+            #   * `_ELSEWHERE_RE` carries `other`, so a clause naming `other-org/other-repo#M` trips it
+            #     on the ORG'S OWN NAME and made a correct complete close abstain;
+            #   * `_DISCLAIMER_RE` (`not in this PR`, `remain unmeasured`) and `only` are about the ROWS
+            #     ON THIS LINE — and a comma is not a clause boundary (round 12), so such a cue can sit
+            #     in the very span a foreign close opened. Suppressing the whole span threw it away:
+            #     `Closes #N (V1–V6), closes #M, V3–V6 not in this PR` asserted a COMPLETE close of #N
+            #     while saying five of its rows are elsewhere.
+            # So the foreign span keeps the row-cues and loses only the `other`-family cue. That also
+            # removes the index-adjacency test (`(i - 1) in foreign`) the previous round needed to tell
+            # a foreign ref from its qualifier: a SECOND foreign close on the line is exempt on its own
+            # account now, instead of being exempted only if it happened to follow a foreign clause.
+            if (_DISCLAIMER_RE.search(line[a:b])
+                    or (_ELSEWHERE_RE.search(line[a:b]) and i not in foreign)
                     or (_ONLY_RE.search(line[a:b]) and not _ids_in(line[a:b], rows))):
-                # ⛔ A CLAUSE THAT CLOSES ANOTHER ISSUE IS NOT A DISCLOSURE ABOUT THIS ONE (review
-                # round 34, P2). `_ELSEWHERE_RE` carries `other`, so a cross-repo closing ref made a
-                # correct complete close read AMBIGUOUS for a reason that had nothing to do with its
-                # rows: `Closes #N (V1–V6), closes other-org/other-repo#M (V2)` tripped the cue on
-                # the org's own name. The round-23 decision (a cue anywhere on the line disclaims)
-                # is about cues in sentences about THIS claim, so the clause that carries a foreign
-                # closing ref is excluded.
-                # ⛔ BUT ONLY THAT CLAUSE, NOT ITS ATTACHED QUALIFIER (review round 35, P1). Exempting
-                # the qualifier too suppressed a cue that is written about the rows on this line:
-                # `Closes #N (V1–V6), closes #M (V2 — V3–V6 not in this PR)` asserted a COMPLETE close
-                # of #N, contradicting round 23's decision (a cue anywhere on the line disclaims,
-                # because negation scopes backwards); the qualifier's cue is read again, and the
-                # no-cue control the previous round fixed (`closes #M (V2)`) still reads `clean`.
-                if i not in foreign or (i - 1) in foreign:
-                    disclaimed = True
+                disclaimed = True
                 claimable.discard(i)
             # ⛔ BLANK EVERY CLAUSE THAT IS NOT CLAIMABLE — NOT JUST THE RECOGNISED DISCLAIMERS
             # (review round 10). Making `claimable` a mere gate on "should I scan the line" left the

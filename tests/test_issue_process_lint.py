@@ -4535,32 +4535,84 @@ def test_a_close_of_ANOTHER_repo_is_foreign_under_either_repo_state():
         assert findings == [] and stats["clean"] == 1, (repo, stats)
 
 
-@pytest.mark.parametrize("body,clean_13036", [
-    # ⛔ A CUE IN THE FOREIGN QUALIFIER STILL DISCLAIMS (review round 35, P1). Exempting the whole
-    # foreign span from the cue scan suppressed a cue written about the rows on this line, so #13036
-    # was asserted COMPLETE beside `V3–V6 not in this PR` — round 23's decision (a cue anywhere on the
-    # line disclaims, because negation scopes backwards) says it must not be.
-    ("Closes #13036 (V1–V6), closes #13037 (V2 — V3–V6 not in this PR)\n", False),
-    # CONTROL — the same sentence with no cue is the case round 32 fixed, and must stay clean.
-    ("Closes #13036 (V1–V6), closes #13037 (V2)\n", True),
-    # ⛔ AND A COUNT IN THE FOREIGN QUALIFIER IS NOT THIS ISSUE'S RIDER (review round 35, P3 — the pin
-    # the foreign-clause skip in the rider read had none of: without it, `2 of 6 done` abstains #13036).
-    ("Closes #13036 (V1–V6), closes #13037 (2 of 6 done)\n", True),
-    # ⛔ AND A CROSS-REPO CLOSE IS FOREIGN BY IDENTITY, NOT BY NUMBER (review round 35, P3): comparing
-    # it by number dropped the datum and accused a COMPLETE close of claiming V2 for ANOTHER repo's
-    # issue that happens to share this one's number.
-    ("Closes #13036 (V1–V6), closes other-org/other-repo#13036 (V2)\n", True),
-    ("Closes #13036 (V1–V6), closes other-org/other-repo#13037 (V2)\n", True),
+@pytest.mark.parametrize("body,verdict", [
+    # ⛔ A CUE ABOUT THIS ISSUE'S ROWS STILL DISCLAIMS, EVEN INSIDE A FOREIGN CLOSE'S SPAN (rounds 35/36).
+    # A comma is not a clause boundary (round 12), so this cue sits in the span the foreign ref opened;
+    # suppressing the whole span asserted a COMPLETE close of #13036 while saying five of its rows are
+    # elsewhere. Only `_ELSEWHERE_RE` — whose `other` trips on `other-org` — is suppressed there.
+    ("Closes #13036 (V1–V6), closes #13037 (V2 — V3–V6 not in this PR)\n", "ambiguous"),
+    ("Closes #13036 (V1–V6), closes #13037, V3–V6 not in this PR\n", "ambiguous"),
+    # ⛔ A SECOND FOREIGN CLOSE ON THE LINE IS EXEMPT ON ITS OWN ACCOUNT (round 36, P3): the previous
+    # round's `(i - 1) in foreign` adjacency test exempted only the FIRST foreign ref, so a correct
+    # complete close abstained for the org's name tripping `_ELSEWHERE_RE`.
+    ("Closes #13036 (V1–V6), closes other-org/other-repo#9 (V2), "
+     "closes other-org/other-repo#8 (V3)\n", "clean"),
+    # CONTROL — the sentence round 32 fixed, with no cue anywhere: it must stay clean.
+    ("Closes #13036 (V1–V6), closes #13037 (V2)\n", "clean"),
+    # ⛔ A COUNT IN A FOREIGN QUALIFIER IS NOT THIS ISSUE'S RIDER (round 35, P3 — the pin the rider
+    # read's foreign-clause skip had none of: without it, `2 of 6 done` abstains #13036).
+    ("Closes #13036 (V1–V6), closes #13037 (2 of 6 done)\n", "clean"),
+    # ⛔ A CROSS-REPO CLOSE IS FOREIGN BY IDENTITY, NOT BY NUMBER (round 35, P3): comparing it by number
+    # dropped the datum and accused a COMPLETE close of claiming V2 for ANOTHER repo's issue sharing N.
+    ("Closes #13036 (V1–V6), closes other-org/other-repo#13036 (V2)\n", "clean"),
+    ("Closes #13036 (V1–V6), closes other-org/other-repo#13037 (V2)\n", "clean"),
 ])
-def test_a_foreign_close_is_excluded_from_the_cue_scan_only_as_far_as_it_is_foreign(body,
-                                                                                    clean_13036):
+def test_a_foreign_close_is_excluded_from_the_cue_scan_only_as_far_as_it_is_foreign(body, verdict):
     rows = L.row_ids([CAPSTONE_BODY])
-    other = ["V2", "Z9"]
+    # ⛔ ONE ISSUE IN SCOPE, so the assertion is about #13036's OWN verdict. A population counter
+    # (`stats["clean"] >= 1`) was satisfied by the OTHER issue's verdict — the parameter was named
+    # `clean_13036` but nothing in the assertion read `#13036` (review round 36, P3).
+    findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)},
+                                              "daniel-ospina/tortoise")
+    assert findings == [], (body, findings)
+    assert stats[verdict] == 1, (body, stats)
+
+
+def test_a_foreign_closes_qualifier_is_not_this_issues_claim():
+    """⛔ TWO READERS MUST ATTRIBUTE THE SAME BRACKET THE SAME WAY (review round 36, P2).
+
+    `_foreign_closing_clauses` assigned the bracket after a foreign ref to the foreign issue, while
+    `_closing_line_claim`'s claimable promotion assigned it to THIS issue — so
+    `Closes #13036, closes other-org/other-repo#13036 (V1–V6)`, a body that names NO row for #13036,
+    reported a complete claim of all six and read `clean`. It is AMBIGUOUS now.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    for body in ("Closes #13036, closes other-org/other-repo#13036 (V1–V6)\n",
+                 "Closes #13036, closes other-org/other-repo#9 (V1–V6)\n"):
+        findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)},
+                                                   "daniel-ospina/tortoise")
+        assert findings == [] and stats["ambiguous"] == 1 and stats["clean"] == 0, (body, stats)
+        assert L.claimed_row_ids(body, 13036, rows, "daniel-ospina/tortoise") == set(), body
+
+
+def test_the_two_foreign_sinks_are_decided_differently_by_repo_state():
+    """⛔ The number test and the identity test are NOT the same rule, and only one half was pinned.
+
+    With the repo RESOLVED, a cross-repo ref is foreign by identity whatever its number → `clean`.
+    With the repo UNRESOLVABLE the ref is known only by its number, so a ref carrying THIS issue's
+    number stays native → the finding survives. A mutant that drops the `repo is None` arm
+    (`elsewhere = bool(other_repo)`) turned the second into `clean` and the suite stayed green
+    (review rounds 35/36, P3).
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    body = "Closes #13036 (V1–V6), closes other-org/other-repo#13036 (V2)\n"
+    resolved, resolved_stats = L.classify_partial_close(
+        body, 500, {13036: _scope(rows)}, "daniel-ospina/tortoise")
+    assert resolved == [] and resolved_stats["clean"] == 1, resolved_stats
+    unknown, unknown_stats = L.classify_partial_close(body, 500, {13036: _scope(rows)}, None)
+    assert [f.evidence["claimed"] for f in unknown] == [["V2"]], unknown
+    assert unknown_stats["clean"] == 0, unknown_stats
+
+
+def test_a_mention_of_a_ten_plus_row_id_is_not_partially_blanked():
+    """The `_blank_declared_ids` bound (review round 36, P3): `V1` must not be found inside `V10`, or
+    the surviving `0` reads as a row count and a correct close abstains."""
+    rows = L.row_ids([CAPSTONE_BODY])
+    assert L._blank_declared_ids("see V10 for the rest", rows).strip() == "see V10 for the rest"
     findings, stats = L.classify_partial_close(
-        body, 500, {13036: _scope(rows), 13037: _scope(other)},
+        "Closes #13036 (V1–V6), see V10 for the rest\n", 500, {13036: _scope(rows)},
         "daniel-ospina/tortoise")
-    assert [f for f in findings if f.evidence.get("issue") == 13036] == [], (body, findings)
-    assert (stats["clean"] >= 1) is clean_13036, (body, stats)
+    assert findings == [] and stats["clean"] == 1, stats
 
 
 def test_a_semicolon_split_satisfies_list_is_an_abstention_not_a_pass():
