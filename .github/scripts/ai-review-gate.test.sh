@@ -71,7 +71,7 @@
 #   (i3) verdict=clean-low on both acceptance paths (#4755)
 #   (t) acceptance rule (c) (#4255) — the PATCH projection survives a base advance:
 #       pinned projection vectors (reviewed/live/edited/whitespace/renamed/deleted),
-#       the anti-vacuity pairs, and (t1)-(t10)/(t20)-(t26), incl. (t20b) the end-to-end cases: the carry, the
+#       the anti-vacuity pairs, and (t1)-(t10)/(t20)-(t28), incl. (t20b) the end-to-end cases: the carry, the
 #       three fail-closed arms, the probe cost bounds, the ANCHOR, the ANCESTRY and
 #       authored-commit preconditions and their mutations, one HMAC verifier, the
 #       relocation refusal, and every refusal's operator-facing diagnostic

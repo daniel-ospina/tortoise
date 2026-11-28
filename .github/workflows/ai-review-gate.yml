@@ -1209,6 +1209,30 @@ jobs:
             fi
           done <<< "$candidates"
 
+          # ⛔ THESE TWO DIAGNOSTICS MUST PRECEDE THE HMAC-MISMATCH BRANCH (final
+          # review). They were written for the case where a STALE `diff=` marker carries
+          # an unverifiable signature, but when ANY decoy candidate exists the
+          # HMAC-mismatch branch below exits first — so in the very population the
+          # entry condition (`candidates_acceptable`) exists to serve, the operator was
+          # told "HMAC mismatch" and never saw the reason the carry was refused. Measured:
+          # decoy + wrong-key stale diff= marker printed 0 of these lines.
+          if [ -z "$marker" ]; then
+            if [ "${patch_sig_rejected:-0}" -gt 0 ]; then
+              # Rule (c) probes SIGNED markers only (the fan-out bound above), so
+              # a STALE-sha diff= marker with a BAD signature reaches this branch
+              # instead of the HMAC-mismatch diagnostic. Name it, or the stale
+              # verdict below blames the DIFF for what is a KEY problem.
+              echo "::error::${patch_sig_rejected} STALE-sha evidence marker(s) carried BOTH the 40-hex @ sha and the diff= that rule (c) anchors on, but their signature did NOT verify against AI_REVIEW_GATE_KEY — so rule (c) did not probe them. If the authored change is unchanged since the review, the recording KEY is the problem — not the diff."
+            fi
+            if [ "${patch_shape_rejected:-0}" -gt 0 ]; then
+              # The other class, and it must NOT get the key advice: without a
+              # `diff=` there is no digest to anchor on, so no key would have made
+              # these probeable. Telling the operator to fix the key here costs a
+              # key rotation and still leaves the gate red.
+              echo "::error::${patch_shape_rejected} evidence marker(s) failed the signature check AND lack the shape rule (c) could anchor on (a 40-hex @ sha that is NOT this head, plus a 64-hex diff=) — no recording key would have made them probeable. Fixing the key cannot carry these: re-record on the current head."
+            fi
+          fi
+
           if [ -z "$marker" ] && [ -n "$candidates" ]; then
             # Right shape, right repo, and EITHER head-bound or diff-matched,
             # signed — but no HMAC verifies. Either the recording key is not
@@ -1245,20 +1269,6 @@ jobs:
             # No acceptable marker. Classify WHY — the operator must not have
             # to guess between "re-record", "fix the repo field", and "fix the
             # key". Priority: unsigned → wrong repo → malformed → stale.
-            if [ "${patch_sig_rejected:-0}" -gt 0 ]; then
-              # Rule (c) probes SIGNED markers only (the fan-out bound above), so
-              # a STALE-sha diff= marker with a BAD signature reaches this branch
-              # instead of the HMAC-mismatch diagnostic. Name it, or the stale
-              # verdict below blames the DIFF for what is a KEY problem.
-              echo "::error::${patch_sig_rejected} STALE-sha evidence marker(s) carried BOTH the 40-hex @ sha and the diff= that rule (c) anchors on, but their signature did NOT verify against AI_REVIEW_GATE_KEY — so rule (c) did not probe them. If the authored change is unchanged since the review, the recording KEY is the problem — not the diff."
-            fi
-            if [ "${patch_shape_rejected:-0}" -gt 0 ]; then
-              # The other class, and it must NOT get the key advice: without a
-              # `diff=` there is no digest to anchor on, so no key would have made
-              # these probeable. Telling the operator to fix the key here costs a
-              # key rotation and still leaves the gate red.
-              echo "::error::${patch_shape_rejected} evidence marker(s) failed the signature check AND lack the shape rule (c) could anchor on (a 40-hex @ sha that is NOT this head, plus a 64-hex diff=) — no recording key would have made them probeable. Fixing the key cannot carry these: re-record on the current head."
-            fi
             # Union both channels here too (#1224): the classification below
             # (unsigned / wrong-repo / malformed / stale) must work when the
             # markers came from EITHER channel, or a comment-carried failure
