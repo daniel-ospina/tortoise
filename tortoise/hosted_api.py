@@ -20602,7 +20602,7 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     # record — every statement in this function is a raw `proj.g.query`, so the
     # fold's hook never sees them. Without the recorder below a process whose live
     # traffic is a demo seed reads `cache_write_targets == {}` — byte-identical to
-    # "this process took no live cache write" — while the 26 nodes below land in
+    # "this process took no live cache write" — while the 26 nodes ABOVE land in
     # whatever graph the org credential opened. MEASURED on an embedded SDK before
     # this line existed: `nodes written: [[26]]`, `cache_write_targets {}` across
     # five labels. The helper's stated residual excuses a raw writer only because
