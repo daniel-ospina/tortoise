@@ -4462,17 +4462,21 @@ def test_a_continuation_ref_of_a_declined_closing_keyword_is_not_a_target():
 
     `closed_but_declined` was appended without the `continued` guard its sibling branch applies, so a
     continuation ref entered the population even though `closes_landing.parse_closing_refs` credits one
-    ref. Measured: `Closes #13036, #13037 — deliberately not closing them.` yielded
-    `closing_targets == [13036, 13037]` and a wrong-claim-set finding naming `V2` for the SECOND ref.
+    ref. Measured at `96b79e8`: `Closes #13036, #13037 (V2) — deliberately not closing them.` yielded
+    `closing_targets == [13036, 13037]` AND a wrong-claim-set finding naming `V2` for #13037 — the
+    continuation that is never claimed. (The plain `Closes #13036, #13037 — …` form names no row, so it
+    only measured the population; the row-naming form is what makes the wrong claim set reachable.)
     """
-    body = "Closes #13036, #13037 — deliberately not closing them.\n"
-    assert L.closing_targets(body, 500, "daniel-ospina/tortoise") == [13036]
     rows = L.row_ids([CAPSTONE_BODY])
-    findings, _ = L.classify_partial_close(
-        body, 500, {13036: _scope(rows), 13037: _scope(["A1", "A2"])},
+    body = "Closes #13036, #13037 (V2) — deliberately not closing them.\n"
+    assert L.closing_targets(body, 500, "daniel-ospina/tortoise") == [13036]
+    findings, stats = L.classify_partial_close(
+        body, 500, {13036: _scope(rows), 13037: _scope(["V2", "Z9"])},
         "daniel-ospina/tortoise")
-    assert findings == [], findings
-    # …and the same declined list WITHOUT a continuation still reads both refs' first ones.
+    assert stats["closes"] == 1, stats
+    assert [(f.evidence["issue"], f.evidence["claimed"]) for f in findings] == [(13036, ["V2"])], \
+        [(f.evidence["issue"], f.evidence["claimed"]) for f in findings]
+    # CONTROL — a single declined ref with no continuation still reads that one ref.
     assert L.closing_targets("Closes #13036 — deliberately not closing it.\n", 500,
                              "daniel-ospina/tortoise") == [13036]
 
@@ -4529,6 +4533,34 @@ def test_a_close_of_ANOTHER_repo_is_foreign_under_either_repo_state():
             "Closes #13036 (V1–V6), closes other-org/other-repo#13037 (V2)\n", 500,
             {13036: _scope(rows)}, repo)
         assert findings == [] and stats["clean"] == 1, (repo, stats)
+
+
+@pytest.mark.parametrize("body,clean_13036", [
+    # ⛔ A CUE IN THE FOREIGN QUALIFIER STILL DISCLAIMS (review round 35, P1). Exempting the whole
+    # foreign span from the cue scan suppressed a cue written about the rows on this line, so #13036
+    # was asserted COMPLETE beside `V3–V6 not in this PR` — round 23's decision (a cue anywhere on the
+    # line disclaims, because negation scopes backwards) says it must not be.
+    ("Closes #13036 (V1–V6), closes #13037 (V2 — V3–V6 not in this PR)\n", False),
+    # CONTROL — the same sentence with no cue is the case round 32 fixed, and must stay clean.
+    ("Closes #13036 (V1–V6), closes #13037 (V2)\n", True),
+    # ⛔ AND A COUNT IN THE FOREIGN QUALIFIER IS NOT THIS ISSUE'S RIDER (review round 35, P3 — the pin
+    # the foreign-clause skip in the rider read had none of: without it, `2 of 6 done` abstains #13036).
+    ("Closes #13036 (V1–V6), closes #13037 (2 of 6 done)\n", True),
+    # ⛔ AND A CROSS-REPO CLOSE IS FOREIGN BY IDENTITY, NOT BY NUMBER (review round 35, P3): comparing
+    # it by number dropped the datum and accused a COMPLETE close of claiming V2 for ANOTHER repo's
+    # issue that happens to share this one's number.
+    ("Closes #13036 (V1–V6), closes other-org/other-repo#13036 (V2)\n", True),
+    ("Closes #13036 (V1–V6), closes other-org/other-repo#13037 (V2)\n", True),
+])
+def test_a_foreign_close_is_excluded_from_the_cue_scan_only_as_far_as_it_is_foreign(body,
+                                                                                    clean_13036):
+    rows = L.row_ids([CAPSTONE_BODY])
+    other = ["V2", "Z9"]
+    findings, stats = L.classify_partial_close(
+        body, 500, {13036: _scope(rows), 13037: _scope(other)},
+        "daniel-ospina/tortoise")
+    assert [f for f in findings if f.evidence.get("issue") == 13036] == [], (body, findings)
+    assert (stats["clean"] >= 1) is clean_13036, (body, stats)
 
 
 def test_a_semicolon_split_satisfies_list_is_an_abstention_not_a_pass():

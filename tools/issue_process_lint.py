@@ -1503,6 +1503,23 @@ def _range_matches(text: str, rows: list[str]) -> list[re.Match]:
 _ID_LIST_FILLER_RE = re.compile(r"[\s,;/&+\-–—.()\[\]|]|\b(?:and|plus)\b", re.IGNORECASE)
 
 
+def _blank_declared_ids(text: str, rows: list[str]) -> str:
+    """`text` with every DECLARED row token and every RANGE mention replaced by spaces.
+
+    ⛔ ONE IMPLEMENTATION, TWO READERS (review round 35, P3). `_clause_is_a_pure_id_list` and the
+    rider's count read both need "what does this clause say, once the rows are set aside", and they
+    had grown two verbatim copies of the same five lines — the second-implementation drift this file
+    keeps removing. Ranges go first (their ENDPOINTS would otherwise be blanked as bare ids and leave
+    the join behind), then the ids, bounded so `V1` is never found inside `V10`/`AV1`.
+    """
+    blanked = text
+    for match in reversed(_range_matches(text, rows)):
+        blanked = blanked[:match.start()] + " " + blanked[match.end():]
+    for row in sorted(rows, key=len, reverse=True):
+        blanked = re.sub(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", " ", blanked)
+    return blanked
+
+
 def _clause_is_a_pure_id_list(clause: str, rows: list[str]) -> bool:
     """Is this clause NOTHING BUT declared rows, ranges over them, and separators — no prose at all?
 
@@ -1521,15 +1538,9 @@ def _clause_is_a_pure_id_list(clause: str, rows: list[str]) -> bool:
     re-breaks `rows V1–V2, V3, V4–V6` — the headline false accusation, in the `rows`-prefixed
     spelling — and the docstring six lines above the branch explained why it could not matter.
     """
-    ranges = _range_matches(clause, rows)
-    if not ranges and not _explicit_ids(clause, rows):
+    if not _range_matches(clause, rows) and not _explicit_ids(clause, rows):
         return False
-    residue = clause
-    for match in reversed(ranges):
-        residue = residue[:match.start()] + " " + residue[match.end():]
-    for row in sorted(rows, key=len, reverse=True):
-        residue = re.sub(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", " ", residue)
-    residue = _ID_LIST_FILLER_RE.sub(" ", residue).strip()
+    residue = _ID_LIST_FILLER_RE.sub(" ", _blank_declared_ids(clause, rows)).strip()
     # ⛔ RESIDUE IS EMPTY **OR IS A LEADING ROW NOUN** — say it, because the branch is load-bearing and
     # reads as redundant with "empty" (review round 32, P2, found by a fresh reviewer after deleting it
     # left the suite green). `rows V1–V2, V3, V4–V6` leaves residue `rows`; refusing it reintroduces the
@@ -1979,18 +1990,21 @@ def _foreign_closing_clauses(line: str, rows: list[str], issue: int | None,
     spans = _clause_spans(line, rows)
     foreign: set[int] = set()
     for i, (a, b) in enumerate(spans):
-        # ⛔ A QUALIFIED REF THE AMBIENT REPO CANNOT RESOLVE IS NOT PROVEN NATIVE (review round 32,
-        # P3). `_claims_in` drops every `owner/repo#N` when `repo` is None, so with the repo unresolved
-        # `Closes #N (V1–V6), closes daniel-ospina/tortoise#M (V2)` looked like ONE closing ref and the
-        # foreign qualifier was read as this issue's narrowing — a complete close accused of claiming
-        # V2, in the live `--pr` mode whenever `resolve_repo` fails. The skipped sink names those refs'
-        # NUMBERS, so a clause about a different issue is still recognisable without knowing the repo;
-        # a skipped ref that IS this issue stays native.
-        skipped: list[int] = []
+        # ⛔ TWO SINK SEMANTICS, AND THEY ARE NOT THE SAME TEST (review rounds 32/35, P3).
+        # `_claims_in` reports a closing ref that names a repo it could not prove is this one in
+        # `other_repo` — which covers BOTH an unresolvable repo and a resolved-but-different one, and
+        # only when the ref is closing-bound and is the keyword's FIRST (a `Refs other/repo#N` mention
+        # is still not a close, #10534).
+        #   * an UNRESOLVABLE ref (`repo is None`) is only known by its NUMBER, so a ref carrying THIS
+        #     issue's number stays native — we cannot prove it is elsewhere;
+        #   * a ref whose repo was RESOLVED to a different one is foreign by IDENTITY, whatever its
+        #     number. Comparing it by number dropped the datum and kept the accusation:
+        #     `Closes #N (V1–V6), closes other-org/other-repo#N (V2)` claimed `V2` of a COMPLETE close
+        #     for another repo's issue that happens to share N.
         other_repo: list[int] = []
-        closing = set(_claims_in(line[a:b], None, repo, skipped,
-                                 other_repo)["closing"])
-        if not (closing - {issue}) and not (set(other_repo) - {issue}):
+        closing = set(_claims_in(line[a:b], None, repo, None, other_repo)["closing"])
+        elsewhere = bool(other_repo) if repo else bool(set(other_repo) - {issue})
+        if not (closing - {issue}) and not elsewhere:
             continue
         foreign.add(i)
         if i + 1 < len(spans):
@@ -2057,7 +2071,10 @@ _COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
 def _a_rowless_rider_understates_the_rows(line: str, rows: list[str], claimable: set[int],
                                         issue: int | None = None,
                                         repo: str | None = None) -> bool:
-    """Does a clause AFTER the claim state a COUNT smaller than the issue's declared rows?
+    """Does any clause on the closing line state a COUNT smaller than the issue's declared rows?
+
+    (Its own declared ids and ranges are blanked first — see `_blank_declared_ids` — so the count is
+    read from what the clause SAYS, and the read is not positional.)
 
     ⛔ WHY THIS EXISTS (review round 32, P1). The two refusals that guard a COMPLETE claim are keyed on
     (a) a cue word (`_DISCLAIMER_RE` / `_ELSEWHERE_RE` / `only`) or (b) a clause naming a NAMED subset of
@@ -2105,7 +2122,7 @@ def _a_rowless_rider_understates_the_rows(line: str, rows: list[str], claimable:
     findings. Closes #N (rows V1–V6)`) now reads AMBIGUOUS instead of `clean`. That is the cheap error
     in this file's ranking (a counted abstention, never a pass, and never a false accusation), which is
     the same price round 27 accepted for `_names_a_proper_subset`.
-    ⚠️ AND THIS READ IS NO LONGER POSITIONAL (review round 34, P2). It used to require the rider to
+    ⚠️ AND THIS READ IS NO LONGER POSITIONAL (review round 34, P1). It used to require the rider to
     come AFTER the claim, justified by an example that measured FALSE on re-check: the claimed victim
     (`This closes the capstone; Closes #N (rows V1–V6)`) states no count at all, so widening it costs
     nothing there — while `Three remain. Closes #N (V1–V6)`, the same disclosure written first, was an
@@ -2130,12 +2147,7 @@ def _a_rowless_rider_understates_the_rows(line: str, rows: list[str], claimable:
         #       numeric-only rider for the bare `)` span)
         # Blanking the declared ids and the RANGES first makes both guards unnecessary: ids are not
         # claims here, and a span that states no count cannot trigger the rule.
-        residue = clause
-        for match in reversed(_range_matches(clause, rows)):
-            residue = residue[:match.start()] + " " + residue[match.end():]
-        for row in sorted(rows, key=len, reverse=True):
-            residue = re.sub(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", " ", residue)
-        if _clause_states_a_partial_count(residue, len(rows)):
+        if _clause_states_a_partial_count(_blank_declared_ids(clause, rows), len(rows)):
             return True
     return False
 
@@ -2456,9 +2468,15 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
                 # correct complete close read AMBIGUOUS for a reason that had nothing to do with its
                 # rows: `Closes #N (V1–V6), closes other-org/other-repo#M (V2)` tripped the cue on
                 # the org's own name. The round-23 decision (a cue anywhere on the line disclaims)
-                # is about cues in sentences about THIS claim; a clause `_foreign_closing_clauses`
-                # has already attributed elsewhere is excluded, and so is its attached qualifier.
-                if i not in foreign:
+                # is about cues in sentences about THIS claim, so the clause that carries a foreign
+                # closing ref is excluded.
+                # ⛔ BUT ONLY THAT CLAUSE, NOT ITS ATTACHED QUALIFIER (review round 35, P1). Exempting
+                # the qualifier too suppressed a cue that is written about the rows on this line:
+                # `Closes #N (V1–V6), closes #M (V2 — V3–V6 not in this PR)` asserted a COMPLETE close
+                # of #N, contradicting round 23's decision (a cue anywhere on the line disclaims,
+                # because negation scopes backwards); the qualifier's cue is read again, and the
+                # no-cue control the previous round fixed (`closes #M (V2)`) still reads `clean`.
+                if i not in foreign or (i - 1) in foreign:
                     disclaimed = True
                 claimable.discard(i)
             # ⛔ BLANK EVERY CLAUSE THAT IS NOT CLAIMABLE — NOT JUST THE RECOGNISED DISCLAIMERS
