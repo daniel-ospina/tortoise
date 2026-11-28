@@ -113,12 +113,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from .live import TERMINAL_EXCLUDED_STATUSES as _TERMINAL_EXCLUDED_STATUSES
-# #14796: the reader rule is ONE predicate. A goal's own retirement question is
-# the same question, so it is asked of the same function instead of a
-# vocabulary test written beside it — the spelling that answered from the word
-# axis alone.
-from .live import is_terminal_status
+from .live import (
+    TERMINAL_EXCLUDED_STATUSES as _TERMINAL_EXCLUDED_STATUSES,
+)
+
+# #14796: the reader rule is ONE predicate — a goal's own retirement question is
+# the same question, so it is asked of the same function instead of a vocabulary
+# test written beside it (the spelling that answered from the word axis alone).
+from .live import (
+    is_terminal_status,
+)
 
 __all__ = [
     "BOUNDARY_UNREADABLE",
