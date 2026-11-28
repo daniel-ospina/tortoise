@@ -4422,6 +4422,115 @@ def test_a_qualified_foreign_close_is_not_read_as_this_issues_rows_without_a_rep
         assert stats["clean"] == 1, (repo, stats)
 
 
+RIDER_SPELLINGS_ROUND_34 = [
+    # ⛔ A rider INSIDE the claimable clause — a comma is not a clause boundary (round 12), so the
+    # `i in claimable` skip never looked at it and the arm's headline false PASS came back one
+    # separator over. The count is read from the clause's RESIDUE, with ids and ranges blanked.
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6, 3 of 6 done)\n", "ambiguous"),
+    # ⛔ A rider with NO LETTERS — the no-letters skip mistook a numeric-only rider for the bare `)`
+    # span. `)` states no count, so the residue read needs no such skip.
+    ("Closes #13036 (V1–V6); 3/6\n", "ambiguous"),
+    ("Closes #13036 (V1–V6); 3\n", "ambiguous"),
+    # ⛔ A rider that PRECEDES the claim: the positional gate (`a < after`) left it uncounted, and the
+    # justification first written for that gate measured false — the example it named states no count.
+    ("Three remain. Closes #13036 (V1–V6)\n", "ambiguous"),
+    ("2 are missing. Closes #13036 (V1–V6)\n", "ambiguous"),
+    # CONTROLS — a count equal to the population, a pointer, and prose that states no count stay clean.
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6, 6 of 6 measured)\n", "clean"),
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6, see the evidence doc)\n", "clean"),
+    ("This closes the capstone; Closes #13036 (rows V1–V6).\n", "clean"),
+]
+
+
+@pytest.mark.parametrize("body,expected", RIDER_SPELLINGS_ROUND_34)
+def test_a_partial_count_rider_is_read_from_the_clause_residue(body, expected):
+    """Review round 34 (P1/P2) — three guards made the rider read separator- and spelling-dependent.
+
+    Each row above was a measured FALSE PASS at `96b79e8` except the three controls, which must not
+    move. The fix removes all three guards and reads the count from what the clause SAYS once the
+    issue's own ids and ranges are blanked, so the discriminator is the assertion, not the spelling.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)},
+                                              "daniel-ospina/tortoise")
+    assert stats[expected] == 1, (body, stats)
+    assert findings == [], body
+
+
+def test_a_continuation_ref_of_a_declined_closing_keyword_is_not_a_target():
+    """⛔ ONLY THE KEYWORD'S FIRST REF CLOSES (review round 34, P2).
+
+    `closed_but_declined` was appended without the `continued` guard its sibling branch applies, so a
+    continuation ref entered the population even though `closes_landing.parse_closing_refs` credits one
+    ref. Measured: `Closes #13036, #13037 — deliberately not closing them.` yielded
+    `closing_targets == [13036, 13037]` and a wrong-claim-set finding naming `V2` for the SECOND ref.
+    """
+    body = "Closes #13036, #13037 — deliberately not closing them.\n"
+    assert L.closing_targets(body, 500, "daniel-ospina/tortoise") == [13036]
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, _ = L.classify_partial_close(
+        body, 500, {13036: _scope(rows), 13037: _scope(["A1", "A2"])},
+        "daniel-ospina/tortoise")
+    assert findings == [], findings
+    # …and the same declined list WITHOUT a continuation still reads both refs' first ones.
+    assert L.closing_targets("Closes #13036 — deliberately not closing it.\n", 500,
+                             "daniel-ospina/tortoise") == [13036]
+
+
+def test_a_refs_declined_reference_is_never_a_closing_target():
+    """The negative control for `closed_but_declined` (review round 34, P3): the key is appended only
+    when the line carries a CLOSING keyword, so a `Refs`/`Part of` decline — which GitHub never
+    closes — stays out. Unpinned, the guard could be dropped and the suite would not notice."""
+    for body in ("Refs #13036 — deliberately not closing it.\n",
+                 "Part of #13036 — deliberately not closing it.\n"):
+        assert L.closing_targets(body, 500, "daniel-ospina/tortoise") == [], body
+        assert L.claims(body, 500)["closed_but_declined"] == [], body
+
+
+def test_a_decline_is_a_disclaimer_whatever_word_it_uses():
+    """⛔ ONE WORD MUST NOT DECIDE BETWEEN A PASS AND A REFUSAL (review round 34, P2).
+
+    `DECLINE_RE` admits `non-closing`; `_DISCLAIMER_RE` does not — so
+    `Closes #N (rows V1–V6) — non-closing reference.` read `clean` (the arm ASSERTING a complete close
+    on a body that says it is not closing) while the `not closing` spelling of the same sentence was
+    UNANSWERABLE. The decline is now read structurally, from `closed_but_declined`.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    for tail in ("non-closing reference.", "not closing it."):
+        body = f"Closes #13036 (rows V1–V6) — {tail}\n"
+        findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)},
+                                                   "daniel-ospina/tortoise")
+        assert findings == [] and stats["clean"] == 0 and stats["ambiguous"] == 1, (body, stats)
+
+
+def test_a_weak_qualified_ref_does_not_make_a_clause_foreign():
+    """⛔ A MENTION IS NOT A CLOSE (#10534) — review round 34, P2.
+
+    The foreign-clause read first took `skipped` (populated for ANY keyword) as proof a clause was
+    about another issue, so `Closes #N (rows V1–V6; V2 only, refs other/repo#99)` lost its narrowing
+    read and downgraded a real FINDING to AMBIGUOUS at `96b79e8` — a regression against both prior
+    heads. Only closing-bound refs now count.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    for repo in (None, "daniel-ospina/tortoise"):
+        findings, stats = L.classify_partial_close(
+            "Closes #13036 (V1–V6; V2 only, refs other/repo#99)\n", 500,
+            {13036: _scope(rows)}, repo)
+        assert [f.evidence.get("claimed") for f in findings] == [["V2"]], (repo, findings)
+        assert stats["ambiguous"] == 0, (repo, stats)
+
+
+def test_a_close_of_ANOTHER_repo_is_foreign_under_either_repo_state():
+    """A cross-repo closing ref is about another issue, and a correct complete close must not abstain
+    for the org's own name tripping `_ELSEWHERE_RE`'s `other`. Measured `clean` for both repo states."""
+    rows = L.row_ids([CAPSTONE_BODY])
+    for repo in (None, "daniel-ospina/tortoise"):
+        findings, stats = L.classify_partial_close(
+            "Closes #13036 (V1–V6), closes other-org/other-repo#13037 (V2)\n", 500,
+            {13036: _scope(rows)}, repo)
+        assert findings == [] and stats["clean"] == 1, (repo, stats)
+
+
 def test_a_semicolon_split_satisfies_list_is_an_abstention_not_a_pass():
     """⛔ A RECORD'S CONTROL THAT STOPPED HOLDING (review round 32, P3).
 
@@ -4539,6 +4648,15 @@ def test_the_counters_line_carries_the_NON_ZERO_abstention_counts(monkeypatch, c
     assert "1 closing ref(s) read" in out, out
     assert counted in out, out
     assert "::notice title=issue-process-lint::closing-scope arm: 1 closing ref(s) read" in out, out
+    # ⛔ AND THE HUMAN RENDER IS A DIFFERENT LINE (review round 34, P3): `--annotate` prints only the
+    # `::notice`, and the indented human line comes from the non-annotate branch — so asserting on the
+    # notice alone left the other surface free to be deleted with the suite green (measured).
+    capsys.readouterr()
+    assert L.main(["--pr", "13886", "--repo", "daniel-ospina/tortoise",
+                   "--arm", "pr-partial-close"]) in {L.RC_CLEAN, L.RC_FINDINGS}
+    human = capsys.readouterr().out
+    assert "  closing-scope arm: 1 closing ref(s) read" in human, human
+    assert counted in human, human
 
 
 def test_cli_refuses_an_arm_the_mode_cannot_run(tmp_path):

@@ -1039,7 +1039,8 @@ def _decline_targets(text: str) -> dict[int, set[int]]:
 
 def _claims_in(text: str, own_number: int | None = None,
                repo: str | None = None,
-               skipped: list[int] | None = None) -> dict[str, list[int]]:
+               skipped: list[int] | None = None,
+               foreign_closing: list[int] | None = None) -> dict[str, list[int]]:
     """`claims` over ALREADY-normalised text, so a caller that needs `hidden_lines` from the same
     pass does not strip the body twice (two passes of a pure function cannot disagree, but a caller
     that reported a count from one pass and classified from another would be reading two bodies).
@@ -1048,6 +1049,13 @@ def _claims_in(text: str, own_number: int | None = None,
     UNKNOWN. Without that sink the drop is invisible: the same body then measures a SMALLER
     population offline than with `--repo`, and reports clean for content it did not read — which is
     the shape this module refuses everywhere else (`Unmeasurable`, never a pass).
+
+    `foreign_closing`, when supplied, receives the refs a CLOSING keyword bound that name a repo the
+    caller cannot prove is this one (`owner/repo#N`, resolved to a DIFFERENT repo, or with an
+    unresolvable repo). It is deliberately narrower than `skipped`: a `Refs other/repo#N` MENTION is
+    not a close (#10534), so only a closing-bound, non-continuation ref lands here — that is the set a
+    reader needs to decide "is this clause about another issue?", and treating a mention as one
+    downgraded a real partial-close finding to an abstention (review round 34, P2).
     """
     found: dict[str, list[int]] = {"closing": [], "satisfies": [], "weak": [], "declined": [],
                                    "continued_resolving": [], "closed_but_declined": []}
@@ -1093,8 +1101,16 @@ def _claims_in(text: str, own_number: int | None = None,
                 # silently forgotten; the caller reports the narrower population (F3 of round 3).
                 if skipped is not None:
                     skipped.append(num)
+                if foreign_closing is not None and word in CLOSING_WORDS and not continued:
+                    foreign_closing.append(num)
                 continue
             if qual and qual.lower() != repo.lower():
+                # ⛔ A CLOSE OF ANOTHER REPO IS NOT A SILENT DROP FOR THE FOREIGN-CLAUSE READ (round 34,
+                # P2). `_foreign_closing_clauses` needs to know that this clause is about a DIFFERENT
+                # issue; without the sink it saw one closing ref and read the foreign qualifier as this
+                # issue's narrowing.
+                if foreign_closing is not None and word in CLOSING_WORDS and not continued:
+                    foreign_closing.append(num)
                 continue  # `owner/repo#N` for another repo is not this PR's business
             if num in declined_here:
                 found["declined"].append(num)
@@ -1104,7 +1120,12 @@ def _claims_in(text: str, own_number: int | None = None,
                 # It lands in its OWN key, never in `closing`: arm 1's question is "did you answer the
                 # claim?", and moving the ref into `closing` would answer it wrongly. Arm 3 asks the
                 # vendor's question and reads both keys.
-                if word in CLOSING_WORDS:
+                if word in CLOSING_WORDS and not continued:
+                    # ⛔ AND ONLY THE KEYWORD'S FIRST REF (review round 34, P2): a continuation of a
+                    # closing keyword is not resolved by GitHub (`closes_landing.parse_closing_refs`
+                    # credits one ref), so putting it in this population inflated `closes` and made a
+                    # wrong-claim-set finding reachable on a ref that will never close — the same
+                    # first-ref rule the non-declined branch applies.
                     found["closed_but_declined"].append(num)
             elif word in CLOSING_WORDS:
                 (found["weak"] if continued else found["closing"]).append(num)
@@ -1493,7 +1514,12 @@ def _clause_is_a_pure_id_list(clause: str, rows: list[str]) -> bool:
     claiming one row of six, with remediation telling its author to rewrite a correct close into a
     partial one. Nothing about the words is guessed: the clause is an id list exactly when its
     residue is empty once the declared rows, the RANGES (endpoints AND the join) and separators are
-    removed, and that test needs no vocabulary — `of`, `bar`, `see`, `landed` are all residue.
+    removed — **or is a leading row noun** (`rows`, `all six rows`, via `_BARE_PREFIX`, the same
+    allowance `_range_is_the_whole_claim` already gives a bare range). Everything else is residue:
+    `of`, `bar`, `see`, `landed` are all residue, and they are what makes a clause a MENTION.
+    ⛔ THE NOUN ALLOWANCE IS LOAD-BEARING AND WAS UNDESCRIBED HERE (review round 34, P3): deleting it
+    re-breaks `rows V1–V2, V3, V4–V6` — the headline false accusation, in the `rows`-prefixed
+    spelling — and the docstring six lines above the branch explained why it could not matter.
     """
     ranges = _range_matches(clause, rows)
     if not ranges and not _explicit_ids(clause, rows):
@@ -1536,7 +1562,6 @@ def _range_is_the_whole_claim(text: str, match: re.Match, rows: list[str],
     line = text[line_start:line_end if line_end != -1 else len(text)]
     start, end = match.start() - line_start, match.end() - line_start
     spans = _clause_spans(line, rows)
-    foreign = _foreign_closing_clauses(line, rows, issue, repo)
     for c_start, c_end in spans:
         if c_start <= start and end <= c_end:
             pre = line[c_start:start].strip()
@@ -1962,8 +1987,10 @@ def _foreign_closing_clauses(line: str, rows: list[str], issue: int | None,
         # NUMBERS, so a clause about a different issue is still recognisable without knowing the repo;
         # a skipped ref that IS this issue stays native.
         skipped: list[int] = []
-        closing = set(_claims_in(line[a:b], None, repo, skipped)["closing"])
-        if not (closing - {issue}) and not (set(skipped) - {issue}):
+        other_repo: list[int] = []
+        closing = set(_claims_in(line[a:b], None, repo, skipped,
+                                 other_repo)["closing"])
+        if not (closing - {issue}) and not (set(other_repo) - {issue}):
             continue
         foreign.add(i)
         if i + 1 < len(spans):
@@ -2065,38 +2092,50 @@ def _a_rowless_rider_understates_the_rows(line: str, rows: list[str], claimable:
     `6/6 measured` (6 is not < 6) and `evidence in the evidence doc` (no count) do not. That keeps
     both pinned controls green and catches every measured shape above.
 
-    The other two exclusion classes are shape checks, not vocabulary: a clause NAMING rows
-    (`; V1–V3 in this PR`, `; V6 needed a migration`) is the narrowing read's job
-    (`_narrowing_sibling_ids`) and earns a finding, not this abstention; and a clause closing a
-    DIFFERENT issue (`… , closes #13037 (V2)`) is `_foreign_closing_clauses`' job, reused here so the
-    three reads agree about what a clause is ABOUT. A clause with no letters is punctuation — the `)`
-    of `Closes #N (rows V1–V6)` is its own span and must never count, or every correct complete close
-    would abstain.
+    The one remaining exclusion is a shape check, not vocabulary: a clause closing a DIFFERENT issue
+    (`… , closes #13037 (V2)`) is `_foreign_closing_clauses`' job, reused here so the three reads agree
+    about what a clause is ABOUT. A clause that names THIS issue's rows is NOT skipped — its ids and
+    ranges are blanked instead (see the residue read below), because a rider written inside the claim
+    (`(V1, V2, V3, V4, V5, V6, 3 of 6 done)`) is in the same clause as the ids and a skip would make
+    the read separator-dependent again. A span that states no count cannot trigger the rule, so the
+    bare `)` of `Closes #N (rows V1–V6)` needs no special case.
 
-    ⛔ THE COST, RECORDED: a correct complete close that trails a rowless count remark
-    (`Closes #N (rows V1–V6); 3 doc rows are links`) now reads AMBIGUOUS instead of `clean`. That is
-    the cheap error in this file's ranking (a counted abstention, never a pass, and never a false
-    accusation), which is the same price round 27 accepted for `_names_a_proper_subset`.
-    ⚠️ RESIDUAL, stated rather than hidden: the rider must come AFTER the claim, matching the `but`
-    rule's own scope, so `Three remain; Closes #N (V1 … V6)` is not caught. Widening it to the whole
-    line would abstain on ordinary prose that precedes a close
-    (`This closes the capstone; Closes #N (rows V1–V6)`), and an abstention on every correct close is a
-    tax this arm cannot pay — the trailing spelling is the one a lane writes.
+    ⛔ THE COST, RECORDED: a correct complete close that says a SMALLER number than the population
+    anywhere on its closing line (`Closes #N (rows V1–V6); 3 doc rows are links`, `Addresses 3
+    findings. Closes #N (rows V1–V6)`) now reads AMBIGUOUS instead of `clean`. That is the cheap error
+    in this file's ranking (a counted abstention, never a pass, and never a false accusation), which is
+    the same price round 27 accepted for `_names_a_proper_subset`.
+    ⚠️ AND THIS READ IS NO LONGER POSITIONAL (review round 34, P2). It used to require the rider to
+    come AFTER the claim, justified by an example that measured FALSE on re-check: the claimed victim
+    (`This closes the capstone; Closes #N (rows V1–V6)`) states no count at all, so widening it costs
+    nothing there — while `Three remain. Closes #N (V1–V6)`, the same disclosure written first, was an
+    uncounted FALSE PASS. The measured cost of the widening is the `Addresses 3 findings` line above,
+    which is the direction this file already chooses to err in.
     """
     spans = _clause_spans(line, rows)
     if not claimable:
         return False
-    after = max(b for a, b in (spans[i] for i in claimable))
     foreign = _foreign_closing_clauses(line, rows, issue, repo)
     for i, (a, b) in enumerate(spans):
-        if i in claimable or i in foreign or a < after:
+        if i in foreign:
             continue
         clause = line[a:b]
-        if not re.search(r"[A-Za-z]", clause):
-            continue
-        if _ids_in(clause, rows):
-            continue
-        if _clause_states_a_partial_count(clause, len(rows)):
+        # ⛔ READ THE COUNT OUT OF WHAT THE CLAUSE SAYS, NOT THE ROWS IT LISTS (review round 34, P1).
+        # Two earlier guards made this read separator- and spelling-dependent and let the arm's headline
+        # false PASS back in, both measured:
+        #   `Closes #N (V1, V2, V3, V4, V5, V6, 3 of 6 done)`   -> `clean`  (the rider is INSIDE the
+        #       claimable clause, so the `i in claimable` skip never looked at it — a comma is not a
+        #       clause boundary, and making it one would contradict round 12)
+        #   `Closes #N (rows V1–V6); 3/6`                      -> `clean`  (the no-letters skip took a
+        #       numeric-only rider for the bare `)` span)
+        # Blanking the declared ids and the RANGES first makes both guards unnecessary: ids are not
+        # claims here, and a span that states no count cannot trigger the rule.
+        residue = clause
+        for match in reversed(_range_matches(clause, rows)):
+            residue = residue[:match.start()] + " " + residue[match.end():]
+        for row in sorted(rows, key=len, reverse=True):
+            residue = re.sub(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", " ", residue)
+        if _clause_states_a_partial_count(residue, len(rows)):
             return True
     return False
 
@@ -2290,6 +2329,15 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
         # the FINDING the SAME sentence earns when the disclosure is on its own line, for a difference
         # of punctuation. A decline is arm 1's answer; this read asks what GitHub will fire on.
         _line_claims = _claims_in(line, None, repo)
+        # ⛔ A SAME-LINE DECLINE IS A DISCLAIMER WHATEVER WORD IT USES (review round 34, P2). The
+        # decline is established STRUCTURALLY here (the ref is in `closed_but_declined`), but the
+        # refusal below reads only `_DISCLAIMER_RE`/`_ELSEWHERE_RE`/`only` — and `DECLINE_RE` admits
+        # spellings `_DISCLAIMER_RE` does not. Measured: `Closes #N (rows V1–V6) — non-closing
+        # reference.` read `clean`, i.e. the arm ASSERTED a complete close on a body that says it is
+        # not closing, while the `not closing` spelling of the same sentence was UNANSWERABLE. One
+        # word must not decide between a pass and a refusal, so the structural signal is used.
+        if issue in _line_claims["closed_but_declined"]:
+            disclaimed = True
         if issue not in set(_line_claims["closing"]) | set(_line_claims["closed_but_declined"]):
             # ⛔ NOT a closing line, but it can still DISCLAIM. A disclosure written on its OWN line
             # is the shape the careful author produces — `Closes #N` on one line, then `V2 is proved;
@@ -2388,6 +2436,7 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # or the documented `Satisfies #N:` form. `_AFFIRM_RE` survives for the WHOLE-BODY
             # fallback, where there is no closing verb to attach to.
         chars = list(line)
+        foreign = _foreign_closing_clauses(line, rows, issue, repo)
         for i, (a, b) in enumerate(spans):
             # ⛔ THE SAME PREDICATE ON BOTH PATHS (review round 12): a clause that points at other work
             # is a mention on the closing line exactly as it is in the body, so `_ELSEWHERE_RE` is
@@ -2402,7 +2451,15 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # the disclosure form names none. So `only` counts only in a clause with no declared id.
             if (_DISCLAIMER_RE.search(line[a:b]) or _ELSEWHERE_RE.search(line[a:b])
                     or (_ONLY_RE.search(line[a:b]) and not _ids_in(line[a:b], rows))):
-                disclaimed = True
+                # ⛔ A CLAUSE THAT CLOSES ANOTHER ISSUE IS NOT A DISCLOSURE ABOUT THIS ONE (review
+                # round 34, P2). `_ELSEWHERE_RE` carries `other`, so a cross-repo closing ref made a
+                # correct complete close read AMBIGUOUS for a reason that had nothing to do with its
+                # rows: `Closes #N (V1–V6), closes other-org/other-repo#M (V2)` tripped the cue on
+                # the org's own name. The round-23 decision (a cue anywhere on the line disclaims)
+                # is about cues in sentences about THIS claim; a clause `_foreign_closing_clauses`
+                # has already attributed elsewhere is excluded, and so is its attached qualifier.
+                if i not in foreign:
+                    disclaimed = True
                 claimable.discard(i)
             # ⛔ BLANK EVERY CLAUSE THAT IS NOT CLAIMABLE — NOT JUST THE RECOGNISED DISCLAIMERS
             # (review round 10). Making `claimable` a mere gate on "should I scan the line" left the
