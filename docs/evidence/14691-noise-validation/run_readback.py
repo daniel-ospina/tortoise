@@ -10,9 +10,13 @@ worked around.
 What it produces, per question the five tests ask:
 
   `entities`   one row per entity discovered by the typed FULL SCAN, per kind, from
-               the vocabulary the graph itself installs (`graph_overview` →
-               `namespaces`). This is T1/T2's population (does the count grow? do
-               two wordings land as two names?).
+               the vocabulary `pack_registry` installs (`CORE_SUBCLASSES` plus every
+               pack's declared kinds). ⛔ NOT from `graph_overview("namespaces")`: that
+               reply carries `namespace` + `name` + `kind_count` and no kind NAMES, so a
+               scan driven by it enumerates nothing — it is recorded as door finding D3.
+               The rows also carry `url` naming their document, which is what T4's
+               per-document Source coverage is graded on. This is T1/T2's population
+               (does the count grow? do two wordings land as two names?).
   `neighbours` for every entity the WRITE receipt named, the door's own answer to
                "how many neighbours does this have" (`explore_connections`) plus the
                entity's own fields (`get_entity`). T3's door leg.

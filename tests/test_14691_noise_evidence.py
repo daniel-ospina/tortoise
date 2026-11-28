@@ -532,7 +532,7 @@ def test_t5_every_sampled_relation_is_traced_and_the_tiers_are_separate():
     # in the excluded half; measured, two of the three are pass-1.)
     assert row["sampled"] == 47, (
         "T5 must sample every relation the receipts say was written (26 pass 1 + 21 "
-        "pass 2); sampling one pass hides the pass where invention happens")
+        "pass 2); pass-1-only sampling leaves a third of the run unexamined")
     assert {s["pass"] for s in row["rows"]} == {1, 2}
     assert row["tiers"] == {"verbatim": 34, "paraphrase": 10, "none": 3}
     # One invented edge, named — and its name is the point: doc-04 says Priya *reports*
