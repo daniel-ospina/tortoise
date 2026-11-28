@@ -1656,7 +1656,8 @@ def _names_a_proper_subset_in(unit: str, rows: list[str]) -> bool:
     return False
 
 
-def _names_a_proper_subset(text: str, rows: list[str]) -> bool:
+def _names_a_proper_subset(text: str, rows: list[str],
+                           issue: int | None = None, repo: str | None = None) -> bool:
     """Does any line of `text` name SOME but not ALL of the issue's declared rows?
 
     ⛔ THE STRUCTURAL PARTIALITY SIGNAL, AND THE REASON NO CUE VOCABULARY IS NEEDED FOR IT (review
@@ -1677,8 +1678,31 @@ def _names_a_proper_subset(text: str, rows: list[str]) -> bool:
     sees all six and no subset. `_a_clause_names_a_proper_subset` asks the same question of the
     CLAUSES; the unit function above is shared so the two cannot answer it differently.
     """
-    return any(_names_a_proper_subset_in(line, rows)
+    return any(_names_a_proper_subset_in(_line_without_foreign_closes(line, rows, issue, repo), rows)
                for line in strip_code(text, strict=True)[0].splitlines())
+
+
+def _line_without_foreign_closes(line: str, rows: list[str], issue: int | None,
+                                 repo: str | None) -> str:
+    """`line` with every clause that closes a DIFFERENT issue blanked out (same length).
+
+    ⛔ THE THIRD PARTIALITY READ NEEDS THE EXCLUSION ITS TWO PEERS ALREADY MAKE (review round 33, P2).
+    `_a_clause_names_a_proper_subset` and `_narrowing_sibling_ids` both drop a foreign closing clause;
+    this LINE-level read did not, so `Closes #N (V1–V6), closes #M (V2)` was refused at
+    `:2386` on the unrelated `(V2)` while the ID-LIST spelling of the same sentence read `clean` —
+    the same second-implementation drift the round-32 P2 repair removed from `_narrowing_ids`, still
+    live one read over. Blanking preserves length and offsets, so callers keep using the line as-is.
+    """
+    if issue is None:
+        return line
+    foreign = _foreign_closing_clauses(line, rows, issue, repo)
+    if not foreign:
+        return line
+    chars = list(line)
+    for i, (a, b) in enumerate(_clause_spans(line, rows)):
+        if i in foreign:
+            chars[a:b] = " " * (b - a)
+    return "".join(chars)
 
 
 def _a_clause_names_a_proper_subset(text: str, rows: list[str],
@@ -1824,20 +1848,56 @@ def _foreign_closing_clauses(line: str, rows: list[str], issue: int | None,
     and disagreed with it, which is exactly the second-implementation drift this file keeps removing.
     The qualifier belongs to the foreign close by the SAME attachment rule the closing-line read uses
     (a bracket or a spaced dash), so `, closes #M (V2)` puts V2 out of scope rather than in it.
+
+    ⛔ AND A SHARED CLAUSE LENDS ITS QUALIFIER TO ONE ISSUE ONLY — THE LAST ONE NAMED (review round 33,
+    P2). `Closes #13036, #13037 (V2)` puts BOTH closing refs in ONE clause, so the `- {issue}` test saw
+    `{13036, 13037} - {13036} = {13037}` and marked the whole clause — including the `(V2)` qualifier —
+    foreign for #13036, while for #13037 it saw `{13036}` and marked it foreign too. Both then fell
+    through to the unmasked read and #13036 — a complete close — was reported as `claimed: ['V2']`.
+    A trailing qualifier attaches to the ref it follows, so a clause that names several issues keeps
+    its CLAIM (each ref is still closed) but lends its qualifier only to the LAST ref in it. Nothing
+    about the words is guessed: order is the attachment rule the whole file already uses.
     """
     if issue is None:
         return set()
     spans = _clause_spans(line, rows)
     foreign: set[int] = set()
     for i, (a, b) in enumerate(spans):
-        if not set(_claims_in(line[a:b], None, repo)["closing"]) - {issue}:
+        closing = set(_claims_in(line[a:b], None, repo)["closing"])
+        if not closing:
             continue
-        foreign.add(i)
+        attached = False
         if i + 1 < len(spans):
             sep = line[b:spans[i + 1][0]].strip()
-            if sep == "(" or sep in {"—", "–"} or "(" in sep:
+            attached = sep == "(" or sep in {"—", "–"} or "(" in sep
+        # ⛔ THE QUALIFIER FOLLOWS THE LAST REF `#n` IN THE CLAUSE, WHICH IS NOT ALWAYS A CLOSING REF.
+        # `_claims_in` is deliberately GitHub-faithful and credits only the FIRST ref of a closing
+        # keyword, so in `Closes #13036, #13037 (V2)` the closing set is `{13036}` while the `(V2)`
+        # visually attaches to `#13037`. Reading it as #13036's qualifier made a COMPLETE close report
+        # `claimed: ['V2']` — the wrong-claim-set defect this function exists to remove, still live on
+        # the shared-clause spelling because the test was `closing != {issue}` rather than "is this
+        # issue the ref the qualifier follows".
+        last = _last_closing_ref(line[a:b], repo)
+        if issue not in closing:
+            foreign.add(i)
+            if attached:
                 foreign.add(i + 1)
+            continue
+        if attached and last is not None and last != issue:
+            foreign.add(i + 1)
     return foreign
+
+
+def _last_closing_ref(clause: str, repo: str | None) -> int | None:
+    """The issue number of the LAST closing ref named in `clause` — the one a qualifier attaches to.
+
+    Read in TEXT ORDER from the same `#<n>` tokens `_claims_in` resolves, so a shared clause
+    (`Closes #N, #M (V2)`) attributes its qualifier to `#M`, not to the issue whose read is asking.
+    """
+    last: int | None = None
+    for match in re.finditer(r"#(\d+)", clause):
+        last = int(match.group(1))
+    return last
 
 
 def _narrowing_sibling_ids(line: str, rows: list[str], claimable: set[int],
@@ -1894,10 +1954,10 @@ _COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
                 "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
 
 
-def _a_rowless_rider_understates_the_rows(line: str, rows: list[str], claimable: set[int],
-                                        issue: int | None = None,
-                                        repo: str | None = None) -> bool:
-    """Does a clause AFTER the claim state a COUNT smaller than the issue's declared rows?
+def _a_rider_understates_the_rows(line: str, rows: list[str], claimable: set[int],
+                                 issue: int | None = None,
+                                 repo: str | None = None) -> bool:
+    """Does any clause of the closing line state a COUNT smaller than the issue's declared rows?
 
     ⛔ WHY THIS EXISTS (review round 32, P1). The two refusals that guard a COMPLETE claim are keyed on
     (a) a cue word (`_DISCLAIMER_RE` / `_ELSEWHERE_RE` / `only`) or (b) a clause naming a NAMED subset of
@@ -1944,24 +2004,42 @@ def _a_rowless_rider_understates_the_rows(line: str, rows: list[str], claimable:
     (`Closes #N (rows V1–V6); 3 doc rows are links`) now reads AMBIGUOUS instead of `clean`. That is
     the cheap error in this file's ranking (a counted abstention, never a pass, and never a false
     accusation), which is the same price round 27 accepted for `_names_a_proper_subset`.
-    ⚠️ RESIDUAL, stated rather than hidden: the rider must come AFTER the claim, matching the `but`
-    rule's own scope, so `Three remain; Closes #N (V1 … V6)` is not caught. Widening it to the whole
-    line would abstain on ordinary prose that precedes a close
-    (`This closes the capstone; Closes #N (rows V1–V6)`), and an abstention on every correct close is a
-    tax this arm cannot pay — the trailing spelling is the one a lane writes.
+
+    ⛔ AND IT IS NOT POSITIONAL, NOR CONFINED TO A NON-CLAIMABLE CLAUSE (review round 33, P1+P2 —
+    both measured on this function's own first draft). The draft skipped any clause inside
+    `claimable` and required `a >= after`, so the separator still decided the verdict — the exact
+    thing this predicate exists to stop — and the same sentence passed when the order moved:
+
+        Closes #N (V1, V2, V3, V4, V5, V6, 3 of 6 done)   -> `clean`  (`,` joins the CLAIM clause)
+        Closes #N (rows V1–V6); 3/6                       -> `clean`  (numeric-only rider)
+        Three remain. Closes #N (V1, V2, V3, V4, V5, V6)   -> `clean`  (rider BEFORE the claim)
+
+    A trailing count is a qualifier of the claim whether it is joined by `,` `;` `but` or a dash, and
+    whether it precedes or follows the ids, so the read is now POSITION-INDEPENDENT and asks every
+    clause on the closing line — the claim's own included. That is safe because `V<n>`/`R<n>` ids and
+    `#<issue>` refs are excluded by `_clause_states_a_partial_count`'s own lookarounds, so the ids
+    that ARE the claim can never be miscounted as a rider.
+    ⚠️ RESIDUAL, stated rather than hidden — and this time the reason is measured, not assumed. The
+    read stays on the CLOSING LINE, because that is this arm's recorded design (see
+    "the qualifier on the closing keyword's own line … deliberately narrow" in `_closing_line_claim`).
+    So a rider on a DIFFERENT line (`Three remain.` / blank line / `Closes #N (rows V1–V6)`) is still
+    not caught. Widening to the whole body was tried: it abstains on any body that counts rows for
+    unrelated reasons, and this arm is mounted on EVERY PR, so that tax buys less than it costs.
     """
     spans = _clause_spans(line, rows)
-    if not claimable:
-        return False
-    after = max(b for a, b in (spans[i] for i in claimable))
     foreign = _foreign_closing_clauses(line, rows, issue, repo)
     for i, (a, b) in enumerate(spans):
-        if i in claimable or i in foreign or a < after:
+        if i in foreign:
             continue
         clause = line[a:b]
-        if not re.search(r"[A-Za-z]", clause):
+        # The empty `)` span of `Closes #N (rows V1–V6)` carries neither a letter nor a digit; a
+        # numeric-only rider (`; 3/6`) carries no LETTER but does carry the count, so the guard is
+        # on ALPHANUMERICS — a letters-only guard let `; 3` and `; 3/6` read `clean` (round 33, P2).
+        if not re.search(r"[A-Za-z0-9]", clause):
             continue
-        if _ids_in(clause, rows):
+        # A NON-claimable clause that names rows is the NARROWING read's job (it earns a finding).
+        # A CLAIMABLE clause is the claim itself, so its ids must not exempt it from the count read.
+        if i not in claimable and _ids_in(clause, rows):
             continue
         if _clause_states_a_partial_count(clause, len(rows)):
             return True
@@ -2219,6 +2297,7 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
         # skipped. Skipping them read each clause in isolation, where that bare range looked like a
         # claim on all six and the line reported `clean` on a one-row PR.
         spans = _clause_spans(line, rows)
+        foreign = _foreign_closing_clauses(line, rows, issue, repo)
         claimable: set[int] = set()
         for i, (a, b) in enumerate(spans):
             clause = line[a:b]
@@ -2234,8 +2313,14 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
                     # …and the qualifier must be ATTACHED by a bracket or a spaced dash — the two
                     # separators that introduce the verb's object. `;` and a sentence break END the
                     # claim, and a second sentence is emphatically not its object.
+                    # ⛔ AND A QUALIFIER THAT BELONGS TO A DIFFERENT ISSUE IS NOT THIS CLAIM'S OBJECT
+                    # (review round 33, P2). `Closes #13036, #13037 (V2)` names BOTH refs in one
+                    # clause, and a trailing qualifier attaches to the LAST ref — so `(V2)` is
+                    # #13037's, and promoting it here made #13036 — a complete close — report
+                    # `claimed: ['V2']`. `_foreign_closing_clauses` owns that attribution (shared
+                    # clause included); this read consumes its answer instead of re-deriving one.
                     sep = line[spans[i][1]:spans[i + 1][0]].strip()
-                    if sep == "(" or sep in {"—", "–"} or "(" in sep:
+                    if (sep == "(" or sep in {"—", "–"} or "(" in sep) and i + 1 not in foreign:
                         claimable.add(i + 1)
             # ⛔ A SIBLING CLAUSE MAY ONLY NARROW, NEVER ADD (review round 11). Promoting a sibling
             # that carries a completion verb made a DISCLOSURE a claim — `(row V2 only); V1 … V6
@@ -2285,7 +2370,7 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # so `Closes #N (V1 … V6); three remain` was the arm's headline false PASS one separator
             # away from the pinned control. Recorded here, applied with the SAME refusal the subset and
             # disclaimer halves use, so all three land on the one verdict (AMBIGUOUS, counted).
-            if _a_rowless_rider_understates_the_rows(line, rows, claimable, issue, repo):
+            if _a_rider_understates_the_rows(line, rows, claimable, issue, repo):
                 rider_seen = True
             # ⛔ A NARROWING ON THE LINE DECIDES THE CLAIM WHETHER OR NOT A RANGE MATCHED (review
             # round 29, P2 — the recorded false PASS on PR #14771). The sibling read above lived
@@ -2383,7 +2468,7 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
     # ran, and `Closes #N (rows V1–V6)` + `V1 … V6 verified in the programme. This PR: V2.` read
     # `clean`. The datum was computed and then not read. Both granularities are asked here, so the
     # same sentence cannot get different answers from the two paths.
-    if set(rows) <= named and (_names_a_proper_subset(text, rows)
+    if set(rows) <= named and (_names_a_proper_subset(text, rows, issue, repo)
                                or _a_clause_names_a_proper_subset(text, rows, issue, repo)):
         named = set()
         refused = True

@@ -4813,32 +4813,110 @@ def test_a_partial_count_rider_is_held_to_the_same_rule_as_a_but_joined_one(body
     assert findings == [], body
 
 
-def test_a_range_close_beside_a_second_closing_ref_is_never_accused_of_the_other_issue():
-    """Review round 32 (PR #14771 P2) — one of the three narrowing reads omitted the foreign exclusion.
+# ⛔ REVIEW ROUND 33 — six findings, all MEASURED against this file before being fixed. Two of them
+# were defects in round 32's OWN repair, and one was a defect in round 32's own TEST, which is why the
+# rows below are grouped by the class they close rather than by the round that found them.
+#
+# The `,` row is the round-32 fix incomplete: a comma is NOT a clause boundary, so a count rider joined
+# by `,` sat inside the CLAIMABLE clause and was skipped — the separator still decided the verdict.
+# The `; 3/6` rows are the guard's own bug: skipping clauses with no LETTER skipped a numeric-only
+# rider. The leading-row row is the positional gate (`a >= after`) that let the same sentence pass by
+# moving before the claim. The shared-clause row is `_foreign_closing_clauses` testing `closing !=
+# {issue}` instead of "is this the ref the qualifier follows".
+NORTH_OF_ROUND_33 = [
+    # ── the `,` spelling of the round-32 defect: same sentence, separator must not decide ──────
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6, 3 of 6 done)\n", "ambiguous"),
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6, three remain)\n", "ambiguous"),
+    # ── a rider BEFORE the claim: position must not decide either ────────────────────────────
+    ("Three remain. Closes #13036 (V1, V2, V3, V4, V5, V6)\n", "ambiguous"),
+    # ── a numeric-only rider (no letter at all) is still a count ─────────────────────────────
+    ("Closes #13036 (rows V1–V6); 3/6\n", "ambiguous"),
+    ("Closes #13036 (rows V1–V6); 3\n", "ambiguous"),
+    # ── CONTROLS: the round-8 decision and the honest self-report must both survive. ──────────
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6, see the evidence doc)\n", "clean"),
+    ("Closes #13036 (rows V1–V6); evidence in the evidence doc\n", "clean"),
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6; 6 of 6 measured)\n", "clean"),
+    # …and a plain complete close, which no guard may touch.
+    ("Closes #13036 (rows V1–V6)\n", "clean"),
+]
 
-    `_names_a_proper_subset` and `_narrowing_sibling_ids` both exclude a clause that closes a DIFFERENT
-    issue; `_narrowing_ids` — reached only on the RANGE path — did not. So `Closes #N (V1-V6), closes
-    #M (V2)` read the unrelated `closes #M (V2)` as a narrowing of #N, claimed V2 of a COMPLETE close
-    and raised a finding whose own remediation told its author to leave the capstone OPEN — a
-    wrong-claim-set finding, which this file ranks beside a false PASS.
 
-    The id-list spelling of the same sentence was pinned `clean` in `NORTH_OF_ROUND_29`; the range
-    spelling was not, which is exactly how a second implementation of one rule drifts. Pinning both
-    spellings here is the point: the read must not depend on how the rows were written.
+@pytest.mark.parametrize("body,expected", NORTH_OF_ROUND_33)
+def test_a_partial_count_rider_is_read_in_every_join_and_every_position(body, expected):
+    """Review round 33 (PR #14771 P1+P2) — the round-32 fix was still separator- and position-shaped.
+
+    Round 32 made a count rider abstain, but only when it sat in a NON-claimable clause AFTER the
+    claim. A comma is not a `_CLAUSE_SPLIT_RE` boundary, so `(V1, …, V6, 3 of 6 done)` kept the rider
+    inside the claim clause and read `clean` — the arm's headline false PASS, one separator away from
+    the row that was pinned. The same sentence before the claim also read `clean`.
+
+    The read is now position-independent and asks EVERY clause on the closing line, the claim's own
+    included; that is safe because `V<n>`/`R<n>` ids and `#<issue>` refs are excluded by
+    `_clause_states_a_partial_count`'s own lookarounds, so the ids that ARE the claim cannot be
+    miscounted as a rider. The controls are the recorded round-8 decision (a rowless cue-free POINTER
+    is neutral) and an honest self-report (`6 of 6`) — neither states a count smaller than the
+    population, so neither may abstain.
     """
     rows = L.row_ids([CAPSTONE_BODY])
-    # `#13037` declares its own, unrelated rows, so nothing below can be a finding about it either.
+    findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)},
+                                              "daniel-ospina/tortoise")
+    assert stats[expected] == 1, (body, stats)
+    assert stats["clean"] == (1 if expected == "clean" else 0), (body, stats)
+    assert findings == [], body
+
+
+def test_a_range_close_beside_a_second_closing_ref_is_never_accused_of_the_other_issue():
+    """Review round 32/33 (PR #14771 P2) — one of the three narrowing reads omitted the exclusion.
+
+    ⛔ THIS TEST WAS REWRITTEN BECAUSE ITS FIRST VERSION HAD ZERO DISCRIMINATING POWER (round 33,
+    P1 — measured against `0f3093b201`'s module, which gave byte-identical results). Its body closed
+    `#13037 (A1)` where `A1` is NOT a declared row of `#13036`, so the pre-repair `_narrowing_ids`
+    ignored it too and the test passed on broken code. It must use `(V2)` — a row `#13036` really
+    declares — because that is the shape that read the foreign qualifier as a narrowing of #13036 and
+    accused a COMPLETE close of claiming `V2`.
+
+    ⛔ AND THE ASSERTION IS WHAT THE REPAIR DELIVERS, NOT WHAT IT MIGHT HAVE BEEN EXPECTED TO. The
+    repapered range spelling does NOT recover a complete claim here — the whole-body subset read still
+    cannot expand a bare range without issue context, so the line lands `ambiguous`. That is a COUNTED
+    ABSTENTION (the cheap error in this file's ranking), and it is the honest bar: the read must never
+    accuse a correct close. It replaced a wrong finding whose own remediation told the author to leave
+    the capstone open, so the floor asserted below is "never a proper-subset claim", and the id-list
+    spelling of the same sentence must still be `clean` outright.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
     other = ["A1", "A2"]
     scopes = {13036: _scope(rows), 13037: _scope(other)}
-    for spelling in ("V1-V6", "V1–V6", "rows V1–V6", "V1, V2, V3, V4, V5, V6"):
-        body = f"Closes #13036 ({spelling}), closes #13037 (A1)\n"
-        findings, stats = L.classify_partial_close(body, 500, scopes, "daniel-ospina/tortoise")
-        # ⛔ THE CLAIM, NOT A VERDICT CLASS: #13036 is a COMPLETE close, so it must never be the
-        # subject of a FINDING naming V2. (The verdict may be `ambiguous` where the whole-body
-        # subset read cannot expand a bare range — a counted abstention, which is the cheap error —
-        # but it must never be an accusation against a correct close.)
+    for spelling in ("V1-V6", "V1–V6", "rows V1–V6"):
+        body = f"Closes #13036 ({spelling}), closes #13037 (V2)\n"
+        findings, _stats = L.classify_partial_close(body, 500, scopes, "daniel-ospina/tortoise")
+        # The claim, not a verdict class: #13036 is a COMPLETE close, so it must never be the subject
+        # of a finding naming V2, and it must never come back CLAIMING a proper subset of its rows.
         assert [f for f in findings if f.evidence.get("issue") == 13036] == [], (body, findings)
-        assert L.claimed_row_ids(body, 13036, rows) == set(rows), (body, stats)
+        claimed = L.claimed_row_ids(body, 13036, rows)
+        assert claimed in (set(rows), set()), (body, claimed)
+    # …and the ID-LIST spelling — the one round 29 already pinned — is still a clean complete close.
+    body = "Closes #13036 (V1, V2, V3, V4, V5, V6), closes #13037 (V2)\n"
+    findings, _stats = L.classify_partial_close(body, 500, scopes, "daniel-ospina/tortoise")
+    assert [f for f in findings if f.evidence.get("issue") == 13036] == []
+    assert L.claimed_row_ids(body, 13036, rows) == set(rows)
+
+
+def test_a_qualifier_after_several_refs_belongs_to_the_last_ref_not_this_issue():
+    """Review round 33 (PR #14771 P2) — a shared clause lent its qualifier to every ref in it.
+
+    `_claims_in` is deliberately GitHub-faithful and credits only the FIRST ref of a closing keyword,
+    so `Closes #13036, #13037 (V2)` closes `#13036` alone while the `(V2)` visually follows `#13037`.
+    `_foreign_closing_clauses` tested `closing != {issue}`, which was TRUE (the set is `{13036}`), so
+    the qualifier was promoted onto #13036 and a COMPLETE close was reported as `claimed: ['V2']` —
+    the wrong-claim-set defect the round-32 P2 repair exists to remove, still live one conjunction
+    away from its pinned shape. A trailing qualifier attaches to the LAST ref it follows, so it is not
+    this issue's unless this issue was named last.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    body = "Closes #13036, #13037 (V2)\n"
+    claimed = L.claimed_row_ids(body, 13036, rows)
+    assert claimed in (set(rows), set()), claimed
+
 
 
 
