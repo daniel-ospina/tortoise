@@ -3812,7 +3812,7 @@ class StaleHolder:
         reason: `git ls-remote <ref>` exits 0 with EMPTY output when the ref does not
         exist and NON-ZERO only when the remote could not be consulted, so collapsing the
         two would read an outage as "nobody holds it". The `ls-remote` exit-status
-        distinction IS `claims.sh:_claim_preflight_at`'s (`:1795-1797`): empty output means
+        distinction IS `claims.sh:_claim_preflight_at`'s (`:1786-1797`): empty output means
         the ref is ABSENT (demoted, `claims.sh` answers `no claim on #N` rc 0), non-zero
         means the registry could not be consulted (LIVE).
 
