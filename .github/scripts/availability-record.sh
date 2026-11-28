@@ -495,7 +495,18 @@ fetch_incidents() {
       ''|-|*[!0-9]*) : ;;
       *)
         if [ "${#inc_ts}" -ge 9 ] && [ "${#inc_ts}" -le 12 ]; then
-          inc_ff="$inc_ts"; inc_day="$(fmt_day "$inc_ts")"
+          # ⛔ NORMALIZE AT INGEST, not at each consumer (rounds 4-6). A leading zero is
+          # bash OCTAL: `01789547000` ABORTS the expansion (= the whole render dies and
+          # publishes nothing), and a valid-octal `012345670` silently walks to a 1970
+          # day. `awk` and `[ -ge ]` read the SAME string as DECIMAL, so two consumers
+          # disagreed about one value while both looked right in isolation. `to_int` is
+          # this file's normalizer (:186); an all-zero result is not a timestamp either
+          # (epoch 0 would read as a 56-year incident), so it joins the unparseable class.
+          inc_ff="$(to_int "$inc_ts" -)"
+          case "$inc_ff" in
+            ''|-|0) inc_ff="-" ;;
+            *) inc_day="$(fmt_day "$inc_ff")" ;;
+          esac
         fi
         ;;
     esac
@@ -560,13 +571,18 @@ build_span_union() { # reads $RUN_TMP/incidents.tsv -> $RUN_TMP/day_minutes.tsv
     # First UTC midnight at or before the span start, then walk forward. The guard
     # bounds the walk so a nonsense span cannot spin; a span beyond it is not a
     # measurement anyone should be printing anyway.
+    # ⛔ THE DAY IS A HALF-OPEN INTERVAL [dse, dse+86400) (round 6). The first cut used the
+    # INCLUSIVE last second (`dse + 86399`) and then divided the clipped length by 60, so
+    # a fully covered UTC day measured 1439 min and EVERY midnight crossing lost a minute
+    # at the boundary (23:00 -> 01:00 read 59 + 60 = 119 of 120). A minute is a DURATION:
+    # the length of a clipped interval is the difference of its ends.
     dse=$(( inc_ff - (inc_ff % 86400) ))
     guard=0
-    while [ "$dse" -le "$inc_end" ] && [ "$guard" -lt 400 ]; do
+    while [ "$dse" -lt "$inc_end" ] && [ "$guard" -lt 400 ]; do
       day_s=$(( inc_ff > dse ? inc_ff : dse ))
-      day_e=$(( dse + 86399 ))
+      day_e=$(( dse + 86400 ))
       [ "$inc_end" -lt "$day_e" ] && day_e="$inc_end"
-      if [ "$day_e" -ge "$day_s" ]; then
+      if [ "$day_e" -gt "$day_s" ]; then
         printf '%s\t%s\t%s\t%s\n' "$(fmt_day "$dse")" "$inc_kind" "$day_s" "$day_e" >> "$RUN_TMP/spans.tsv"
       fi
       dse=$(( dse + 86400 ))
@@ -578,6 +594,13 @@ build_span_union() { # reads $RUN_TMP/incidents.tsv -> $RUN_TMP/day_minutes.tsv
   # before the running end. Truncation to whole minutes happens ONCE, on the
   # merged interval — truncating per input interval would lose a minute per
   # overlap and make the union depend on how many issues one outage opened.
+  # ⛔ A FAILED PASS IS NOT ZERO MINUTES (rounds 3, 5, 6). The first cut ended this
+  # pipeline with `|| : > file`, so ANY failure in the chain — OOM, a full /tmp, a lost
+  # pipe, or the render aborting above — truncated the minutes file, every day resolved
+  # through the `if (!found) print 0` default, and the record published
+  # `0 min DOWN over 1 DOWN incident(s)` directly beside `down_for=60 min`. The return
+  # code is the contract now: the caller REFUSES to render, because an unusable
+  # measurement must be DISCLOSED, never costed at 0 (like every fetch-side failure here).
   : > "$RUN_TMP/day_minutes.tsv"
   if [ -s "$RUN_TMP/spans.tsv" ]; then
     LC_ALL=C sort -t"$(printf '\t')" -k1,1 -k2,2 -k3,3n "$RUN_TMP/spans.tsv" \
@@ -588,8 +611,11 @@ build_span_union() { # reads $RUN_TMP/incidents.tsv -> $RUN_TMP/day_minutes.tsv
         END { flush() }' \
       | awk -F'\t' '{ key = $1 SUBSEP $2; m[key] += $3; if (!(key in seen)) { order[++n] = key; seen[key] = 1 } }
                      END { for (i = 1; i <= n; i++) { split(order[i], p, SUBSEP); printf "%s\t%s\t%d\n", p[1], p[2], m[order[i]] } }' \
-      > "$RUN_TMP/day_minutes.tsv" || : > "$RUN_TMP/day_minutes.tsv"
+      > "$RUN_TMP/day_minutes.tsv" || return 1
   fi
+  # Test seam: force the pass to report failure, so the caller's refuse-to-render guard
+  # is covered by the harness instead of being dead code (mirrors RECORD_FETCH_INTEGRITY).
+  [ "${RECORD_UNION_FAIL:-0}" = "1" ] && return 1
   return 0
 }
 
@@ -701,6 +727,10 @@ render_record() { # <days> <now>
   local zero_days=0 partial_days=0 gap_days_list="" inconclusive_kinds=""
   local day day_intended day_mark d_del d_fail d_inc d_decided del_ok
   local line inc_line inc_down inc_deg inc_unk d_rest d_dmin d_gmin d_open d_rec d_grec pct_avail
+  # ⛔ AN AGGREGATION THAT DID NOT RUN IS NOT A ZERO (rounds 3, 5, 6). Each per-day pass
+  # below converts its own failure into this refusal instead of an empty file: an empty
+  # file renders as "no samples" / "0 minutes", which is a claim no run made.
+  local agg_rc=0 agg_reason=""
 
   printf 'availability record — RECORD-ONLY baseline (#3810) — INSTRUMENT, NOT A GATE\n'
   printf 'generated: %s   window: %s UTC day(s) ending %s\n' "$(fmt_iso "$now")" "$days" "$today"
@@ -717,7 +747,8 @@ render_record() { # <days> <now>
   # Columns: day, delivered, failed, inconclusive(=no verdict).
   awk -F'\t' '{ d[$1]++; if ($2 == "failure") f[$1]++; else if ($2 != "success") o[$1]++ }
               END { for (k in d) printf "%s\t%d\t%d\t%d\n", k, d[k]+0, f[k]+0, o[k]+0 }' \
-    "$RUN_TMP/runs.tsv" > "$RUN_TMP/day_runs.tsv" 2>/dev/null || : > "$RUN_TMP/day_runs.tsv"
+    "$RUN_TMP/runs.tsv" > "$RUN_TMP/day_runs.tsv" 2>/dev/null \
+    || { agg_rc=1; agg_reason="the per-day run-count aggregation did not complete"; }
 
   # The distinct inconclusive conclusions, so "no verdict" is never a black box.
   awk -F'\t' '$2 != "success" && $2 != "failure" { c[$2]++ }
@@ -745,9 +776,20 @@ render_record() { # <days> <now>
                 rs[day] += c; seen[day] = 1;
                 if ($4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ && $5 >= $4) { if ($2 == "down") rcd[day]++; else if ($2 == "degraded") rcg[day]++; else op[day]++ } else { op[day]++ } }
               END { for (k in seen) printf "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", k, dn[k]+0, dg[k]+0, un[k]+0, rs[k]+0, op[k]+0, rcd[k]+0, rcg[k]+0 }' \
-    "$RUN_TMP/incidents.tsv" > "$RUN_TMP/day_incidents.tsv" 2>/dev/null || : > "$RUN_TMP/day_incidents.tsv"
+    "$RUN_TMP/incidents.tsv" > "$RUN_TMP/day_incidents.tsv" 2>/dev/null \
+    || { agg_rc=1; agg_reason="the per-day incident aggregation did not complete"; }
 
-  build_span_union
+  build_span_union \
+    || { agg_rc=1; agg_reason="the per-day downtime UNION pass did not complete"; }
+  if [ "$agg_rc" -ne 0 ]; then
+    printf 'availability record — INSTRUMENT FAILURE, NOT A READING (#3484)\n'
+    printf 'A per-day aggregation pass did not complete, so the minute and incident columns have no\n'
+    printf 'measurement behind them. Rendering zeros would assert "no downtime observed" — a figure\n'
+    printf 'this run does not have. An unusable measurement is DISCLOSED, never costed at 0 minutes.\n'
+    printf 'Reason: %s\n' "$agg_reason"
+    fail "INSTRUMENT FAILURE — $agg_reason"
+    return 1
+  fi
 
   # Incidents that could not be dated AT ALL have no day to be bucketed into,
   # so they are disclosed on their own line rather than folded into a window
@@ -758,6 +800,12 @@ render_record() { # <days> <now>
   # before the window the header names).
   undated_inc="$(awk -F'\t' '$3 == "" || $3 == "n/a" { n++ } END { print n + 0 }' "$RUN_TMP/incidents.tsv" 2>/dev/null || printf 0)"
   total_down_inc=0 total_degraded_inc=0 total_unknown_inc=0 total_restarts=0
+  # ⛔ AN UNDATED INCIDENT IS A MEMBER OF THE UNBOUNDED CLASS (rounds 5-6). Both the header
+  # (`:76-82`) and the PUBLISHED legend name "no parseable first_failure_ts" as one, but the
+  # aggregator `next`s on a day it cannot bucket, so such a row reached no `op[]` key and the
+  # record printed `0 incident(s) have NO usable span` while an undated — often still OPEN —
+  # incident sat in the same output. Counting it here makes the column agree with its legend.
+  total_unbounded=$(( total_unbounded + undated_inc ))
 
   # ── per-day table ──
   printf '%-12s %-9s %-9s %-9s %-9s %-10s %-56s %-9s %-13s %-12s %-9s %-9s %-13s %s\n' \
@@ -866,10 +914,12 @@ render_record() { # <days> <now>
   printf 'DOWN_MIN = minutes the service was OBSERVED DOWN. DEGRADED_MIN is the same measure for DEGRADED incidents, in its OWN column — DOWN and DEGRADED are never summed. ⛔ MINUTES ARE WALL-CLOCK AND UNIONED: overlapping incidents are counted ONCE, and a minute is attributed to the UTC day it OCCURRED (the incident COUNT columns next to them attribute each incident to the day it was FIRST observed — a count belongs to the incident, a minute belongs to the clock). UNBOUNDED_INC = incidents that produce NO minutes and are disclosed here instead: still open, closed with an unreadable recovery stamp, closed as not_planned/duplicate (not a recovery), a recovery stamp that precedes the first failure, no parseable first_failure_ts, or a usable span with no parseable kind. Each carries its own label in the per-incident list, so an unknown end is never printed as "down right now". DOWN_MIN is a LOWER BOUND wherever UNBOUNDED_INC > 0. Resolution = the probe cadence printed above — a span shorter than one probe interval cannot be told apart from one interval.\n'
   printf '  incident totals: down=%s degraded=%s unknown=%s restart_attempts=%s\n' \
     "$total_down_inc" "$total_degraded_inc" "$total_unknown_inc" "$total_restarts"
-  printf '  recovered downtime: %s min DOWN over %s DOWN incident(s) and %s min DEGRADED over %s DEGRADED incident(s) — never summed. These are WALL-CLOCK minutes (overlapping incidents union, not add) attributed to the UTC day the minute occurred. %s incident(s) have NO usable span and contribute NOTHING, so every figure here is a LOWER BOUND wherever that count is non-zero.\n' \
+  printf '  recovered downtime: %s min DOWN over %s DOWN incident(s) and %s min DEGRADED over %s DEGRADED incident(s) — never summed. These are WALL-CLOCK minutes (overlapping incidents union, not add) attributed to the UTC day the minute occurred; a span that BEGAN BEFORE this window still contributes its in-window minutes while its incident is counted on its first-observed day, so the minutes and the counts are TWO DIFFERENT ATTRIBUTIONS and not a ratio. %s incident(s) have NO usable span and contribute NOTHING, so every figure here is a LOWER BOUND wherever that count is non-zero.\n' \
     "$total_down_min" "$total_recovered" "$total_degraded_min" "$total_recovered_deg" "$total_unbounded"
   printf '  (those totals are WINDOW-SCOPED — summed from the day columns above. The list below covers the\n'
-  printf '   whole ledger, so it can name an incident that is outside this window.)\n'
+  printf '   whole ledger, so it can name an incident that is outside this window. They are NOT the sum of\n'
+  printf '   the per-incident down_for= lines: overlapping spans union, and every minute is clipped to its\n'
+  printf '   UTC day, so a line is evidence — not an addend.)\n'
   if [ "$undated_inc" -gt 0 ]; then
     printf '  %s incident(s) carry no parseable first_failure_ts: listed below, but attributable to no UTC day and therefore NOT counted in the window totals above (a human-edited state block is warned about, NEVER silently dropped).\n' "$undated_inc"
   fi
@@ -888,8 +938,9 @@ render_record() { # <days> <now>
       fi
       if [ -n "$inc_rest" ]; then rest_disp="$inc_rest"; else rest_disp="(none)"; fi
       restart_count="$(printf '%s' "$inc_rest" | tr ',' '\n' | grep -c '[0-9]' || true)"
-      # The per-incident span, so the day totals above are AUDITABLE line by line
-      # rather than a number the reader has to take on faith.
+      # The per-incident RAW span. NOTE it is NOT a component you can add up: the day and TOTAL
+      # columns are the UNION of day-clipped intervals (an overlap is counted once, and a minute
+      # is clipped to the window), so these lines are evidence, not an arithmetic decomposition.
       # ⛔ "STILL DOWN" AND "CLOSED, STAMP UNREADABLE" ARE DIFFERENT CLAIMS (review P2).
       # Both reach here as `inc_end == "-"`, so the label is chosen from `state`, not guessed:
       # asserting that a CLOSED incident is down right now — with a `now - first_failure`

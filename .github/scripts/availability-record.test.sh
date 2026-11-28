@@ -259,7 +259,7 @@ reset_case() {
         STUB_LEDGER_SEARCH_JSON STUB_LEDGER_SEARCH_FAIL \
         STUB_RECORD_SEARCH_JSON STUB_RECORD_SEARCH_FAIL STUB_CREATE_FAIL STUB_NEW_ISSUE \
         STUB_PATCH_FAIL STUB_GET_BODY_FAIL STUB_ISSUE_JSON \
-        RECORD_FETCH_INTEGRITY RECORD_CRON_PER_DAY 2>/dev/null || true
+        RECORD_FETCH_INTEGRITY RECORD_CRON_PER_DAY RECORD_UNION_FAIL 2>/dev/null || true
   export GH_TOKEN="test-token"
   export GITHUB_REPOSITORY="daniel-ospina/tortoise"
   export RECORD_NOW_EPOCH="$NOW"
@@ -825,7 +825,10 @@ assert_contains "$OUT" "closed, recovery stamp unreadable (NOT counted as downti
   "a CLOSED incident with an unreadable stamp is not asserted to be down right now"
 assert_not_contains "$OUT" "#6004  first_observed=2026-09-16  kind=down  restarts=(none)  restart_attempts=0  down_for=open" \
   "the closed incident (#6004) never carries the OPEN label"
-assert_contains "$OUT" "NOT counted" "the open incident's elapsed time is explicitly excluded from the total"
+# ⛔ THE NEEDLE MUST NOT BE SATISFIED BY ANOTHER INCIDENT'S LABEL (rule 2): the bare
+# "NOT counted" also occurs in #6004's "closed, recovery stamp unreadable (NOT counted as
+# downtime)", so deleting the OPEN arm's exclusion left this row GREEN.
+assert_contains "$OUT" "min elapsed, NOT counted)" "the open incident's elapsed time is explicitly excluded from the total"
 assert_contains "$OUT" "excluded (closed as not_planned/duplicate — not a recovery)" \
   "a not_planned close is NOT read as a recovery (its closed_at would invent a span)"
 assert_contains "$OUT" "recovered downtime: 60 min DOWN over 1 DOWN incident(s) and 0 min DEGRADED over 0 DEGRADED incident(s)" \
@@ -943,12 +946,32 @@ assert_contains "$OUT" "recovered downtime: 240 min DOWN over 4 DOWN incident(s)
 echo
 echo "29. an unrenderable or octal first_failure_ts cannot produce a false bound or kill the render"
 reset_case
-export STUB_LEDGER_SEARCH_JSON='{"total_count":2,"items":[
+export STUB_LEDGER_SEARCH_JSON='{"total_count":4,"items":[
  {"number":9001,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=99999999999999999 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":null,"state_reason":null,"state":"open"},
  {"number":9002,"user":{"login":"github-actions[bot]"},"title":"b","body":"<!-- watchdog-state kind=down first_failure_ts=08 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":null,"state_reason":null,"state":"open"},
- {"number":9003,"user":{"login":"github-actions[bot]"},"title":"c","body":"<!-- watchdog-state kind=down first_failure_ts=12345 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":null,"state_reason":null,"state":"open"}]}' \
+ {"number":9003,"user":{"login":"github-actions[bot]"},"title":"c","body":"<!-- watchdog-state kind=down first_failure_ts=12345 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":null,"state_reason":null,"state":"open"},
+ {"number":9004,"user":{"login":"github-actions[bot]"},"title":"d","body":"<!-- watchdog-state kind=down first_failure_ts=01789547000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T09:23:20Z","state_reason":"completed","state":"closed"}]}' \
        STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
 run_record 3 --print-only
+# ⛔ THE FIXTURE THAT REACHES THE ARM THE OTHERS CANNOT (rounds 4-6). All three
+# fixtures above are width-REJECTED before any arithmetic runs, so case 29 was green
+# on a head that aborted the whole render for a stamp the width gate ADMITS: an
+# 11-digit leading-zero value is bash OCTAL, so `$(( ff - ff % 86400 ))` dies and
+# `day_minutes.tsv` is never created — every day then reads 0. #9004 is that stamp
+# WITH a readable closed_at, and it must normalize (08:23:20 -> 09:23:20 = 60 min).
+assert_eq "$(row_downtime "$OUT" 2026-09-16)" "60 0 0" \
+  "a width-admitted leading-zero stamp normalizes decimal and STILL contributes its 60 min"
+assert_contains "$OUT" "#9004  first_observed=2026-09-16" \
+  "the leading-zero stamp is dated from its normalized value, not its spelling"
+assert_not_contains "$OUT" "1970-01-31" "a valid-octal leading-zero stamp does not land on a 1970 day"
+# ⛔ THE UNDATED CLASS IS A MEMBER OF `unbounded_inc`, as BOTH the header and the published
+# legend say (rounds 5-6). The aggregator keys `op[]` by day, so an undated row used to reach
+# no key: the record printed `0 incident(s) have NO usable span` while three undated incidents
+# — often still OPEN ones — sat in the same output, and the headline claimed to be exact.
+assert_eq "$(printf '%s\n' "$OUT" | awk '$1 == "TOTAL" { print $NF }')" "3" \
+  "the three undated incidents are counted in unbounded_inc, where the legend says they belong"
+assert_contains "$OUT" "3 incident(s) have NO usable span" \
+  "the headline declares itself a LOWER BOUND for a class it cannot date"
 assert_eq "$RC" "0" "an octal first_failure_ts does NOT abort the render (it used to exit non-zero, publishing nothing)"
 assert_contains "$OUT" "RECORD-ONLY baseline" "the record is still rendered"
 assert_contains "$OUT" "unknown (no parseable first_failure_ts)" \
@@ -972,6 +995,69 @@ assert_contains "$OUT" "unknown kind — NOT counted in any minutes column" \
   "the print side agrees with the aggregate, which can only bucket down/degraded"
 assert_not_contains "$OUT" "down_for=60 min" "the span is NOT printed as minutes no column contains"
 assert_eq "$(row_downtime "$OUT" 2026-09-16)" "0 0 1" "it is counted in unbounded_inc instead of vanishing"
+
+# ── 31: a span crossing UTC midnight is split by the DAY, not the incident ──
+# "A minute belongs to the clock" (the header's own claim, and the legend's) had no
+# assertion that could go red: every fixture above is intra-day, so a regression that
+# attributed a whole span to its START day — the pre-round-2 behaviour — stayed GREEN.
+# Here: 2026-09-15T23:00:00Z -> 2026-09-16T01:00:00Z, one incident, 120 min, 60 on each
+# day. Both days are COMPLETE (the in-progress day is 09-17, and its row carries the `*`
+# marker), so the split is asserted on two plain day rows. The COUNT stays on the
+# first-observed day; only the MINUTES split.
+echo
+echo "31. a span crossing UTC midnight puts each minute on the day it OCCURRED"
+reset_case
+# 1789513200 = 2026-09-15T23:00:00Z; 1789520400 = 2026-09-16T01:00:00Z.
+export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
+ {"number":9201,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1789513200 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T01:00:00Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-15T23:30:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$(row_downtime "$OUT" 2026-09-15)" "60 0 0" \
+  "the pre-midnight share (60 min) is booked on 2026-09-15"
+assert_eq "$(row_downtime "$OUT" 2026-09-16)" "60 0 0" \
+  "the post-midnight share (60 min) is booked on 2026-09-16 — not all 120 on the start day"
+assert_eq "$(row_cols "$OUT" 2026-09-15 | cut -d' ' -f1)" "1" \
+  "the incident COUNT stays on the first-observed day (a count belongs to the incident)"
+assert_eq "$(row_cols "$OUT" 2026-09-16 | cut -d' ' -f1)" "0" \
+  "the second day carries minutes but not the incident"
+assert_eq "$(printf '%s\n' "$OUT" | awk '$1 == "TOTAL" { print $(NF-2) }')" "120" \
+  "the window TOTAL is the whole 120 min — no minute lost at the midnight boundary"
+
+echo
+echo "32. a fully covered UTC day measures 1440 minutes, not 1439"
+reset_case
+# 1789430400 = 2026-09-15T00:00:00Z; 1789516800 = 2026-09-16T00:00:00Z — exactly one day.
+# (Both days are complete; the in-progress 09-17 row carries the `*` marker.)
+# The first cut clipped to the INCLUSIVE last second (`dse + 86399`) and then divided by 60,
+# so this read 1439 and emitted a spurious 0-minute interval on the next day.
+export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
+ {"number":9301,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1789430400 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T00:00:00Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-15T12:00:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$(row_downtime "$OUT" 2026-09-15)" "1440 0 0" \
+  "a 24-hour span is 1440 whole minutes — the clipped length is the difference of its ends"
+assert_eq "$(row_downtime "$OUT" 2026-09-16)" "0 0 0" \
+  "the day it ends on carries no minutes and no spurious zero-minute interval"
+assert_eq "$(printf '%s\n' "$OUT" | awk '$1 == "TOTAL" { print $(NF-2) }')" "1440" \
+  "the window TOTAL does not lose a minute to the boundary convention"
+
+# ── 33: a failed aggregation is an INSTRUMENT FAILURE, never a 0-minute record ──
+# The union pipeline used to end in `|| : > file`: any failure truncated the minutes
+# file, every day fell through to the `print 0` default, and the record published
+# `0 min DOWN over 1 DOWN incident(s)` beside `down_for=60 min`. Forcing the pass to
+# report failure proves the refusal path, which no data fixture can reach.
+echo
+echo "33. a failed downtime pass refuses to render — it never publishes 0 minutes"
+reset_case
+export RECORD_UNION_FAIL=1 \
+       STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
+ {"number":9401,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1789547000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T09:23:20Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$RC" "1" "a failed UNION pass exits non-zero"
+assert_contains "$OUT" "INSTRUMENT FAILURE, NOT A READING" "the refusal is named on stdout"
+assert_not_contains "$OUT" "recovered downtime:" "no downtime figure is published from a pass that did not run"
+assert_contains "$ERR" "downtime UNION pass did not complete" "stderr names the pass that failed"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
