@@ -8959,7 +8959,8 @@ class CollisionPreflightTest(unittest.TestCase):
         self.set_claim_ref(self.claim_sha(lease_until, message=message, author=author))
 
     def claim_sha(self, lease_until: int | None, *,
-                  message: str | None = None, author: str | None = None) -> str:
+                  message: str | None = None, author: str | None = None,
+                  committer: str | None = None) -> str:
         """Build a claim commit IN THE ORIGIN and return its sha, moving NO ref.
 
         Separate from `live_claim` so a test can hold two commits and decide which one
@@ -8968,13 +8969,17 @@ class CollisionPreflightTest(unittest.TestCase):
 
         `author` sets the AUTHOR NAME, which is where a peer-planted `lease_until=` hides from
         a reader that scans the whole commit object instead of the body (`claims.sh:_lease_of`).
+        `committer` sets the COMMITTER NAME, which is the LAST header line — so a `\r\r` there is
+        the one CR byte that can sit immediately above the header/body separator and fabricate one
+        under universal-newline decoding (#13727 review round 8). It is a separate seam for that
+        reason: the author variant cannot reach that position.
         """
         origin = self.tmp / "remotes" / "test-owner" / "test-repo.git"
         empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
         env = {
             **os.environ,
             "GIT_AUTHOR_NAME": author or "Test", "GIT_AUTHOR_EMAIL": "test@example.com",
-            "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": committer or "Test", "GIT_COMMITTER_EMAIL": "test@example.com",
         }
         # ⛔ THE COMMIT IS BUILT IN THE ORIGIN, not in the clone: `update-ref` in a bare
         # repo cannot point at an object its own odb does not have, and `commit-tree` in
@@ -9360,22 +9365,58 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("s left", basis, f"no countdown from a junk token:\n{basis}")
 
     def test_a_cr_inside_the_minted_line_is_not_a_line_boundary(self):
-        """`\r` is deleted by `claims.sh:_lease_of`; Python's decoder turns it into a LINE BREAK.
+        """`\r` is DELETED by `claims.sh:_lease_of` — AFTER the boundary is found, in that order.
 
-        So `claim lease_until=<past>\rlease_until=<future>` is ONE line for the authority (whose
-        `sed` finds no whole-token match → `0` → unparseable → LIVE) and TWO for any Python reader,
-        which took the first and freed the claim. `_run` decodes with universal newlines, so the CR
-        is already `\n` here and cannot be told apart from a real break — which is why the rule is
-        the fail-closed one: a lease token after the minted line abstains, exactly as `_lease_of`
-        answers for the CR-split.
+        `_lease_of:1146` is `sed -n '/^$/,$p' | tail -n +2 | tr -d '\r'`: the first EMPTY line of
+        the RAW object is the boundary, and CRs are deleted from the body only afterwards. This
+        reader now reproduces that order exactly, so `claim lease_until=<past>\rlease_until=<future>`
+        fuses into ONE token (`tr -d` deletes without substituting a space) and matches no
+        whole-token lease — the owner's own answer. Measured on a real object: `_lease_of` →
+        `?\t0`, `_claim_lease_state` → `unreadable`, i.e. LIVE.
+
+        This row used to assert the "a line AFTER the minted one" abstention, which was the
+        fail-closed stand-in for a CR the tool could not delete: under universal-newline decoding
+        the CR had already become `\n`. The read is byte-faithful now, so the CR is deleted here as
+        the authority deletes it, and the answer is the same LIVE — reached by agreeing rather than
+        by abstaining.
         """
         past, future = int(time.time()) - 86400, int(time.time()) + 86400
         claimed, basis, unreadable = self.claim_read(
             message=f"claim lease_until={past}\rlease_until={future}")
         self.assertTrue(claimed, basis)
         self.assertTrue(unreadable, basis)
-        self.assertIn("AFTER the minted one", basis)
+        self.assertIn(f"cannot parse (lease_until={past}lease_until={future})", basis)
         self.assertNotIn("EXPIRED", basis, f"a CR must not free the claim:\n{basis}")
+        self.assertNotIn("s left", basis, f"no lease may be quoted here:\n{basis}")
+
+    def test_a_cr_in_a_header_cannot_move_the_body_boundary(self):
+        """The boundary is the first EMPTY line of the RAW object — a header CR cannot forge one.
+
+        `_lease_of:1146` runs `sed -n '/^$/,$p'` on the raw bytes and deletes `\r` only afterwards,
+        so `\r\r` inside a peer-writable COMMITTER name is still part of ONE header line. A reader
+        that decodes with universal newlines first turns that `\r\r` into `\n\n` — a separator the
+        authority cannot see — and then reads the forged header remainder as "the minted line".
+        Measured on the object this row builds: the universal-newline reader answered
+        `EXPIRED at 1700000000` and FREED the claim; `claims.sh` answers `_lease_of` → `?\t0`,
+        `_claim_lease_state` → `unreadable` → LIVE.
+
+        The COMMITTER name, not the author's: it is the last header line, so it is the only one
+        whose forged continuation sits immediately above the separator. The body is empty ON
+        PURPOSE — that is the shape a forged boundary needs, because with no non-blank line after
+        the forged one the after-the-minted-line abstention cannot fire (an AUTHOR-name plant leaves
+        the committer line behind, which the abstention already catches, so it is not this defect).
+        """
+        past = 1700000000
+        self.bare_origin()
+        self.set_claim_ref(
+            self.claim_sha(None, message="", committer=f"C\r\rlease_until={past}"),
+        )
+        mod = _tool_module()
+        holder = mod.StaleHolder("git", str(self.repo), ISSUE, 60, [], now=1800000000)
+        claimed, basis, unreadable = holder._claim_live()
+        self.assertTrue(claimed, basis)
+        self.assertTrue(unreadable, basis)
+        self.assertNotIn("EXPIRED", basis, f"a header CR must not free the claim:\n{basis}")
         self.assertNotIn("s left", basis, f"no lease may be quoted here:\n{basis}")
 
     def test_a_cr_splitting_off_a_non_lease_remainder_does_not_free_the_claim(self):
@@ -9384,15 +9425,16 @@ class CollisionPreflightTest(unittest.TestCase):
         Review round 3's finding: the narrower predicate ("a lease token after the minted line")
         read `claim owner=box-a lease_until=<past>\rjunk` as a clean expired lease and FREED it,
         while `claims.sh:_lease_of` joins the halves into `lease_until=<past>junk`, finds no
-        whole-token match, and answers unparseable → LIVE. The remainder's SHAPE must not decide,
-        because the divergence is the boundary itself.
+        whole-token match, and answers unparseable → LIVE. The remainder's SHAPE must not decide —
+        and now that the read is byte-faithful the tool joins the halves the same way, so it
+        reaches the same unparseable answer instead of the abstention that used to stand in for it.
         """
         past = int(time.time()) - 86400
         claimed, basis, unreadable = self.claim_read(
             message=f"claim owner=box-a lease_until={past}\rjunk")
         self.assertTrue(claimed, basis)
         self.assertTrue(unreadable, basis)
-        self.assertIn("AFTER the minted one", basis)
+        self.assertIn(f"cannot parse (lease_until={past}junk)", basis)
         self.assertNotIn("EXPIRED", basis, f"a CR must not free the claim:\n{basis}")
         self.assertNotIn("s left", basis, f"no lease may be quoted here:\n{basis}")
 

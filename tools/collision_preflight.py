@@ -1322,6 +1322,48 @@ def _run(cmd: list[str], cwd: str, timeout: float, env: dict | None = None):
         )
 
 
+def _run_untranslated(cmd: list[str], cwd: str, timeout: float,
+                      env: dict[str, str] | None = None) -> tuple[int, str, str, bool]:
+    """`_run`, but WITHOUT newline translation — the bytes exactly as git wrote them.
+
+    `_run` decodes with `text=True`, and Python's universal-newline mode rewrites a lone `\r`
+    to `\n`. That is harmless for a ref name or a sha, and FATAL for a parser whose boundary
+    is "the first EMPTY line": `claims.sh:_lease_of:1146` finds that boundary on the RAW
+    object (`sed -n '/^$/,$p'`)
+    and only then deletes `\r`, so a peer-chosen `\r\r` in a commit HEADER is not a line
+    break to the authority — while after universal-newline decoding it is a second `\n` and
+    manufactures a header/body separator the authority cannot see, which moves "the minted
+    line" onto a forged one (#13727 review round 8).
+
+    So the ONE caller that splits on that boundary reads through here. Everything else keeps
+    `_run`: this function exists for a byte-level distinction, not as a general replacement.
+    """
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, timeout=timeout, env=env)
+        return (
+            proc.returncode,
+            proc.stdout.decode("utf-8"),
+            proc.stderr.decode("utf-8", "replace"),
+            False,
+        )
+    except FileNotFoundError:
+        return 127, "", f"{cmd[0]}: command not found", False
+    except subprocess.TimeoutExpired:
+        return 124, "", f"timeout after {timeout:g}s", True
+    except OSError as exc:  # pragma: no cover - defensive
+        return 126, "", f"{cmd[0]}: {exc}", False
+    except UnicodeDecodeError:
+        # Same refusal as `_run`'s (#8881): a replacement character would let a read the tool
+        # cannot make look like a read it made.
+        return (
+            126,
+            "",
+            f"{cmd[0]}: output not decodable as text "
+            "— the read is refused, not guessed (#8881)",
+            False,
+        )
+
+
 # C0/C1 control characters (ESC/CSI/OSC/BEL/DEL included) are stripped from
 # every UNTRUSTED field before it reaches the report. The report IS the
 # artifact a human reads to decide "do NOT dispatch", and GitHub-sourced text
@@ -3914,7 +3956,15 @@ class StaleHolder:
         the first sha it ever saw.
         """
         moved_note = f", re-read after it moved {', '.join(moved)}" if moved else ""
-        rc, out, _err, _to = _run(
+        # ⛔ BYTE-FAITHFUL, NOT TEXT-FAITHFUL (#13727 review round 8). The boundary between the
+        # object's headers and its body is "the first EMPTY line", and `claims.sh:_lease_of` finds
+        # it on the RAW bytes before deleting `\r`. `_run`'s universal-newline decoding turns a
+        # lone `\r` into `\n`, so a `\r\r` inside a peer-chosen committer/author NAME became a
+        # `\n\n` here — a separator the authority cannot see — and the forged line after it became
+        # "the minted line", freeing a claim `claims.sh` holds. The object is immutable and named
+        # by sha, so reading it through a second, untranslated decoder is not a second observation
+        # of a moving ref (the CAS above is what binds this read to the enumeration).
+        rc, out, _err, _to = _run_untranslated(
             [self.git_bin, "cat-file", "commit", sha], self.repo, self.timeout,
         )
         if rc != 0:
@@ -3946,6 +3996,13 @@ class StaleHolder:
         # its own reader still holds it. So: lines split on `\n` only, blank test on `[ \t]`, fields
         # split on `[ \t]` — byte-for-byte the same separator set.
         body = out.split("\n\n", 1)[1] if "\n\n" in out else ""
+        # ⛔ AND `\r` IS DELETED FROM THE BODY **AFTER** THE BOUNDARY IS FOUND — the owner's own
+        # order (`claims.sh:_lease_of:1146`: `sed -n '/^$/,$p' | tail -n +2 | tr -d '\r'`). Doing
+        # it before the split would be a different reader: a lone `\r` line would collapse into an
+        # empty one and move the boundary. `tr -d` deletes without substituting a space, so the two
+        # sides of a CR-joined token fuse — `lease_until=<past>\rjunk` becomes one unparseable
+        # value in both readers, which is why the abstention below is no longer the CR defence.
+        body = body.replace("\r", "")
         lines = body.split("\n")
         minted_at = next((i for i, line in enumerate(lines) if line.strip(" \t")), None)
         minted = lines[minted_at] if minted_at is not None else ""
