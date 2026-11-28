@@ -54,13 +54,18 @@
 # DOWNTIME IS A MEASUREMENT, NOT A RECOLLECTION (#3484). "How much downtime did
 # that cost" was unanswerable without a human opening incidents one at a time:
 # the ledger carried WHEN an incident opened, and the recovery existed only in
-# the issue's `closed_at`, which nothing read. Every incident now contributes a
-# span (first_seen_down -> closed) attributed to the day it was FIRST observed,
-# with THREE states that are never collapsed into two:
-#   recovered  a bounded outage, the only kind that contributes minutes
-#   unbounded  still open, or closed with no readable stamp: contributes NO
-#              minutes and is counted in `unbounded_inc`, so a week of open
-#              outages can never read as a small number
+# the issue's `closed_at`, which nothing read. Every incident contributes the
+# span first_seen_down -> closed, attributed to the day it was FIRST observed.
+# ⛔ THE SPAN IS SPLIT BY KIND (`down_min` / `degraded_min`), because DOWN and
+# DEGRADED are different product failures and this file never sums them.
+# The per-incident state is one of four, and they are never collapsed:
+#   recovered  a bounded span; the only shape that contributes minutes
+#   unbounded  no USABLE span — still open, closed with an unreadable stamp,
+#              closed as not-a-recovery, or a recovery stamp EARLIER than the
+#              first failure. Contributes NO minutes and is counted in
+#              `unbounded_inc`, so a week of such outages can never read as a
+#              small number, and no incident can be simultaneously invisible
+#              and costed at 0 minutes
 #   excluded   closed as not_planned/duplicate by a human — NOT a recovery, and
 #              its `closed_at` is never read as one
 # The span's resolution is the probe's real cadence (printed above it): an
@@ -391,7 +396,7 @@ fetch_runs() { # reads $RUN_TMP/window_days.txt -> TSV "day<TAB>conclusion" in $
 # Search by the BODY marker + the reserved Actions login, then re-verify both
 # client-side (mirroring the watchdog's own adoption guard — the repo is
 # public, and a human-authored look-alike must never be read as machine state).
-# Writes TSV: number, kind, first_failure_ts, closed_at, state_reason, restarts_raw
+# Writes TSV: number, kind, first_failure_ts, closed_at, state_reason, state, restarts_raw
 #
 # WHY `closed_at` (#3484) — downtime was the one bucket figure nobody could
 # answer: the ledger records WHEN an incident opened (`first_failure_ts`), and
@@ -428,11 +433,17 @@ fetch_incidents() {
       | (grab("watchdog-state[^>]*restarts=(?<v>[^>]*)")) as $r
       | ((.closed_at // "") | tostring) as $c
       | ((.state_reason // "") | tostring) as $y
+      | ((.state // "") | tostring) as $s
       | [ (.number | tostring),
           (($k // "-") | ascii_downcase),
           ($f // "-"),
           (if $c == "" then "-" else $c end),
           (if $y == "" then "-" else $y end),
+          # `state` is what separates "still down" from "closed, but the recovery stamp is
+          # unreadable". Without it the printer could only guess, and the guess it made was
+          # the worst one available: asserting, for a CLOSED incident, that the service is
+          # down right now with an elapsed time that grows for ever (review P2).
+          (if $s == "" then "-" else $s end),
           # `-` is the sentinel; a PRESENT-but-empty restarts= also normalizes to
           # "". Both reach bash as `-`/"" in the LAST field, which is where an
           # empty value is safe: bash `read` with IFS=<tab> collapses an empty
@@ -448,12 +459,15 @@ fetch_incidents() {
   # day an incident belongs to (they did: bucketing compared a raw epoch against
   # a formatted day and every incident column silently read 0).
   : > "$RUN_TMP/incidents.tsv"
-  local inc_n inc_kind inc_ts inc_closed inc_reason inc_rest inc_day
+  local inc_n inc_kind inc_ts inc_closed inc_reason inc_state inc_rest inc_day
   local inc_ff inc_end
-  while IFS="$(printf '\t')" read -r inc_n inc_kind inc_ts inc_closed inc_reason inc_rest; do
+  while IFS="$(printf '\t')" read -r inc_n inc_kind inc_ts inc_closed inc_reason inc_state inc_rest; do
     [ -n "$inc_n" ] || continue
     [ "$inc_kind" = "-" ] && inc_kind="unknown"
     [ "$inc_rest" = "-" ] && inc_rest=""
+    # ⛔ `state` KEEPS its `-` sentinel: an EMPTY MIDDLE field is collapsed by `read`, which
+    # would shift `restarts` into the wrong column — the `#3896` P2-3 trap, one field over.
+    [ -n "${inc_state:-}" ] || inc_state="-"
     inc_day="n/a"
     inc_ff="-"
     case "${inc_ts:-}" in
@@ -484,8 +498,8 @@ fetch_incidents() {
         esac
         ;;
     esac
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$inc_n" "$inc_kind" "$inc_day" "$inc_ff" "$inc_end" "${inc_rest:-}" >> "$RUN_TMP/incidents.tsv"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$inc_n" "$inc_kind" "$inc_day" "$inc_ff" "$inc_end" "${inc_state}" "${inc_rest:-}" >> "$RUN_TMP/incidents.tsv"
   done < "$RUN_TMP/incidents.raw.tsv"
   return 0
 }
@@ -594,10 +608,10 @@ render_record() { # <days> <now>
 
   local total_intended=0 total_delivered=0 total_failed=0 total_inconclusive=0
   local total_down_inc total_degraded_inc total_unknown_inc total_restarts undated_inc
-  local total_down_min=0 total_unbounded=0 total_recovered=0
+  local total_down_min=0 total_degraded_min=0 total_unbounded=0 total_recovered=0
   local zero_days=0 partial_days=0 gap_days_list="" inconclusive_kinds=""
   local day day_intended day_mark d_del d_fail d_inc d_decided del_ok
-  local line inc_line inc_down inc_deg inc_unk d_rest d_dmin d_open d_rec pct_avail
+  local line inc_line inc_down inc_deg inc_unk d_rest d_dmin d_gmin d_open d_rec pct_avail
 
   printf 'availability record — RECORD-ONLY baseline (#3810) — INSTRUMENT, NOT A GATE\n'
   printf 'generated: %s   window: %s UTC day(s) ending %s\n' "$(fmt_iso "$now")" "$days" "$today"
@@ -624,18 +638,22 @@ render_record() { # <days> <now>
   # Per-day incident counts (bucketed by first_failure_ts — the day the
   # incident was FIRST observed, i.e. the day whose availability it explains).
   # Columns emitted: day, down, degraded, unknown, restart_attempts,
-  #                  downtime_min (RECOVERED only), open (no bounded end),
-  #                  recovered (count of incidents that contributed minutes).
-  # `downtime_min` is integer minutes and is attributed WHOLE to the day the
-  # incident was first observed, the same convention the incident counts above
-  # already use — an incident that straddles midnight does not get split, and the
-  # day column therefore cannot disagree with the total that summarizes it.
+  #                  down_min (DOWN only, RECOVERED only), degraded_min (same rule),
+  #                  unbounded (no usable span), recovered (count that contributed minutes).
+  # ⛔ THE SPAN IS SPLIT BY KIND, because this file's own invariant (`:51-52`) says DOWN
+  # and DEGRADED are different product failures and are NEVER SUMMED. The first cut of this
+  # aggregation summed both into `down_min`, which would have published "67 minutes of downtime"
+  # on a day with zero DOWN incidents (ledger #11442, 2026-11-07) — and the harness could not
+  # see it, because every fixture with a `closed_at` was `kind=down` (review P1).
+  # ⛔ AND A SPAN THAT CANNOT BE USED IS DISCLOSED, NEVER DROPPED: an incident whose recovery
+  # stamp is missing (`-`), a non-recovery (`x`), or NUMERIC BUT EARLIER THAN the first failure
+  # lands in `unbounded`, so no incident can be both invisible and costed at 0 minutes (review P2).
   awk -F'\t' '{ day = $3; if (day == "" || day == "n/a") next;
                 if ($2 == "down") dn[day]++; else if ($2 == "degraded") dg[day]++; else un[day]++;
-                n = split($6, a, ","); c = 0; for (i = 1; i <= n; i++) if (a[i] != "") c++;
+                n = split($7, a, ","); c = 0; for (i = 1; i <= n; i++) if (a[i] != "") c++;
                 rs[day] += c; seen[day] = 1;
-                if ($4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ && $5 >= $4) { dm[day] += int(($5 - $4) / 60); rc[day]++ } else if ($5 == "-" || $5 == "x") { op[day]++ } }
-              END { for (k in seen) printf "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", k, dn[k]+0, dg[k]+0, un[k]+0, rs[k]+0, dm[k]+0, op[k]+0, rc[k]+0 }' \
+                if ($4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ && $5 >= $4) { if ($2 == "down") { dm[day] += int(($5 - $4) / 60); rc[day]++ } else if ($2 == "degraded") { gm[day] += int(($5 - $4) / 60) } else { op[day]++ } } else { op[day]++ } }
+              END { for (k in seen) printf "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", k, dn[k]+0, dg[k]+0, un[k]+0, rs[k]+0, dm[k]+0, gm[k]+0, op[k]+0, rc[k]+0 }' \
     "$RUN_TMP/incidents.tsv" > "$RUN_TMP/day_incidents.tsv" 2>/dev/null || : > "$RUN_TMP/day_incidents.tsv"
 
   # Incidents that could not be dated AT ALL have no day to be bucketed into,
@@ -649,10 +667,9 @@ render_record() { # <days> <now>
   total_down_inc=0 total_degraded_inc=0 total_unknown_inc=0 total_restarts=0
 
   # ── per-day table ──
-  printf '%-12s %-9s %-9s %-9s %-9s %-10s %-56s %-9s %-13s %-12s %-9s %-9s %s\n' \
-    'UTC day' 'delivered' 'intended' 'cadence' 'failed' 'inconcl.' 'sampled_availability (printed WITH its resolution)' 'down_inc' 'degraded_inc' 'unknown_inc' 'restarts' 'down_min' 'unbounded_inc'
-  printf -- '-%.0s' $(seq 1 180); printf '\n'
-  printf -- '-%.0s' $(seq 1 160); printf '\n'
+  printf '%-12s %-9s %-9s %-9s %-9s %-10s %-56s %-9s %-13s %-12s %-9s %-9s %-13s %s\n' \
+    'UTC day' 'delivered' 'intended' 'cadence' 'failed' 'inconcl.' 'sampled_availability (printed WITH its resolution)' 'down_inc' 'degraded_inc' 'unknown_inc' 'restarts' 'down_min' 'degraded_min' 'unbounded_inc'
+  printf -- '-%.0s' $(seq 1 190); printf '\n'
 
   # Iterate the SAME day list the fetch walked, oldest first.
   while IFS= read -r day; do
@@ -664,14 +681,15 @@ render_record() { # <days> <now>
     d_fail="$(printf '%s' "$line" | cut -f2)"
     d_inc="$(printf '%s' "$line" | cut -f3)"
     d_decided=$(( d_del - d_inc ))
-    inc_line="$(awk -F'\t' -v d="$day" '$1 == d { print $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 "\t" $7 "\t" $8; found = 1 } END { if (!found) print "0\t0\t0\t0\t0\t0\t0" }' "$RUN_TMP/day_incidents.tsv")"
+    inc_line="$(awk -F'\t' -v d="$day" '$1 == d { print $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 "\t" $7 "\t" $8 "\t" $9; found = 1 } END { if (!found) print "0\t0\t0\t0\t0\t0\t0\t0" }' "$RUN_TMP/day_incidents.tsv")"
     inc_down="$(printf '%s' "$inc_line" | cut -f1)"
     inc_deg="$(printf '%s' "$inc_line" | cut -f2)"
     inc_unk="$(printf '%s' "$inc_line" | cut -f3)"
     d_rest="$(printf '%s' "$inc_line" | cut -f4)"
     d_dmin="$(printf '%s' "$inc_line" | cut -f5)"
-    d_open="$(printf '%s' "$inc_line" | cut -f6)"
-    d_rec="$(printf '%s' "$inc_line" | cut -f7)"
+    d_gmin="$(printf '%s' "$inc_line" | cut -f6)"
+    d_open="$(printf '%s' "$inc_line" | cut -f7)"
+    d_rec="$(printf '%s' "$inc_line" | cut -f8)"
 
     total_delivered=$((total_delivered + d_del))
     total_failed=$((total_failed + d_fail))
@@ -682,6 +700,7 @@ render_record() { # <days> <now>
     total_unknown_inc=$((total_unknown_inc + inc_unk))
     total_restarts=$((total_restarts + d_rest))
     total_down_min=$((total_down_min + d_dmin))
+    total_degraded_min=$((total_degraded_min + d_gmin))
     total_unbounded=$((total_unbounded + d_open))
     total_recovered=$((total_recovered + d_rec))
 
@@ -705,11 +724,11 @@ render_record() { # <days> <now>
       del_ok=$(( d_del - d_fail - d_inc ))
       pct_avail="$(pct "$del_ok" "$d_decided")% (delivered=${d_del}/${day_intended} cadence=$(pct "$d_del" "$day_intended")% decided=${d_decided}/${d_del})"
     fi
-    printf '%-12s %-9s %-9s %-9s %-9s %-10s %-56s %-9s %-13s %-12s %-9s %-9s %s\n' \
-      "$day$day_mark" "$d_del" "$day_intended" "$(pct "$d_del" "$day_intended")%" "$d_fail" "$d_inc" "$pct_avail" "$inc_down" "$inc_deg" "$inc_unk" "$d_rest" "$d_dmin" "$d_open"
+    printf '%-12s %-9s %-9s %-9s %-9s %-10s %-56s %-9s %-13s %-12s %-9s %-9s %-13s %s\n' \
+      "$day$day_mark" "$d_del" "$day_intended" "$(pct "$d_del" "$day_intended")%" "$d_fail" "$d_inc" "$pct_avail" "$inc_down" "$inc_deg" "$inc_unk" "$d_rest" "$d_dmin" "$d_gmin" "$d_open"
   done < "$RUN_TMP/window_days.txt"
 
-  printf -- '-%.0s' $(seq 1 180); printf '\n'
+  printf -- '-%.0s' $(seq 1 190); printf '\n'
   local total_decided=$(( total_delivered - total_inconclusive )) total_avail
   if [ "$total_delivered" -le 0 ]; then
     total_avail="n/a (delivered=0/${total_intended} cadence=$(pct 0 "$total_intended")%)"
@@ -718,9 +737,9 @@ render_record() { # <days> <now>
   else
     total_avail="$(pct "$(( total_delivered - total_failed - total_inconclusive ))" "$total_decided")% (delivered=${total_delivered}/${total_intended} cadence=$(pct "$total_delivered" "$total_intended")% decided=${total_decided}/${total_delivered})"
   fi
-  printf '%-12s %-9s %-9s %-9s %-9s %-10s %-56s %-9s %-13s %-12s %-9s %-9s %s\n' \
+  printf '%-12s %-9s %-9s %-9s %-9s %-10s %-56s %-9s %-13s %-12s %-9s %-9s %-13s %s\n' \
     'TOTAL' "$total_delivered" "$total_intended" "$(pct "$total_delivered" "$total_intended")%" "$total_failed" "$total_inconclusive" \
-    "$total_avail" "$total_down_inc" "$total_degraded_inc" "$total_unknown_inc" "$total_restarts" "$total_down_min" "$total_unbounded"
+    "$total_avail" "$total_down_inc" "$total_degraded_inc" "$total_unknown_inc" "$total_restarts" "$total_down_min" "$total_degraded_min" "$total_unbounded"
 
   printf '\n'
   printf '  * today (%s) is IN PROGRESS: intended=%s counts only the cron intervals elapsed since 00:00 UTC, so that row is not comparable to a complete day.\n' "$today" "$today_intended"
@@ -747,11 +766,11 @@ render_record() { # <days> <now>
   printf '\n'
   printf 'INCIDENTS — from ledger issues carrying %s (kind and restarts read from each state block).\n' "$INCIDENT_STATE_MARKER"
   printf 'DOWN (no answer) and DEGRADED (answered wrongly) are SEPARATE product failures and are never summed.\n'
-  printf 'DOWN_MIN = minutes of OBSERVED downtime (first_seen_down -> the probe confirming recovery, i.e. the issue closed), attributed WHOLE to the day the incident was first observed. UNBOUNDED_INC = incidents from that day whose outage has NO bounded end (still open, or closed as not-a-recovery): they contribute NO minutes, so DOWN_MIN is a LOWER BOUND wherever UNBOUNDED_INC > 0. Resolution = the probe cadence printed above — a span shorter than one probe interval cannot be told apart from one interval.\n'
+  printf 'DOWN_MIN = minutes of OBSERVED downtime for DOWN incidents only (first_seen_down -> the probe confirming recovery, i.e. the issue closed), attributed WHOLE to the day the incident was first observed. DEGRADED_MIN is the same measure for DEGRADED incidents, in its OWN column — DOWN and DEGRADED are never summed. UNBOUNDED_INC = incidents whose outage has no USABLE span (still open, closed with an unreadable stamp, closed as not-a-recovery, or a recovery stamp that precedes the first failure): they contribute NO minutes and are disclosed here, so DOWN_MIN is a LOWER BOUND wherever UNBOUNDED_INC > 0. Resolution = the probe cadence printed above — a span shorter than one probe interval cannot be told apart from one interval.\n'
   printf '  incident totals: down=%s degraded=%s unknown=%s restart_attempts=%s\n' \
     "$total_down_inc" "$total_degraded_inc" "$total_unknown_inc" "$total_restarts"
-  printf '  recovered downtime: %s min over %s incident(s) first observed in this window; %s incident(s) have NO bounded end (still open, or closed as not-a-recovery) and contribute NOTHING — they are a lower bound, never an availability claim.\n' \
-    "$total_down_min" "$total_recovered" "$total_unbounded"
+  printf '  recovered downtime: %s min DOWN and %s min DEGRADED (never summed) over %s incident(s) first observed in this window; %s incident(s) have NO usable span and contribute NOTHING — they are a lower bound, never an availability claim.\n' \
+    "$total_down_min" "$total_degraded_min" "$total_recovered" "$total_unbounded"
   printf '  (those totals are WINDOW-SCOPED — summed from the day columns above. The list below covers the\n'
   printf '   whole ledger, so it can name an incident that is outside this window.)\n'
   if [ "$undated_inc" -gt 0 ]; then
@@ -760,8 +779,8 @@ render_record() { # <days> <now>
   if [ ! -s "$RUN_TMP/incidents.tsv" ]; then
     printf '  (none found in the ledger)\n'
   else
-    local inc_n inc_kind inc_day inc_ff inc_end inc_rest rest_disp restart_count down_disp
-    while IFS="$(printf '\t')" read -r inc_n inc_kind inc_day inc_ff inc_end inc_rest; do
+    local inc_n inc_kind inc_day inc_ff inc_end inc_state inc_rest rest_disp restart_count down_disp
+    while IFS="$(printf '\t')" read -r inc_n inc_kind inc_day inc_ff inc_end inc_state inc_rest; do
       [ -n "$inc_n" ] || continue
       [ -n "$inc_day" ] || inc_day="n/a"
       if [ "$inc_day" = "n/a" ]; then
@@ -774,12 +793,19 @@ render_record() { # <days> <now>
       restart_count="$(printf '%s' "$inc_rest" | tr ',' '\n' | grep -c '[0-9]' || true)"
       # The per-incident span, so the day totals above are AUDITABLE line by line
       # rather than a number the reader has to take on faith.
+      # ⛔ "STILL DOWN" AND "CLOSED, STAMP UNREADABLE" ARE DIFFERENT CLAIMS (review P2).
+      # Both reach here as `inc_end == "-"`, so the label is chosen from `state`, not guessed:
+      # asserting that a CLOSED incident is down right now — with a `now - first_failure`
+      # elapsed time that grows for ever — is the most consequential false statement an
+      # availability record can make, and it was what the first cut printed.
       case "$inc_end" in
         -|'')
-          if [ "$inc_ff" != "-" ]; then
-            down_disp="open (>= $(( ($(now_epoch) - inc_ff) / 60 )) min elapsed, NOT counted)"
-          else
+          if [ "$inc_ff" = "-" ]; then
             down_disp="unknown (no first_failure_ts)"
+          elif [ "$inc_state" = "closed" ]; then
+            down_disp="closed, recovery stamp unreadable (NOT counted as downtime)"
+          else
+            down_disp="open (>= $(( ($(now_epoch) - inc_ff) / 60 )) min elapsed, NOT counted)"
           fi
           ;;
         x) down_disp="excluded (closed as not_planned/duplicate — not a recovery)" ;;
@@ -787,7 +813,7 @@ render_record() { # <days> <now>
           if [ "$inc_ff" != "-" ] && [ "$inc_end" -ge "$inc_ff" ]; then
             down_disp="$(( (inc_end - inc_ff) / 60 )) min"
           else
-            down_disp="unknown (recovery stamp precedes the first failure)"
+            down_disp="unusable (recovery stamp precedes the first failure — NOT counted)"
           fi
           ;;
       esac
