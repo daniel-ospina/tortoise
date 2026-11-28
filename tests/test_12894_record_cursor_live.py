@@ -1425,15 +1425,23 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
                 "the ENUMERATED arm stopped qualifying the heal by the FORM "
                 "the cursor row allows — this sentence refuses a plain replay "
                 f"in its own last clause: {text[-400:]!r}")
-            # ⛔ THE UNCONDITIONAL FORM CANNOT COME BACK (review P2, round 38).
-            # The last clause of THIS sentence refuses an enumerated replay that
-            # carries a position on a cut-over graph, so the bare claim promises
-            # a heal the same sentence withholds.
-            assert "an OUTAGE is healed by a replay;" not in text, (
-                "the ENUMERATED arm is back to the UNCONDITIONAL heal claim, "
-                "which its own cutover clause contradicts: "
-                f"{text[-400:]!r}")
-            assert "statement that EXECUTED and failed re-fails" in text, (
+            # ⛔ COUNT-BASED, NOT SPELLING-BASED (review P3, round 39). A
+            # `; `-bound negative let the unconditional claim back in with a
+            # period, shipping BOTH the bare and the qualified claim with the
+            # leg green (measured: `1 passed`). One occurrence is the qualified
+            # form itself; any re-added bare claim makes it two. The
+            # retryable-half negative is spelled twice for this same reason.
+            assert text.count("an OUTAGE is healed by a replay") == 1, (
+                "the ENUMERATED arm states the heal claim more than once — "
+                "which FORM follows the cursor row is the ONLY heal it may "
+                f"state: {text[-400:]!r}")
+            # The twin of the ARMED arm's consequence pin, widened the same way
+            # (review P3, round 39): the needle used to stop at "re-fails", so
+            # deleting "until its own cause … is fixed" left the leg GREEN.
+            assert (
+                "statement that EXECUTED and failed re-fails until its own "
+                "cause (its data or a constraint) is fixed"
+            ) in text, (
                 "the ENUMERATED arm still promises a heal to a statement that "
                 "executed and failed — a `RecordStatementError` re-fails on a "
                 f"replay: {text[-400:]!r}")
