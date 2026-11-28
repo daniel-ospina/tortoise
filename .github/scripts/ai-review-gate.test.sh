@@ -71,7 +71,7 @@
 #   (i3) verdict=clean-low on both acceptance paths (#4755)
 #   (t) acceptance rule (c) (#4255) — the PATCH projection survives a base advance:
 #       pinned projection vectors (reviewed/live/edited/whitespace/renamed/deleted),
-#       the anti-vacuity pairs, and (t1)-(t10)/(t20)-(t26) the end-to-end cases: the carry, the
+#       the anti-vacuity pairs, and (t1)-(t10)/(t20)-(t26), incl. (t20b) the end-to-end cases: the carry, the
 #       three fail-closed arms, the probe cost bounds, the ANCHOR, the ANCESTRY and
 #       authored-commit preconditions and their mutations, one HMAC verifier, the
 #       relocation refusal, and every refusal's operator-facing diagnostic
@@ -1509,8 +1509,9 @@ if [[ "$CAP_PIN" =~ ^[0-9]+$ ]]; then
     # makes up to FOUR calls per probe (ancestry read, base sha, reviewed diff) and
     # ALL of them are repo-scoped `gh api` calls against the shared budget — so the
     # assertion is two-sided: the EXPENSIVE per-probe compare is exactly CAP_PIN, and
-    # the rule-(c) call total is bounded by 3 x CAP_PIN. Counting `/compare/` alone
-    # would have read a correct 3-call probe as a cap violation (measured: 16 for 8).
+    # the rule-(c) call total is bounded by 4 x CAP_PIN. Counting `/compare/` alone
+    # would have read a correct multi-call probe as a cap violation (measured: 16 for 8
+    # when it was three calls and the comment said two).
     _t9_cap_compares="$(grep -cE -- "compare/${BASE_SHA}\.\.\." "$T/gh.log" || true)"
     _t9_cap_all="$(grep -cE -- '/compare/|--jq \.base\.sha' "$T/gh.log" || true)"
     if [ "$_t9_cap_compares" -eq "$CAP_PIN" ]; then
@@ -1943,6 +1944,21 @@ else
 fi
 
 
+# (e) BRANCH-SIDE TRUNCATION, the mirror of (d): if the branch-side page omits a sha,
+# an AUTHORED commit would look like one the base brought in — the exact failure this
+# guard exists to prevent — so a short page must refuse, not pass. This row is what
+# makes the branch-side guard observable: without it, reverting it to the old
+# `<= 250` test left the whole suite green (measured by the next review).
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" \
+    STUB_ANCESTOR_STATUS=ahead STUB_ANCESTOR_TOTAL=1 STUB_ANCESTOR_SEEN=1 \
+    STUB_ANCESTOR_COMMITS="${NEWC}:2" STUB_BRANCH_TOTAL=9 STUB_BRANCH_COUNT=1 \
+    STUB_BRANCH_SHAS="$NEWC" \
+    run_gate "$T/body-t23"
+assert_rc 1 "(t23) a TRUNCATED BRANCH-SIDE list refuses too (a missing sha must never read as 'came from the base')"
+assert_contains "(t23) …with the same 'could not READ' diagnosis" "could not READ this PR's commit graph"
+
+
 # ── (t24) AN UNREADABLE ANCESTRY ANSWER IS NOT A REWRITE (review cycle 2, P2) ──
 # A 502 on the compare call used to fall into the same branch as `diverged` and print
 # "the branch was REWRITTEN (force-push / rebase / amend)" — a false statement about
@@ -1969,40 +1985,56 @@ assert_contains "(t25) …and the log SAYS the anchor held but the projection di
 
 
 # ── (t20b) THE FRAME IS A STRING, NOT A POSITION — the DECLARED residual ─────
-# ⛔ THE LIMIT THIS PINS, MEASURED (final review of #4255). `(t20)` refuses a relocation
-# between `def alpha()` and `def zulu()` — DIFFERENT heading text. Two DISTINCT scopes
-# that happen to share the SAME text (two `def handler(event):` at column 0, two
-# duplicate markdown headings, or two letter-initial lines in a driverless text file)
-# render the SAME frame, so a relocation between them projects IDENTICALLY.
-# This is NOT closable inside the projection: the reviewed and live diffs each carry one
-# hunk, so an ordinal matches too, and a pre-image line number is exactly the
-# base-move-sensitive datum the projection exists to drop. It is bounded OUTSIDE it — by
-# the ancestry and authored-commit shape checks — and the row exists so the limit cannot
-# quietly turn back into a claim of coverage (it asserted refusal until this row).
+# ⛔ THE LIMIT THIS PINS, MEASURED. `(t20)` refuses a relocation between `def alpha()`
+# and `def zulu()` — DIFFERENT heading text. Two DISTINCT scopes that share the SAME
+# text (two `def handler(event):` at column 0, two duplicate markdown headings, two
+# letter-initial lines in a driverless text file) render the SAME frame, so a
+# relocation between them projects IDENTICALLY.
+#
+# ⛔ AND A FIRST VERSION OF THIS ROW WAS VACUOUS — measured by the next review. It used
+# a pair differing ONLY in the hunk's line numbers, and the BINDING normalizer rewrites
+# `@@ -a,b +c,d @@` to `@@ -0,b +0,d @@`, so the two sides normalized to the SAME digest
+# and the carry came from rule (b) (`passed via diff match`) with rule (c) never
+# consulted — the row passed with the patch arm entirely disabled. The fixtures below
+# therefore ALSO differ in a CONTEXT line (which the binding KEEPS and the patch DROPS),
+# so the binding moves and rule (c) is genuinely the arm under test.
+#
+# What actually bounds the residual is the two SHAPE checks, and rows (c)/(d) below prove
+# they do: a merge advances, an authored commit or a rewrite does not.
 DUP_SCOPE_REVIEWED="$T/dup-scope-reviewed.diff"
 cat > "$DUP_SCOPE_REVIEWED" <<'DIFFEOF'
 diff --git a/h.py b/h.py
 index 1111111..2222222 100644
 --- a/h.py
 +++ b/h.py
-@@ -2,3 +2,4 @@ def handler(event):
+@@ -2,4 +2,5 @@ def handler(event):
      a1
      a2
 +AUDIT()
      a3
+     a4
 DIFFEOF
+# ⛔ THE PAIR MUST DIFFER IN CONTEXT, NOT ONLY IN LINE NUMBERS. A first version of this
+# row differed only in the `@@ -a,b` numbers, which the BINDING normalizer rewrites to
+# `@@ -0,b …` — so both sides normalized to the SAME digest, rule (b) carried it
+# (`passed via diff match`), rule (c) was never consulted, and the row stayed green with
+# the patch arm entirely disabled (measured by the next review). The context line
+# `a4` -> `a9` is KEPT by the binding and DROPPED by the patch projection, which is
+# exactly the split this section needs.
 DUP_SCOPE_LIVE="$T/dup-scope-live.diff"
 cat > "$DUP_SCOPE_LIVE" <<'DIFFEOF'
 diff --git a/h.py b/h.py
 index 3333333..4444444 100644
 --- a/h.py
 +++ b/h.py
-@@ -40,3 +40,4 @@ def handler(event):
+@@ -40,4 +40,5 @@ def handler(event):
      a1
      a2
 +AUDIT()
      a3
+     a9
 DIFFEOF
+DUP_SCOPE_ANCHOR="$(normalize_review_diff < "$DUP_SCOPE_REVIEWED" | openssl dgst -sha256 | awk '{print $NF}')"
 _dup_r="$(patch_projection_review_diff < "$DUP_SCOPE_REVIEWED" | openssl dgst -sha256 | awk '{print $NF}')"
 _dup_l="$(patch_projection_review_diff < "$DUP_SCOPE_LIVE" | openssl dgst -sha256 | awk '{print $NF}')"
 if [ "$_dup_r" = "$_dup_l" ]; then
@@ -2010,13 +2042,31 @@ if [ "$_dup_r" = "$_dup_l" ]; then
 else
     bad "(t20b) the two same-text scopes now project DIFFERENTLY — the residual is gone; update the docs bullet that declares it (do not leave them claiming a limit the code no longer has)"
 fi
-DUP_SCOPE_ANCHOR="$(normalize_review_diff < "$DUP_SCOPE_REVIEWED" | openssl dgst -sha256 | awk '{print $NF}')"
+# The binding MUST move, or rule (b) answers first and this section tests nothing.
+_dup_bn_r="$(normalize_review_diff < "$DUP_SCOPE_REVIEWED" | openssl dgst -sha256 | awk '{print $NF}')"
+_dup_bn_l="$(normalize_review_diff < "$DUP_SCOPE_LIVE" | openssl dgst -sha256 | awk '{print $NF}')"
+if [ "$_dup_bn_r" != "$_dup_bn_l" ]; then
+    ok "(t20b) …and the BINDING moves on the same pair, so rule (b) cannot carry it and rule (c) is the arm under test"
+else
+    bad "(t20b) the binding is UNCHANGED on this pair, so rule (b) would answer first — this row would pass with the patch arm disabled (that was the first version of it)"
+fi
 printf '%s\n' "$(diff_marker "$STALE" "$DUP_SCOPE_ANCHOR")" > "$T/body-t20b"
+# (a) The DECLARED residual, asserted as such: on an ADVANCED branch it carries.
 STUB_DIFF_FILE="$DUP_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
     STUB_COMPARE_FILE="$DUP_SCOPE_REVIEWED" run_gate "$T/body-t20b"
-# ⛔ ASSERTED AS THE RESIDUAL, NOT AS DESIRABLE BEHAVIOUR: this carry is the documented
-# limit, and the row is what makes it visible if the docs ever claim otherwise.
-assert_rc 0 "(t20b) …and it CARRIES (the declared residual, bounded only by the ancestry + authored-commit checks — not by the frame)"
+assert_rc 0 "(t20b) …and on a branch that merely ADVANCED it CARRIES — the residual is real and is declared, not hidden"
+assert_contains "(t20b) …via the PATCH arm (not rule (b), which the binding change already excluded)" "passed via PATCH match"
+# (b) …and it is BOUNDED: a rewritten branch is refused, so the shape checks really do
+# reach this sub-class (the claim the docs make).
+STUB_DIFF_FILE="$DUP_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$DUP_SCOPE_REVIEWED" STUB_ANCESTOR_STATUS=diverged run_gate "$T/body-t20b"
+assert_rc 1 "(t20b) …and a REWRITTEN branch is refused, so the residual is bounded by the shape checks after all"
+# (c) …and an authored commit after the review is refused too.
+STUB_DIFF_FILE="$DUP_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$DUP_SCOPE_REVIEWED" \
+    STUB_ANCESTOR_STATUS=ahead STUB_ANCESTOR_TOTAL=1 STUB_ANCESTOR_SEEN=1 \
+    STUB_ANCESTOR_COMMITS="ffffffffffff:1" STUB_BRANCH_SHAS="ffffffffffff" run_gate "$T/body-t20b"
+assert_rc 1 "(t20b) …and an authored commit after the review is refused"
 
 
 # ── (t26) REPEATED RECORDS COST ONE PROBE — AND WHAT IS NOT ATTRIBUTABLE ─────

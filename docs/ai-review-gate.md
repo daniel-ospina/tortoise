@@ -142,13 +142,21 @@ entry condition closes that path.
   **What the patch arm does NOT do.** Its residual is narrower than "position
   blind" but it is not zero, and it is declared rather than hidden:
 
-  - **A relocation WITHIN one scope** (or within a heading-less file) still
-    projects identically, so it is caught only by the shape checks above — i.e. it
-    needs the branch to have gained a non-merge commit, or its history to have been
-    rewritten. Both are refused, so the residual is: a **merge** whose conflict
-    resolution relocates the author's own lines inside one scope. Pinned as a
-    same-scope projection identity by `(t22)`/`(t23)`; the merge-resolution sub-case
-    itself is not constructed.
+  - **A relocation into a scope whose heading TEXT is unchanged** (the same function
+    signature repeated at two places, two duplicate markdown headings, two
+    letter-initial lines in a driverless text file) still projects identically — the
+    frame is a STRING, not a position (pinned by `(t20b)`, which also pins that the
+    shape checks below DO refuse it once the branch gained a non-merge commit or its
+    history was rewritten). What is left is a **merge** whose conflict resolution
+    relocates the author's own lines between such scopes.
+  - **A relocation whose hunk LINE NUMBERS are the only thing that moved** is carried
+    by **rule (b)**, not by this arm — the normalized binding digest drops hunk
+    numbers by design (#1362), so such a pair is diff-identical and rule (c) is never
+    consulted. That is a pre-existing property of the binding normalizer, unchanged
+    here, and it is NOT bounded by rule (c)'s shape checks. `(t20b)` deliberately
+    differs in a CONTEXT line so the row tests rule (c) rather than passing through
+    this path (a first version of it did not, and stayed green with the patch arm
+    disabled — measured).
   - **A base advance that rewrites the hunk's enclosing-scope heading** — git
     derives the heading from the line preceding the hunk, so inserting a column-0
     line above the change (any markdown/text file, or a new `def` above the
@@ -156,15 +164,11 @@ entry condition closes that path.
     false RED, never a pass, and it costs a fresh review on a diff nobody
     changed. The same happens when a base advance re-groups the PR's hunks. The
     heading is kept anyway because a position-blind projection accepts a change
-    that was **moved**, which is the direction a gate must not fail in.
-    A relocation into a DIFFERENT scope is refused when the **heading text** changes
-    (pinned by `(t20)`) — but the frame is a STRING, not a position: two distinct
-    scopes sharing the same heading text (two `def handler(event):`, duplicate
-    markdown headings, two letter-initial lines in a driverless text file) project
-    identically, so a relocation between them is NOT distinguished (pinned as a
-    declared residual by `(t20b)`). No position-bearing frame can close that: each
-    side carries one hunk, so an ordinal matches too, and a pre-image line number is
-    the base-move-sensitive datum the projection exists to drop.
+    that was **moved**, which is the direction a gate must not fail in. A relocation
+    whose heading TEXT changes is refused (pinned by `(t20)`); the unchanged-text case
+    is the first bullet above. No position-bearing frame can close that: each side
+    carries one hunk, so an ordinal matches too, and a pre-image line number is the
+    base-move-sensitive datum the projection exists to drop.
   - A marker minted with the producer's **legacy raw** digest cannot be anchored
     (the anchor reproduces the normalized digest) and is refused — fail-closed,
     pre-change behaviour, and no harness fixture covers that population.

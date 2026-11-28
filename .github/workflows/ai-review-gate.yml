@@ -155,8 +155,11 @@ name: ai-review-gate
 #     REFUSED — an OVER-BLOCK, i.e. the pre-#4255 verdict, never a pass. Same for
 #     any base advance that re-groups the PR's hunks (one hunk becomes two). The
 #     heading is kept anyway because it is what makes the projection
-#     POSITION-BEARING, and a position-blind projection accepts a change that
-#     was MOVED — the one direction a gate must never fail in.
+#     SCOPE-TEXT-SENSITIVE — a strictly stronger frame than none, not a position — and a
+#     position-blind projection accepts a change that was MOVED, the one direction a gate
+#     must never fail in. It refuses a relocation whenever the heading TEXT changes
+#     (`(t20)`) and not when it does not (`(t20b)`); what bounds the latter is the shape
+#     preconditions, which `(t20b)` also pins.
 # ⛔ Do NOT try to make the BINDING digest base-move invariant by dropping
 # context there: it is what `diff=` means to every producer in the fleet, and
 # changing it silently invalidates every marker ever signed (the #3076 shape).
@@ -223,8 +226,7 @@ name: ai-review-gate
 # ⛔ AND SAY WHICH CASES ACTUALLY PIN THEM — this sentence used to name four and was
 # wrong in both directions (measured by the #4255 cycle-2 review): deleting the
 # SIGNATURE-FIRST check reddens §(t9) twice, §(t10) twice and §(t21) — NOT (t6)/(t8)/(t22),
-# which are about other guards (a THIRD review measured that deletion at §(t9)x2,
-# §(t10)x1, §(t21)x1 — an earlier revision of this sentence said (t10) twice).
+# which are about other guards (measured: §(t9)x2, §(t10)x2, §(t21)x1).
 # And the DEDUP half is NOT pinned: deleting the in-loop (sha,diff) `case` leaves the
 # suite green. It is REACHABLE, but only by two DISTINCT SIGNED records sharing
 # (sha,diff) — a key-holder shape no fixture constructs — because `all_markers` is
@@ -1403,7 +1405,7 @@ jobs:
             accepted_via_patch=1
           fi
           if [ "$accepted_via_patch" -eq 1 ]; then
-            echo "AI review gate passed via PATCH match: the verdict recorded against a previous head carries forward because the change this PR AUTHORED is byte-identical (the rendered diff moved — hunk context and line numbers — which is what a base advance does; every reviewed +/- line, path and whitespace is unchanged). The marker's @ sha is stale; its signed diff= was reproduced from that sha against the current base (the ANCHOR), and the patch projection matched rule (c)."
+            echo "AI review gate passed via PATCH match: the verdict recorded against a previous head carries forward because the change this PR AUTHORED is byte-identical (the rendered diff moved — hunk context and line numbers — as an advance by MERGE does; every reviewed +/- line, path and whitespace is unchanged). The marker's @ sha is stale; its signed diff= was reproduced from that sha against the current base (the ANCHOR), and the patch projection matched rule (c)."
             echo "AI review gate passed: ${marker% sig=*} (marker found in ${marker_chan})"
           elif [ "$accepted_via_diff" -eq 1 ]; then
             # New (#2982) diagnostic: explain WHY a stale-sha marker passed.
