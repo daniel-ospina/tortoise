@@ -757,7 +757,7 @@ def test_the_conjuncts_that_never_decide_on_this_run_are_still_pinned():
     #    contributed NO goal candidate at all (the fact dropped, or reworded below the
     #    0.45 candidate band) with no entity growth. `ids_b - ids_a` is then empty, so a
     #    containment test alone PASSes total loss — the acceptance gate this issue sets,
-    #    open on the worst outcome (review round 4, finding 1).
+    #    open on the worst outcome (review round 5, finding 1).
     receipt_absent = copy.deepcopy(_receipt())
     doc6_absent = next(d for d in receipt_absent["passes"][0]["documents"]
                        if d["doc_id"] == "doc-06")

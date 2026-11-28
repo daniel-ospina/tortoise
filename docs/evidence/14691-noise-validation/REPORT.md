@@ -112,9 +112,12 @@ have an endpoint the corpus never names (T5's `none` tier — a further **10** a
 re-wordings and are `paraphrase`, i.e. SUPPORTED), and **3 of 7 orphans** have a name below this band.
 
 ⛔ **Two limits of this predicate, stated rather than left to be assumed away.** (a) It is a **NAME**
-test, at **T1's restatement band (0.80)**, not T5's narrower naming band (0.60). At 0.60 `chilled-goods
-operation` (0.667) would count as traceable, so the honest count of names the corpus never says is
-**2 of 7**; at 0.80 it is **3 of 7**, which is what `RULE_T3` states and what the verdict uses. ⛔ The
+test, at **T1's restatement band (0.80)**, not T5's narrower naming band (0.60). At 0.60 only
+`the ownership map` (0.500) is still unnamed — `the cold-chain rules as operational preferences` (0.600)
+and `chilled-goods operation` (0.667) clear that band, T5's own threshold being inclusive — so the
+count is **1 of 7** there; at 0.80 it is **3 of 7**, which is what `RULE_T3` states and what the verdict
+uses. Both counts are read off `orphan_traceability[*].best_overlap` in the artifact, not restated by
+hand. ⛔ The
 tokenisation is the rule's own (`overlap()`, content tokens of >2 characters) — an earlier cut of this
 file filtered to >4-character tokens, which dropped `map` from `the ownership map` and scored that name
 1.000 instead of 0.500.

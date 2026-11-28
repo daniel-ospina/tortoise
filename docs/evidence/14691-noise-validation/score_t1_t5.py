@@ -47,7 +47,9 @@ RULE_T2 = ("PASS iff the restatement (doc-06) adds 0 new ENTITIES and every "
            "doc-06 statement of the goal resolves to an EXISTING doc-03 point id — a "
            "complete merge, one thing carrying two sources, not a second copy (this "
            "is a resolution test, not a count: the goal fact is two sentences per "
-           "wording, so a complete merge shares TWO ids and a partial one shares one); a "
+           "wording, so a complete merge shares TWO ids and a partial one shares one; "
+           "and doc-06 must contribute AT LEAST ONE goal candidate — a restatement that "
+           "produced none is FAIL, never a vacuous pass); a "
            "second same-meaning entity (an unlinked second point) is FAIL. 'Entities' "
            "here is Object + Subject, NOT Event: doc-06's first ingest is one capture, "
            "and RULE_T1 states that one Event per capture is expected rather than "
@@ -463,7 +465,7 @@ def t2(receipt: dict, corpus: dict) -> dict:
     # below the 0.45 candidate band, with no entity growth. `bool(ids_a)` is deliberately
     # NOT written: `ids_b ⊆ ids_a ∧ ids_b ≠ ∅ ⇒ ids_a ≠ ∅`, so it can never decide, and a
     # conjunct that cannot vary is dead weight in a rule a reader is asked to recompute
-    # (review round 4, finding 1 — the arm is `test_both_no_data_arms…`'s sibling below).
+    # (review round 5, finding 1 — the arm it drives sits in the conjuncts test below).
     one_goal = bool(ids_b) and not unresolved
     verdict = "PASS" if (entity_delta == 0 and one_goal) else "FAIL"
     return {
