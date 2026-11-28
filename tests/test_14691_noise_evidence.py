@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -178,7 +181,7 @@ def test_the_five_verdicts_are_the_reports_verdicts():
     tests = _score()["tests"]
     committed = {name: row["verdict"] for name, row in tests.items()}
     assert committed == {
-        "T1": "FAIL", "T2": "FAIL", "T3": "FAIL", "T4": "PASS", "T5": "PASS",
+        "T1": "FAIL", "T2": "FAIL", "T3": "FAIL", "T4": "PASS", "T5": "FAIL",
     }
     # ROW-SCOPED: a flip in one row cannot be satisfied by another row's word.
     assert _report_verdicts() == committed, (
@@ -200,17 +203,41 @@ def test_the_scorer_RECOMPUTES_the_committed_verdicts():
     """
     module = _score_module()
     receipt, corpus = _receipt(), _corpus()
-    computed = {
-        "T1": module.t1(receipt)["verdict"],
-        "T2": module.t2(receipt, corpus)["verdict"],
-        "T3": module.t3(receipt, corpus)["verdict"],
-        "T4": module.t4(receipt, corpus)["verdict"],
-        "T5": module.t5(receipt, corpus)["verdict"],
+    computed_rows = {
+        "T1": module.t1(receipt),
+        "T2": module.t2(receipt, corpus),
+        "T3": module.t3(receipt, corpus),
+        "T4": module.t4(receipt, corpus),
+        "T5": module.t5(receipt, corpus),
     }
-    assert computed == {name: row["verdict"] for name, row in _score()["tests"].items()}, (
+    computed = {name: row["verdict"] for name, row in computed_rows.items()}
+    committed = {name: row["verdict"] for name, row in _score()["tests"].items()}
+    assert computed == committed, (
         "the scorer no longer computes the verdicts its own artifact states — a rule "
         "changed under figures that were not re-derived")
     assert computed == _report_verdicts()
+    # ⛔ RULE TEXT is what REPORT §2 promises is "quoted beside" every verdict, and it
+    # was the ONE thing a committed-JSON assertion could not see: deleting T5's whole D6
+    # disclosure from the scorer left the suite green, because the tests read
+    # `score["rules"]` and never the module. A scorer whose rule has silently diverged
+    # from the artifact's is the exact defect class this bundle exists to catch.
+    assert {name: module.RULE_T1 if name == "T1" else getattr(module, f"RULE_{name}")
+            for name in ("T1", "T2", "T3", "T4", "T5")} == {
+        name: _score()["rules"][name] for name in ("T1", "T2", "T3", "T4", "T5")}, (
+        "the scorer's RULE_* text has diverged from the artifact's `rules` block — the "
+        "rule quoted beside a verdict must be the rule the scorer holds")
+    # ⛔ The MEASURED numbers, not only the verdicts. Deactivating T1's restatement
+    # detector left the suite green (T1 still FAILs on object_delta), so the bundle's
+    # headline mechanism could be broken with nothing reddening. These are recomputed
+    # from the scorer and compared to the committed artifact.
+    assert (computed_rows["T1"]["restated_points_pass_2"]["restating_a_pass_1_point"]
+            == _score()["tests"]["T1"]["restated_points_pass_2"]["restating_a_pass_1_point"])
+    assert (computed_rows["T3"]["population"]["entities_enumerated_by_full_scan"]
+            == _score()["tests"]["T3"]["population"]["entities_enumerated_by_full_scan"])
+    assert (computed_rows["T5"]["tiers"] == _score()["tests"]["T5"]["tiers"]
+            and computed_rows["T5"]["sampled"] == _score()["tests"]["T5"]["sampled"])
+    assert (computed_rows["T4"]["decision_leg"]["decision_entities"]
+            == _score()["tests"]["T4"]["decision_leg"]["decision_entities"])
 
 
 def test_every_conjunct_of_a_rule_changes_its_verdict(monkeypatch):
@@ -249,38 +276,76 @@ def test_every_conjunct_of_a_rule_changes_its_verdict(monkeypatch):
     assert row["verdict"] == "PASS", (
         "T3 fails a traceable orphan — the second conjunct is not reading the corpus")
 
-    # ── T4: every OTHER leg holds (all four layers, 6 Sources, 10 Subjects); only
-    #        the decision leg is missing (no event-kind Point), which the pre-fix
-    #        verdict ignored.
+    # ── T4: every layer leg holds (all four layers, 6 Sources); only the DECISION
+    #        leg is missing (no decision-kind entity), which the pre-fix verdict
+    #        ignored and the first repair still missed by reading a graph-wide
+    #        event-Point tally instead of the entities.
     readback_t4 = {
         "overview": {"taxonomy": {"Point": 100, "Event": 26, "Subject": 10,
                                    "Object": 25, "Source": 6},
                      "structure": {"total": 90, "operators": 30},
-                     "pointkinds": {"by_kind": {"statement": 100}},
+                     "pointkinds": {"by_kind": {"statement": 100, "event": 80}},
                      "sources": {"total": 6, "with_points": 6}},
-        "entities": [{"id": "s1", "name": "Marta Reyes", "layer": "subject"}],
+        "entities": [{"id": "s1", "name": "Marta Reyes", "layer": "subject",
+                      "kind": "core:naturalPerson"},
+                     {"id": "s2", "name": "Sales Lead", "layer": "subject",
+                      "kind": "core:role"}],
     }
-    # A decision worded in a Point, so the `decision_points` half of the leg holds and
-    # the arm isolates the event-KIND half.
-    receipt_with_decision = {"passes": [{"pass": 1, "documents": [{"doc_id": "doc-01",
-        "result": {"points": [{"kind": "event",
-                               "text": "we decided to revert to NordicFreight"}]}}]}]}
     monkeypatch.setattr(module, "load", lambda name: readback_t4)
-    row = module.t4(receipt_with_decision, _corpus())
+    row = module.t4({}, _corpus())
     assert row["flat_distribution"].get("Event") == 26, "the fixture must satisfy the layer leg"
-    assert row["decision_leg"]["event_point_kind_rows"] == 0
+    assert row["role_leg"]["graded"] is True, "the fixture must satisfy the role leg"
+    # ⛔ `event_point_kind_rows` is 80 in this fixture and its verdict is still FAIL —
+    # the pre-repair code read that tally and PASSed, which is the defect.
+    assert row["decision_leg"]["event_point_kind_rows"] == 80
+    assert row["decision_leg"]["graded"] is False
     assert row["verdict"] == "FAIL", (
-        "T4 PASSes a run whose decisions never landed as an event-kind row — the rule's "
-        "decision clause is computed and dropped")
-    readback_t4["overview"]["pointkinds"] = {"by_kind": {"event": 80}}
-    assert module.t4(receipt_with_decision, _corpus())["verdict"] == "PASS", (
-        "T4 fails with an event-kind Point present — the decision leg is not reading the "
-        "distribution")
-    # …and the leg's OTHER half: event-kind Points exist, but no decision is worded
-    # anywhere they could have landed from.
+        "T4 PASSes a run whose decisions never landed as a decision-kind ENTITY — the "
+        "rule's decision leg is computed and dropped, or graded on an unrelated tally")
+    # …and with a decision-kind entity present it must PASS, so the arm cannot be
+    #   satisfied by making T4 fail unconditionally.
+    readback_t4["entities"].append({"id": "s3", "name": "the delivery partner decision",
+                                    "layer": "object", "kind": "core:decision"})
+    row = module.t4({}, _corpus())
+    assert row["decision_leg"]["graded"] is True
+    assert row["verdict"] == "PASS", (
+        "T4 fails with a decision-kind entity present — the decision leg is not reading "
+        "the entity kinds")
+    # …and the ROLE leg's own bite: a subject-layer person does not stand in for a role.
+    readback_t4["entities"] = [readback_t4["entities"][0], readback_t4["entities"][2]]
     assert module.t4({}, _corpus())["verdict"] == "FAIL", (
-        "T4 PASSes a graph holding no decision at all — the `decision_points` half of "
-        "its decision clause is not read")
+        "T4 PASSes a graph with no `core:role` entity — any subject-layer entity is "
+        "being read as a role")
+
+    # ── T2: the rule states TWO graded legs; the committed run fails both. Force the
+    #        shared-id leg TRUE on the committed data and the verdict must STILL be FAIL
+    #        because the entity delta is non-zero — which is what proves the entity-delta
+    #        conjunct is read, the one the review measured as deletable with 21 passed.
+    readback_t2 = json.loads(json.dumps(_readback()))
+    monkeypatch.setattr(module, "load", lambda name: readback_t2)
+    receipt_t2 = json.loads(json.dumps(_receipt()))
+    base = module.t2(receipt_t2, _corpus())
+    assert base["verdict"] == "FAIL", "the committed run fails T2; the fixture starts there"
+    assert base["legs"]["exactly_one_shared_point"] is False
+    cands = _score()["tests"]["T2"]["goal_point_candidates"]
+    id_doc3 = next(c["point_id"] for c in cands if c["doc_id"] == "doc-03")
+    id_doc6 = next(c["point_id"] for c in cands if c["doc_id"] == "doc-06")
+    renamed = 0
+    # ⛔ Mutate the RECEIPT, not `points()`'s return: that helper yields `{**pt, …}`
+    # copies, so a rebind on its output never reaches the data the scorer reads.
+    for doc in receipt_t2["passes"][0]["documents"]:
+        for pt in ((doc.get("result") or {}).get("points") or []):
+            if pt.get("point_id") == id_doc3:
+                pt["point_id"] = id_doc6
+                renamed += 1
+    assert renamed, "the fixture could not rebind a doc-03 goal point"
+    forced = module.t2(receipt_t2, _corpus())
+    assert forced["legs"]["exactly_one_shared_point"] is True, (
+        "the shared-id leg did not see the forced id — the arm is not driving the leg")
+    assert forced["legs"]["entity_delta_zero"] is False
+    assert forced["verdict"] == "FAIL", (
+        "T2 PASSes with a non-zero entity delta and one shared id — its entity-delta "
+        "conjunct is dropped")
 
 
 def test_t1_the_second_ingestion_numbers_are_the_artifacts_numbers():
@@ -311,6 +376,12 @@ def test_t2_the_two_wordings_landed_as_two_points():
     row = _score()["tests"]["T2"]
     assert row["goal_point_ids"]["shared"] == [], \
         "T2 fails because the two wordings share no point id; a merge would change this"
+    # BOTH graded legs are recorded, not just the one that happens to fail first.
+    assert row["legs"] == {"entity_delta_zero": False,
+                           "exactly_one_shared_point": False, "shared_count": 0}
+    # …and the leg the door cannot answer is disclosed, not silently implied.
+    assert row["source_link_leg"]["graded"] is False
+    assert "D7" in row["source_link_leg"]["why"]
     assert row["delta_across_doc_06_ingest"]["taxonomy.Point"] == 15
     assert row["delta_across_doc_06_ingest"]["taxonomy.Object"] == 1
     assert row["sources"] == {"before": 5, "after": 6, "delta": 1}
@@ -321,6 +392,16 @@ def test_t3_the_orphan_share_is_stated_with_its_population_and_its_door():
     assert row["population"]["entities_enumerated_by_full_scan"] == 30
     assert row["orphans_by_write_receipt"]["count"] == 7
     assert row["orphans_by_write_receipt"]["share"] == pytest.approx(0.233)
+    # RULE_T3 has TWO conjuncts and both are recorded: the share passes, the
+    # traceability conjunct is what makes this FAIL.
+    legs = row["orphan_legs"]
+    assert legs["majority_are_not_orphans"] is True
+    assert legs["every_orphan_explained_in_corpus"] is False
+    assert [r["name"] for r in legs["unexplained"]] == [
+        "the cold-chain rules as operational preferences", "chilled-goods operation"]
+    # The band is named in the rule, so the count cannot drift into "no document states
+    # it" for a name that merely falls below the band (one of these scores 0.667).
+    assert "0.8" in row["rule"]
     # The disagreement between the two reads is the finding, not noise: a door
     # that reported 7 "isolated" entities would make D4 unfalsifiable.
     assert row["orphans_by_door"]["count"] == 0
@@ -342,16 +423,46 @@ def test_t4_every_ontology_layer_is_used_and_the_kinds_are_not_collapsed():
         "T4's PASS rests on the kinds being USED; a collapse to one kind reds here"
     assert row["document_leg"]["sources"] == 12
     assert row["document_leg"]["sources_with_points"] == 12
+    # Both named legs are GRADED, and each is read from its own quantity — not from a
+    # graph-wide tally that any Event Point would satisfy (the pre-review defect).
+    assert row["decision_leg"]["graded"] is True
+    assert [e["kind"] for e in row["decision_leg"]["decision_entities"]] == ["core:decision"]
+    assert row["decision_leg"]["decision_entities"]
+    assert row["role_leg"]["graded"] is True and row["role_leg"]["subject_entities"] == 3
+    # …and the adjacent fact is DISCLOSED rather than implied away: the decision's own
+    # sentence is a `statement` Point, not an event-kind one.
+    assert row["decision_leg"]["decision_point_kinds"] == ["statement"]
+    assert row["decision_leg"]["decisions_stated"] == 2
 
 
 def test_t5_every_sampled_relation_is_traced_and_the_tiers_are_separate():
     row = _score()["tests"]["T5"]
-    assert row["sampled"] == 26, "T5 requires a sample of at least 10 relations"
-    assert row["tiers"] == {"verbatim": 17, "paraphrase": 9, "none": 0}
-    assert row["unsupported"] == []
+    # ⛔ THE POPULATION IS BOTH PASSES. The first cut of this bundle sampled pass 1 only
+    # (`relation_rows(receipt, 1)`), which excluded all 21 pass-2 edges — and pass 2 is
+    # precisely where re-extraction invents names, so the one unsupported edge in this
+    # run lived in the unexamined half. A sample that omits the pass the defect lives in
+    # is not a sample, so `sampled` here is the number of edges BOTH receipts wrote.
+    assert row["sampled"] == 47, (
+        "T5 must sample every relation the receipts say was written (26 pass 1 + 21 "
+        "pass 2); sampling one pass hides the pass where invention happens")
+    assert {s["pass"] for s in row["rows"]} == {1, 2}
+    assert row["tiers"] == {"verbatim": 34, "paraphrase": 12, "none": 1}
+    # One invented edge, named — and its name is the point: doc-04 says Priya *reports*
+    # the count monthly, and pass 2 minted an entity for the reporting act.
+    assert len(row["unsupported"]) == 1, (
+        "T5's FAIL rests on exactly one unsupported edge; a rescored run must move this "
+        "number deliberately")
+    bad = row["unsupported"][0]
+    assert bad["pass"] == 2 and bad["src"] == "monthly account count report"
+    assert bad["support"] == "none"
     for sample in row["rows"]:
-        assert sample["support"] in ("verbatim", "paraphrase")
-        assert sample["co_stated_verbatim"] or sample["co_stated_paraphrase"]
+        assert sample["support"] in ("verbatim", "paraphrase", "none")
+        if sample["support"] != "none":
+            assert sample["co_stated_verbatim"] or sample["co_stated_paraphrase"]
+    # The predicate axis is declared ungraded and carries a number (gap D6).
+    axis = row["predicate_axis"]
+    assert axis["graded"] is False and axis["sampled"] == 47
+    assert axis["predicate_wording_in_co_stated_docs"] == 0
 
 
 def test_the_scorer_keeps_no_data_of_its_own():
@@ -404,7 +515,7 @@ def test_the_five_rules_state_BOTH_their_conjuncts_and_the_report_discloses_the_
     assert "D6" in report and "predicate axis is not graded" in report.lower(), (
         "REPORT.md lost D6, so the ungraded predicate axis is no longer disclosed")
     axis = score["tests"]["T5"]["predicate_axis"]
-    assert axis["graded"] is False and axis["sampled"] == 26
+    assert axis["graded"] is False and axis["sampled"] == 47
     assert axis["predicate_wording_in_co_stated_docs"] == 0, (
         "the reported predicate-gap number moved — re-read D6 rather than assuming the "
         "axis is still unmeasurable")
@@ -417,3 +528,44 @@ def is_t4_decision_graded(score: dict) -> bool:
     the verdict cannot disagree about whether the clause was read.
     """
     return score["tests"]["T4"]["decision_leg"].get("graded") is True
+
+
+def test_the_artifact_is_byte_identical_under_a_different_hash_seed():
+    """Re-running the scorer must reproduce the committed bytes, not merely the values.
+
+    The bundle's one reproducible property is "a reviewer re-runs `score_t1_t5.py` and
+    diffs it against the committed file". Two `set`-ordered dict builds (`delta()`'s axis
+    loop and `predicate_histogram`) made the emitted KEY ORDER depend on
+    `PYTHONHASHSEED`: rerunning produced byte-different JSON while every value agreed, so
+    a reviewer's diff was noise and `git status` was never clean after a verify. Both are
+    `sorted()` now, and this arm runs the scorer under two seeds in separate processes —
+    the only way the hash seed can differ — so a return to set-ordering reds here.
+    """
+    script = (
+        "import importlib.util, json, sys\n"
+        "spec = importlib.util.spec_from_file_location('noise_score', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "receipt = json.loads(open(sys.argv[2]).read())\n"
+        "corpus = json.loads(open(sys.argv[3]).read())\n"
+        "payload = {'tests': {\n"
+        "    'T1': m.t1(receipt), 'T2': m.t2(receipt, corpus),\n"
+        "    'T3': m.t3(receipt, corpus), 'T4': m.t4(receipt, corpus),\n"
+        "    'T5': m.t5(receipt, corpus)}}\n"
+        "sys.stdout.write(json.dumps(payload, indent=2, default=str))\n"
+    )
+    outputs = []
+    for seed in ("0", "1", "4294967295"):
+        env = {**os.environ, "PYTHONHASHSEED": seed}
+        outputs.append(subprocess.run(
+            [sys.executable, "-c", script,
+             str(BUNDLE / "score_t1_t5.py"),
+             str(BUNDLE / "out" / "ingest-receipt.json"),
+             str(BUNDLE / "corpus" / "noise-corpus.json")],
+            capture_output=True, text=True, env=env, check=True).stdout)
+    assert len(set(outputs)) == 1, (
+        "the scorer's output is not byte-stable across PYTHONHASHSEED — a set-ordered "
+        "dict build has crept back in, so a reviewer re-running it gets a spurious diff")
+    # …and the committed artifact really is what that run produces, for the `tests` block.
+    committed = json.dumps(_score()["tests"], indent=2, default=str)
+    assert json.loads(committed) == json.loads(json.dumps(
+        json.loads(outputs[0])["tests"], indent=2, default=str))

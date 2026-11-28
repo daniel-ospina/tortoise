@@ -39,27 +39,40 @@ RULE_T1 = ("PASS iff the second ingestion adds no RE-STATED knowledge: 0 new "
            "noise on the object axis: a re-ingestion IS an occurrence, so one "
            "Event per capture is expected — but an event-kind POINT re-minted for "
            "a sentence that was already stated is noise, and is counted.")
-RULE_T2 = ("PASS iff the restatement (doc-06) adds 0 entities, and the goal fact "
-           "resolves to ONE point/entity carrying two sources; a second "
-           "same-meaning entity or an unlinked second point is FAIL.")
+RULE_T2 = ("PASS iff the restatement (doc-06) adds 0 entities AND the goal fact "
+           "resolves to exactly ONE point id shared across the two wordings; a second "
+           "same-meaning entity (an unlinked second point) is FAIL. ⛔ The rule's "
+           "\"carrying two sources\" leg is NOT graded: the sources door answers "
+           "per-Source POINT COUNTS, not point-to-Source links, so \"does this point "
+           "carry two sources\" cannot be asked of the committed readback at all — "
+           "recorded as gap D7 rather than assumed.")
 RULE_T3 = ("Reported as a share, with an explicit population. PASS iff the "
            "majority of created entities are NOT orphans AND every orphan named "
-           "is standalone in the corpus text; otherwise FAIL, with the door's "
-           "own answer reported beside the write receipt's so a door defect "
-           "cannot be laundered as an extractor defect.")
+           "is standalone in the corpus text — graded as: its NAME is stated in one "
+           "document, verbatim or at >= 0.8 of the name's own >4-character tokens "
+           "(the same near-match band T1 uses for a restatement); otherwise FAIL, "
+           "with the door's own answer reported beside the write receipt's so a "
+           "door defect cannot be laundered as an extractor defect.")
 RULE_T4 = ("PASS iff none of the ontology's types is collapsed: the flat "
-           "(Point/Event/Subject/Object/Source) distribution is non-degenerate, "
-           "decisions land as the event/decision kind rather than as a bare "
-           "statement, roles land as Subjects, and documents land as Sources.")
+           "(Point/Event/Subject/Object/Source) distribution is non-degenerate "
+           "(Event, Subject and Object all non-zero, and at least one Source per "
+           "document ingested), a decision is represented by a decision-kind "
+           "ENTITY, roles land as Subject-layer role entities, and documents land "
+           "as Sources. ⛔ The decision's SENTENCES are Points and land as "
+           "`statement` kind; this rule grades the decision ENTITY, and the "
+           "Points' kinds are reported beside the verdict rather than graded.")
 RULE_T5 = ("PASS iff every sampled relation is stated or directly implied by the "
            "corpus text: both ENDPOINTS named in one document — verbatim, or the "
            "extractor's re-wording at >= 0.6 content-token overlap with that "
-           "document. One relation whose endpoints are never co-stated fails the "
-           "test. ⛔ The PREDICATE axis is NOT graded: the corpus is prose and the "
-           "graph's predicates are ontology names (`ownedBy`, `related`, …), so a "
-           "wording test would score a correct normalisation as an invention — the "
-           "count of rows whose predicate wording appears in its co-stated "
-           "documents is reported as gap D6 instead of being passed silently.")
+           "document. The POPULATION is every relation either pass's write receipt "
+           "says it wrote: pass 2 is where re-extraction invents names (§4), so "
+           "excluding it would be sampling away the defect. One relation whose "
+           "endpoints are never co-stated fails the test. ⛔ The PREDICATE axis is "
+           "NOT graded: the corpus is prose and the graph's predicates are ontology "
+           "names (`ownedBy`, `related`, …), so a wording test would score a correct "
+           "normalisation as an invention — the count of rows whose predicate "
+           "wording appears in its co-stated documents is reported as gap D6 "
+           "instead of being passed silently.")
 
 
 def load(name: str) -> dict:
@@ -119,7 +132,13 @@ def delta(a: dict, b: dict) -> dict:
     """`b - a` over the axes, flattened for the report."""
     out: dict = {}
     for axis in ("taxonomy", "points_by_kind"):
-        for key in set(a.get(axis) or {}) | set(b.get(axis) or {}):
+        # ⛔ `sorted()`, not the raw set: iterating a set of strings makes the emitted
+        # dict's KEY ORDER depend on `PYTHONHASHSEED`, so two runs over identical
+        # artifacts produced byte-different JSON while every VALUE agreed. That breaks the
+        # one property the bundle sells — a reviewer re-runs the scorer and diffs it against
+        # the committed file — and nothing graded it. Pinned by
+        # `test_the_artifact_is_byte_identical_under_a_different_hash_seed`.
+        for key in sorted(set(a.get(axis) or {}) | set(b.get(axis) or {})):
             d = int((b.get(axis) or {}).get(key) or 0) - int((a.get(axis) or {}).get(key) or 0)
             if d:
                 out[f"{axis}.{key}"] = d
@@ -349,8 +368,18 @@ def t2(receipt: dict, corpus: dict) -> dict:
     readback = load("readback.json")
     probe_ids = {q: v.get("ids") for q, v in (readback.get("probes") or {}).items()}
 
-    verdict = "PASS" if (d.get("taxonomy.Object", 0) + d.get("taxonomy.Subject", 0)
-                         + d.get("taxonomy.Event", 0) == 0 and shared) else "FAIL"
+    # RULE_T2 states THREE legs, and each is now either GRADED or DISCLOSED:
+    #   * the entity delta — graded;
+    #   * exactly ONE shared point id — graded (`len(shared) == 1`, not merely
+    #     "non-empty": two shared ids is two things the product believes are one);
+    #   * "carrying two sources" — NOT gradeable from this artifact. The `sources`
+    #     door answers per-Source POINT COUNTS, not point->Source links, so the
+    #     question cannot be put to the committed readback at all. Recorded as gap
+    #     D7 and reported beside the verdict instead of being silently implied.
+    entity_delta = (d.get("taxonomy.Object", 0) + d.get("taxonomy.Subject", 0)
+                    + d.get("taxonomy.Event", 0))
+    one_shared_point = len(shared) == 1
+    verdict = "PASS" if (entity_delta == 0 and one_shared_point) else "FAIL"
     return {
         "test": "T2",
         "rule": RULE_T2,
@@ -362,6 +391,16 @@ def t2(receipt: dict, corpus: dict) -> dict:
         "goal_point_candidates": scored,
         "goal_point_ids": {"doc_03": sorted(ids_a), "doc_06": sorted(ids_b),
                            "shared": sorted(shared)},
+        "legs": {"entity_delta_zero": entity_delta == 0,
+                 "exactly_one_shared_point": one_shared_point,
+                 "shared_count": len(shared)},
+        "source_link_leg": {
+            "graded": False,
+            "why": ("D7 — the `sources` door answers per-Source POINT COUNTS, not "
+                    "point->Source links, so 'the shared point carries two sources' "
+                    "cannot be asked of the committed readback. RULE_T2 grades the "
+                    "entity delta and the shared id; this is the gap."),
+        },
         "sources": {"before": c_before["source_rows"], "after": c_after["source_rows"],
                     "delta": c_after["source_rows"] - c_before["source_rows"]},
         "retrieval_probe_ids": probe_ids,
@@ -423,6 +462,16 @@ def t3(receipt: dict, corpus: dict) -> dict:
     # (two orphans match no document at all). `>= 0.8` of an orphan's own long tokens
     # is the same near-match band the T1 restatement test uses, so "traceable" means
     # the same thing in both places.
+    # The second conjunct's predicate is NAME PRESENCE, and `RULE_T3` now says so with
+    # its band: exact, or >= 0.8 of the name's own >4-character tokens. ⛔ That band is
+    # T1's RESTATEMENT band, not T5's NAMING band (0.6), and the two are not
+    # interchangeable: at 0.6 `chilled-goods operation` (0.667 against doc-02) would be
+    # traceable, at 0.8 it is not. ⛔ It is also a NAME test, not the rule's full
+    # "standalone in the corpus text" — `restaurant account` is counted explained because
+    # the name is verbatim, although doc-03 relates it ("Every new restaurant account
+    # needs a morning delivery slot"). So this conjunct catches an invented NAME; it does
+    # not catch an entity that is real but not standalone. Both limits are stated in
+    # REPORT §5 beside the count rather than left for a reader to assume away.
     unexplained = [r for r in named_in_corpus
                    if not r["exact_doc_hits"] and not r["near_doc_hits"]]
     share_receipt = (len(orphans_receipt) / len(rows)) if rows else None
@@ -438,7 +487,7 @@ def t3(receipt: dict, corpus: dict) -> dict:
             "note": ("population is every ENTITY the typed full scan resolves; "
                      "Points are excluded because a Point's edges are epistemic "
                      "bindings the write receipt does not enumerate — recorded "
-                     "as a gap (REPORT §6)"),
+                     "as a gap (REPORT §8)"),
         },
         "orphans_by_write_receipt": {"count": len(orphans_receipt),
                                      "share": None if share_receipt is None
@@ -478,26 +527,29 @@ def t4(receipt: dict, corpus: dict) -> dict:
                        if norm(pt.get("kind")) in ("event", "decision", "eventrecord")
                        or re.search(r"\bdecision\b|\bchoose|\brevert\b",
                                     norm(pt.get("text")) or "")]
+    # The decision leg: `RULE_T4` asks that a decision be represented by a
+    # decision-kind ENTITY. Graded on the ENTITY count, not on a graph-wide tally of
+    # event-kind Points: before #14812's second review this read `event_kinds > 0`,
+    # which 80 unrelated Event Points satisfied regardless of how the decisions landed.
+    decision_entities = [e for e in (readback.get("entities") or [])
+                         if "decision" in norm(e.get("kind"))]
     event_kinds = c["points_by_kind"].get("event", 0)
 
-    # The role leg: roles and people must be Subjects, not Points.
+    # The role leg: roles must land as SUBJECT-layer role entities — not merely "some
+    # subject-layer entity exists", which any one naturalPerson satisfied.
     role_entities = [e for e in (readback.get("entities") or [])
-                     if e.get("layer") == "subject"]
+                     if norm(e.get("kind")).endswith(":role")
+                     and e.get("layer") == "subject"]
     sources = c["source_rows"]
     docs = len(corpus["documents"])
 
-    # RULE_T4's decision clause — "decisions land as the event/decision kind rather
-    # than as a bare statement" — is GRADED, not merely reported. It was computed and
-    # dropped before #14812's review, so a run whose decisions landed as bare
-    # statements still PASSed. `event_kinds` counts POINTS whose kind is `event`; the
-    # taxonomy's `Event` above counts the Event layer, which is a different quantity.
-    decision_leg = bool(decision_points) and event_kinds > 0
-    verdict = "PASS" if (c["taxonomy"].get("Event", 0) > 0
-                         and c["taxonomy"].get("Subject", 0) > 0
-                         and c["taxonomy"].get("Object", 0) > 0
-                         and c["taxonomy"].get("Source", 0) >= docs
-                         and decision_leg
-                         and role_entities) else "FAIL"
+    decision_leg = bool(decision_entities)
+    role_leg = bool(role_entities)
+    layers_leg = (c["taxonomy"].get("Event", 0) > 0
+                  and c["taxonomy"].get("Subject", 0) > 0
+                  and c["taxonomy"].get("Object", 0) > 0
+                  and c["taxonomy"].get("Source", 0) >= docs)
+    verdict = "PASS" if (layers_leg and decision_leg and role_leg) else "FAIL"
     return {
         "test": "T4",
         "rule": RULE_T4,
@@ -508,13 +560,19 @@ def t4(receipt: dict, corpus: dict) -> dict:
         "entity_kinds_seen": kinds,
         "per_kind_full_scan": scans,
         "decision_leg": {"graded": decision_leg,
+                         "decision_entities": [{"name": e.get("name"),
+                                                "kind": e.get("kind")}
+                                               for e in decision_entities],
+                         "decisions_stated": len(decision_points),
+                         "decision_point_kinds": sorted({p.get("kind") for p in decision_points
+                                                         if p.get("kind")}),
                          "events": c["taxonomy"].get("Event", 0),
                          "event_point_kind_rows": event_kinds,
                          "decision_wording_points": [
                              {"doc_id": p.get("doc_id"), "kind": p.get("kind"),
                               "text": str(p.get("text"))[:180]}
                              for p in decision_points[:12]]},
-        "role_leg": {"subject_entities": len(role_entities),
+        "role_leg": {"graded": role_leg, "subject_entities": len(role_entities),
                      "examples": [e.get("name") for e in role_entities[:10]]},
         "document_leg": {"sources": sources, "documents_ingested": docs,
                          "sources_with_points": c["sources_with_points"]},
@@ -555,7 +613,7 @@ def t5(receipt: dict, corpus: dict) -> dict:
         return {"verbatim_docs": exact, "paraphrase_docs": para,
                 "best_overlap": round(best, 2)}
 
-    rows_out = relation_rows(receipt, 1) or relation_rows(receipt)
+    rows_out = relation_rows(receipt)
     samples = []
     for edge in rows_out:
         src_id, dst_id = edge.get("src_id") or "", edge.get("dst_id") or ""
@@ -618,7 +676,7 @@ def t5(receipt: dict, corpus: dict) -> dict:
         "unsupported": unsupported,
         "rows": samples,
         "predicate_histogram": {p: sum(1 for s in samples if s["predicate"] == p)
-                                for p in {s["predicate"] for s in samples}},
+                                for p in sorted({s["predicate"] for s in samples})},
         "predicate_axis": {
             "graded": False,
             "why": ("D6 — the graph's predicates are ontology names and the corpus is "

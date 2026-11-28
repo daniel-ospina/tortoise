@@ -16,9 +16,9 @@ in §7, never worked around.
 
 ## 1. The answer in one sentence
 
-**No — this is not yet a logical model of that business: the entities are correctly typed but not
-all of them are real (two carry names the corpus never says), and every fact is stored as a new
-sentence each time it is heard, so the graph doubles its Point layer
+**No — this is not yet a logical model of that business: the types are used and mostly correct, but
+two entities carry names the corpus never says, one relation is invented, and every fact is stored as
+a new sentence each time it is heard, so the graph doubles its Point layer
 on a second reading of the same six documents while its entity skeleton stays exactly the same size.**
 
 ## 2. The five tests
@@ -26,10 +26,10 @@ on a second reading of the same six documents while its entity skeleton stays ex
 | # | test | verdict | the numbers |
 |---|---|---|---|
 | **T1** | duplicate multiplication | **FAIL** | pass 1 → `Point 134 · Event 12 · Subject 10 · Object 25 · Source 6`; pass 2 → `Point 243 · Event 26 · Subject 10 · Object 29 · Source 12`. **+109 Points (+81 %), +14 Events, +4 Objects, +6 Sources, +19 operators, +90 structure rows.** `Subject +0`, `0` same-name entity duplicates. **38 of the 61 Points created on pass 2 (62 %) re-state a pass-1 Point at ≥ 0.80 token overlap (29 of them at 1.00) — and all 38 were written anyway: 26 carry `dedup: "new"` (not recognised at all), and 12 took the `content_hash_hit` path, i.e. recognised as a duplicate and created regardless. Every one of the 12 content-hash hits is a restatement.** Relations did **not** grow: 26 written on pass 1, 21 on pass 2 (−5). |
-| **T2** | same fact, two wordings | **FAIL** | the goal fact ("40 restaurant accounts by December … 18 today, 22 to go") is stated in **doc-03** and restated in **doc-06**. Ingesting doc-06 added **+15 Points, +1 Object, +1 Event, +1 Source** and produced **2 distinct goal Points with no shared id** (`shared: []`). The retrieval probe's **top hit is `doc-03-replay`** — the pass-2 duplicate outranks the original. |
-| **T3** | orphan share | **FAIL** | of the **30 entities the doors can enumerate**, **7 (23.3 %)** have **no entity→entity edge** in either write receipt — so the *share* leg passes (23 % is far from "the majority is orphaned"). **The second conjunct fails**: `RULE_T3` also requires every orphan named to be standalone **in the corpus text**, and **2 of the 7 carry a name no document states at all** — `the cold-chain rules as operational preferences` (`core:strategy`) and `chilled-goods operation` (`core:workflow`), with neither an exact nor a near document hit. Every orphan is named in §5 with its traceability. The **door** says **0 of 30 are isolated** — because it counts a Point mention as a neighbour (§7 D4). |
-| **T4** | type collapse | **PASS** | flat distribution `Point 243 · Event 26 · Subject 10 · Object 29 · Source 12`; **13 distinct entity kinds used**: `core:naturalPerson` 3, `core:role` 3, `core:organization` 4, `core:workflow` 3, `core:strategy` 3, `core:agreement` 2, `core:standard` 2, `core:goal` 1, `core:decision` **1**, `core:Project` 1, `agent-ops:rule` 3, `venture:actionItem` 3, `product-strategy:customerSegment` 1. Decisions land as `core:decision` + event-kind Points (`statement` 111, `event` 80); roles land as **Subjects** (3 roles + 3 people); documents land as **Sources** (6 per pass). |
-| **T5** | invented connections | **PASS** | **26 relations sampled**, all 26 checked against the text: **17 verbatim co-stated** (both endpoint names appear in one document), **9 paraphrase** (one endpoint is the extractor's own name for a stated thing — e.g. *"the ColdPath contract negotiation"* for *"you negotiate the contract"*), **0 with no support**. Predicates: `ownedBy` 16, `related` 4, `dependsOn` 3, `IMPL` 2, `produces` 1. **No relation the text never makes.** The 9 paraphrases are the naming axis, not the invention axis — a one-tier substring test would have scored all 9 as invented. ⛔ **The PREDICATE axis is not graded by T5** — the graph's predicates are ontology names (`ownedBy`, `related`, …) and the corpus is prose, so a wording test would score a correct normalisation (*"owns"* → `ownedBy`) as an invention. **0 of 26** rows carry a predicate spelling that appears in the document co-stating their endpoints; that is measured and reported as gap **D6** rather than passed silently. |
+| **T2** | same fact, two wordings | **FAIL** | the goal fact ("40 restaurant accounts by December … 18 today, 22 to go") is stated in **doc-03** and restated in **doc-06**. Ingesting doc-06 added **+15 Points, +1 Object, +1 Event, +1 Source** and produced **2 distinct goal Points with no shared id** (`shared: []`) — so the *exactly ONE shared point* leg fails, and the entity delta is non-zero too. The retrieval probe's **top hit is `doc-03-replay`** — the pass-2 duplicate outranks the original. ⛔ The rule's *"carrying two sources"* leg is **not graded**: the `sources` door answers per-Source POINT COUNTS, not point→Source links, so the question cannot be put to the committed readback at all (gap **D7**). |
+| **T3** | orphan share | **FAIL** | of the **30 entities the doors can enumerate**, **7 (23.3 %)** have **no entity→entity edge** in either write receipt — so the *share* leg passes (23 % is far from "the majority is orphaned"). **The second conjunct fails**: `RULE_T3` also requires every orphan's name to be stated in the corpus, graded as verbatim or **≥ 0.80** of the name's own long tokens, and **2 of the 7 fall below that** — `the cold-chain rules as operational preferences` (`core:strategy`, best 0.50) and `chilled-goods operation` (`core:workflow`, best 0.667). Every orphan is named in §5 with its traceability, and §5 states this predicate's two limits. The **door** says **0 of 30 are isolated** — because it counts a Point mention as a neighbour (§7 D4). |
+| **T4** | type collapse | **PASS** | flat distribution `Point 243 · Event 26 · Subject 10 · Object 29 · Source 12`; **13 distinct entity kinds used**: `core:naturalPerson` 3, `core:role` 3, `core:organization` 4, `core:workflow` 3, `core:strategy` 3, `core:agreement` 2, `core:standard` 2, `core:goal` 1, `core:decision` **1**, `core:Project` 1, `agent-ops:rule` 3, `venture:actionItem` 3, `product-strategy:customerSegment` 1. A decision is represented by a **decision-kind entity** (`the delivery partner decision`, `core:decision`), the **3 `core:role` entities are Subject-layer** (Sales Lead, Finance Director, Operations Lead), and documents land as **Sources** (6 per pass). ⛔ Disclosed, not graded: the decision **SENTENCES** are Points and land as `statement` kind — 2 decisions are stated and `decision_point_kinds` is `["statement"]`, with the 80 event-kind Points unrelated to them. The typed representation exists; the decision's own sentence is still a statement. |
+| **T5** | invented connections | **FAIL** | **all 47 relations both passes wrote** are sampled — 26 from pass 1 and **21 from pass 2**, because pass 2 is exactly where re-extraction invents names (§4); sampling only pass 1 would have hidden the one failure. **34 verbatim** (both endpoint names appear in one document), **12 paraphrase** (one endpoint is the extractor's own name for a stated thing), **1 with no support**: pass 2's `ownedBy` edge `monthly account count report → Priya Nair`. doc-04 says *"Priya Nair reports the account count to the team every month"* — an action, not an entity — and the invented name's best content-token overlap with doc-04 is **0.50**, below even the paraphrase tier. So **one invented edge fails T5**, which is the rule. The 12 paraphrases are the naming axis, not the invention axis — a one-tier substring test would have scored all 12 as invented. ⛔ **The PREDICATE axis is not graded by T5** — the graph's predicates are ontology names (`ownedBy`, `related`, …) and the corpus is prose, so a wording test would score a correct normalisation (*"owns"* → `ownedBy`) as an invention. **0 of 47** rows carry a predicate spelling that appears in the document co-stating their endpoints; that is measured and reported as gap **D6** rather than passed silently. |
 
 Scorer: `score_t1_t5.py` (pure function of `out/ingest-receipt.json` + `out/readback.json`; no graph,
 no network, no model call). Each verdict is a rule over numbers, and the rule is quoted beside it in
@@ -98,15 +98,24 @@ Population: the 30 entities the typed full scan resolves (**20 of 29 Objects, 10
 | `the own refrigerated van option` | `core:strategy` | paraphrase of doc-01 Option C | a rejected option — standalone by nature |
 | `the 4 degrees Celsius cold-chain constraint` | `agent-ops:rule` | paraphrase of doc-02 | a rule with no declared part-of edge to a parent policy |
 | `restaurant account` | `product-strategy:customerSegment` | **verbatim** (doc-03/04/05/06) | the segment counted by the goal; it has no containment edge because nothing in the corpus contains it |
-| `the cold-chain rules as operational preferences` | `core:strategy` | **name the corpus never says** | invented label — reported on T5's naming axis |
-| `chilled-goods operation` | `core:workflow` | **name the corpus never says** | invented label — same |
+| `the cold-chain rules as operational preferences` | `core:strategy` | **below the naming band** (best 0.50, doc-02/03) | invented label |
+| `chilled-goods operation` | `core:workflow` | **below the naming band** (best 0.667, doc-02/05) | the words *"chilled goods"* are in doc-02, but not as this name |
 
-**5 of 7 are genuinely standalone or plainly paraphrased; 2 carry a name no sentence states.** The
-*share* criterion passes — 23 % is far from "the majority is orphaned" — but `RULE_T3`'s **second
-conjunct does not**: it requires every orphan named to be standalone *in the corpus text*, and these
-two are not in it at all. So **T3 is FAIL**, and the mechanism is the naming defect T5's paraphrase
-tier measures (9 of 26 edges have one renamed endpoint) one layer out: there the name is the
-extractor's re-wording of something the corpus says, here it is a name the corpus never says.
+**5 of 7 are verbatim or well above the naming band; 2 fall below it. T3 is FAIL** — the *share*
+criterion passes (23 % is far from "the majority is orphaned"), but `RULE_T3`'s **second conjunct
+does not**: every orphan's name must be stated in the corpus at ≥ 0.80 of its own long tokens, and
+both of these are below. The mechanism is the same naming defect T5's paraphrase tier measures (12
+of 47 edges have one renamed endpoint) one layer out.
+
+⛔ **Two limits of this predicate, stated rather than left to be assumed away.** (a) It is a **NAME**
+test, at **T1's restatement band (0.80)**, not T5's narrower naming band (0.60). At 0.60 `chilled-goods
+operation` (0.667) would count as traceable, so the honest count of names the corpus never says is
+**1 of 7**; at 0.80 it is **2 of 7**, which is what `RULE_T3` now states and what the verdict uses.
+The two bands answer different questions and neither is folded into the other. (b) It tests whether
+the name is *stated*, not whether the entity is *standalone*: `restaurant account` is counted
+explained because the name is verbatim, although doc-03 relates it ("Every new restaurant account
+needs a morning delivery slot"). So this conjunct catches an invented **name**; an entity that is
+real but not standalone passes it.
 
 ## 6. The other two failures in T2's shape
 
@@ -147,12 +156,19 @@ and the second source attached to a *second* thing rather than to the first.
 * **D6 — a relation's PREDICATE is not verifiable through the product's prose.** T5 grades that both
   endpoints of each sampled relation are stated in one document; it cannot grade the *predicate*,
   because the graph stores ontology names (`ownedBy`, `related`, `dependsOn`, `IMPL`, `produces`)
-  while the corpus is English. Measured: **0 of 26** sampled rows carry a predicate spelling that
+  while the corpus is English. Measured: **0 of 47** sampled rows carry a predicate spelling that
   appears in the document that co-states its endpoints (`out/t1-t5-score.json` →
   `tests.T5.predicate_axis`). So an edge whose endpoints are real but whose *predicate* is invented
   is not caught by this bundle, and that is a hole in the acceptance bar rather than a property of
   the extractor. Closing it needs a predicate-level check (the corpus's own verb, normalised to the
   ontology's predicate) which the doors do not offer today.
+* **D7 — a Point's SOURCES cannot be counted.** T2's rule asks whether the goal fact resolves to one
+  point *carrying two sources*. The `sources` door answers per-Source **point counts**
+  (`{"url": "session:doc-03", "points": 8}`), never point→Source links, so "how many sources does
+  *this* point carry" has no answer through the product. Measured in
+  `out/readback.json` → `sources.reply`: 12 rows of `url`/`sourceKind`/`points`, no per-point
+  reverse index. T2's verdict therefore grades the entity delta and the shared id, and this leg is
+  disclosed rather than silently implied (`out/t1-t5-score.json` → `tests.T2.source_link_leg`).
 
 ## 8. Gaps — what this bundle does NOT measure
 

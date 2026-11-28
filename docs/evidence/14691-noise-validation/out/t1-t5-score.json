@@ -62,11 +62,11 @@
         "delta_pass_1": {
           "taxonomy.Event": 12,
           "taxonomy.Object": 25,
+          "taxonomy.Point": 134,
           "taxonomy.Source": 6,
           "taxonomy.Subject": 10,
-          "taxonomy.Point": 134,
-          "points_by_kind.statement": 61,
           "points_by_kind.event": 40,
+          "points_by_kind.statement": 61,
           "structure_total": 101,
           "operators": 33,
           "source_rows": 6,
@@ -75,10 +75,10 @@
         "delta_pass_2": {
           "taxonomy.Event": 14,
           "taxonomy.Object": 4,
-          "taxonomy.Source": 6,
           "taxonomy.Point": 109,
-          "points_by_kind.statement": 50,
+          "taxonomy.Source": 6,
           "points_by_kind.event": 40,
+          "points_by_kind.statement": 50,
           "structure_total": 90,
           "operators": 19,
           "source_rows": 6,
@@ -443,7 +443,7 @@
     },
     "T2": {
       "test": "T2",
-      "rule": "PASS iff the restatement (doc-06) adds 0 entities, and the goal fact resolves to ONE point/entity carrying two sources; a second same-meaning entity or an unlinked second point is FAIL.",
+      "rule": "PASS iff the restatement (doc-06) adds 0 entities AND the goal fact resolves to exactly ONE point id shared across the two wordings; a second same-meaning entity (an unlinked second point) is FAIL. \u26d4 The rule's \"carrying two sources\" leg is NOT graded: the sources door answers per-Source POINT COUNTS, not point-to-Source links, so \"does this point carry two sources\" cannot be asked of the committed readback at all \u2014 recorded as gap D7 rather than assumed.",
       "pair": [
         "doc-03",
         "doc-06"
@@ -453,10 +453,10 @@
       "delta_across_doc_06_ingest": {
         "taxonomy.Event": 1,
         "taxonomy.Object": 1,
-        "taxonomy.Source": 1,
         "taxonomy.Point": 15,
-        "points_by_kind.statement": 8,
+        "taxonomy.Source": 1,
         "points_by_kind.event": 6,
+        "points_by_kind.statement": 8,
         "structure_total": 14,
         "operators": 1,
         "source_rows": 1,
@@ -541,6 +541,15 @@
         ],
         "shared": []
       },
+      "legs": {
+        "entity_delta_zero": false,
+        "exactly_one_shared_point": false,
+        "shared_count": 0
+      },
+      "source_link_leg": {
+        "graded": false,
+        "why": "D7 \u2014 the `sources` door answers per-Source POINT COUNTS, not point->Source links, so 'the shared point carries two sources' cannot be asked of the committed readback. RULE_T2 grades the entity delta and the shared id; this is the gap."
+      },
       "sources": {
         "before": 5,
         "after": 6,
@@ -613,10 +622,10 @@
     },
     "T3": {
       "test": "T3",
-      "rule": "Reported as a share, with an explicit population. PASS iff the majority of created entities are NOT orphans AND every orphan named is standalone in the corpus text; otherwise FAIL, with the door's own answer reported beside the write receipt's so a door defect cannot be laundered as an extractor defect.",
+      "rule": "Reported as a share, with an explicit population. PASS iff the majority of created entities are NOT orphans AND every orphan named is standalone in the corpus text \u2014 graded as: its NAME is stated in one document, verbatim or at >= 0.8 of the name's own >4-character tokens (the same near-match band T1 uses for a restatement); otherwise FAIL, with the door's own answer reported beside the write receipt's so a door defect cannot be laundered as an extractor defect.",
       "population": {
         "entities_enumerated_by_full_scan": 30,
-        "note": "population is every ENTITY the typed full scan resolves; Points are excluded because a Point's edges are epistemic bindings the write receipt does not enumerate \u2014 recorded as a gap (REPORT \u00a76)"
+        "note": "population is every ENTITY the typed full scan resolves; Points are excluded because a Point's edges are epistemic bindings the write receipt does not enumerate \u2014 recorded as a gap (REPORT \u00a78)"
       },
       "orphans_by_write_receipt": {
         "count": 7,
@@ -807,7 +816,7 @@
     },
     "T4": {
       "test": "T4",
-      "rule": "PASS iff none of the ontology's types is collapsed: the flat (Point/Event/Subject/Object/Source) distribution is non-degenerate, decisions land as the event/decision kind rather than as a bare statement, roles land as Subjects, and documents land as Sources.",
+      "rule": "PASS iff none of the ontology's types is collapsed: the flat (Point/Event/Subject/Object/Source) distribution is non-degenerate (Event, Subject and Object all non-zero, and at least one Source per document ingested), a decision is represented by a decision-kind ENTITY, roles land as Subject-layer role entities, and documents land as Sources. \u26d4 The decision's SENTENCES are Points and land as `statement` kind; this rule grades the decision ENTITY, and the Points' kinds are reported beside the verdict rather than graded.",
       "flat_distribution": {
         "Point": 243,
         "Event": 26,
@@ -1133,6 +1142,16 @@
       },
       "decision_leg": {
         "graded": true,
+        "decision_entities": [
+          {
+            "name": "the delivery partner decision",
+            "kind": "core:decision"
+          }
+        ],
+        "decisions_stated": 2,
+        "decision_point_kinds": [
+          "statement"
+        ],
         "events": 26,
         "event_point_kind_rows": 80,
         "decision_wording_points": [
@@ -1149,15 +1168,9 @@
         ]
       },
       "role_leg": {
-        "subject_entities": 10,
+        "graded": true,
+        "subject_entities": 3,
         "examples": [
-          "Priya Nair",
-          "Dev Patel",
-          "Marta Reyes",
-          "delivery partner",
-          "the food safety auditor",
-          "ColdPath Logistics",
-          "NordicFreight",
           "Sales Lead",
           "Finance Director",
           "Operations Lead"
@@ -1172,15 +1185,50 @@
     },
     "T5": {
       "test": "T5",
-      "rule": "PASS iff every sampled relation is stated or directly implied by the corpus text: both ENDPOINTS named in one document \u2014 verbatim, or the extractor's re-wording at >= 0.6 content-token overlap with that document. One relation whose endpoints are never co-stated fails the test. \u26d4 The PREDICATE axis is NOT graded: the corpus is prose and the graph's predicates are ontology names (`ownedBy`, `related`, \u2026), so a wording test would score a correct normalisation as an invention \u2014 the count of rows whose predicate wording appears in its co-stated documents is reported as gap D6 instead of being passed silently.",
-      "sampled": 26,
+      "rule": "PASS iff every sampled relation is stated or directly implied by the corpus text: both ENDPOINTS named in one document \u2014 verbatim, or the extractor's re-wording at >= 0.6 content-token overlap with that document. The POPULATION is every relation either pass's write receipt says it wrote: pass 2 is where re-extraction invents names (\u00a74), so excluding it would be sampling away the defect. One relation whose endpoints are never co-stated fails the test. \u26d4 The PREDICATE axis is NOT graded: the corpus is prose and the graph's predicates are ontology names (`ownedBy`, `related`, \u2026), so a wording test would score a correct normalisation as an invention \u2014 the count of rows whose predicate wording appears in its co-stated documents is reported as gap D6 instead of being passed silently.",
+      "sampled": 47,
       "tiers": {
-        "verbatim": 17,
-        "paraphrase": 9,
-        "none": 0
+        "verbatim": 34,
+        "paraphrase": 12,
+        "none": 1
       },
-      "supported": 26,
-      "unsupported": [],
+      "supported": 46,
+      "unsupported": [
+        {
+          "doc_id": "doc-04",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "monthly account count report",
+          "dst": "Priya Nair",
+          "src_kind": "other",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [],
+            "best_overlap": 0.5
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [],
+          "co_stated_paraphrase": [],
+          "support": "none"
+        }
+      ],
       "rows": [
         {
           "doc_id": "doc-01",
@@ -2317,19 +2365,959 @@
             "doc-06"
           ],
           "support": "paraphrase"
+        },
+        {
+          "doc_id": "doc-02",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "Marta Reyes",
+          "dst": "Operations Lead",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:role",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-01",
+            "doc-02",
+            "doc-04",
+            "doc-05"
+          ],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-02",
+            "doc-04",
+            "doc-05"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-02",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "Dev Patel",
+          "dst": "Finance Director",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:role",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-01",
+            "doc-02",
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-02",
+            "doc-04"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-02",
+          "pass": 2,
+          "predicate": "dependsOn",
+          "stated_predicate": "dependsOn",
+          "write_path": "structural",
+          "src": "the per-delivery temperature log requirement",
+          "dst": "the food safety auditor",
+          "src_kind": "agent-ops:rule",
+          "dst_kind": "core:organization",
+          "src_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-02",
+              "doc-03",
+              "doc-04"
+            ],
+            "best_overlap": 0.67
+          },
+          "dst_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-02"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [],
+          "co_stated_paraphrase": [
+            "doc-02"
+          ],
+          "support": "paraphrase"
+        },
+        {
+          "doc_id": "doc-02",
+          "pass": 2,
+          "predicate": "dependsOn",
+          "stated_predicate": "dependsOn",
+          "write_path": "structural",
+          "src": "the wholesale licence subcontracting restriction",
+          "dst": "the wholesale licence",
+          "src_kind": "agent-ops:rule",
+          "dst_kind": "core:agreement",
+          "src_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-02",
+              "doc-05"
+            ],
+            "best_overlap": 0.8
+          },
+          "dst_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-02",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [],
+          "co_stated_paraphrase": [
+            "doc-02",
+            "doc-05"
+          ],
+          "support": "paraphrase"
+        },
+        {
+          "doc_id": "doc-02",
+          "pass": 2,
+          "predicate": "dependsOn",
+          "stated_predicate": "dependsOn",
+          "write_path": "structural",
+          "src": "the wholesale licence subcontracting restriction",
+          "dst": "the validated cold-chain certificate",
+          "src_kind": "agent-ops:rule",
+          "dst_kind": "core:standard",
+          "src_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-02",
+              "doc-05"
+            ],
+            "best_overlap": 0.8
+          },
+          "dst_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [],
+          "co_stated_paraphrase": [
+            "doc-02",
+            "doc-05"
+          ],
+          "support": "paraphrase"
+        },
+        {
+          "doc_id": "doc-03",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "account onboarding",
+          "dst": "Priya Nair",
+          "src_kind": "core:workflow",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-03",
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-03",
+            "doc-04",
+            "doc-06"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-03",
+          "pass": 2,
+          "predicate": "dependsOn",
+          "stated_predicate": "dependsOn",
+          "write_path": "structural",
+          "src": "account onboarding",
+          "dst": "40 restaurant accounts by December",
+          "src_kind": "core:workflow",
+          "dst_kind": "core:goal",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-03"
+          ],
+          "co_stated_paraphrase": [
+            "doc-03",
+            "doc-06"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-03",
+          "pass": 2,
+          "predicate": "dependsOn",
+          "stated_predicate": "dependsOn",
+          "write_path": "structural",
+          "src": "40 restaurant accounts by December",
+          "dst": "delivery partner",
+          "src_kind": "core:goal",
+          "dst_kind": "core:organization",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-03",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-03",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-03",
+            "doc-05"
+          ],
+          "co_stated_paraphrase": [
+            "doc-03",
+            "doc-05"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "Marta Reyes",
+          "dst": "Operations Lead",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:role",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-01",
+            "doc-02",
+            "doc-04",
+            "doc-05"
+          ],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-02",
+            "doc-04",
+            "doc-05"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "Dev Patel",
+          "dst": "Finance Director",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:role",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-01",
+            "doc-02",
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-02",
+            "doc-04"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "Priya Nair",
+          "dst": "Sales Lead",
+          "src_kind": "core:naturalPerson",
+          "dst_kind": "core:role",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-03",
+            "doc-04",
+            "doc-05",
+            "doc-06"
+          ],
+          "co_stated_paraphrase": [
+            "doc-03",
+            "doc-04",
+            "doc-05",
+            "doc-06"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "delivery scheduling",
+          "dst": "Marta Reyes",
+          "src_kind": "other",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-04"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "cold-chain temperature log",
+          "dst": "Marta Reyes",
+          "src_kind": "other",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-02",
+              "doc-03",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-02",
+            "doc-04"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "supplier payments",
+          "dst": "Dev Patel",
+          "src_kind": "other",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-01",
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-04"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "capital spending approvals",
+          "dst": "Dev Patel",
+          "src_kind": "other",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-04"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "account onboarding",
+          "dst": "Priya Nair",
+          "src_kind": "core:workflow",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-03",
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-03",
+            "doc-04",
+            "doc-06"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "restaurant account pipeline",
+          "dst": "Priya Nair",
+          "src_kind": "core:workflow",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-04",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-04",
+            "doc-06"
+          ],
+          "co_stated_paraphrase": [
+            "doc-03",
+            "doc-04",
+            "doc-06"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-04",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "monthly account count report",
+          "dst": "Priya Nair",
+          "src_kind": "other",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [],
+            "paraphrase_docs": [],
+            "best_overlap": 0.5
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [],
+          "co_stated_paraphrase": [],
+          "support": "none"
+        },
+        {
+          "doc_id": "doc-05",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "renegotiating with NordicFreight",
+          "dst": "Marta Reyes",
+          "src_kind": "venture:actionItem",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "paraphrase_docs": [
+              "doc-01",
+              "doc-02",
+              "doc-04",
+              "doc-05"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-05"
+          ],
+          "co_stated_paraphrase": [
+            "doc-01",
+            "doc-05"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-06",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "restaurant account pipeline",
+          "dst": "Priya Nair",
+          "src_kind": "core:workflow",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-04",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-04",
+            "doc-06"
+          ],
+          "co_stated_paraphrase": [
+            "doc-03",
+            "doc-04",
+            "doc-06"
+          ],
+          "support": "verbatim"
+        },
+        {
+          "doc_id": "doc-06",
+          "pass": 2,
+          "predicate": "ownedBy",
+          "stated_predicate": "ownedBy",
+          "write_path": "structural",
+          "src": "account onboarding",
+          "dst": "Priya Nair",
+          "src_kind": "core:workflow",
+          "dst_kind": "core:naturalPerson",
+          "src_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "dst_trace": {
+            "verbatim_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "paraphrase_docs": [
+              "doc-03",
+              "doc-04",
+              "doc-05",
+              "doc-06"
+            ],
+            "best_overlap": 1.0
+          },
+          "co_stated_verbatim": [
+            "doc-03",
+            "doc-04"
+          ],
+          "co_stated_paraphrase": [
+            "doc-03",
+            "doc-04",
+            "doc-06"
+          ],
+          "support": "verbatim"
         }
       ],
       "predicate_histogram": {
         "IMPL": 2,
+        "dependsOn": 8,
+        "ownedBy": 32,
         "produces": 1,
-        "related": 4,
-        "ownedBy": 16,
-        "dependsOn": 3
+        "related": 4
       },
       "predicate_axis": {
         "graded": false,
         "why": "D6 \u2014 the graph's predicates are ontology names and the corpus is prose, so a wording test scores a correct normalisation as an invention. RULE_T5 grades the endpoints; this is the gap.",
-        "sampled": 26,
+        "sampled": 47,
         "predicate_wording_in_co_stated_docs": 0,
         "rows": [
           {
@@ -2461,17 +3449,122 @@
             "predicate": "dependsOn",
             "stated_predicate": "dependsOn",
             "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "dependsOn",
+            "stated_predicate": "dependsOn",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "dependsOn",
+            "stated_predicate": "dependsOn",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "dependsOn",
+            "stated_predicate": "dependsOn",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "dependsOn",
+            "stated_predicate": "dependsOn",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "dependsOn",
+            "stated_predicate": "dependsOn",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
+          },
+          {
+            "predicate": "ownedBy",
+            "stated_predicate": "ownedBy",
+            "wording_in_co_stated_docs": []
           }
         ]
       },
-      "verdict": "PASS"
+      "verdict": "FAIL"
     }
   },
   "rules": {
     "T1": "PASS iff the second ingestion adds no RE-STATED knowledge: 0 new Objects, 0 new Subjects, 0 same-name entities, and no Point whose text re-states an existing Point (>= 0.8 content-token overlap with a pass-1 Point). Events are reported SEPARATELY and are not counted as noise on the object axis: a re-ingestion IS an occurrence, so one Event per capture is expected \u2014 but an event-kind POINT re-minted for a sentence that was already stated is noise, and is counted.",
-    "T2": "PASS iff the restatement (doc-06) adds 0 entities, and the goal fact resolves to ONE point/entity carrying two sources; a second same-meaning entity or an unlinked second point is FAIL.",
-    "T3": "Reported as a share, with an explicit population. PASS iff the majority of created entities are NOT orphans AND every orphan named is standalone in the corpus text; otherwise FAIL, with the door's own answer reported beside the write receipt's so a door defect cannot be laundered as an extractor defect.",
-    "T4": "PASS iff none of the ontology's types is collapsed: the flat (Point/Event/Subject/Object/Source) distribution is non-degenerate, decisions land as the event/decision kind rather than as a bare statement, roles land as Subjects, and documents land as Sources.",
-    "T5": "PASS iff every sampled relation is stated or directly implied by the corpus text: both ENDPOINTS named in one document \u2014 verbatim, or the extractor's re-wording at >= 0.6 content-token overlap with that document. One relation whose endpoints are never co-stated fails the test. \u26d4 The PREDICATE axis is NOT graded: the corpus is prose and the graph's predicates are ontology names (`ownedBy`, `related`, \u2026), so a wording test would score a correct normalisation as an invention \u2014 the count of rows whose predicate wording appears in its co-stated documents is reported as gap D6 instead of being passed silently."
+    "T2": "PASS iff the restatement (doc-06) adds 0 entities AND the goal fact resolves to exactly ONE point id shared across the two wordings; a second same-meaning entity (an unlinked second point) is FAIL. \u26d4 The rule's \"carrying two sources\" leg is NOT graded: the sources door answers per-Source POINT COUNTS, not point-to-Source links, so \"does this point carry two sources\" cannot be asked of the committed readback at all \u2014 recorded as gap D7 rather than assumed.",
+    "T3": "Reported as a share, with an explicit population. PASS iff the majority of created entities are NOT orphans AND every orphan named is standalone in the corpus text \u2014 graded as: its NAME is stated in one document, verbatim or at >= 0.8 of the name's own >4-character tokens (the same near-match band T1 uses for a restatement); otherwise FAIL, with the door's own answer reported beside the write receipt's so a door defect cannot be laundered as an extractor defect.",
+    "T4": "PASS iff none of the ontology's types is collapsed: the flat (Point/Event/Subject/Object/Source) distribution is non-degenerate (Event, Subject and Object all non-zero, and at least one Source per document ingested), a decision is represented by a decision-kind ENTITY, roles land as Subject-layer role entities, and documents land as Sources. \u26d4 The decision's SENTENCES are Points and land as `statement` kind; this rule grades the decision ENTITY, and the Points' kinds are reported beside the verdict rather than graded.",
+    "T5": "PASS iff every sampled relation is stated or directly implied by the corpus text: both ENDPOINTS named in one document \u2014 verbatim, or the extractor's re-wording at >= 0.6 content-token overlap with that document. The POPULATION is every relation either pass's write receipt says it wrote: pass 2 is where re-extraction invents names (\u00a74), so excluding it would be sampling away the defect. One relation whose endpoints are never co-stated fails the test. \u26d4 The PREDICATE axis is NOT graded: the corpus is prose and the graph's predicates are ontology names (`ownedBy`, `related`, \u2026), so a wording test would score a correct normalisation as an invention \u2014 the count of rows whose predicate wording appears in its co-stated documents is reported as gap D6 instead of being passed silently."
   }
 }

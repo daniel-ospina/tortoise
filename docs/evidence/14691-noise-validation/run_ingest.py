@@ -14,7 +14,7 @@ by pass 2 (every document again). Pass 2 uses a DISTINCT `session_id` suffix
 (`-replay`): a second, independent ingestion of the same words — the shape a user
 re-uploads a document in — not an idempotent replay keyed on a session id we
 already used. The same-session variant is deliberately NOT measured here and is
-recorded as a gap in REPORT.md §6, because it answers a different question
+recorded as a gap in REPORT.md §8, because it answers a different question
 (a retry of one capture) and the owner's failure mode is "previous graphs became
 all noise" over repeated ingestion.
 
