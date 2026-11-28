@@ -51,6 +51,43 @@
 # DOWN and DEGRADED ARE NEVER SUMMED. They are different product failures (no
 # answer vs answered wrongly). They get SEPARATE columns.
 #
+# DOWNTIME IS A MEASUREMENT, NOT A RECOLLECTION (#3484). "How much downtime did
+# that cost" was unanswerable without a human opening incidents one at a time:
+# the ledger carried WHEN an incident opened, and the recovery existed only in
+# the issue's `closed_at`, which nothing read. Every incident contributes the
+# span first_seen_down -> closed.
+#
+# ⛔ MINUTES ARE WALL-CLOCK, NOT A SUM OF DURATIONS. Overlapping incidents are
+# UNIONED, because one outage can open more than one issue and "minutes down" is
+# elapsed time, not a tally of tickets. Minutes are attributed to the UTC day the
+# minute OCCURRED. Incident COUNTS are attributed to the day an incident was
+# FIRST observed — a count belongs to the incident, a minute belongs to the clock,
+# and the legend says which column is which so no reader has to infer it.
+# (Round-2 review P2: the first cut summed per-incident durations and overstated
+# the 28-day window by ~475 min / 12.5% — the ledger holds 39 overlapping DOWN
+# pairs, #13930/#13931, #14036/#14041, #14080/#14082, #14116/#14117 among them.)
+#
+# ⛔ THE SPAN IS SPLIT BY KIND (`down_min` / `degraded_min`), because DOWN and
+# DEGRADED are different product failures and this file never sums them.
+#
+# TWO AGGREGATE CLASSES, and they are never collapsed:
+#   counted    a DOWN or DEGRADED incident with a bounded span — the ONLY shape
+#              that contributes minutes, and the only one in a minutes column
+#   unbounded  everything else, counted in `unbounded_inc` and contributing NO
+#              minutes: still open; closed with an unreadable recovery stamp;
+#              closed as not_planned/duplicate (a human decision is not a
+#              recovery); a recovery stamp EARLIER than the first failure; no
+#              USABLE first_failure_ts (absent, unparseable, or AHEAD of now —
+#              a stamp after this run's clock is classified at ingest, so it can
+#              never be counted and denied in the same record); or a usable span
+#              with no parseable kind. Disclosing them together is what
+#              guarantees no incident can
+#              be simultaneously INVISIBLE and costed at 0 minutes — but each
+#              carries its own label in the per-incident list, so "we do not know
+#              when it ended" is never printed as "it is down right now".
+# The span's resolution is the probe's real cadence (printed above it): an
+# outage shorter than one probe interval cannot be told apart from one interval.
+#
 # A FOURTH INVARIANT (#3896): the window is reported ONLY if the run fetch was
 # PROVEN COMPLETE. GitHub's runs endpoint returns at most 1,000 results for a
 # `created`-filtered query, so the fetch walks one bounded UTC-day slice at a
@@ -174,6 +211,28 @@ fmt_day() { # <epoch>
   out="$(date -u -d "@$1" +%Y-%m-%d 2>/dev/null || true)"
   if [ -z "$out" ]; then out="$(date -u -r "$1" +%Y-%m-%d 2>/dev/null || true)"; fi
   printf '%s' "$out"
+}
+
+# ISO-8601 Z -> epoch (the INVERSE of fmt_iso, needed for the ledger's
+# `closed_at`, which the API hands back as a string). Prints NOTHING when the
+# value is not a renderable timestamp: the caller treats "" as UNKNOWN rather
+# than as 0, because epoch 0 would read as a 56-year outage.
+iso_to_epoch() { # <ISO-8601> -> epoch or empty
+  local iso="${1:-}" out digits
+  case "$iso" in
+    ????-??-??T??????*) : ;;
+    *) printf ''; return 0 ;;
+  esac
+  out="$(date -u -d "$iso" +%s 2>/dev/null || true)"
+  if [ -z "$out" ]; then
+    out="$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$iso" +%s 2>/dev/null || true)"
+  fi
+  # Accept only plain digits of a plausible epoch width. Anything else is an
+  # unparseable timestamp, and no caller may do arithmetic on it.
+  case "$out" in
+    ''|*[!0-9]*) printf '' ;;
+    *) digits="${#out}"; if [ "$digits" -ge 9 ] && [ "$digits" -le 12 ]; then printf '%s' "$out"; fi ;;
+  esac
 }
 
 # epoch -> ISO-8601 Z (same two-platform approach).
@@ -354,7 +413,19 @@ fetch_runs() { # reads $RUN_TMP/window_days.txt -> TSV "day<TAB>conclusion" in $
 # Search by the BODY marker + the reserved Actions login, then re-verify both
 # client-side (mirroring the watchdog's own adoption guard — the repo is
 # public, and a human-authored look-alike must never be read as machine state).
-# Writes TSV: number, kind, first_failure_ts, restarts_raw
+# Writes TSV: number, kind, first_failure_ts, closed_at, state_reason, state, restarts_raw
+#
+# WHY `closed_at` (#3484) — downtime was the one bucket figure nobody could
+# answer: the ledger records WHEN an incident opened (`first_failure_ts`), and
+# the recovery time lived only in the issue's own `closed_at`, which no consumer
+# read. "How much downtime did that cost" therefore needed a human opening
+# incidents one at a time. The span first-seen-down -> closed is the outage the
+# probe OBSERVED; it is reported with its resolution (the probe's real cadence)
+# and never summed with still-open incidents, whose outage is not yet bounded.
+#
+# `state_reason` is read for one reason: a human CLOSING an issue as
+# `not_planned` or `duplicate` is NOT a recovery, and its `closed_at` would
+# otherwise manufacture an outage span that never happened.
 fetch_incidents() {
   local q enc out
   q="repo:${REPO} is:issue in:body author:app/github-actions \"${INCIDENT_STATE_MARKER}\""
@@ -377,9 +448,19 @@ fetch_incidents() {
       | (grab("watchdog-state[^>]*kind=(?<v>[a-zA-Z]+)")) as $k
       | (grab("watchdog-state[^>]*first_failure_ts=(?<v>[0-9]+)")) as $f
       | (grab("watchdog-state[^>]*restarts=(?<v>[^>]*)")) as $r
+      | ((.closed_at // "") | tostring) as $c
+      | ((.state_reason // "") | tostring) as $y
+      | ((.state // "") | tostring) as $s
       | [ (.number | tostring),
           (($k // "-") | ascii_downcase),
           ($f // "-"),
+          (if $c == "" then "-" else $c end),
+          (if $y == "" then "-" else $y end),
+          # `state` is what separates "still down" from "closed, but the recovery stamp is
+          # unreadable". Without it the printer could only guess, and the guess it made was
+          # the worst one available: asserting, for a CLOSED incident, that the service is
+          # down right now with an elapsed time that grows for ever (review P2).
+          (if $s == "" then "-" else $s end),
           # `-` is the sentinel; a PRESENT-but-empty restarts= also normalizes to
           # "". Both reach bash as `-`/"" in the LAST field, which is where an
           # empty value is safe: bash `read` with IFS=<tab> collapses an empty
@@ -395,23 +476,160 @@ fetch_incidents() {
   # day an incident belongs to (they did: bucketing compared a raw epoch against
   # a formatted day and every incident column silently read 0).
   : > "$RUN_TMP/incidents.tsv"
-  local inc_n inc_kind inc_ts inc_rest inc_day
-  while IFS="$(printf '\t')" read -r inc_n inc_kind inc_ts inc_rest; do
+  local inc_n inc_kind inc_ts inc_closed inc_reason inc_state inc_rest inc_day
+  local inc_ff inc_end
+  while IFS="$(printf '\t')" read -r inc_n inc_kind inc_ts inc_closed inc_reason inc_state inc_rest; do
     [ -n "$inc_n" ] || continue
     [ "$inc_kind" = "-" ] && inc_kind="unknown"
     [ "$inc_rest" = "-" ] && inc_rest=""
+    # ⛔ `state` KEEPS its `-` sentinel: an EMPTY MIDDLE field is collapsed by `read`, which
+    # would shift `restarts` into the wrong column — the `#3896` P2-3 trap, one field over.
+    [ -n "${inc_state:-}" ] || inc_state="-"
     inc_day="n/a"
+    inc_ff="-"
+    # ⛔ A WIDTH GATE, NOT JUST A DIGIT TEST (round-2 review P2). `08` passes a
+    # `not-all-digits` test and is not a timestamp: GNU `date -d @08` renders
+    # 1970-01-01, so the incident would claim a 56-year elapsed bound. `to_int` says
+    # the same thing about this class (`:171`), and `iso_to_epoch` already applies a
+    # 9..12-digit width gate to the OTHER end of the span. Real ledger stamps are 10
+    # digits; anything outside 9..12 is not a renderable epoch and is treated as the
+    # unparseable stamp it is (warned, listed, never counted).
     case "${inc_ts:-}" in
       ''|-|*[!0-9]*) : ;;
-      *) inc_day="$(fmt_day "$inc_ts")" ;;
+      *)
+        if [ "${#inc_ts}" -ge 9 ] && [ "${#inc_ts}" -le 12 ]; then
+          # ⛔ NORMALIZE AT INGEST, not at each consumer (rounds 4-6). A leading zero is
+          # bash OCTAL: `01789547000` ABORTS the expansion (= the whole render dies and
+          # publishes nothing), and a valid-octal `012345670` silently walks to a 1970
+          # day. `awk` and `[ -ge ]` read the SAME string as DECIMAL, so two consumers
+          # disagreed about one value while both looked right in isolation. `to_int` is
+          # this file's normalizer (:186); an all-zero result is not a timestamp either
+          # (epoch 0 would read as a 56-year incident), so it joins the unparseable class.
+          inc_ff="$(to_int "$inc_ts" -)"
+          case "$inc_ff" in
+            ''|-|0) inc_ff="-" ;;
+            *)
+              # ⛔ A STAMP AHEAD OF `now` IS NOT A MEASUREMENT (review round 9 P2). Neither
+              # counting pass can see the clock, so a stamp seconds in the future — an incident
+              # that opened and closed during this run's ~N-day fetch — was counted in the day
+              # columns, the recovered subset AND the minutes, while its own line said "NOT
+              # counted". Classified HERE, once, as its own class: no minutes, no day, disclosed
+              # in the TOTAL's unbounded_inc, and measured on the next run once `now` passes it.
+              # The `future` sentinel is deliberately NON-NUMERIC, so both passes skip the row
+              # structurally (a `case`/regex) rather than by remembering to check a clock.
+              if [ "$inc_ff" -gt "$now" ]; then inc_ff="future"; inc_day="n/a"
+              else inc_day="$(fmt_day "$inc_ff")"; fi
+              ;;
+          esac
+        fi
+        ;;
     esac
     # A numeric epoch that `date` cannot render (out of range) must still land
     # as a DATED-NOTHING row, never as an empty field: bash `read` collapses an
     # empty MIDDLE field, which shifted the restart ledger into the day column
     # and printed a restart stamp as the observation day.
     [ -n "$inc_day" ] || inc_day="n/a"
-    printf '%s\t%s\t%s\t%s\n' "$inc_n" "$inc_kind" "$inc_day" "${inc_rest:-}" >> "$RUN_TMP/incidents.tsv"
+    # The recovery end of the span. Three DISTINGUISHABLE states, never two:
+    #   <epoch>  closed, therefore RECOVERED — a real, bounded outage
+    #   -        never closed (still down, or closed with no readable stamp):
+    #            the outage is NOT bounded, so it contributes no minutes
+    #   x        closed as not_planned/duplicate by a human — NOT a recovery,
+    #            excluded from every downtime figure rather than read as one
+    inc_end="-"
+    case "${inc_reason:-}" in
+      not_planned|duplicate) inc_end="x" ;;
+      *)
+        case "${inc_closed:-}" in
+          ''|-|x) : ;;
+          *)
+            inc_end="$(iso_to_epoch "$inc_closed")"
+            [ -n "$inc_end" ] || inc_end="-"
+            ;;
+        esac
+        ;;
+    esac
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$inc_n" "$inc_kind" "$inc_day" "$inc_ff" "$inc_end" "${inc_state}" "${inc_rest:-}" >> "$RUN_TMP/incidents.tsv"
   done < "$RUN_TMP/incidents.raw.tsv"
+  return 0
+}
+
+# ── 2b. wall-clock downtime per UTC day, by UNION of intervals (#3484) ─────
+# ⛔ SPANS ARE NOT ADDITIVE (round-2 review P2). The ledger contains overlapping
+# incidents — two probes can open two `kind=down` issues for one outage, and 39 such
+# overlapping DOWN pairs exist in the live ledger (#13930/#13931, #14036/#14041,
+# #14080/#14082, #14116/#14117) — so summing per-incident durations reports a
+# number that never existed as elapsed time (measured: +475 min, ~12.5%, on the
+# 28-day window). "Minutes the service was down" is a UNION of intervals.
+#
+# Each span is also CLIPPED to the UTC day it falls in, so a minute is counted on
+# the day it actually happened. That is deliberately different from the incident
+# COUNTS above, which stay attributed to the day an incident was first observed:
+# a count belongs to the incident, a minute belongs to the clock. Both rules are
+# stated in the rendered legend, because a reader must not have to infer which
+# column uses which.
+#
+# Interval arithmetic is done on INTEGER epoch seconds in awk, never through
+# `date`: an unrenderable stamp must not be able to abort the render, and this
+# pass only ever runs on stamps that already passed the numeric + ordering gates.
+build_span_union() { # reads $RUN_TMP/incidents.tsv -> $RUN_TMP/day_minutes.tsv
+  : > "$RUN_TMP/spans.tsv"
+  local inc_n inc_kind inc_day inc_ff inc_end inc_state inc_rest
+  local dse day_s day_e guard
+  while IFS="$(printf '\t')" read -r inc_n inc_kind inc_day inc_ff inc_end inc_state inc_rest; do
+    [ -n "$inc_n" ] || continue
+    [ "$inc_kind" = "down" ] || [ "$inc_kind" = "degraded" ] || continue
+    case "${inc_ff:-}" in ''|-|*[!0-9]*) continue ;; esac
+    case "${inc_end:-}" in ''|-|x|*[!0-9]*) continue ;; esac
+    [ "$inc_end" -ge "$inc_ff" ] || continue
+    # First UTC midnight at or before the span start, then walk forward. The guard
+    # bounds the walk so a nonsense span cannot spin; a span beyond it is not a
+    # measurement anyone should be printing anyway.
+    # ⛔ THE DAY IS A HALF-OPEN INTERVAL [dse, dse+86400) (round 6). The first cut used the
+    # INCLUSIVE last second (`dse + 86399`) and then divided the clipped length by 60, so
+    # a fully covered UTC day measured 1439 min and EVERY midnight crossing lost a minute
+    # at the boundary (23:00 -> 01:00 read 59 + 60 = 119 of 120). A minute is a DURATION:
+    # the length of a clipped interval is the difference of its ends.
+    dse=$(( inc_ff - (inc_ff % 86400) ))
+    guard=0
+    while [ "$dse" -lt "$inc_end" ] && [ "$guard" -lt 400 ]; do
+      day_s=$(( inc_ff > dse ? inc_ff : dse ))
+      day_e=$(( dse + 86400 ))
+      [ "$inc_end" -lt "$day_e" ] && day_e="$inc_end"
+      if [ "$day_e" -gt "$day_s" ]; then
+        printf '%s\t%s\t%s\t%s\n' "$(fmt_day "$dse")" "$inc_kind" "$day_s" "$day_e" >> "$RUN_TMP/spans.tsv"
+      fi
+      dse=$(( dse + 86400 ))
+      guard=$(( guard + 1 ))
+    done
+  done < "$RUN_TMP/incidents.tsv"
+
+  # Union: sort by (day, kind, start) and merge every interval that starts at or
+  # before the running end. Truncation to whole minutes happens ONCE, on the
+  # merged interval — truncating per input interval would lose a minute per
+  # overlap and make the union depend on how many issues one outage opened.
+  # ⛔ A FAILED PASS IS NOT ZERO MINUTES (rounds 3, 5, 6). The first cut ended this
+  # pipeline with `|| : > file`, so ANY failure in the chain — OOM, a full /tmp, a lost
+  # pipe, or the render aborting above — truncated the minutes file, every day resolved
+  # through the `if (!found) print 0` default, and the record published
+  # `0 min DOWN over 1 DOWN incident(s)` directly beside `down_for=60 min`. The return
+  # code is the contract now: the caller REFUSES to render, because an unusable
+  # measurement must be DISCLOSED, never costed at 0 (like every fetch-side failure here).
+  : > "$RUN_TMP/day_minutes.tsv"
+  if [ -s "$RUN_TMP/spans.tsv" ]; then
+    LC_ALL=C sort -t"$(printf '\t')" -k1,1 -k2,2 -k3,3n "$RUN_TMP/spans.tsv" \
+      | awk -F'\t' '
+        function flush() { if (have) printf "%s\t%s\t%d\n", cd, ck, int((ce - cs) / 60) }
+        $1 != cd || $2 != ck { flush(); cd = $1; ck = $2; cs = $3; ce = $4; have = 1; next }
+        { if ($3 <= ce) { if ($4 > ce) ce = $4 } else { flush(); cs = $3; ce = $4 } }
+        END { flush() }' \
+      | awk -F'\t' '{ key = $1 SUBSEP $2; m[key] += $3; if (!(key in seen)) { order[++n] = key; seen[key] = 1 } }
+                     END { for (i = 1; i <= n; i++) { split(order[i], p, SUBSEP); printf "%s\t%s\t%d\n", p[1], p[2], m[order[i]] } }' \
+      > "$RUN_TMP/day_minutes.tsv" || return 1
+  fi
+  # Test seam: force the pass to report failure, so the caller's refuse-to-render guard
+  # is covered by the harness instead of being dead code (mirrors RECORD_FETCH_INTEGRITY).
+  [ "${RECORD_UNION_FAIL:-0}" = "1" ] && return 1
   return 0
 }
 
@@ -519,9 +737,14 @@ render_record() { # <days> <now>
 
   local total_intended=0 total_delivered=0 total_failed=0 total_inconclusive=0
   local total_down_inc total_degraded_inc total_unknown_inc total_restarts undated_inc
+  local total_down_min=0 total_degraded_min=0 total_unbounded=0 total_recovered=0 total_recovered_deg=0
   local zero_days=0 partial_days=0 gap_days_list="" inconclusive_kinds=""
   local day day_intended day_mark d_del d_fail d_inc d_decided del_ok
-  local line inc_line inc_down inc_deg inc_unk d_rest pct_avail
+  local line inc_line inc_down inc_deg inc_unk d_rest d_dmin d_gmin d_open d_rec d_grec pct_avail
+  # ⛔ AN AGGREGATION THAT DID NOT RUN IS NOT A ZERO (rounds 3, 5, 6). Each per-day pass
+  # below converts its own failure into this refusal instead of an empty file: an empty
+  # file renders as "no samples" / "0 minutes", which is a claim no run made.
+  local agg_rc=0 agg_reason=""
 
   printf 'availability record — RECORD-ONLY baseline (#3810) — INSTRUMENT, NOT A GATE\n'
   printf 'generated: %s   window: %s UTC day(s) ending %s\n' "$(fmt_iso "$now")" "$days" "$today"
@@ -538,7 +761,8 @@ render_record() { # <days> <now>
   # Columns: day, delivered, failed, inconclusive(=no verdict).
   awk -F'\t' '{ d[$1]++; if ($2 == "failure") f[$1]++; else if ($2 != "success") o[$1]++ }
               END { for (k in d) printf "%s\t%d\t%d\t%d\n", k, d[k]+0, f[k]+0, o[k]+0 }' \
-    "$RUN_TMP/runs.tsv" > "$RUN_TMP/day_runs.tsv" 2>/dev/null || : > "$RUN_TMP/day_runs.tsv"
+    "$RUN_TMP/runs.tsv" > "$RUN_TMP/day_runs.tsv" 2>/dev/null \
+    || { agg_rc=1; agg_reason="the per-day run-count aggregation did not complete"; }
 
   # The distinct inconclusive conclusions, so "no verdict" is never a black box.
   awk -F'\t' '$2 != "success" && $2 != "failure" { c[$2]++ }
@@ -547,12 +771,39 @@ render_record() { # <days> <now>
 
   # Per-day incident counts (bucketed by first_failure_ts — the day the
   # incident was FIRST observed, i.e. the day whose availability it explains).
+  # Columns emitted: day, down, degraded, unknown, restart_attempts,
+  #                  unbounded (no usable span), recovered_down, recovered_degraded.
+  # MINUTES ARE NOT SUMMED HERE — see `build_span_union` below, which is the whole
+  # reason it is a separate pass.
+  # ⛔ THE SPAN IS SPLIT BY KIND, because this file's own invariant (`:51-52`) says DOWN
+  # and DEGRADED are different product failures and are NEVER SUMMED. The first cut of this
+  # aggregation summed both into `down_min`, which would have published "67 minutes of downtime"
+  # on a day with zero DOWN incidents (ledger #11442, 2026-11-07) — and the harness could not
+  # see it, because every fixture with a `closed_at` was `kind=down` (round-1 review P1).
+  # ⛔ AND A SPAN THAT CANNOT BE USED IS DISCLOSED, NEVER DROPPED: an incident whose recovery
+  # stamp is missing (`-`), a non-recovery (`x`), a NUMERIC SPAN EARLIER THAN the first failure,
+  # or a usable span with NO parseable kind lands in `unbounded`, so no incident can be both
+  # invisible and costed at 0 minutes (round-1 review P2, round-2 review P2 for the kind case).
   awk -F'\t' '{ day = $3; if (day == "" || day == "n/a") next;
                 if ($2 == "down") dn[day]++; else if ($2 == "degraded") dg[day]++; else un[day]++;
-                n = split($4, a, ","); c = 0; for (i = 1; i <= n; i++) if (a[i] != "") c++;
-                rs[day] += c; seen[day] = 1 }
-              END { for (k in seen) printf "%s\t%d\t%d\t%d\t%d\n", k, dn[k]+0, dg[k]+0, un[k]+0, rs[k]+0 }' \
-    "$RUN_TMP/incidents.tsv" > "$RUN_TMP/day_incidents.tsv" 2>/dev/null || : > "$RUN_TMP/day_incidents.tsv"
+                n = split($7, a, ","); c = 0; for (i = 1; i <= n; i++) if (a[i] != "") c++;
+                rs[day] += c; seen[day] = 1;
+                if ($4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ && $5 >= $4) { if ($2 == "down") rcd[day]++; else if ($2 == "degraded") rcg[day]++; else op[day]++ } else { op[day]++ } }
+              END { for (k in seen) printf "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", k, dn[k]+0, dg[k]+0, un[k]+0, rs[k]+0, op[k]+0, rcd[k]+0, rcg[k]+0 }' \
+    "$RUN_TMP/incidents.tsv" > "$RUN_TMP/day_incidents.tsv" 2>/dev/null \
+    || { agg_rc=1; agg_reason="the per-day incident aggregation did not complete"; }
+
+  build_span_union \
+    || { agg_rc=1; agg_reason="the per-day downtime UNION pass did not complete"; }
+  if [ "$agg_rc" -ne 0 ]; then
+    printf 'availability record — INSTRUMENT FAILURE, NOT A READING (#3484)\n'
+    printf 'A per-day aggregation pass did not complete, so the minute and incident columns have no\n'
+    printf 'measurement behind them. Rendering zeros would assert "no downtime observed" — a figure\n'
+    printf 'this run does not have. An unusable measurement is DISCLOSED, never costed at 0 minutes.\n'
+    printf 'Reason: %s\n' "$agg_reason"
+    fail "INSTRUMENT FAILURE — $agg_reason"
+    return 1
+  fi
 
   # Incidents that could not be dated AT ALL have no day to be bucketed into,
   # so they are disclosed on their own line rather than folded into a window
@@ -563,11 +814,17 @@ render_record() { # <days> <now>
   # before the window the header names).
   undated_inc="$(awk -F'\t' '$3 == "" || $3 == "n/a" { n++ } END { print n + 0 }' "$RUN_TMP/incidents.tsv" 2>/dev/null || printf 0)"
   total_down_inc=0 total_degraded_inc=0 total_unknown_inc=0 total_restarts=0
+  # ⛔ AN UNDATED INCIDENT IS A MEMBER OF THE UNBOUNDED CLASS (rounds 5-6). Both the header
+  # (`:76-82`) and the PUBLISHED legend name "no parseable first_failure_ts" as one, but the
+  # aggregator `next`s on a day it cannot bucket, so such a row reached no `op[]` key and the
+  # record printed `0 incident(s) have NO usable span` while an undated — often still OPEN —
+  # incident sat in the same output. Counting it here makes the column agree with its legend.
+  total_unbounded=$(( total_unbounded + undated_inc ))
 
   # ── per-day table ──
-  printf '%-12s %-9s %-9s %-9s %-9s %-10s %-56s %-9s %-13s %-12s %s\n' \
-    'UTC day' 'delivered' 'intended' 'cadence' 'failed' 'inconcl.' 'sampled_availability (printed WITH its resolution)' 'down_inc' 'degraded_inc' 'unknown_inc' 'restarts'
-  printf -- '-%.0s' $(seq 1 160); printf '\n'
+  printf '%-12s %-9s %-9s %-9s %-9s %-10s %-56s %-9s %-13s %-12s %-9s %-9s %-13s %s\n' \
+    'UTC day' 'delivered' 'intended' 'cadence' 'failed' 'inconcl.' 'sampled_availability (printed WITH its resolution)' 'down_inc' 'degraded_inc' 'unknown_inc' 'restarts' 'down_min' 'degraded_min' 'unbounded_inc'
+  printf -- '-%.0s' $(seq 1 190); printf '\n'
 
   # Iterate the SAME day list the fetch walked, oldest first.
   while IFS= read -r day; do
@@ -579,11 +836,18 @@ render_record() { # <days> <now>
     d_fail="$(printf '%s' "$line" | cut -f2)"
     d_inc="$(printf '%s' "$line" | cut -f3)"
     d_decided=$(( d_del - d_inc ))
-    inc_line="$(awk -F'\t' -v d="$day" '$1 == d { print $2 "\t" $3 "\t" $4 "\t" $5; found = 1 } END { if (!found) print "0\t0\t0\t0" }' "$RUN_TMP/day_incidents.tsv")"
+    inc_line="$(awk -F'\t' -v d="$day" '$1 == d { print $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 "\t" $7 "\t" $8; found = 1 } END { if (!found) print "0\t0\t0\t0\t0\t0\t0" }' "$RUN_TMP/day_incidents.tsv")"
     inc_down="$(printf '%s' "$inc_line" | cut -f1)"
     inc_deg="$(printf '%s' "$inc_line" | cut -f2)"
     inc_unk="$(printf '%s' "$inc_line" | cut -f3)"
     d_rest="$(printf '%s' "$inc_line" | cut -f4)"
+    d_open="$(printf '%s' "$inc_line" | cut -f5)"
+    d_rec="$(printf '%s' "$inc_line" | cut -f6)"
+    d_grec="$(printf '%s' "$inc_line" | cut -f7)"
+    # Minutes come from the UNION pass, keyed by (day, kind).
+    d_dmin="$(awk -F'\t' -v d="$day" -v k="down" '$1 == d && $2 == k { print $3; found = 1 } END { if (!found) print 0 }' "$RUN_TMP/day_minutes.tsv" 2>/dev/null)"
+    d_gmin="$(awk -F'\t' -v d="$day" -v k="degraded" '$1 == d && $2 == k { print $3; found = 1 } END { if (!found) print 0 }' "$RUN_TMP/day_minutes.tsv" 2>/dev/null)"
+    d_dmin="${d_dmin:-0}"; d_gmin="${d_gmin:-0}"
 
     total_delivered=$((total_delivered + d_del))
     total_failed=$((total_failed + d_fail))
@@ -593,6 +857,11 @@ render_record() { # <days> <now>
     total_degraded_inc=$((total_degraded_inc + inc_deg))
     total_unknown_inc=$((total_unknown_inc + inc_unk))
     total_restarts=$((total_restarts + d_rest))
+    total_down_min=$((total_down_min + d_dmin))
+    total_degraded_min=$((total_degraded_min + d_gmin))
+    total_unbounded=$((total_unbounded + d_open))
+    total_recovered=$((total_recovered + d_rec))
+    total_recovered_deg=$((total_recovered_deg + d_grec))
 
     if [ "$d_del" -eq 0 ]; then
       zero_days=$((zero_days + 1))
@@ -614,11 +883,11 @@ render_record() { # <days> <now>
       del_ok=$(( d_del - d_fail - d_inc ))
       pct_avail="$(pct "$del_ok" "$d_decided")% (delivered=${d_del}/${day_intended} cadence=$(pct "$d_del" "$day_intended")% decided=${d_decided}/${d_del})"
     fi
-    printf '%-12s %-9s %-9s %-9s %-9s %-10s %-56s %-9s %-13s %-12s %s\n' \
-      "$day$day_mark" "$d_del" "$day_intended" "$(pct "$d_del" "$day_intended")%" "$d_fail" "$d_inc" "$pct_avail" "$inc_down" "$inc_deg" "$inc_unk" "$d_rest"
+    printf '%-12s %-9s %-9s %-9s %-9s %-10s %-56s %-9s %-13s %-12s %-9s %-9s %-13s %s\n' \
+      "$day$day_mark" "$d_del" "$day_intended" "$(pct "$d_del" "$day_intended")%" "$d_fail" "$d_inc" "$pct_avail" "$inc_down" "$inc_deg" "$inc_unk" "$d_rest" "$d_dmin" "$d_gmin" "$d_open"
   done < "$RUN_TMP/window_days.txt"
 
-  printf -- '-%.0s' $(seq 1 160); printf '\n'
+  printf -- '-%.0s' $(seq 1 190); printf '\n'
   local total_decided=$(( total_delivered - total_inconclusive )) total_avail
   if [ "$total_delivered" -le 0 ]; then
     total_avail="n/a (delivered=0/${total_intended} cadence=$(pct 0 "$total_intended")%)"
@@ -627,9 +896,9 @@ render_record() { # <days> <now>
   else
     total_avail="$(pct "$(( total_delivered - total_failed - total_inconclusive ))" "$total_decided")% (delivered=${total_delivered}/${total_intended} cadence=$(pct "$total_delivered" "$total_intended")% decided=${total_decided}/${total_delivered})"
   fi
-  printf '%-12s %-9s %-9s %-9s %-9s %-10s %-56s %-9s %-13s %-12s %s\n' \
+  printf '%-12s %-9s %-9s %-9s %-9s %-10s %-56s %-9s %-13s %-12s %-9s %-9s %-13s %s\n' \
     'TOTAL' "$total_delivered" "$total_intended" "$(pct "$total_delivered" "$total_intended")%" "$total_failed" "$total_inconclusive" \
-    "$total_avail" "$total_down_inc" "$total_degraded_inc" "$total_unknown_inc" "$total_restarts"
+    "$total_avail" "$total_down_inc" "$total_degraded_inc" "$total_unknown_inc" "$total_restarts" "$total_down_min" "$total_degraded_min" "$total_unbounded"
 
   printf '\n'
   printf '  * today (%s) is IN PROGRESS: intended=%s counts only the cron intervals elapsed since 00:00 UTC, so that row is not comparable to a complete day.\n' "$today" "$today_intended"
@@ -656,34 +925,126 @@ render_record() { # <days> <now>
   printf '\n'
   printf 'INCIDENTS — from ledger issues carrying %s (kind and restarts read from each state block).\n' "$INCIDENT_STATE_MARKER"
   printf 'DOWN (no answer) and DEGRADED (answered wrongly) are SEPARATE product failures and are never summed.\n'
+  printf 'DOWN_MIN = minutes the service was OBSERVED DOWN. DEGRADED_MIN is the same measure for DEGRADED incidents, in its OWN column — DOWN and DEGRADED are never summed. ⛔ MINUTES ARE WALL-CLOCK AND UNIONED: overlapping incidents are counted ONCE, and a minute is attributed to the UTC day it OCCURRED (the incident COUNT columns next to them attribute each incident to the day it was FIRST observed — a count belongs to the incident, a minute belongs to the clock). UNBOUNDED_INC = incidents that produce NO minutes and are disclosed here instead: still open, closed with an unreadable recovery stamp, closed as not_planned/duplicate (not a recovery), a recovery stamp that precedes the first failure, no USABLE first_failure_ts (absent, unparseable, or ahead of now), or a usable span with no parseable kind. Each carries its own label in the per-incident list, so an unknown end is never printed as "down right now". DOWN_MIN is a LOWER BOUND wherever UNBOUNDED_INC > 0. Resolution = the probe cadence printed above — a span shorter than one probe interval cannot be told apart from one interval.\n'
   printf '  incident totals: down=%s degraded=%s unknown=%s restart_attempts=%s\n' \
     "$total_down_inc" "$total_degraded_inc" "$total_unknown_inc" "$total_restarts"
-  printf '  (those totals are WINDOW-SCOPED — summed from the day columns above. The list below covers the\n'
-  printf '   whole ledger, so it can name an incident that is outside this window.)\n'
+  # ⛔ THE COUNT CLAUSE NAMES A POPULATION, SO IT MUST PRINT THAT POPULATION (review round 8 P2).
+  # "FIRST OBSERVED inside this window" is `down_inc`/`degraded_inc` (every in-window incident);
+  # `total_recovered` is the RECOVERED subset, which differs whenever anything in the window is
+  # unbounded — so the round-7 rewording published "are 1 DOWN" on a day whose TOTAL row says
+  # down_inc=4. A count the document contradicts one line above is the class this PR closes.
+  printf '  recovered downtime: %s min DOWN and %s min DEGRADED — never summed. These are WALL-CLOCK minutes (overlapping incidents union, not add) attributed to the UTC day the minute OCCURRED, so a span that BEGAN BEFORE this window still contributes its in-window minutes. The incidents FIRST OBSERVED inside this window are %s DOWN and %s DEGRADED (of which %s and %s recovered) — a count belongs to the incident and a minute to the clock, so the two are STATED SEPARATELY and are not a ratio. %s incident(s) have NO usable span and contribute NOTHING, so every figure here is a LOWER BOUND wherever that count is non-zero.\n' \
+    "$total_down_min" "$total_degraded_min" "$total_down_inc" "$total_degraded_inc" "$total_recovered" "$total_recovered_deg" "$total_unbounded"
+  # ⛔ "SUMMED FROM THE DAY COLUMNS" IS NOT TRUE OF `unbounded_inc` (review round 8 P3): the
+  # undated class is added to that TOTAL and has no day row, so the sentence must name the
+  # exception instead of implying a reconciliation that cannot be performed.
+  printf '  (those totals are WINDOW-SCOPED — summed from the day columns above, EXCEPT `unbounded_inc`,\n'
+  # ⚙ THE NOTE MUST NAME THE WHOLE CLASS (review round 10 P3): the undated class now includes a
+  # PARSEABLE stamp that is AHEAD of `now`, so "no parseable first_failure_ts" describes a
+  # population of size 0 while the TOTAL still shows the off-row +1.
+  printf '   which also counts incidents with no USABLE `first_failure_ts` (absent, unparseable, or ahead of now).\n'
+  printf '   The list below covers the\n'
+  printf '   whole ledger, so it can name an incident that is outside this window. They are NOT the sum of\n'
+  printf '   the per-incident down_for= lines: overlapping spans union, and every minute is clipped to its\n'
+  printf '   UTC day, so a line is evidence — not an addend.)\n'
   if [ "$undated_inc" -gt 0 ]; then
-    printf '  %s incident(s) carry no parseable first_failure_ts: listed below, but attributable to no UTC day and therefore NOT counted in the window totals above (a human-edited state block is warned about, NEVER silently dropped).\n' "$undated_inc"
+    # ⛔ THE DISCLOSURE MUST MATCH THE COLUMN (review round 7 P2). These incidents are
+    # COUNTED in the TOTAL's `unbounded_inc` (`total_unbounded += undated_inc`) because
+    # both the header and the legend name them as members of that class — so the old
+    # "NOT counted in the window totals" sentence contradicted the row three lines above it.
+    printf '  %s incident(s) carry no usable first_failure_ts (absent, unparseable, or AHEAD of now): listed below, counted in the TOTAL%s unbounded_inc but on NO day row — a human-edited state block is warned about, NEVER silently dropped.\n' "$undated_inc" "'s"
   fi
   if [ ! -s "$RUN_TMP/incidents.tsv" ]; then
     printf '  (none found in the ledger)\n'
   else
-    local inc_n inc_kind inc_day inc_rest rest_disp restart_count
-    while IFS="$(printf '\t')" read -r inc_n inc_kind inc_day inc_rest; do
+    local inc_n inc_kind inc_day inc_ff inc_end inc_state inc_rest rest_disp restart_count down_disp ff_i
+    while IFS="$(printf '\t')" read -r inc_n inc_kind inc_day inc_ff inc_end inc_state inc_rest; do
       [ -n "$inc_n" ] || continue
       [ -n "$inc_day" ] || inc_day="n/a"
-      if [ "$inc_day" = "n/a" ]; then
-        warn "ledger incident #${inc_n} has no parseable first_failure_ts — listed, but attributable to no UTC day and therefore NOT counted in the window totals"
+      if [ "$inc_ff" = "future" ]; then
+        warn "ledger incident #${inc_n} has a first_failure_ts AFTER now — listed, counted in the TOTAL's unbounded_inc but on no day row"
+      elif [ "$inc_day" = "n/a" ]; then
+        warn "ledger incident #${inc_n} has no parseable first_failure_ts — listed, counted in the TOTAL's unbounded_inc but on no day row"
       fi
       if [ "$inc_kind" = "unknown" ]; then
-        warn "ledger incident #${inc_n} has no parseable kind= — counted as unknown (never as down or degraded)"
+        # A row with no day cannot reach `unknown_inc` (that column is day-keyed), so the
+        # warning must not claim it was counted there (pre-existing defect, exposed by the
+        # undated/future classes this diff adds).
+        warn "ledger incident #${inc_n} has no parseable kind= — never counted as down or degraded (unknown where it has a day, unclassified otherwise)"
       fi
       if [ -n "$inc_rest" ]; then rest_disp="$inc_rest"; else rest_disp="(none)"; fi
       restart_count="$(printf '%s' "$inc_rest" | tr ',' '\n' | grep -c '[0-9]' || true)"
-      printf '  #%s  first_observed=%s  kind=%s  restarts=%s  restart_attempts=%s\n' \
-        "$inc_n" "$inc_day" "$inc_kind" "$rest_disp" "$restart_count"
+      # The per-incident RAW span. NOTE it is NOT a component you can add up: the day and TOTAL
+      # columns are the UNION of day-clipped intervals (an overlap is counted once, and a minute
+      # is clipped to the window), so these lines are evidence, not an arithmetic decomposition.
+      # ⛔ "STILL DOWN" AND "CLOSED, STAMP UNREADABLE" ARE DIFFERENT CLAIMS (review P2).
+      # Both reach here as `inc_end == "-"`, so the label is chosen from `state`, not guessed:
+      # asserting that a CLOSED incident is down right now — with a `now - first_failure`
+      # elapsed time that grows for ever — is the most consequential false statement an
+      # availability record can make, and it was what the first cut printed.
+      # ⛔ NOTHING BELOW MAY DO ARITHMETIC ON A RAW LEDGER EPOCH (round-2 review P2).
+      # `inc_ff` arrives verbatim from a human-editable issue body. Two reachable
+      # consequences of using it directly: a numeric-but-UNRENDERABLE epoch
+      # (`first_failure_ts=99999999999999999`) printed a NEGATIVE elapsed bound
+      # ("open (>= -1666666666666637 min)") on the very incident the record's own warn
+      # had just called unparseable; and a LEADING-ZERO value (`first_failure_ts=08`) is
+      # bash OCTAL, so `$(( … - 08 ))` aborts the expansion under `set -u` and the render
+      # dies — a human-edited body could stop the published record entirely. `to_int` is
+      # this file's normalizer for exactly this class (`:171`); `inc_day == "n/a"` is this
+      # file's existing "no parseable first_failure_ts" verdict (the width gate at the
+      # top of this function is what makes `08` land there rather than at epoch 8).
+      # ⛔ AND AN UNPARSEABLE KIND IS NOT A SPAN WE COUNT (round-2 review P2): the
+      # aggregator can only bucket down/degraded, so anything else is disclosed as such
+      # instead of being printed as minutes that no column contains.
+      case "$inc_end" in
+        -|'')
+          if [ "$inc_ff" = "future" ]; then
+            down_disp="unknown (first_failure_ts is in the FUTURE — not counted in any minutes column, carried in UNBOUNDED_INC)"
+          elif [ "$inc_day" = "n/a" ] || [ "$inc_ff" = "-" ]; then
+            down_disp="unknown (no parseable first_failure_ts)"
+          elif [ "$inc_state" = "closed" ]; then
+            down_disp="closed, recovery stamp unreadable (NOT counted as downtime)"
+          else
+            # The future class cannot reach here (it is classified at ingest), so `now - ff`
+            # is never negative — the negative-elapsed defect stays closed without a second
+            # clock comparison in the printer.
+            down_disp="open (>= $(( ($(now_epoch) - $(to_int "$inc_ff" 0)) / 60 )) min elapsed, NOT counted)"
+          fi
+          ;;
+        x) down_disp="excluded (closed as not_planned/duplicate — not a recovery)" ;;
+        *)
+          case "$inc_kind" in
+            down|degraded)
+              # ⛔ ONE `else` FOR TWO CAUSES WAS A WRONG DIAGNOSIS (review round 7 P3). "No
+              # parseable first_failure_ts" and "the recovery precedes the failure" reach this
+              # arm the same way (`inc_end` is numeric), and the header promises each unbounded
+              # class its OWN label — so an undated row was told it held a clock inversion that
+              # does not exist, and pointed at the wrong field to repair.
+              # ⛔ AND A STAMP AHEAD OF NOW IS CLASSIFIED AT INGEST (review round 9 P2), so it
+              # never reaches this arm as a numeric span: the row is non-numeric (`future`) and
+              # is skipped by both counting passes. The label therefore only has to be truthful.
+              ff_i="$(to_int "$inc_ff" 0)"
+              if [ "$inc_ff" = "future" ]; then
+                down_disp="unknown (first_failure_ts is in the FUTURE — not counted in any minutes column, carried in UNBOUNDED_INC)"
+              elif [ "$inc_day" = "n/a" ] || [ "$inc_ff" = "-" ]; then
+                down_disp="unknown (no parseable first_failure_ts)"
+              elif [ "$inc_end" -ge "$ff_i" ]; then
+                down_disp="$(( (inc_end - ff_i) / 60 )) min"
+              else
+                down_disp="unusable (recovery stamp precedes the first failure — NOT counted)"
+              fi
+              ;;
+            *) down_disp="unknown kind — NOT counted in any minutes column" ;;
+          esac
+          ;;
+      esac
+      printf '  #%s  first_observed=%s  kind=%s  restarts=%s  restart_attempts=%s  down_for=%s\n' \
+        "$inc_n" "$inc_day" "$inc_kind" "$rest_disp" "$restart_count" "$down_disp"
     done < "$RUN_TMP/incidents.tsv"
   fi
 
   printf '\n'
+
   printf 'RECORD-ONLY: no verdict, no target, no gate, no page, no restart. Publication of any figure\n'
   printf 'is an OWNER decision — this record is evidence, not an SLA.\n'
   printf '%s\n' "$RECORD_STATE_MARKER"

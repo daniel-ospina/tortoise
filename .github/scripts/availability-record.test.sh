@@ -63,6 +63,16 @@
 #       refuses; the fetch drops an unusable created_at closed. Otherwise the
 #       marker certifies "COMPLETE — N enumerated" while the body asserts zero
 #       delivery: the same false-absence claim, one stage later.
+#  24.  (#3484) DOWNTIME is read from the ledger, not left to a human. An
+#       incident's span is first_seen_down -> `closed_at`; it is attributed to
+#       the day the incident was FIRST observed, summed ONLY for incidents that
+#       actually recovered, and printed with its resolution. An incident whose
+#       outage has no bounded end (still open, or closed with no readable
+#       stamp) contributes NO minutes and is counted in `unbounded_inc` instead, so
+#       a partly-open week can never read as a small outage. A close as
+#       `not_planned`/`duplicate` is NOT a recovery and is excluded from every
+#       figure — its `closed_at` would otherwise manufacture an outage span
+#       that never happened.
 #
 # Fixtures are simulated; the real recorder is the script under test.
 
@@ -249,7 +259,7 @@ reset_case() {
         STUB_LEDGER_SEARCH_JSON STUB_LEDGER_SEARCH_FAIL \
         STUB_RECORD_SEARCH_JSON STUB_RECORD_SEARCH_FAIL STUB_CREATE_FAIL STUB_NEW_ISSUE \
         STUB_PATCH_FAIL STUB_GET_BODY_FAIL STUB_ISSUE_JSON \
-        RECORD_FETCH_INTEGRITY RECORD_CRON_PER_DAY 2>/dev/null || true
+        RECORD_FETCH_INTEGRITY RECORD_CRON_PER_DAY RECORD_UNION_FAIL 2>/dev/null || true
   export GH_TOKEN="test-token"
   export GITHUB_REPOSITORY="daniel-ospina/tortoise"
   export RECORD_NOW_EPOCH="$NOW"
@@ -269,12 +279,21 @@ count_calls() { # <pattern>
   grep -c "$1" "$STUB_TMP/calls.log" 2>/dev/null || true
 }
 
-row_cols() { # <record output> <UTC day> -> that row's 4 trailing incident-column values
-  # The availability column contains spaces, so the LAST four fields are the
-  # incident columns (down_inc degraded_inc unknown_inc restarts). Asserting on
-  # data cells rather than on the header labels is the difference between a
-  # check that can fail and one answered by the always-printed header.
-  printf '%s\n' "$1" | awk -v d="$2" '$1 == d { print $(NF-3), $(NF-2), $(NF-1), $NF }'
+row_cols() { # <record output> <UTC day> -> down_inc degraded_inc unknown_inc restarts
+  # The availability column contains spaces, so a data row's field indices are not
+  # the header's. The incident columns are therefore read POSITIONAL FROM THE END,
+  # and the header's own trailing labels are asserted separately (case 25) so a
+  # rename cannot silently re-point these reads into the wrong column.
+  # Suffix (from the end): down_min degraded_min unbounded_inc | restarts unknown_inc degraded_inc down_inc
+  printf '%s\n' "$1" | awk -v d="$2" '$1 == d { print $(NF-6), $(NF-5), $(NF-4), $(NF-3) }'
+}
+
+row_downtime() { # <record output> <UTC day> -> down_min degraded_min unbounded_inc
+  printf '%s\n' "$1" | awk -v d="$2" '$1 == d { print $(NF-2), $(NF-1), $NF }'
+}
+
+header_tail() { # <record output> -> the header's last three column labels
+  printf '%s\n' "$1" | awk '$1 == "UTC" && $2 == "day" { print $(NF-2), $(NF-1), $NF; exit }'
 }
 
 echo "availability-record.test.sh (#3810) — record-only baseline harness"
@@ -630,11 +649,19 @@ assert_contains "$OUT" "#4002" "an incident whose block has NO kind= is still li
 assert_contains "$OUT" "#4003" "an incident whose block has NO first_failure_ts= is still listed (it used to vanish)"
 assert_contains "$OUT" "incident totals: down=1 degraded=0 unknown=1 restart_attempts=1" \
   "the DATED incidents missing a field are still counted (both used to vanish)"
-assert_contains "$OUT" "1 incident(s) carry no parseable first_failure_ts: listed below, but attributable to no UTC day and therefore NOT counted in the window totals above" \
-  "the undated incident is listed and disclosed as not-window-counted — never silently dropped"
+assert_contains "$OUT" "1 incident(s) carry no usable first_failure_ts (absent, unparseable, or AHEAD of now): listed below, counted in the TOTAL's unbounded_inc but on NO day row" \
+  "the undated incident is listed and disclosed as counted in the TOTAL only — never silently dropped"
 assert_contains "$ERR" "has no parseable kind=" "the unparsable kind is warned about"
-assert_contains "$ERR" "has no parseable first_failure_ts — listed, but attributable to no UTC day and therefore NOT counted in the window totals" \
-  "the undated warning AGREES with the disclosure (it is not counted in the totals)"
+assert_contains "$ERR" "has no parseable first_failure_ts — listed, counted in the TOTAL's unbounded_inc but on no day row" \
+  "the undated warning AGREES with the disclosure (counted in the TOTAL, on no day row)"
+# ⛔ THE COUNT CLAUSE MUST NAME THE POPULATION IT PRINTS (review round 8 P2). "FIRST OBSERVED"
+# is down_inc/degraded_inc (1 dated DOWN here), NOT the recovered subset (0 here). And the
+# "summed from the day columns" sentence must name its own exception, because this TOTAL's
+# unbounded_inc (3) exceeds the day column (2) by the undated incident.
+assert_contains "$OUT" "The incidents FIRST OBSERVED inside this window are 1 DOWN and 0 DEGRADED (of which 0 and 0 recovered)" \
+  "the count clause prints the first-observed population, not the recovered subset"
+assert_contains "$OUT" "summed from the day columns above, EXCEPT \`unbounded_inc\`" \
+  "the totals note names the one column the TOTAL cannot reconcile against the day rows"
 
 # ── 18: the in-progress UTC day is scored on elapsed intent (P2-6) ──────────
 echo
@@ -772,6 +799,405 @@ run_record 1 --print-only
 assert_eq "$RC" "1" "a garbage created_at exits non-zero (nothing published)"
 assert_contains "$ERR" "no created_at that is a usable UTC date" "the refusal names the unusable created_at"
 assert_not_contains "$OUT" "RECORD-ONLY baseline" "a garbage created_at renders no record"
+# ── 24: (#3484) downtime is read from the ledger, never left to a human ────
+# The bucket could not answer "how much downtime did that cost": the ledger
+# carried WHEN an incident opened and the recovery lived only in the issue's
+# `closed_at`. Three shapes are pinned here, because each one fails differently:
+#   * a RECOVERED incident contributes its span, to its FIRST-OBSERVED day;
+#   * an incident with NO bounded end contributes 0 minutes and is disclosed as
+#     unbounded (counting it as 0 without disclosure is a fail-open reading);
+#   * a human CLOSE as not_planned/duplicate is not a recovery.
+echo
+echo "24. (#3484) recovered downtime is measured, attributed, and never faked"
+reset_case
+# 1789547000 = 2026-09-16T08:23:20Z. +3600s = 09:23:20Z -> 60 whole minutes.
+export STUB_LEDGER_SEARCH_JSON='{"total_count":4,"items":[
+ {"number":6001,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1789547000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T09:23:20Z","state_reason":"completed"},
+ {"number":6002,"user":{"login":"github-actions[bot]"},"title":"b","body":"<!-- watchdog-state kind=down first_failure_ts=1789547000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":null,"state_reason":null,"state":"open"},
+ {"number":6003,"user":{"login":"github-actions[bot]"},"title":"c","body":"<!-- watchdog-state kind=down first_failure_ts=1789547000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T20:00:00Z","state_reason":"not_planned"},
+ {"number":6004,"user":{"login":"github-actions[bot]"},"title":"d","body":"<!-- watchdog-state kind=down first_failure_ts=1789547000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"not-a-timestamp","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$RC" "0" "a ledger with downtime still records (exit 0)"
+assert_eq "$(row_downtime "$OUT" 2026-09-16)" "60 0 3" \
+  "the 09-16 row carries the ONE recovered DOWN span (60 min), no degraded minutes, and the THREE whose span is unusable"
+assert_eq "$(row_downtime "$OUT" 2026-09-15)" "0 0 0" "a day with no incident carries no downtime"
+assert_contains "$OUT" "#6001  first_observed=2026-09-16  kind=down" "the recovered incident is listed"
+assert_contains "$OUT" "down_for=60 min" "the recovered incident states its own span"
+assert_contains "$OUT" "open (>= " "an incident with no closed_at is shown as OPEN with its elapsed lower bound"
+# ⛔ THE OTHER HALF OF THAT ARM (review P2): a CLOSED incident whose recovery stamp is
+# unreadable ALSO has no usable span, but it must never be described as down RIGHT NOW.
+# Both states are pinned, because one assertion covering both cannot tell them apart —
+# which is how the first cut asserted a closed incident was still down.
+assert_contains "$OUT" "closed, recovery stamp unreadable (NOT counted as downtime)" \
+  "a CLOSED incident with an unreadable stamp is not asserted to be down right now"
+assert_not_contains "$OUT" "#6004  first_observed=2026-09-16  kind=down  restarts=(none)  restart_attempts=0  down_for=open" \
+  "the closed incident (#6004) never carries the OPEN label"
+# ⛔ THE NEEDLE MUST NOT BE SATISFIED BY ANOTHER INCIDENT'S LABEL (rule 2): the bare
+# "NOT counted" also occurs in #6004's "closed, recovery stamp unreadable (NOT counted as
+# downtime)", so deleting the OPEN arm's exclusion left this row GREEN.
+assert_contains "$OUT" "min elapsed, NOT counted)" "the open incident's elapsed time is explicitly excluded from the total"
+assert_contains "$OUT" "excluded (closed as not_planned/duplicate — not a recovery)" \
+  "a not_planned close is NOT read as a recovery (its closed_at would invent a span)"
+assert_contains "$OUT" "recovered downtime: 60 min DOWN and 0 min DEGRADED — never summed" \
+  "the total is WINDOW-SCOPED: exactly the one recovered incident contributes"
+# ⛔ 1 RECOVERED but 4 FIRST OBSERVED: the two populations differ, and the clause must print
+# the one it names. Printing the recovered subset here produced "are 1 DOWN" beside a TOTAL
+# row reading down_inc=4 — the contradiction class this PR exists to close.
+assert_contains "$OUT" "The incidents FIRST OBSERVED inside this window are 4 DOWN and 0 DEGRADED (of which 1 and 0 recovered)" \
+  "the count clause prints all four in-window DOWN incidents, not only the recovered one"
+assert_contains "$OUT" "DOWN_MIN is a LOWER BOUND wherever UNBOUNDED_INC > 0" \
+  "the total is declared a lower bound while any outage is unbounded"
+assert_eq "$(printf '%s\n' "$OUT" | awk '$1 == "TOTAL" { print $(NF-2), $(NF-1), $NF }')" "60 0 3" \
+  "the TOTAL row agrees with the day column it summarizes (it can never contradict it)"
+
+# The same shapes in one page: 2 closed, 1 still open.
+echo
+echo "24b. a partly-open window reads as a LOWER bound, never as 'little downtime'"
+reset_case
+export STUB_LEDGER_SEARCH_JSON='{"total_count":3,"items":[
+ {"number":6101,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1789547000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T08:53:20Z","state_reason":"completed"},
+ {"number":6102,"user":{"login":"github-actions[bot]"},"title":"b","body":"<!-- watchdog-state kind=down first_failure_ts=1789550000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T23:00:00Z","state_reason":"completed"},
+ {"number":6103,"user":{"login":"github-actions[bot]"},"title":"c","body":"<!-- watchdog-state kind=down first_failure_ts=1789550000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":null,"state_reason":null}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
+run_record 3 --print-only
+assert_contains "$OUT" "recovered downtime: 856 min DOWN and 0 min DEGRADED — never summed" \
+  "30 min + 826 min of RECOVERED spans, and nothing for the open one"
+assert_contains "$OUT" "1 incident(s) have NO usable span" "the open incident is disclosed beside the total"
+
+# A ledger whose incidents carry no recovery stamp at all must render ZERO
+# minutes and count EVERY incident as unbounded — never a clean-looking 0.
+echo
+echo "24c. with no recovery stamp anywhere, downtime is 0 min and EVERY incident is disclosed"
+reset_case
+export STUB_LEDGER_SEARCH_JSON="$LEDGER_JSON"
+run_record 3 --print-only
+assert_contains "$OUT" "recovered downtime: 0 min DOWN and 0 min DEGRADED — never summed" "no recovery stamp means no invented minutes"
+assert_contains "$OUT" "2 incident(s) have NO usable span" "both fixtures are disclosed as unbounded instead of reading as 0 downtime"
+assert_eq "$(row_downtime "$OUT" 2026-09-16)" "0 0 2" "the day row carries 0 minutes AND names the two unbounded incidents"
+
+# ── 25: the incident columns are where the header says they are ─────────────
+# The helpers read those columns POSITIONALLY FROM THE END, so the labels are
+# asserted directly: a rename that left the reads pointing at `restarts` would
+# otherwise be invisible to every other assertion in this file.
+echo
+echo "25. the day table's trailing column labels are the ones the helpers read"
+reset_case
+export STUB_LEDGER_SEARCH_JSON="$LEDGER_JSON"
+run_record 3 --print-only
+assert_eq "$(header_tail "$OUT")" "down_min degraded_min unbounded_inc" \
+  "the last three columns are the downtime trio, in the order the helpers index them"
+
+# ── 26: DOWN and DEGRADED minutes are SEPARATE — the file's own invariant ───
+# ⛔ THIS IS THE ASSERTION WHOSE ABSENCE LET THE FIRST CUT SHIP A P1 (review).
+# Summing both kinds into `down_min` published "67 minutes of downtime" for ledger
+# #11442 — a DEGRADED incident — on a day with zero DOWN incidents. Every fixture
+# that carried a `closed_at` was `kind=down`, so the fix and the bug were
+# indistinguishable to this file. A degraded incident with a readable recovery
+# stamp now proves the separation in BOTH directions.
+echo
+echo "26. DEGRADED minutes land in their OWN column and never in down_min"
+reset_case
+# #7001 down 08:23:20 -> 09:23:20 = 60 min; #7002 degraded 08:23:20 -> 10:23:20 = 120 min.
+export STUB_LEDGER_SEARCH_JSON='{"total_count":2,"items":[
+ {"number":7001,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1789547000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T09:23:20Z","state_reason":"completed","state":"closed"},
+ {"number":7002,"user":{"login":"github-actions[bot]"},"title":"b","body":"<!-- watchdog-state kind=degraded first_failure_ts=1789547000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T10:23:20Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$(row_downtime "$OUT" 2026-09-16)" "60 120 0" \
+  "the DEGRADED span (120 min) is in degraded_min and NOT added to down_min (60 min)"
+assert_contains "$OUT" "recovered downtime: 60 min DOWN and 120 min DEGRADED — never summed" \
+  "the summary states the two kinds separately and counts only DOWN as downtime"
+
+# ── 27: a span that cannot be used is DISCLOSED, never a clean-looking 0 ────
+# A numeric recovery stamp EARLIER than the first failure matched neither the
+# minutes arm nor the unbounded arm, so the incident vanished from every column
+# while the day row still printed a confident `0`. Reachable from a hand-edited
+# state block (which this file says must be warned about, never dropped) and from
+# a `first_failure_ts` stamped in MILLISECONDS.
+echo
+echo "27. an inverted span is disclosed as unbounded, not silently costed at 0 min"
+reset_case
+export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
+ {"number":7003,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1789547000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T08:13:20Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$RC" "0" "an inverted span does not fail the record"
+assert_eq "$(row_downtime "$OUT" 2026-09-16)" "0 0 1" \
+  "the day row reports 0 minutes AND discloses the incident as unusable — never 0 and 0"
+assert_contains "$OUT" "unusable (recovery stamp precedes the first failure — NOT counted)" \
+  "the incident line says why its span is not counted"
+
+# ── 28: overlapping spans are UNIONED, not added (round-2 review P2) ────────
+# The live ledger holds 39 overlapping DOWN pairs — two probe runs can open two
+# incidents for ONE outage (#13930/#13931, #14036/#14041, #14080/#14082,
+# #14116/#14117) — so a per-incident sum reports a wall-clock figure that never
+# existed (~+475 min, 12.5%, on the 28-day window). "Minutes down" is a union.
+echo
+echo "28. two OVERLAPPING DOWN spans count once, and a split span counts twice"
+reset_case
+# #8001 08:00:00->10:00:00 (120 min); #8002 09:00:00->11:00:00 (120 min, overlaps 1h)
+# → union 08:00->11:00 = 180 min, NOT 240.
+# #8003 12:00:00->12:30:00 and #8004 13:00:00->13:30:00 are DISJOINT → 60 min more.
+export STUB_LEDGER_SEARCH_JSON='{"total_count":4,"items":[
+ {"number":8001,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1789545600 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T10:00:00Z","state_reason":"completed","state":"closed"},
+ {"number":8002,"user":{"login":"github-actions[bot]"},"title":"b","body":"<!-- watchdog-state kind=down first_failure_ts=1789549200 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T11:00:00Z","state_reason":"completed","state":"closed"},
+ {"number":8003,"user":{"login":"github-actions[bot]"},"title":"c","body":"<!-- watchdog-state kind=down first_failure_ts=1789560000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T12:30:00Z","state_reason":"completed","state":"closed"},
+ {"number":8004,"user":{"login":"github-actions[bot]"},"title":"d","body":"<!-- watchdog-state kind=down first_failure_ts=1789563600 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T13:30:00Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$(row_downtime "$OUT" 2026-09-16)" "240 0 0" \
+  "the 1h overlap is counted ONCE: 180 union minutes + 60 disjoint, never 300 summed"
+assert_contains "$OUT" "recovered downtime: 240 min DOWN and 0 min DEGRADED — never summed" \
+  "the union minutes are stated on their own, never welded to a per-incident count"
+# ⛔ THIS ASSERTION MUST BE ITS OWN CALL (review round 8 P3): a stray trailing `\` made it
+# a 7-argument continuation of the call above, so `assert_contains` read only $1..$3 and the
+# count clause was UNGUARDED — the summary mutant reddened only the minutes row.
+assert_contains "$OUT" "The incidents FIRST OBSERVED inside this window are 4 DOWN and 0 DEGRADED" \
+  "the count is per-incident while the minutes are per-wall-clock — stated separately"
+
+# ── 29: a raw ledger epoch never reaches arithmetic (round-2 review P2) ─────
+# `first_failure_ts` is human-editable. Two reachable shapes: a numeric-but-
+# unrenderable epoch printed a NEGATIVE elapsed bound, and a leading-zero value is
+# bash OCTAL, which aborts the expansion under `set -u` and kills the render
+# (publishing nothing until a human edits the issue body).
+echo
+echo "29. an unrenderable or octal first_failure_ts cannot produce a false bound or kill the render"
+reset_case
+export STUB_LEDGER_SEARCH_JSON='{"total_count":4,"items":[
+ {"number":9001,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=99999999999999999 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":null,"state_reason":null,"state":"open"},
+ {"number":9002,"user":{"login":"github-actions[bot]"},"title":"b","body":"<!-- watchdog-state kind=down first_failure_ts=08 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":null,"state_reason":null,"state":"open"},
+ {"number":9003,"user":{"login":"github-actions[bot]"},"title":"c","body":"<!-- watchdog-state kind=down first_failure_ts=12345 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":null,"state_reason":null,"state":"open"},
+ {"number":9004,"user":{"login":"github-actions[bot]"},"title":"d","body":"<!-- watchdog-state kind=down first_failure_ts=01789547000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T09:23:20Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
+run_record 3 --print-only
+# ⛔ THE FIXTURE THAT REACHES THE ARM THE OTHERS CANNOT (rounds 4-6). All three
+# fixtures above are width-REJECTED before any arithmetic runs, so case 29 was green
+# on a head that aborted the whole render for a stamp the width gate ADMITS: an
+# 11-digit leading-zero value is bash OCTAL, so `$(( ff - ff % 86400 ))` dies and
+# `day_minutes.tsv` is never created — every day then reads 0. #9004 is that stamp
+# WITH a readable closed_at, and it must normalize (08:23:20 -> 09:23:20 = 60 min).
+assert_eq "$(row_downtime "$OUT" 2026-09-16)" "60 0 0" \
+  "a width-admitted leading-zero stamp normalizes decimal and STILL contributes its 60 min"
+assert_contains "$OUT" "#9004  first_observed=2026-09-16" \
+  "the leading-zero stamp is dated from its normalized value, not its spelling"
+assert_not_contains "$OUT" "1970-01-31" "a valid-octal leading-zero stamp does not land on a 1970 day"
+# ⛔ THE UNDATED CLASS IS A MEMBER OF `unbounded_inc`, as BOTH the header and the published
+# legend say (rounds 5-6). The aggregator keys `op[]` by day, so an undated row used to reach
+# no key: the record printed `0 incident(s) have NO usable span` while three undated incidents
+# — often still OPEN ones — sat in the same output, and the headline claimed to be exact.
+assert_eq "$(printf '%s\n' "$OUT" | awk '$1 == "TOTAL" { print $NF }')" "3" \
+  "the three undated incidents are counted in unbounded_inc, where the legend says they belong"
+assert_contains "$OUT" "3 incident(s) have NO usable span" \
+  "the headline declares itself a LOWER BOUND for a class it cannot date"
+assert_eq "$RC" "0" "an octal first_failure_ts does NOT abort the render (it used to exit non-zero, publishing nothing)"
+assert_contains "$OUT" "RECORD-ONLY baseline" "the record is still rendered"
+assert_contains "$OUT" "unknown (no parseable first_failure_ts)" \
+  "the unrenderable epoch is labelled unparseable rather than given a NEGATIVE elapsed bound"
+assert_not_contains "$OUT" "min elapsed, NOT counted" "no elapsed bound is computed from a stamp the record called unparseable"
+# A SHORT numeric stamp is the trap a bare digit test walks into: GNU `date -d @12345`
+# renders 1970-01-01, so `first_failure_ts=12345` would be bucketed into a 1970 day and
+# claim a 56-YEAR elapsed bound. Only a WIDTH gate on the stamp (real ledger stamps are
+# 10 digits) prevents that, which is why the gate is not merely "all digits".
+assert_not_contains "$OUT" "1970-01-01" "a short numeric stamp is NOT rendered as a 1970 incident day"
+
+# ── 30: an unknown-kind span is not printed as minutes it never contributes ─
+echo
+echo "30. a usable span with NO parseable kind is disclosed, not printed as minutes"
+reset_case
+export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
+ {"number":9101,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state first_failure_ts=1789547000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T09:23:20Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
+run_record 3 --print-only
+assert_contains "$OUT" "unknown kind — NOT counted in any minutes column" \
+  "the print side agrees with the aggregate, which can only bucket down/degraded"
+assert_not_contains "$OUT" "down_for=60 min" "the span is NOT printed as minutes no column contains"
+assert_eq "$(row_downtime "$OUT" 2026-09-16)" "0 0 1" "it is counted in unbounded_inc instead of vanishing"
+
+# ── 31: a span crossing UTC midnight is split by the DAY, not the incident ──
+# "A minute belongs to the clock" (the header's own claim, and the legend's) had no
+# assertion that could go red: every fixture above is intra-day, so a regression that
+# attributed a whole span to its START day — the pre-round-2 behaviour — stayed GREEN.
+# Here: 2026-09-15T23:00:00Z -> 2026-09-16T01:00:00Z, one incident, 120 min, 60 on each
+# day. Both days are COMPLETE (the in-progress day is 09-17, and its row carries the `*`
+# marker), so the split is asserted on two plain day rows. The COUNT stays on the
+# first-observed day; only the MINUTES split.
+echo
+echo "31. a span crossing UTC midnight puts each minute on the day it OCCURRED"
+reset_case
+# 1789513200 = 2026-09-15T23:00:00Z; 1789520400 = 2026-09-16T01:00:00Z.
+export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
+ {"number":9201,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1789513200 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T01:00:00Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-15T23:30:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$(row_downtime "$OUT" 2026-09-15)" "60 0 0" \
+  "the pre-midnight share (60 min) is booked on 2026-09-15"
+assert_eq "$(row_downtime "$OUT" 2026-09-16)" "60 0 0" \
+  "the post-midnight share (60 min) is booked on 2026-09-16 — not all 120 on the start day"
+assert_eq "$(row_cols "$OUT" 2026-09-15 | cut -d' ' -f1)" "1" \
+  "the incident COUNT stays on the first-observed day (a count belongs to the incident)"
+assert_eq "$(row_cols "$OUT" 2026-09-16 | cut -d' ' -f1)" "0" \
+  "the second day carries minutes but not the incident"
+assert_eq "$(printf '%s\n' "$OUT" | awk '$1 == "TOTAL" { print $(NF-2) }')" "120" \
+  "the window TOTAL is the whole 120 min — no minute lost at the midnight boundary"
+
+echo
+echo "32. a fully covered UTC day measures 1440 minutes, not 1439"
+reset_case
+# 1789430400 = 2026-09-15T00:00:00Z; 1789516800 = 2026-09-16T00:00:00Z — exactly one day.
+# (Both days are complete; the in-progress 09-17 row carries the `*` marker.)
+# The first cut clipped to the INCLUSIVE last second (`dse + 86399`) and then divided by 60,
+# so this read 1439 and emitted a spurious 0-minute interval on the next day.
+export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
+ {"number":9301,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1789430400 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T00:00:00Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-15T12:00:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$(row_downtime "$OUT" 2026-09-15)" "1440 0 0" \
+  "a 24-hour span is 1440 whole minutes — the clipped length is the difference of its ends"
+assert_eq "$(row_downtime "$OUT" 2026-09-16)" "0 0 0" \
+  "the day it ends on carries no minutes and no spurious zero-minute interval"
+assert_eq "$(printf '%s\n' "$OUT" | awk '$1 == "TOTAL" { print $(NF-2) }')" "1440" \
+  "the window TOTAL does not lose a minute to the boundary convention"
+
+# ── 33: a failed aggregation is an INSTRUMENT FAILURE, never a 0-minute record ──
+# The union pipeline used to end in `|| : > file`: any failure truncated the minutes
+# file, every day fell through to the `print 0` default, and the record published
+# `0 min DOWN over 1 DOWN incident(s)` beside `down_for=60 min`. Forcing the pass to
+# report failure proves the refusal path, which no data fixture can reach.
+echo
+echo "33. a failed downtime pass refuses to render — it never publishes 0 minutes"
+reset_case
+export RECORD_UNION_FAIL=1 \
+       STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
+ {"number":9401,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1789547000 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T09:23:20Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$RC" "1" "a failed UNION pass exits non-zero"
+assert_contains "$OUT" "INSTRUMENT FAILURE, NOT A READING" "the refusal is named on stdout"
+assert_not_contains "$OUT" "recovered downtime:" "no downtime figure is published from a pass that did not run"
+assert_contains "$ERR" "downtime UNION pass did not complete" "stderr names the pass that failed"
+
+# ── 34: an undated incident with a readable stamp names the RIGHT defect ─────
+# The numeric-end arm had one `else` for TWO different causes — a genuine inversion
+# (end < first failure) and "the first-failure stamp is unparseable" — and always named
+# the first. The header promises each unbounded class its OWN label, so an auditor was
+# being told the ledger holds a clock inversion that does not exist, and pointed at the
+# wrong field to repair.
+echo
+echo "34. an undated incident is labelled unparseable, never as a clock inversion"
+reset_case
+# No first_failure_ts at all (the #3896 P2-3 trap this file has always carried), but a
+# perfectly readable closed_at — the shape that used to fall through to "precedes".
+export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
+ {"number":9501,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-16T09:23:20Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$RC" "0" "an undated incident with a readable stamp does not fail the record"
+assert_contains "$OUT" "down_for=unknown (no parseable first_failure_ts)" \
+  "the label names the actual defect: the FIRST-failure stamp is unparseable"
+assert_not_contains "$OUT" "recovery stamp precedes the first failure" \
+  "no clock inversion is invented from a stamp that was never parsed"
+
+# ── 35: a future-dated stamp never prints a NEGATIVE elapsed ──────────────────
+# The 9..12-digit width gate admits any 10-digit epoch, including one in the future:
+# `(now - ff) / 60` then publishes "open (>= -3505893 min elapsed)" — a negative
+# duration presented as downtime evidence, the same false-statement class round 2
+# set out to remove.
+echo
+echo "35. a future first_failure_ts never publishes a negative elapsed bound"
+reset_case
+# 1999999999 = 2033-05-18T03:33:19Z, i.e. ~6.5 years after the fixture's `now`.
+export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
+ {"number":9601,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1999999999 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":null,"state_reason":null,"state":"open"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$RC" "0" "a future-dated stamp does not fail the record"
+assert_contains "$OUT" "down_for=unknown (first_failure_ts is in the FUTURE — not counted in any minutes column, carried in UNBOUNDED_INC)" \
+  "the future stamp is named as such instead of being rendered as downtime"
+assert_not_contains "$OUT" "min elapsed, NOT counted)" \
+  "no elapsed bound is computed from a stamp that is ahead of now"
+# ⛔ AND IT IS NOT COUNTED ANYWHERE (review round 9 P2): the label says "not counted", so
+# the aggregations must not have counted it either — this is the whole point of classifying
+# it at ingest with a non-numeric sentinel.
+assert_eq "$(printf '%s\n' "$OUT" | awk '$1 == "TOTAL" { print $NF }')" "1" \
+  "the future stamp lands in unbounded_inc, where the record says it goes"
+
+# ── 36: minutes from a span that began BEFORE the window — no "over 0 incidents" ──
+# `total_down_min` is window-scoped by the day the minute OCCURRED, while the count is
+# of incidents FIRST OBSERVED inside the window. The old sentence welded the two with
+# "over", so it could print "2003 min DOWN over 0 DOWN incident(s)". The two are now
+# stated separately, because they are different attributions.
+echo
+echo "36. a pre-window span contributes minutes without being counted as an in-window incident"
+reset_case
+# 1789426800 = 2026-09-14T23:00:00Z (BEFORE the 09-15..09-17 window);
+# 1789434000 = 2026-09-15T01:00:00Z → 60 min land on 09-15.
+export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
+ {"number":9701,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1789426800 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-15T01:00:00Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-15T00:30:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$(row_downtime "$OUT" 2026-09-15)" "60 0 0" \
+  "the in-window minute share is booked on 2026-09-15"
+assert_contains "$OUT" "recovered downtime: 60 min DOWN and 0 min DEGRADED — never summed" \
+  "the minute total is stated on its own"
+assert_contains "$OUT" "The incidents FIRST OBSERVED inside this window are 0 DOWN and 0 DEGRADED" \
+  "the count is stated as a separate fact: 0 incidents were first observed here"
+assert_not_contains "$OUT" "60 min DOWN over 0" \
+  "no sentence welds a wall-clock minute total to a count with 'over'"
+
+# ── 37: a future stamp with a readable end invents no duration either ────────
+# The round-7 guard sat only in the `inc_end == "-"` arm, so a future
+# `first_failure_ts` with a LATER readable `closed_at` still printed a span
+# (`down_for=1226 min`) for a day that is in no column.
+echo
+echo "37. a future first_failure_ts with a readable end still prints no duration"
+reset_case
+export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
+ {"number":9901,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1999999999 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2033-05-19T00:00:00Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$RC" "0" "a future stamp with a readable end does not fail the record"
+assert_contains "$OUT" "down_for=unknown (first_failure_ts is in the FUTURE — not counted in any minutes column, carried in UNBOUNDED_INC)" \
+  "the future stamp is named in the readable-end arm too"
+assert_not_contains "$OUT" "down_for=1226 min" \
+  "no duration is invented from two future stamps"
+
+# ── 38: a future stamp INSIDE the window is counted nowhere, not just mislabelled ──
+# The round-8 guard only changed the LABEL, so a stamp a few seconds ahead of `now` —
+# an incident that opened and closed during this run's 28-day fetch — was still counted
+# in down_min, down_inc and the recovered subset while its own line said "NOT counted".
+# That is the self-contradiction class this PR exists to close, so the class is decided
+# ONCE at ingest now, and this fixture is the shape that used to slip through.
+echo
+echo "38. a future stamp inside the window contributes to NO column"
+reset_case
+# `now` = 1789646400 (2026-09-17T12:00:00Z); stamp = now+60s, closed 13:00 — a 59-minute
+# span that WOULD land on the in-progress 09-17 row if the counting passes saw it.
+export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
+ {"number":9950,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1789646460 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2026-09-17T13:00:00Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-17T11:00:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$RC" "0" "a future stamp inside the window does not fail the record"
+assert_eq "$(printf '%s\n' "$OUT" | awk '$1 ~ /^2026-09-17/ { print $(NF-2), $(NF-1), $NF }')" "0 0 0" \
+  "the row carries no minutes, no unbounded minute-row and no count"
+assert_eq "$(printf '%s\n' "$OUT" | awk '$1 ~ /^2026-09-17/ { print $(NF-6) }')" "0" \
+  "the incident is not counted in down_inc either"
+assert_contains "$OUT" "recovered downtime: 0 min DOWN and 0 min DEGRADED — never summed" \
+  "no downtime figure is published for a stamp that has not happened yet"
+# ⛔ THE LEGEND AND THE NOTE MUST NAME THE FUTURE MEMBER of unbounded_inc (review round 10 P3),
+# or the note explains its own off-row +1 with a class of size 0.
+assert_contains "$OUT" "no USABLE first_failure_ts (absent, unparseable, or ahead of now)" \
+  "the published legend names the class the future stamp was filed under"
+assert_contains "$OUT" "which also counts incidents with no USABLE \`first_failure_ts\` (absent, unparseable, or ahead of now)" \
+  "the reconciliation note names the same class"
+assert_eq "$(printf '%s\n' "$OUT" | awk '$1 == "TOTAL" { print $NF }')" "1" \
+  "it is disclosed in the TOTAL's unbounded_inc instead of vanishing"
+# ⛔ THE ROW LABEL AND THE COLUMN MUST AGREE (review round 11 P3): `unbounded_inc` IS a
+# column, so "not counted in any column" denied the very count the TOTAL row carries one
+# line above. The label now names the column it is carried in.
+assert_contains "$OUT" "carried in UNBOUNDED_INC" \
+  "the per-incident label names the column that carries it, so the two cannot disagree"
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "availability-record.test.sh: $PASS passed, 0 failed ✅"
