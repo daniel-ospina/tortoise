@@ -20605,7 +20605,7 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     # "this process took no live cache write" — while the 26 nodes ABOVE land in
     # whatever graph the org credential opened. MEASURED on an embedded SDK before
     # this line existed: `nodes written: [[26]]`, `cache_write_targets {}` across
-    # five labels. The helper's stated residual excuses a raw writer only because
+    # four labels. The helper's stated residual excuses a raw writer only because
     # "such a writer does not CHOOSE its graph"; this one does, so the residual
     # does not reach it.
     #

@@ -1388,7 +1388,7 @@ def test_hosted_session_delete_records_its_target(monkeypatch, tmp_path):
 # UNIVERSAL — "called from every gateway that writes the cache without folding a
 # record" — and a universal cannot be satisfied by enumeration: three consecutive
 # review cycles of that PR (5, 6 and 7) each found exactly one more lane, and the
-# last one measured this: `_seed_demo_graph` writes 26 nodes across five labels
+# last one measured this: `_seed_demo_graph` writes 26 nodes across four labels
 # and the registry reads `{}`, byte-identical to "this process took no live cache
 # write". These two tests close the INSTANCE and the DECLARATION DRIFT: the lane
 # is counted, and the population is a named set checked against its call sites.

@@ -281,7 +281,7 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
       "a fold" and "a mint": such a lane calls it directly;
     * ``hosted_api._seed_demo_graph`` (#12943) — the opt-in demo/sample seeder,
       raw Cypher, ``proj = sdk._get_proj()`` on an org-chosen handle. Measured
-      before it was declared: 26 nodes across five labels landed and
+      before it was declared: 26 nodes across four labels landed and
       ``cache_write_targets`` read ``{}``.
 
     A NINTH lane added tomorrow must be added here — and if it CALLS the helper
@@ -376,9 +376,9 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
 
 #: The CLOSED, NAMED population of lanes that count their live cache writes
 #: (#12943). `(repo-relative module path, dotted qualname of the enclosing
-#: class/function)` — the same shape :func:`tortoise.projection.note_live_write_target`
-#: records, and the population its docstring and
-#: :func:`note_cache_write_target`'s both name.
+#: class/function)` — the shape this DECLARATION uses; the helper itself records a
+#: store+graph key (`cache_write_targets()`), never a lane identity, so this tuple
+#: is the only place in the codebase that names a lane.
 #:
 #: ⛔ THE POINT IS THAT IT IS CLOSED. The claim this replaced was a UNIVERSAL
 #: ("called from every gateway that writes the cache without folding a record"),

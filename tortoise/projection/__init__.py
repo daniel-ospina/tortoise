@@ -4790,10 +4790,10 @@ def note_live_write_target(proj) -> None:
     (`_CAPTURE_PROVENANCE_LANE`) are the standing example — is not recorded. That
     is accepted because such a writer can only write the graph the SDK is already
     bound to (it stamps nodes by id), so it cannot hide this class. ⛔ That test
-    is about CHOOSING A GRAPH, not about being raw: every lane that does choose
-    one calls this helper directly and is a row in
-    `cache_leg._COUNTED_LIVE_WRITE_LANES`. Closing the non-choosing rest belongs
-    at the write handle, where §17.1's per-statement census already lives.
+    is about CHOOSING A GRAPH, not about being raw: the graph-choosing lanes under
+    `tortoise/` that call this helper are the rows in
+    `cache_leg._COUNTED_LIVE_WRITE_LANES`; a writer that chooses a graph and never
+    calls it is the OMISSION direction above. §17.1's census closes the rest.
 
     ⛔ TOTAL (#5148's rule): observability must never break a write that already
     landed, so every step — endpoint resolution included — is inside the guard.
