@@ -1699,7 +1699,7 @@ else
     STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
         STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t10b-carry"
     RUN_BLOCK="$_saved_block"
-    if printf '%s' "$GATE_OUT" | grep -q "are HEAD-BOUND"; then
+    if grep -q "are HEAD-BOUND" <<<"$GATE_OUT"; then
         ok "(t10b) the MUTANT annotates a GREEN run with a head-bound key error — so the guard is load-bearing"
     else
         bad "(t10b) the mutant printed no head-bound key error on the carry — the not_contains assertion above attributes nothing"
@@ -1708,9 +1708,9 @@ else
     # key and shape diagnostics must ALSO appear on this green run (one marker of each
     # class is in the body precisely so this can be checked).
     _miss=""
-    printf '%s' "$GATE_OUT" | grep -q "STALE-sha evidence marker(s) carried BOTH" \
+    grep -q "STALE-sha evidence marker(s) carried BOTH" <<<"$GATE_OUT" \
         || _miss="${_miss} key"
-    printf '%s' "$GATE_OUT" | grep -q "failed the signature check AND lack the shape" \
+    grep -q "failed the signature check AND lack the shape" <<<"$GATE_OUT" \
         || _miss="${_miss} shape"
     if [ -z "$_miss" ]; then
         ok "(t10b) …and the key and shape absence rows are both falsifiable (both classes print on the mutant)"
