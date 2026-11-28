@@ -4549,6 +4549,16 @@ def test_a_close_of_ANOTHER_repo_is_foreign_under_either_repo_state():
     ("Closes #13036 (V1–V6), closes other-org/r#9 (V2), "
      "closes other-org/r#8, V3–V6 in other PRs\n", "ambiguous"),
     ("Closes #13036 (V1–V6), closes other-org/r#9, V3–V6 in other PRs\n", "ambiguous"),
+    # ⛔ AND A FOREIGN QUALIFIER IS READ NORMALLY (round 38, P1 — the false PASS this rule exists to
+    # prevent, one word away): a qualifier is about another issue's ROWS, not its subject, so a cue in it
+    # is evidence about rows on this line. `refs ⊇ quals` made this `clean` while the body said the
+    # remainder of #13036 lands later.
+    ("Closes #13036 (rows V1–V6), closes #13037 "
+     "(the rest of #13036 lands in a later PR)\n", "ambiguous"),
+    # …and this row is the PIN GAP for the NAMES-rows half's bare-id term (green at both heads; dropping
+    # `_explicit_ids` from that test revives the same false PASS, and nothing else reds): `V3 and V4` is
+    # not a range, so only the id read finds it.
+    ("Closes #13036 (V1–V6), closes other-org/r#9, V3 and V4 in other PRs\n", "ambiguous"),
     # ⛔ AND `only` IS NOT DISTINGUISHED BY THE FOREIGN RULE EITHER (round 37, P3 pin gap): adding the
     # foreign condition to the `_ONLY_RE` arm flipped this to `clean` with the suite green.
     ("Closes #13036 (V1–V6), closes #13037 (only one is done)\n", "ambiguous"),

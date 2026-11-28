@@ -1987,16 +1987,16 @@ def _foreign_closing_sets(line: str, rows: list[str], issue: int | None,
                           repo: str | None) -> tuple[set[int], set[int]]:
     """The clause indices that close ANOTHER issue, split into (REF clauses, their QUALIFIERS).
 
-    ⛔ SPLIT BECAUSE THE TWO ARE READ DIFFERENTLY (review round 37, P2). A ref clause is about another
+    ⛔ SPLIT BECAUSE THE TWO ARE READ DIFFERENTLY (review rounds 37/38). A ref clause is about another
     issue's SUBJECT, so its `other`-family cue is the org name and is suppressed; a qualifier is about
-    another issue's ROWS and may carry a cue about rows on this line, so it is read normally. The
-    previous round inferred which was which from index adjacency (`(i - 1) in foreign`), and that is
-    provably wrong for two foreign closes in a row: the SECOND ref follows the first one's qualifier and
-    was therefore mistaken for a qualifier, so its `other-org` name disclaimed a correct complete close.
-    Both sets are produced here, from the attribution itself.
+    another issue's ROWS and may carry a cue about rows on this line, so it is read normally. Round 35
+    inferred which was which from index adjacency (`(i - 1) in foreign`), which is wrong for two foreign
+    closes in a row — the SECOND ref follows the first one's qualifier and was mistaken for a qualifier,
+    so its `other-org` name disclaimed a correct complete close. Both sets are produced here, from the
+    attribution itself, and they are DISJOINT: a set named for refs that also holds the qualifiers is
+    how round 38 shipped a rule its own comment stated and its code did not implement.
     """
-    refs, quals = _foreign_closing_sets_impl(line, rows, issue, repo)
-    return refs, quals
+    return _foreign_closing_sets_impl(line, rows, issue, repo)
 
 
 def _foreign_closing_clauses(line: str, rows: list[str], issue: int | None,
@@ -2015,7 +2015,7 @@ def _foreign_closing_clauses(line: str, rows: list[str], issue: int | None,
     if issue is None:
         return set()
     refs, quals = _foreign_closing_sets_impl(line, rows, issue, repo)
-    return refs | quals
+    return refs | quals  # the qualifier IS part of the foreign span for every existing reader
 
 
 def _foreign_closing_sets_impl(line: str, rows: list[str], issue: int | None,
@@ -2046,8 +2046,13 @@ def _foreign_closing_sets_impl(line: str, rows: list[str], issue: int | None,
         if i + 1 < len(spans):
             sep = line[b:spans[i + 1][0]].strip()
             if sep == "(" or sep in {"—", "–"} or "(" in sep:
-                foreign.add(i + 1)
                 quals.add(i + 1)
+    # ⛔ THE UNION IS BUILT HERE, NOT IN THE SET NAMED FOR REFS (review round 38, P1). The first version
+    # of this split added the qualifier to BOTH sets, so `refs ⊇ quals`, the caller's `i in refs` was
+    # byte-for-byte the old `i in foreign`, and the rule its own docstring states was never implemented:
+    # `Closes #N (rows V1–V6), closes #M (the rest of #N lands in a later PR)` read `clean` — a FALSE
+    # PASS on the arm's headline question — because the qualifier's `later` cue was suppressed along with
+    # the foreign ref's org name. A split whose halves are nested is not a split.
     return foreign, quals
 
 
