@@ -467,7 +467,11 @@ if grep -qE -- "/compare/" <<<"$*" && ! grep -qF -- "application/vnd.github.v3.d
         # served as a SHORT row — what such an expression actually yields — and the
         # rows that expect a carry redden until the stub and the gate agree again.
         # This is an EMULATION of the consequence, never a claim about jq itself.
-        if ! grep -qF -- '[(.total_commits // 0), ([.commits[]?] | length)' <<<"$*"; then
+        # ⛔ `.sha[0:12]` IS PART OF THE PINNED EXPRESSION (sign-off review, F3): the
+        # membership test compares 12-char tokens, so if this half rendered 40-char shas
+        # every token would MISS, an AUTHORED commit would read as "the base brought it
+        # in", and the gate would carry it — measured, with the whole suite green.
+        if ! grep -qF -- '[(.total_commits // 0), ([.commits[]?] | length), ([.commits[]? | .sha[0:12]]' <<<"$*"; then
             printf '%s\n' "${STUB_BRANCH_TOTAL:-0}"
             exit 0
         fi
@@ -505,7 +509,8 @@ if grep -qE -- "/compare/" <<<"$*" && ! grep -qF -- "application/vnd.github.v3.d
     # ⛔ THE EXPRESSION IS PART OF THE CONTRACT, for the reason spelled out
     # on the branch-side arm above: a changed expression must redden the rows that
     # expect a carry, not leave the suite green over an over-blocking gate.
-    if ! grep -qF -- '[.status, (.total_commits // 0), ([.commits[]?] | length)' <<<"$*"; then
+    # ⛔ …and the same width pin on the REVIEWED arm (F3).
+    if ! grep -qF -- '[.status, (.total_commits // 0), ([.commits[]?] | length), ([.commits[]? | (.sha[0:12]' <<<"$*"; then
         printf '%s\n' "${STUB_ANCESTOR_STATUS:-ahead}"
         exit 0
     fi
@@ -2454,6 +2459,7 @@ sed -E -e 's/^ *(if \[ -z "\$p_bside" \]; then patch_ancestry_unreadable=1; retu
        -e 's/^ *(\[\[ "\$p_btotal" =~ \^\[0-9\]\+\$ && "\$p_bcount" =~ \^\[0-9\]\+\$ \]\] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
        -e 's/^ *(\[ "\$p_btotal" = "\$p_bcount" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
        -e 's/^ *(\[ "\$\(printf .%s. "\$p_bshas" \| wc -w\)" = "\$p_bcount" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
+       -e 's/^( *).*p_btotal:-0.*-ge 1.*$/\1:/' \
     "$RUN_BLOCK" > "$MUT_BSIDE"
 if cmp -s "$RUN_BLOCK" "$MUT_BSIDE"; then
     bad "(t30) the branch-side guard mutation did not apply — the guards changed shape, so this control proves NOTHING"
@@ -2571,6 +2577,7 @@ sed -E -e 's/^ *(\[\[ "\$p_rel" =~ \^\(ahead\|behind\|diverged\|identical\)\$ \]
        -e 's/^ *(\[\[ "\$p_total" =~ \^\[0-9\]\+\$ && "\$p_seen" =~ \^\[0-9\]\+\$ \]\] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
        -e 's/^ *(\[ "\$p_total" = "\$p_seen" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
        -e 's/^ *(\[ "\$\(printf .%s. "\$p_added" \| wc -w\)" = "\$p_seen" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
+       -e 's/^( *).*p_total:-0.*-ge 1.*$/\1:/' \
        -e 's/^ *(\[ "\$p_seen" -ge 1 \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
     "$RUN_BLOCK" > "$MUT_T32"
 if cmp -s "$RUN_BLOCK" "$MUT_T32"; then
@@ -2586,6 +2593,43 @@ else
         ok "(t32f) with the presence+arity guards removed the SHORT row CARRIES — so those guards are load-bearing"
     else
         bad "(t32f) the mutant still refused (rc=$GATE_RC) — something else refuses this, so the rows above attribute nothing"
+    fi
+fi
+
+
+# ── (t33) THE BRANCH-SIDE PAGE CANNOT CLAIM ZERO EITHER ──────────────────────
+# ⛔ `(t32g)` pins the REVIEWED side's "ahead with zero commits is self-contradictory"
+# guard. The branch side needed the same one and did not have it: that read only runs when
+# the branch gained at least one commit (the merge that brought the base in is head-side
+# and NOT in the base), so a `0`-total branch page is equally malformed — and with the
+# guard absent, an authored commit read as "the base brought it in". Measured before the
+# guard: `rc=0`, `passed via PATCH match`.
+printf '%s\n' "$(diff_marker "$STALE" "$SAME_SCOPE_ANCHOR")" > "$T/body-t33"
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" \
+    STUB_ANCESTOR_STATUS=ahead STUB_ANCESTOR_TOTAL=1 STUB_ANCESTOR_SEEN=1 \
+    STUB_ANCESTOR_COMMITS="dddddddddddd:1" \
+    STUB_BRANCH_TOTAL=0 STUB_BRANCH_COUNT=0 STUB_BRANCH_SHAS="" run_gate "$T/body-t33"
+assert_rc 1 "(t33) a branch-side page claiming ZERO commits while the branch gained one REFUSES"
+assert_contains "(t33) …as an UNREADABLE page" "could not READ this PR's commit graph"
+assert_not_contains "(t33) …and no patch match is claimed" "passed via PATCH match"
+# MUTATION: delete the branch-side zero guard and the same fixture CARRIES an authored commit.
+MUT_ZERO="$T/mutant-no-branch-zero-guard.sh"
+sed -E 's/^( *).*p_btotal:-0.*-ge 1.*$/\1:/' "$RUN_BLOCK" > "$MUT_ZERO"
+if cmp -s "$RUN_BLOCK" "$MUT_ZERO"; then
+    bad "(t33) the branch-zero mutation did not apply — this control proves NOTHING"
+else
+    _saved_block="$RUN_BLOCK"; RUN_BLOCK="$MUT_ZERO"
+    STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+        STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" \
+        STUB_ANCESTOR_STATUS=ahead STUB_ANCESTOR_TOTAL=1 STUB_ANCESTOR_SEEN=1 \
+        STUB_ANCESTOR_COMMITS="dddddddddddd:1" \
+        STUB_BRANCH_TOTAL=0 STUB_BRANCH_COUNT=0 STUB_BRANCH_SHAS="" run_gate "$T/body-t33"
+    RUN_BLOCK="$_saved_block"
+    if [ "$GATE_RC" = "0" ]; then
+        ok "(t33) with that guard removed the zero-page CARRIES an authored commit — so it is load-bearing"
+    else
+        bad "(t33) the mutant still refused (rc=$GATE_RC) — (t33) attributes nothing"
     fi
 fi
 
