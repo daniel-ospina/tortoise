@@ -2217,9 +2217,12 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
         # `classify_items(`, so a bare substring still passed the first cut of
         # this widening (measured in the mutation pass: the README cite moved to
         # `:15690` stayed GREEN under it). The call must start at a NAME
-        # BOUNDARY — not preceded by a word character or a dot — which is what
-        # `_CALL_BOUNDARY` below is, and the mutation that reddens it is that
-        # same one-line README edit.
+        # BOUNDARY — not preceded by a WORD CHARACTER, which is the `_` in
+        # `_collect_classify_items(`; a preceding DOT is deliberately ADMITTED,
+        # because `kind_classifier.classify_items(items)` is a real call form
+        # this bundle cites and refusing it would be the false-block twin. That
+        # boundary lives in `_cites_a_call()` above, and the mutation that
+        # reddens this assertion is that same one-line README edit.
         assert _cites_a_call(text, symbol.split(".")[-1]), (
             f"README cites `{symbol}` at extractor_v2.py:{lineno}, which reads "
             f"{text.strip()!r} — the line moved and the cite did not: "
