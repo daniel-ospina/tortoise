@@ -4794,3 +4794,54 @@ def test_the_whole_body_fallback_applies_the_same_partiality_test(body):
         "Closes #13036\n\nV1, V2, V3, V4, V5, V6 are all proved in this PR.\n", 500,
         {13036: _scope(rows)}, "daniel-ospina/tortoise")
     assert findings == [] and stats["clean"] == 1, stats
+
+
+# ⛔ THE SAME CLASS, ONE SPELLING FURTHER — FOUND BY REVIEWING THIS CHANGE AGAINST ITS OWN THESIS.
+# Each row below was a FALSE PASS or a wrong-claim-set finding in the first version of round 29's fix,
+# and each is the repair's own regression pin:
+#
+#   * a narrowing sibling spelled as a RANGE (`; V1–V3 in this PR`) named three rows that
+#     `_explicit_ids` BLANKS and the line-level range gate refuses to expand, so a THREE-row close of
+#     six read `clean` — on the closing line, in the fallback and on the `Satisfies` source;
+#   * a second closing ref on the same line (`… ), closes #13037 (V2)`) had its qualifier read as a
+#     narrowing of #13036, so a COMPLETE close was accused of claiming V2 (wrong claim set);
+#   * `but` becoming a clause boundary made `(rows V1–V6 but two are missing)` a bare range with a
+#     rowless rider, i.e. the whole claim — `clean` — where the parent read `ambiguous`.
+NORTH_OF_ROUND_29 = [
+    # range-spelled narrowing sibling, closing line — claims the three rows it names.
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6; V1–V3 in this PR)\n",
+     "finding", ["V1", "V2", "V3"], ["V4", "V5", "V6"]),
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6; V1–V3)\n",
+     "finding", ["V1", "V2", "V3"], ["V4", "V5", "V6"]),
+    # …and on the `Satisfies` source, same sentence, same claim.
+    ("Closes #13036\nSatisfies #13036: V1, V2, V3, V4, V5, V6 (V1–V3 in this PR)\n",
+     "finding", ["V1", "V2", "V3"], ["V4", "V5", "V6"]),
+    # CONTROL — a second closing ref is NOT this issue's narrowing: `#13036`'s six were claimed in
+    # full, so the verdict is `clean` (and the finding above must not name them unclaimed).
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6), closes #13037 (V2)\n", "clean", None, None),
+    # CONTROL — a `but`-joined rider qualifies the range, so it is not the whole claim: abstain,
+    # never pass. (This is the row that pins the contrast-rider rule in `_range_is_the_whole_claim`.)
+    ("Closes #13036 (rows V1–V6 but two are missing)\n", "ambiguous", None, None),
+]
+
+
+@pytest.mark.parametrize("body,expected,claimed,unclaimed", NORTH_OF_ROUND_29)
+def test_a_narrowing_sibling_is_read_in_every_spelling_and_never_across_closing_refs(
+        body, expected, claimed, unclaimed):
+    """Review of round 29 — the repair's own near-misses, each pinned so it cannot come back.
+
+    The demotion has to answer the same question for a list, a range, and the `Satisfies` form; it
+    must not read ANOTHER issue's qualifier as this issue's claim; and the new `but` boundary must not
+    turn a qualified range into a complete claim. The two controls are the false-positive half: a
+    complete close beside a second closing ref stays `clean`, and a qualified range abstains.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)},
+                                              "daniel-ospina/tortoise")
+    assert stats[expected] == 1, (body, stats)
+    if expected == "finding":
+        assert findings[0].evidence["issue"] == 13036, findings[0].evidence
+        assert findings[0].evidence["claimed"] == claimed, (body, findings[0].evidence)
+        assert findings[0].evidence["unclaimed"] == unclaimed, (body, findings[0].evidence)
+    else:
+        assert findings == [], (body, findings)

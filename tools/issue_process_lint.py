@@ -1501,7 +1501,12 @@ def _range_is_the_whole_claim(text: str, match: re.Match, rows: list[str]) -> bo
         other = line[c_start:c_end]
         if any(re.search(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", other) for row in rows):
             return False
-    return True
+    # ⛔ AND A CONTRASTIVE RIDER IS NOT PART OF THE CLAIM (review of this change, P3). `but` is now a
+    # clause boundary (`_CLAUSE_SPLIT_RE`), so `Closes #N (rows V1–V6 but two are missing)` would
+    # otherwise see a bare range followed by a rowless clause, call it the WHOLE claim and read
+    # `clean` — a shape that was AMBIGUOUS before the boundary existed. A rider introduced by `but`
+    # qualifies the claim, so the range is a mention and the line abstains.
+    return not re.search(r"\bbut\b", line[own[1]:])
 
 
 def _row_range_span(text: str, rows: list[str]) -> set[str]:
@@ -1666,6 +1671,12 @@ def _a_clause_names_a_proper_subset(text: str, rows: list[str]) -> bool:
     sentence, so the read has to be clause-shaped: the line names all six and only the clause split
     shows the narrowing. Downstream the caller refuses the fallback and reports AMBIGUOUS — the cheap
     error in this file's ranking — never a pass.
+
+    ⛔ AND A RANGE-ONLY CLAUSE IS COVERED BY `_names_a_proper_subset_in`'S WIDE READING (review round
+    30) — this function deliberately does NOT grow a second range expansion of its own: the unit read
+    now evaluates wide and narrow independently, so `… are all proved; V1–V3 in this PR.` is a
+    subset without help from here, and a duplicate expansion would be the second implementation this
+    file keeps having to remove.
     """
     return any(_names_a_proper_subset_in(clause, rows)
                for line in strip_code(text, strict=True)[0].splitlines()
@@ -1759,7 +1770,8 @@ def _narrowing_ids(line: str, match: re.Match, rows: list[str]) -> set[str]:
     return ids
 
 
-def _narrowing_sibling_ids(line: str, rows: list[str], claimable: set[int]) -> set[str]:
+def _narrowing_sibling_ids(line: str, rows: list[str], claimable: set[int],
+                           issue: int | None = None, repo: str | None = None) -> set[str]:
     """The ids a NARROWING sibling clause names when NO RANGE matched — `(V1, …, V6; V2 only)` ⇒ V2.
 
     ⛔ THIS IS `_narrowing_ids` WITHOUT A RANGE (review round 29, P2). `_narrowing_ids` is handed the
@@ -1772,15 +1784,45 @@ def _narrowing_sibling_ids(line: str, rows: list[str], claimable: set[int]) -> s
     Rows come from the issue, so a clause can only narrow to a declared row, and the caller applies
     the strict-subset test (`narrowing < line_named`) so a sibling naming the WHOLE set — the
     `V1 … V6 are separate PRs` shape — narrows nothing and earns no pass.
+
+    ⛔ TWO THINGS THIS READ MISSED WHEN IT WAS FIRST WRITTEN, BOTH FOUND BY REVIEWING IT AGAINST THE
+    SAME CLASS IT EXISTS FOR — and both false PASSes one spelling away:
+    * A SIBLING THAT CLOSES A DIFFERENT ISSUE IS NOT THIS ISSUE'S NARROWING. `Closes #N (V1 … V6),
+      closes #M (V2)` read the second parenthetical as a narrowing of #N and accused a complete close
+      of claiming `V2` — a wrong-claim-set finding, which this file ranks beside a false PASS.
+    * A RANGE-ONLY SIBLING NAMES ITS SPAN. `(V1, …, V6; V1–V3 in this PR)` names three rows, but
+      `_explicit_ids` BLANKS range mentions, so the demotion never happened and a THREE-row close of
+      six read `clean`. Expanded from the issue's own order and only when the clause names no id
+      outside the range, so it cannot invent a row; a sibling that repeats ids the claim already has
+      (`; V2 only`) is read by `_explicit_ids` as before.
     """
     ids: set[str] = set()
-    for i, (a, b) in enumerate(_clause_spans(line, rows)):
-        if i in claimable:
+    order = {row: i for i, row in enumerate(rows)}
+    spans = _clause_spans(line, rows)
+    foreign: set[int] = set()
+    for i, (a, b) in enumerate(spans):
+        if issue is None or not set(_claims_in(line[a:b], None, repo)["closing"]) - {issue}:
+            continue
+        foreign.add(i)
+        # …and its ATTACHED qualifier (a bracket or a spaced dash), by the same attachment rule the
+        # closing-line read uses: `, closes #M (V2)` puts the foreign claim's rows in the NEXT
+        # clause, and reading them as this issue's narrowing is the wrong-claim-set finding above.
+        if i + 1 < len(spans):
+            sep = line[b:spans[i + 1][0]].strip()
+            if sep == "(" or sep in {"—", "–"} or "(" in sep:
+                foreign.add(i + 1)
+    for i, (a, b) in enumerate(spans):
+        if i in claimable or i in foreign:
             continue
         clause = line[a:b]
         if _DISCLAIMER_RE.search(clause) or _ELSEWHERE_RE.search(clause):
             continue
-        ids |= _explicit_ids(clause, rows)
+        named = _explicit_ids(clause, rows)
+        if not named:
+            for match in _range_matches(clause, rows):
+                lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
+                ids |= set(rows[lo:hi + 1])
+        ids |= named
     return ids
 
 
@@ -1880,7 +1922,7 @@ def _satisfies_claim(text: str, issue: int, rows: list[str], repo: str | None) -
         own = {i for i, (a, b) in enumerate(spans)
                if _is_an_id_list(line[a:b], rows)
                or a <= match.start() - start < b}
-        narrowing = _narrowing_sibling_ids(line, rows, own)
+        narrowing = _narrowing_sibling_ids(line, rows, own, issue, repo)
         if narrowing and narrowing < claimed_ids:
             claimed_ids = narrowing
         claimed |= claimed_ids
@@ -2091,7 +2133,7 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # the cheap error here and a false PASS on a partial one is the expensive one, and the
             # alternative — deciding which sibling `means` a narrowing by its vocabulary — is the
             # enumeration five earlier rounds each leaked through.
-            narrowing = _narrowing_sibling_ids(line, rows, claimable)
+            narrowing = _narrowing_sibling_ids(line, rows, claimable, issue, repo)
             if narrowing and narrowing < line_named:
                 line_named = narrowing
             named |= line_named
