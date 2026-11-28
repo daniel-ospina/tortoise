@@ -8991,6 +8991,21 @@ class CollisionPreflightTest(unittest.TestCase):
             check=True, capture_output=True, text=True, env=env,
         ).stdout.strip()
 
+    def raw_claim_sha(self, raw: bytes) -> str:
+        """Store a VERBATIM commit object in the ORIGIN and return its sha.
+
+        `claim_sha` goes through `commit-tree`, which cannot write a header a real commit would
+        not have (an ident value with a newline in it). The class this seam exists for is exactly
+        a peer-PUSHED object, and `git hash-object --literally` is how such an object gets into a
+        repository at all — so this is the faithful way to build the input.
+        """
+        origin = self.tmp / "remotes" / "test-owner" / "test-repo.git"
+        return subprocess.run(
+            ["git", "-C", str(origin), "hash-object", "-t", "commit", "-w",
+             "--stdin", "--literally"],
+            check=True, capture_output=True, input=raw,
+        ).stdout.decode().strip()
+
     def set_claim_ref(self, sha: str) -> None:
         """Point `refs/claims/issue-<ISSUE>` at `sha` — a renewal, in place."""
         origin = self.tmp / "remotes" / "test-owner" / "test-repo.git"
@@ -9543,6 +9558,40 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertFalse(claimed, basis)
         self.assertFalse(unreadable, basis)
         self.assertIn("EXPIRED at", basis)
+
+    def test_the_cr_is_deleted_only_after_the_boundary_is_found(self):
+        """The ORDER is load-bearing: delete `\r` BEFORE the split and a lone-CR line forges a boundary.
+
+        `claims.sh:_lease_of:1146` is `sed -n '/^$/,$p' | tail -n +2 | tr -d '\r'` — boundary
+        first, CR deletion second. A lone `\r` alone on its line (`\n\r\n`) is NOT an empty line to
+        that `sed`. Delete `\r` first and it becomes `\n\n`, i.e. an empty line, so the forged
+        header remainder becomes "the minted body line".
+
+        Measured on the object this row stores: the swapped order answers `EXPIRED at 1700000000`
+        and FREES the claim, while `claims.sh` answers `_lease_of` → `?\t0`,
+        `_claim_lease_state` → `unreadable` → LIVE. `claimed=False` is not inert — `judge` counts
+        the ref `demoted`, so a dispatch proceeds on a claim the owner still holds.
+
+        The object is stored VERBATIM (`hash-object --literally`): `commit-tree` cannot write a
+        committer value containing a newline, and a verbatim object is the shape a peer pushes.
+        """
+        past = 1700000000
+        empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        raw = (
+            f"tree {empty_tree}\n"
+            "author A <a@b> 1792789000 +0000\n"
+            f"committer C\n\r\nlease_until={past} <c@d> 1792789000 +0000\n"
+            "\n"
+        ).encode()
+        self.bare_origin()
+        self.set_claim_ref(self.raw_claim_sha(raw))
+        mod = _tool_module()
+        holder = mod.StaleHolder("git", str(self.repo), ISSUE, 60, [], now=1800000000)
+        claimed, basis, unreadable = holder._claim_live()
+        self.assertTrue(claimed, basis)
+        self.assertTrue(unreadable, basis)
+        self.assertNotIn("EXPIRED", basis, f"a lone-CR line must not move the boundary:\n{basis}")
+        self.assertNotIn("s left", basis, f"no lease may be quoted here:\n{basis}")
 
     def test_a_failed_fetch_never_frees_the_claim(self):
         """The FETCH-failure arm is fail-closed (LIVE) — and it had no test at all.

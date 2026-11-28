@@ -4026,9 +4026,11 @@ class StaleHolder:
         # handled where the owner handles it — `\r` is deleted from the body BEFORE lines are split
         # (see the `body.replace` above), so a CR-split is ONE fused token in BOTH readers and lands
         # on the unparseable arm below instead of here. What is left for this predicate is a
-        # GENUINE second non-blank line (a CRLF-terminated or multi-line claim body): there
-        # `_lease_of` reads the first line and can answer `expired`, while this reader refuses to
-        # pick a line and answers LIVE. That is an over-block — the safe direction — and it is
+        # GENUINE second non-blank line — a MULTI-LINE claim body (`lf second`, `\r\nsecond\r\n`):
+        # there `_lease_of` reads the first line and can answer `expired`, while this reader refuses
+        # to pick a line and answers LIVE. (A CRLF-TERMINATED SINGLE line does NOT abstain: its CR
+        # is deleted like any other and the token reads the same in both — measured.) That is an
+        # over-block — the safe direction — and it is
         # unreachable from the writer (`claims.sh:_claim_commit` mints exactly one line; 0 of 543
         # local claim commits carry anything after it), so this abstains on nothing a writer
         # produces and can only ever REFUSE a demotion.
