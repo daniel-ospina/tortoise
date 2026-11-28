@@ -9544,6 +9544,78 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertFalse(unreadable, basis)
         self.assertIn("EXPIRED at", basis)
 
+    def test_a_failed_fetch_never_frees_the_claim(self):
+        """The FETCH-failure arm is fail-closed (LIVE) — and it had no test at all.
+
+        Review round 9, P1: `if frc != 0:` returns `(True, basis, True)`, and flipping that to
+        `(False, basis, False)` left the WHOLE FILE green (477/477). `claimed=False` is not inert —
+        `judge` reads it as "no live claim" and counts the row `demoted`, so a dispatch proceeds.
+        This is the boundary between "an unreadable measurement" and "nobody holds it", which is
+        the one direction this gate must never fail in.
+
+        Reached by an ordinary transient: the registry answers `ls-remote`, and then the `fetch` of
+        the same ref exits non-zero (a dropped connection, or the ref deleted between the steps).
+        """
+        mod = _tool_module()
+        self.bare_origin()
+        self.live_claim(int(time.time()) + 3600)
+        real_run = mod._run
+
+        def _run_hook(cmd, cwd, timeout, env=None):
+            if len(cmd) > 1 and cmd[1] == "fetch":
+                return (1, "", "fatal: could not read from remote repository", False)
+            return real_run(cmd, cwd, timeout, env)
+
+        holder = mod.StaleHolder("git", str(self.repo), ISSUE, 60, [])
+        with mock.patch.object(mod, "_run", _run_hook):
+            claimed, basis, unreadable = holder._claim_live()
+        self.assertTrue(claimed, basis)
+        self.assertTrue(unreadable, basis)
+        self.assertIn("could not be read", basis)
+        self.assertNotIn("s left", f"no lease may be quoted here:\n{basis}")
+
+    def test_a_commit_that_cannot_be_read_never_frees_the_claim(self):
+        """The `cat-file`-failure arm is fail-closed too, and it was equally unguarded.
+
+        Same family as the fetch arm above (review round 9 residual, fixed here rather than filed):
+        flipping `if rc != 0:` to demote also left the whole file green. An object that cannot be
+        read is an unreadable lease, and an unreadable lease is LIVE.
+        """
+        mod = _tool_module()
+        self.bare_origin()
+        self.live_claim(int(time.time()) + 3600)
+        real_read = mod._run_untranslated
+
+        def _read_hook(cmd, cwd, timeout, env=None):
+            if len(cmd) > 1 and cmd[1] == "cat-file":
+                return (1, "", "fatal: bad object", False)
+            return real_read(cmd, cwd, timeout, env)
+
+        holder = mod.StaleHolder("git", str(self.repo), ISSUE, 60, [])
+        with mock.patch.object(mod, "_run_untranslated", _read_hook):
+            claimed, basis, unreadable = holder._claim_live()
+        self.assertTrue(claimed, basis)
+        self.assertTrue(unreadable, basis)
+        self.assertIn("could not be read", basis)
+        self.assertNotIn("s left", f"no lease may be quoted here:\n{basis}")
+
+    def test_a_nineteen_digit_lease_is_unparseable_and_quotes_no_countdown(self):
+        """`claims.sh:_lease_unparseable` bounds the value at 18 digits; this reader must too.
+
+        Review round 9, P2: dropping `len(lease) > 18` left every test green, because no fixture
+        used a lease longer than 10 digits. The VERDICT is unchanged — a 19-digit value is at least
+        10**18, so it lands on the same LIVE arm — but the BASIS is not: without the bound the tool
+        publishes `lease 9999999999999999999s left`, a countdown no lease can hold, and breaks the
+        parity the surrounding comment claims against `_lease_unparseable`'s own bound.
+        """
+        wide = "9999999999999999999"  # 19 digits
+        claimed, basis, unreadable = self.claim_read(
+            message=f"claim owner=box-a lease_until={wide} nonce=9806")
+        self.assertTrue(claimed, basis)
+        self.assertTrue(unreadable, basis)
+        self.assertIn(f"cannot parse (lease_until={wide})", basis)
+        self.assertNotIn("s left", f"no lease may be quoted here:\n{basis}")
+
     def test_a_fetched_commit_that_cannot_be_named_is_an_abstention(self):
         """`_ref_sha` returning `""` is fail-closed (LIVE), and it was the one uncovered arm.
 

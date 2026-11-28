@@ -4019,22 +4019,24 @@ class StaleHolder:
                     if value and all(char in "0123456789" for char in value)]
         lease = faithful[0] if faithful else (tokens[0] if tokens else "")
         # ⛔ A LINE AFTER THE MINTED ONE IS AN ABSTENTION, AND THE TEST IS *ANY* LINE — NOT
-        # "does it carry a lease token" (#13727 review round 3, which is the round that found the
-        # narrower predicate reading `claim … lease_until=<past>\rjunk` as EXPIRED → FREE while
-        # `_lease_of` answers unparseable → LIVE). `claims.sh:_lease_of` deletes `\r` BEFORE splitting
-        # lines, so ANY CR inside the minted line makes ONE (unparseable) line for the authority and
-        # TWO logical lines for this reader — and `_run` decodes with UNIVERSAL NEWLINES, so the CR
-        # has already become `\n` and cannot be told apart from a real break. The divergence class is
-        # "the minted line was CR-split", never "the remainder looks like a lease", so the predicate
-        # must be the boundary itself. A legitimate claim commit is ONE line (`claims.sh:_claim_commit`
-        # mints exactly one; 0 of 543 local claim commits carry anything after it), so this abstains on
-        # nothing a writer produces, and it can only ever REFUSE a demotion.
+        # "does it carry a lease token" (#13727 review round 3, which found the narrower predicate
+        # reading `claim … lease_until=<past>\rjunk` as EXPIRED → FREE while `_lease_of` answers
+        # unparseable → LIVE).
+        # ⛔ AND ITS SCOPE NARROWED WHEN THE READ BECAME BYTE-FAITHFUL (round 8): the CR case is now
+        # handled where the owner handles it — `\r` is deleted from the body BEFORE lines are split
+        # (see the `body.replace` above), so a CR-split is ONE fused token in BOTH readers and lands
+        # on the unparseable arm below instead of here. What is left for this predicate is a
+        # GENUINE second non-blank line (a CRLF-terminated or multi-line claim body): there
+        # `_lease_of` reads the first line and can answer `expired`, while this reader refuses to
+        # pick a line and answers LIVE. That is an over-block — the safe direction — and it is
+        # unreachable from the writer (`claims.sh:_claim_commit` mints exactly one line; 0 of 543
+        # local claim commits carry anything after it), so this abstains on nothing a writer
+        # produces and can only ever REFUSE a demotion.
         if any(line.strip(" \t")
                for line in lines[(minted_at if minted_at is not None else 0) + 1:]):
             return (True, (f"`{ref}` (sha {sha[:9]}) carries a line AFTER the minted one — "
-                           "indistinguishable from a CR-split, whose two readers disagree about "
-                           f"the same bytes{moved_note} — so no lease can be reported: treated as "
-                           "LIVE, NOT demoted"), True)
+                           "more than one non-blank line, so no lease can be attributed"
+                           f"{moved_note} — treated as LIVE, NOT demoted"), True)
         # claims.sh:_lease_unparseable — an absent value, the `0` sentinel, **a LEADING ZERO**, any
         # non-digit (a negative collapses to `0`) and a 19+-digit value (the 18-digit bound exists
         # so a full-width lease cannot wrap) are all "a claim EXISTS whose lease this reader cannot
