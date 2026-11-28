@@ -158,8 +158,12 @@ name: ai-review-gate
 #     SCOPE-TEXT-SENSITIVE — a strictly stronger frame than none, not a position — and a
 #     position-blind projection accepts a change that was MOVED, the one direction a gate
 #     must never fail in. It refuses a relocation whenever the heading TEXT changes
-#     (`(t20)`) and not when it does not (`(t20b)`); what bounds the latter is the shape
-#     preconditions, which `(t20b)` also pins.
+#     (`(t20)`) and not when it does not (`(t20b)`). What bounds THAT case is the shape
+#     preconditions, which `(t20b)` also pins — except for one sub-class they cannot
+#     reach: where the hunk's LINE NUMBERS are the only thing that moved, the BINDING
+#     digest is unchanged too (#1362 drops them), so rule (b) carries it before rule (c)
+#     is consulted and NO rule-(c) precondition applies. Pre-existing, unchanged here,
+#     and stated in docs/ai-review-gate.md's residual list.
 # ⛔ Do NOT try to make the BINDING digest base-move invariant by dropping
 # context there: it is what `diff=` means to every producer in the fleet, and
 # changing it silently invalidates every marker ever signed (the #3076 shape).
@@ -683,7 +687,12 @@ jobs:
           # `patch_arm_ok` — the reviewed sha must be reachable, and everything the
           # branch gained after the review must be a merge commit — so what is left is
           # a MERGE (or a conflict resolution) that moves the author's own lines to a
-          # position whose enclosing heading string matches. A position-bearing frame
+          # position whose enclosing heading string matches — and NOTE that a relocation
+          # whose ONLY movement is the hunk's line NUMBERS never reaches this arm at all:
+          # the binding digest drops them too, so rule (b) carries it and no rule-(c)
+          # precondition applies (pre-existing #1362 behaviour, documented in the docs
+          # residual list; `(t20b)` differs in a CONTEXT line so it tests THIS arm).
+          # A position-bearing frame
           # cannot be added: the reviewed and live diffs each carry one hunk, so an
           # ordinal matches too, and a pre-image line number is exactly the
           # base-move-sensitive datum this projection exists to drop. `(t20b)` pins the

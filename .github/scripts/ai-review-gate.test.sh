@@ -1547,7 +1547,8 @@ if [[ "$CAP_PIN" =~ ^[0-9]+$ ]]; then
         STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$CAPBODY"
     assert_rc 1 "(t9) signed stale records that match nothing still FAIL closed"
     # ⛔ COUNT THE SHAPE, NOT THE ENDPOINT. Since the ancestry precondition the gate
-    # makes up to FOUR calls per probe (ancestry read, base sha, reviewed diff) and
+    # makes up to FOUR calls per probe (base sha, the ancestry read, the branch-side
+    # commit list, and the reviewed diff) and
     # ALL of them are repo-scoped `gh api` calls against the shared budget — so the
     # assertion is two-sided: the EXPENSIVE per-probe compare is exactly CAP_PIN, and
     # the rule-(c) call total is bounded by 4 x CAP_PIN. Counting `/compare/` alone
@@ -2054,8 +2055,9 @@ assert_contains "(t25) …and the log SAYS the anchor held but the projection di
 # therefore ALSO differ in a CONTEXT line (which the binding KEEPS and the patch DROPS),
 # so the binding moves and rule (c) is genuinely the arm under test.
 #
-# What actually bounds the residual is the two SHAPE checks, and rows (c)/(d) below prove
-# they do: a merge advances, an authored commit or a rewrite does not.
+# What actually bounds the residual is the two SHAPE checks, and rows (a)/(b)/(c) below
+# prove they do: an ADVANCED branch carries, and a rewritten branch or an authored commit
+# after the review is refused.
 DUP_SCOPE_REVIEWED="$T/dup-scope-reviewed.diff"
 cat > "$DUP_SCOPE_REVIEWED" <<'DIFFEOF'
 diff --git a/h.py b/h.py
