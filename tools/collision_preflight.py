@@ -1322,6 +1322,48 @@ def _run(cmd: list[str], cwd: str, timeout: float, env: dict | None = None):
         )
 
 
+def _run_untranslated(cmd: list[str], cwd: str, timeout: float,
+                      env: dict[str, str] | None = None) -> tuple[int, str, str, bool]:
+    """`_run`, but WITHOUT newline translation — the bytes exactly as git wrote them.
+
+    `_run` decodes with `text=True`, and Python's universal-newline mode rewrites a lone `\r`
+    to `\n`. That is harmless for a ref name or a sha, and FATAL for a parser whose boundary
+    is "the first EMPTY line": `claims.sh:_lease_of:1146` finds that boundary on the RAW
+    object (`sed -n '/^$/,$p'`)
+    and only then deletes `\r`, so a peer-chosen `\r\r` in a commit HEADER is not a line
+    break to the authority — while after universal-newline decoding it is a second `\n` and
+    manufactures a header/body separator the authority cannot see, which moves "the minted
+    line" onto a forged one (#13727 review round 8).
+
+    So the ONE caller that splits on that boundary reads through here. Everything else keeps
+    `_run`: this function exists for a byte-level distinction, not as a general replacement.
+    """
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, timeout=timeout, env=env)
+        return (
+            proc.returncode,
+            proc.stdout.decode("utf-8"),
+            proc.stderr.decode("utf-8", "replace"),
+            False,
+        )
+    except FileNotFoundError:
+        return 127, "", f"{cmd[0]}: command not found", False
+    except subprocess.TimeoutExpired:
+        return 124, "", f"timeout after {timeout:g}s", True
+    except OSError as exc:  # pragma: no cover - defensive
+        return 126, "", f"{cmd[0]}: {exc}", False
+    except UnicodeDecodeError:
+        # Same refusal as `_run`'s (#8881): a replacement character would let a read the tool
+        # cannot make look like a read it made.
+        return (
+            126,
+            "",
+            f"{cmd[0]}: output not decodable as text "
+            "— the read is refused, not guessed (#8881)",
+            False,
+        )
+
+
 # C0/C1 control characters (ESC/CSI/OSC/BEL/DEL included) are stripped from
 # every UNTRUSTED field before it reaches the report. The report IS the
 # artifact a human reads to decide "do NOT dispatch", and GitHub-sourced text
@@ -3376,6 +3418,17 @@ STALE_TIP_DAYS = 7.0
 # not imported: agent-infra is a separate checkout this tool may not have.
 CLAIM_NS = "refs/claims"
 CLAIM_TMP_NS = "refs/claims-tmp"
+#: How many times a claim read is repeated when the ref MOVES under it (#13727).
+#:
+#: The read is TWO network steps — `ls-remote` names the sha, a `fetch` brings its commit
+#: into a temp ref — and a claim ref is force-updated IN PLACE by every renewal
+#: (`claims.sh:_claim_acquire_at` rebuilds the claim commit and pushes it to the same key),
+#: so the two steps can straddle a renewal and see two different commits. The pair
+#: (sha, lease) must then come from ONE of them: the tool re-enumerates and re-reads, and
+#: only reports a lease it has bound to the sha it names. Three reads cover a renewal
+#: (one move) with one spare; a ref that will not hold still is an ABSTENTION, never a
+#: number quoted about a commit the caller never enumerated.
+CLAIM_READ_ATTEMPTS = 3
 
 
 def _ref_tip_age_days(git_bin: str, repo: str, ref: str, timeout: float,
@@ -3800,9 +3853,20 @@ class StaleHolder:
         The read is `claims.sh:claim_issue_preflight`'s, in the same order, for the same
         reason: `git ls-remote <ref>` exits 0 with EMPTY output when the ref does not
         exist and NON-ZERO only when the remote could not be consulted, so collapsing the
-        two would read an outage as "nobody holds it". The lease is DATA (the claim
-        commit's own message) and a claim is `--force-with-lease`-fenced on the ref's
-        SHA, so a temp ref is fetched to read the message and deleted immediately.
+        two would read an outage as "nobody holds it". The `ls-remote` exit-status
+        distinction IS `claims.sh:_claim_preflight_at`'s (`:1786-1797`): empty output means
+        the ref is ABSENT (demoted, `claims.sh` answers `no claim on #N` rc 0), non-zero
+        means the registry could not be consulted (LIVE).
+
+        ⛔ THE LEASE IS **NOT** READ THE WAY `_claim_preflight_at` READS IT (#13727). The
+        owner fetches into a temp ref and parses the message out of THAT (claims.sh:1799-1805),
+        which is the race this change exists to close: `claims.sh` renews by force-updating the
+        SAME ref, so the enumerated sha and the fetched commit can be two different commits and
+        the printed lease then describes neither. Here the lease is read BY THE ENUMERATED SHA
+        (`git cat-file commit <sha>`) after a `rev-parse --verify` compare-and-swap, and a ref
+        that moves is re-read (`CLAIM_READ_ATTEMPTS`) and then abstained. So do NOT "restore"
+        the owner's temp-ref read here as a parity fix — parity is on the PARSED VALUE
+        (`_lease_of`), never on the transport.
 
         ⛔ THE POLARITY IS COPIED FROM THE ONE FUNCTION THAT OWNS IT (`_lease_is_live`,
         claims.sh): absent, `0`, non-numeric and oversized leases are all LIVE. An
@@ -3816,68 +3880,198 @@ class StaleHolder:
         if self._claim is not None:
             return self._claim
         ref = f"{CLAIM_NS}/issue-{self.issue}"
-        rc, out, err, timed_out = _run(
-            [self.git_bin, "ls-remote", "origin", ref], self.repo, self.timeout,
-        )
-        if rc != 0:
-            why = "timeout" if timed_out else f"exit {rc}"
-            basis = (f"the claim registry could not be read ({ref}: "
-                     f"`git ls-remote` {why}: {_one_line(err)}) — NOT demoted")
-            self._claim = (True, basis, True)
-            return self._claim
-        sha = out.split()[0] if out.split() else ""
-        if not sha:
-            self._claim = (False, f"no `{ref}` on origin", False)
-            return self._claim
-        tmp = f"{CLAIM_TMP_NS}/preflight-{os.getpid()}-{int(self.now)}"
-        try:
-            frc, _fout, ferr, _fto = _run(
-                [self.git_bin, "fetch", "-q", "origin", f"+{ref}:{tmp}"],
-                self.repo, self.timeout,
+        # ⛔ A LEASE MUST BE READ FROM THE COMMIT THE REF NAMED, NOT FROM WHATEVER THE
+        # NAMESPACE HELD MOMENTS LATER (#13727). Every attempt below re-enumerates the ref
+        # and then requires the fetched commit to BE that sha before any lease is read out
+        # of it, so the number this tool prints and the sha it prints it about are one
+        # object. Without the check the two halves of the message come from two different
+        # reads: `ls-remote` supplies the sha, the `fetch` supplies the lease, and a
+        # renewal in between makes the report describe a commit nobody enumerated — an
+        # expired claim printed with a renewed (future) lease reads as LIVE and refuses a
+        # free dispatch, and the countdown looks like a measurement.
+        moved: list[str] = []
+        for attempt in range(CLAIM_READ_ATTEMPTS):
+            rc, out, err, timed_out = _run(
+                [self.git_bin, "ls-remote", "origin", ref], self.repo, self.timeout,
             )
-            if frc != 0:
-                basis = (f"`{ref}` exists but its lease could not be read "
-                         f"({_one_line(ferr)}) — treated as LIVE, NOT demoted")
+            if rc != 0:
+                why = "timeout" if timed_out else f"exit {rc}"
+                basis = (f"the claim registry could not be read ({ref}: "
+                         f"`git ls-remote` {why}: {_one_line(err)}) — NOT demoted")
                 self._claim = (True, basis, True)
                 return self._claim
-            return self._lease_from_ref(ref, tmp, sha)
-        finally:
-            _run([self.git_bin, "update-ref", "-d", tmp], self.repo, self.timeout)
+            sha = out.split()[0] if out.split() else ""
+            if not sha:
+                self._claim = (False, f"no `{ref}` on origin", False)
+                return self._claim
+            tmp = (f"{CLAIM_TMP_NS}/preflight-{os.getpid()}-{int(self.now)}"
+                   f"-{attempt}")
+            try:
+                frc, _fout, ferr, _fto = _run(
+                    [self.git_bin, "fetch", "-q", "origin", f"+{ref}:{tmp}"],
+                    self.repo, self.timeout,
+                )
+                if frc != 0:
+                    basis = (f"`{ref}` exists but its lease could not be read "
+                             f"({_one_line(ferr)}) — treated as LIVE, NOT demoted")
+                    self._claim = (True, basis, True)
+                    return self._claim
+                # Which commit did that fetch actually land? NOT assumed to be `sha`.
+                got = self._ref_sha(tmp)
+                if not got:
+                    self._claim = (True, (
+                        f"`{ref}` exists but the commit its lease would be read from "
+                        "cannot be named — treated as LIVE, NOT demoted"), True)
+                    return self._claim
+                if got == sha:
+                    self._claim = self._lease_from_ref(ref, got, moved)
+                    return self._claim
+                # The ref moved between the two steps (a renewal, or a release and a
+                # re-claim). Re-enumerate rather than report a lease about a commit this
+                # read never named.
+                moved.append(f"{sha[:9]} → {got[:9]}")
+            finally:
+                _run([self.git_bin, "update-ref", "-d", tmp], self.repo, self.timeout)
+        self._claim = (True, (
+            f"`{ref}` moved under {CLAIM_READ_ATTEMPTS} reads ({', '.join(moved)}) — its "
+            "lease cannot be BOUND to the commit it names, so no lease is reported: "
+            "treated as LIVE, NOT demoted"), True)
+        return self._claim
 
-    def _lease_from_ref(self, ref: str, tmp: str, sha: str) -> tuple[bool, str, bool]:
+    def _ref_sha(self, ref: str) -> str:
+        """The commit sha a (temp) ref resolves to, or `""` when it cannot be read."""
         rc, out, _err, _to = _run(
-            [self.git_bin, "cat-file", "commit", tmp], self.repo, self.timeout,
+            [self.git_bin, "rev-parse", "--verify", ref], self.repo, self.timeout,
         )
         if rc != 0:
-            self._claim = (True, (f"`{ref}` exists but its commit could not be read — "
-                                 "treated as LIVE, NOT demoted"), True)
-            return self._claim
-        lease = ""
-        for line in out.splitlines():
-            for token in line.split():
-                if token.startswith("lease_until="):
-                    lease = token.split("=", 1)[1]
-        # claims.sh:_lease_unparseable — an absent value, the `0` sentinel, any
-        # non-digit (a negative collapses to `0`) and a 19+-digit value (the `[`
-        # 18-digit bound exists so a full-width lease cannot wrap) are all "a claim
-        # EXISTS whose lease this reader cannot parse" — i.e. LIVE, never free.
-        # `isascii() and isdigit()`, not `isdigit()`: `int()` requires *Decimal*
-        # digits and raises on a Unicode *Digit* such as `'²'`, which would escape
-        # as an uncaught ValueError — a crash standing in for a verdict.
+            return ""
+        return out.strip()
+
+    def _lease_from_ref(self, ref: str, sha: str,
+                        moved: list[str]) -> tuple[bool, str, bool]:
+        """(is a LIVE claim?, basis) for the claim commit `sha`, read BY THAT SHA.
+
+        `moved` is the reads this one survived (`<enumerated> → <fetched>`); it is reported
+        so a reader can tell that the ref was re-enumerated rather than silently bound to
+        the first sha it ever saw.
+        """
+        moved_note = f", re-read after it moved {', '.join(moved)}" if moved else ""
+        # ⛔ BYTE-FAITHFUL, NOT TEXT-FAITHFUL (#13727 review round 8). The boundary between the
+        # object's headers and its body is "the first EMPTY line", and `claims.sh:_lease_of` finds
+        # it on the RAW bytes before deleting `\r`. `_run`'s universal-newline decoding turns a
+        # lone `\r` into `\n`, so a `\r\r` inside a peer-chosen committer/author NAME became a
+        # `\n\n` here — a separator the authority cannot see — and the forged line after it became
+        # "the minted line", freeing a claim `claims.sh` holds. The object is immutable and named
+        # by sha, so reading it through a second, untranslated decoder is not a second observation
+        # of a moving ref (the CAS above is what binds this read to the enumeration).
+        rc, out, _err, _to = _run_untranslated(
+            [self.git_bin, "cat-file", "commit", sha], self.repo, self.timeout,
+        )
+        if rc != 0:
+            return (True, (f"`{ref}` exists but its commit {sha[:9]} could not be read — "
+                           "treated as LIVE, NOT demoted"), True)
+        # ⛔ THE LEASE IS ONE TOKEN OF ONE LINE, AND IT IS SCOPED EXACTLY AS THE OWNER READER
+        # SCOPES IT (`claims.sh:_lease_of`, agent-infra#3203 review rounds 11–12): the BODY's FIRST
+        # non-empty line, and the FIRST faithful token of that line. Two peer-writable escapes are
+        # closed by that scoping, both FAIL-OPEN in the other direction:
+        #   * `cat-file commit` prints the HEADERS too, and `author`/`committer` NAMES are
+        #     peer-writable bytes — a `lease_until=<past>` planted there was read here as "the
+        #     claim's lease" and freed the claim, while `_lease_of` answers absent → `0` →
+        #     unparseable → LIVE;
+        #   * a later line is peer-planted junk and may not contribute at all — honouring one made
+        #     this reader take a value the writer never minted, on exactly the "claim-commit bytes
+        #     are peer-writable" premise `claims.sh` builds two guards on.
+        # ⛔ AND A REPEATED FIELD IS RESOLVED THE SAME WAY `_lease_of` RESOLVES IT — FIRST token
+        # wins. A second, different token on the minted line is NOT given a third state here: the
+        # polarity has ONE owner (`_claim_lease_state`), and a reader that invented "ambiguous"
+        # would disagree with the authority about the same bytes, which is the class of disagreement
+        # agent-infra#3203 exists to end.
+        # ⛔ AND THE TOKENIZER IS ASCII, BECAUSE THE OWNER READER'S IS (#13727 review round 2).
+        # `claims.sh:_lease_of` DELETES `\r` (`:1146`) and splits fields with `tr ' \t'` (`:1161`);
+        # Python's no-argument `splitlines`, `strip()` and `split()` are WIDER — U+00A0 /
+        # U+2000-U+200A / U+202F / U+205F / U+3000 are WHITESPACE to `split()` and not to `tr` — so a
+        # peer-chosen byte handed this reader a field boundary the authority cannot see. Since the
+        # reader takes the FIRST match, that byte CHOSE the value: `nonce=1<NBSP>lease_until=<past>`
+        # read EXPIRED here while `_lease_of` answers `unparseable` → LIVE, i.e. a claim freed while
+        # its own reader still holds it. So: lines split on `\n` only, blank test on `[ \t]`, fields
+        # split on `[ \t]` — byte-for-byte the same separator set.
+        body = out.split("\n\n", 1)[1] if "\n\n" in out else ""
+        # ⛔ AND `\r` IS DELETED FROM THE BODY **AFTER** THE BOUNDARY IS FOUND — the owner's own
+        # order (`claims.sh:_lease_of:1146`: `sed -n '/^$/,$p' | tail -n +2 | tr -d '\r'`). Doing
+        # it before the split would be a different reader: a lone `\r` line would collapse into an
+        # empty one and move the boundary. `tr -d` deletes without substituting a space, so the two
+        # sides of a CR-joined token fuse — `lease_until=<past>\rjunk` becomes one unparseable
+        # value in both readers, which is why the abstention below is no longer the CR defence.
+        body = body.replace("\r", "")
+        lines = body.split("\n")
+        minted_at = next((i for i, line in enumerate(lines) if line.strip(" \t")), None)
+        minted = lines[minted_at] if minted_at is not None else ""
+        # ⛔ AND THE FIRST *FAITHFUL* TOKEN WINS, not merely the first `lease_until=` — `_lease_of`'s
+        # `sed` matches a WHOLE all-digit value and `head -n 1` takes the first such match, so
+        # `lease_until=junk lease_until=<digits>` reads as `<digits>` there. Reading the junk token
+        # instead would abstain where the authority frees (fail-closed, so never a wrong dispatch —
+        # but still a disagreement about the same bytes, and this reader's whole point is to agree).
+        # A junk value that stands ALONE still reaches the unparseable/LIVE arm below, because no
+        # faithful token exists and the junk one is then what "the lease" is.
+        tokens = [token.split("=", 1)[1] for token in minted.replace("\t", " ").split(" ")
+                  if token.startswith("lease_until=")]
+        faithful = [value for value in tokens
+                    if value and all(char in "0123456789" for char in value)]
+        lease = faithful[0] if faithful else (tokens[0] if tokens else "")
+        # ⛔ A LINE AFTER THE MINTED ONE IS AN ABSTENTION, AND THE TEST IS *ANY* LINE — NOT
+        # "does it carry a lease token" (#13727 review round 3, which found the narrower predicate
+        # reading `claim … lease_until=<past>\rjunk` as EXPIRED → FREE while `_lease_of` answers
+        # unparseable → LIVE).
+        # ⛔ AND ITS SCOPE NARROWED WHEN THE READ BECAME BYTE-FAITHFUL (round 8): the CR case is now
+        # handled where the owner handles it — `\r` is deleted from the body BEFORE lines are split
+        # (see the `body.replace` above), so a CR-split is ONE fused token in BOTH readers and lands
+        # on the unparseable arm below instead of here. What is left for this predicate is a
+        # GENUINE second non-blank line — a MULTI-LINE claim body (`lf second`, `\r\nsecond\r\n`):
+        # there `_lease_of` reads the first line and can answer `expired`, while this reader refuses
+        # to pick a line and answers LIVE. (A CRLF-TERMINATED SINGLE line does NOT abstain: its CR
+        # is deleted like any other and the token reads the same in both — measured.) That is an
+        # over-block — the safe direction — and it is
+        # unreachable from the writer (`claims.sh:_claim_commit` mints exactly one line; 0 of 543
+        # local claim commits carry anything after it), so this abstains on nothing a writer
+        # produces and can only ever REFUSE a demotion.
+        if any(line.strip(" \t")
+               for line in lines[(minted_at if minted_at is not None else 0) + 1:]):
+            return (True, (f"`{ref}` (sha {sha[:9]}) carries a line AFTER the minted one — "
+                           "more than one non-blank line, so no lease can be attributed"
+                           f"{moved_note} — treated as LIVE, NOT demoted"), True)
+        # claims.sh:_lease_unparseable — an absent value, the `0` sentinel, **a LEADING ZERO**, any
+        # non-digit (a negative collapses to `0`) and a 19+-digit value (the 18-digit bound exists
+        # so a full-width lease cannot wrap) are all "a claim EXISTS whose lease this reader cannot
+        # parse" — i.e. LIVE, never free.
+        # ⛔ THE LEADING-ZERO ARM IS NOT COSMETIC (#13727 review, measured against `claims.sh:1302`):
+        # `int("0000009999")` is 9999, a 1970 window, so its absence freed a claim whose term this
+        # reader cannot judge — the exact value `claims.sh` was hardened against.
+        # `isascii() and isdigit()`, not `isdigit()`: `int()` requires *Decimal* digits and raises on
+        # a Unicode *Digit* such as `'²'`, which would escape as an uncaught ValueError — a crash
+        # standing in for a verdict.
         if (not lease or not (lease.isascii() and lease.isdigit())
-                or len(lease) > 18 or lease == "0"):
-            self._claim = (True, (f"`{ref}` is held with a lease this reader cannot "
-                                 f"parse (lease_until={lease or 'absent'}) — treated as "
-                                 "LIVE, NOT demoted"), True)
-            return self._claim
+                or lease.startswith("0") or len(lease) > 18):
+            return (True, (f"`{ref}` (sha {sha[:9]}) is held with a lease this reader "
+                           f"cannot parse (lease_until={lease or 'absent'}){moved_note} — "
+                           "treated as LIVE, NOT demoted"), True)
         until = int(lease)
-        if until > int(self.now):
-            self._claim = (True, (f"`{ref}` is a LIVE claim (lease {until - int(self.now)}s "
-                                 "left) — NOT demoted"), False)
-            return self._claim
-        self._claim = (False, (f"the only `{ref}` (sha {sha[:9]}) EXPIRED at {until}, "
-                              f"{(int(self.now) - until) // 3600}h ago"), False)
-        return self._claim
+        # ⛔ THE BOUNDARY IS THE AUTHORITY'S, AND IT IS INCLUSIVE (#13727 review round 5,
+        # measured against `claims.sh:_claim_lease_state`). The owner classifies with
+        # `[ "$2" -le "$1" ]` — `now <= until` is `live` — so `_lease_is_live` answers
+        # DO NOT STEAL at `until == now`, and `_claim_acquire_at`'s reclaim refuses on that
+        # answer. `until > now` therefore FREED a claim its owner still held, for the whole
+        # one-second window `[until, until+1)`; ordinary expiry reaches it, no hostile input
+        # needed. Only `until < now` frees — which is also what the module's own polarity
+        # sentence says, and what this line previously contradicted.
+        if until >= int(self.now):
+            # ⛔ THE SHA IS NAMED IN *BOTH* ARMS. A lease printed without the commit it was
+            # read from cannot be checked against the ref by anyone reading the output —
+            # that is how a lease from a different commit passed as a measurement (#13727).
+            return (True, (f"`{ref}` (sha {sha[:9]}) is a LIVE claim (lease "
+                           f"{until - int(self.now)}s left){moved_note} — NOT demoted"),
+                    False)
+        return (False, (f"the only `{ref}` (sha {sha[:9]}) EXPIRED at {until}, "
+                        f"{(int(self.now) - until) // 3600}h ago{moved_note}"), False)
 
     # ── the four tests ───────────────────────────────────────────────────────
 
