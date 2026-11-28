@@ -999,7 +999,7 @@ render_record() { # <days> <now>
       case "$inc_end" in
         -|'')
           if [ "$inc_ff" = "future" ]; then
-            down_disp="unknown (first_failure_ts is in the FUTURE — not counted in any column)"
+            down_disp="unknown (first_failure_ts is in the FUTURE — not counted in any minutes column, carried in UNBOUNDED_INC)"
           elif [ "$inc_day" = "n/a" ] || [ "$inc_ff" = "-" ]; then
             down_disp="unknown (no parseable first_failure_ts)"
           elif [ "$inc_state" = "closed" ]; then
@@ -1025,7 +1025,7 @@ render_record() { # <days> <now>
               # is skipped by both counting passes. The label therefore only has to be truthful.
               ff_i="$(to_int "$inc_ff" 0)"
               if [ "$inc_ff" = "future" ]; then
-                down_disp="unknown (first_failure_ts is in the FUTURE — not counted in any column)"
+                down_disp="unknown (first_failure_ts is in the FUTURE — not counted in any minutes column, carried in UNBOUNDED_INC)"
               elif [ "$inc_day" = "n/a" ] || [ "$inc_ff" = "-" ]; then
                 down_disp="unknown (no parseable first_failure_ts)"
               elif [ "$inc_end" -ge "$ff_i" ]; then

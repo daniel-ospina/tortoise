@@ -1112,7 +1112,7 @@ export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
        STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
 run_record 3 --print-only
 assert_eq "$RC" "0" "a future-dated stamp does not fail the record"
-assert_contains "$OUT" "down_for=unknown (first_failure_ts is in the FUTURE — not counted in any column)" \
+assert_contains "$OUT" "down_for=unknown (first_failure_ts is in the FUTURE — not counted in any minutes column, carried in UNBOUNDED_INC)" \
   "the future stamp is named as such instead of being rendered as downtime"
 assert_not_contains "$OUT" "min elapsed, NOT counted)" \
   "no elapsed bound is computed from a stamp that is ahead of now"
@@ -1157,7 +1157,7 @@ export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
        STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
 run_record 3 --print-only
 assert_eq "$RC" "0" "a future stamp with a readable end does not fail the record"
-assert_contains "$OUT" "down_for=unknown (first_failure_ts is in the FUTURE — not counted in any column)" \
+assert_contains "$OUT" "down_for=unknown (first_failure_ts is in the FUTURE — not counted in any minutes column, carried in UNBOUNDED_INC)" \
   "the future stamp is named in the readable-end arm too"
 assert_not_contains "$OUT" "down_for=1226 min" \
   "no duration is invented from two future stamps"
@@ -1192,6 +1192,11 @@ assert_contains "$OUT" "which also counts incidents with no USABLE \`first_failu
   "the reconciliation note names the same class"
 assert_eq "$(printf '%s\n' "$OUT" | awk '$1 == "TOTAL" { print $NF }')" "1" \
   "it is disclosed in the TOTAL's unbounded_inc instead of vanishing"
+# ⛔ THE ROW LABEL AND THE COLUMN MUST AGREE (review round 11 P3): `unbounded_inc` IS a
+# column, so "not counted in any column" denied the very count the TOTAL row carries one
+# line above. The label now names the column it is carried in.
+assert_contains "$OUT" "carried in UNBOUNDED_INC" \
+  "the per-incident label names the column that carries it, so the two cannot disagree"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
