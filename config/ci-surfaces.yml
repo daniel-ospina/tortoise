@@ -310,15 +310,15 @@ version: 1
 # gives ZERO entries the other side lacks — `surfaces`, `durations`, `durations_floors`, `tier1`,
 # `slow_files`, `on_demand` and `carve_out` all compare equal (measured at this head, #14587 review
 # cycle 10, P2). So the blanket word is right HERE — and the per-key reading stays the durable form,
-# because it is what settles which of the two a given head is (#14587 review cycle 10, P2). ⛔ NO POOL SIZE AND NO ROW COUNT IS STATED HERE as a claim about
-# nor the selector) and FALSE from the moment a lane that REGISTERS a row carried it: on THAT tree
-# the `core` surface list and the `durations` map each HELD one entry `main` did not, while
-# `durations_floors` and `tier1` compared equal — so the blanket word was the defect, not the
-# per-key reading it replaced. ⛔ ON THIS HEAD the `durations` half is false again and the past tense
-# above is load-bearing: the row that lane registered landed on `main` (`#14723`'s
-# `tests/test_14691_structure_evidence.py`), so it is no longer an entry this branch carries alone.
-# What this branch adds is the `core` REGISTRATION at `:7733`, and a registration is not a
-# `durations` row — which is why the paragraph above calls it one and not the other. ⛔ NO POOL SIZE AND NO ROW COUNT IS STATED HERE as a claim about
+# because it is what settles which of the two a given head is (#14587 review cycle 10, P2).
+# ⛔ ON THIS HEAD the per-key reading is the one that holds, and it is measured: `surfaces` carries
+# exactly ONE entry `origin/main` lacks — this PR's `core` REGISTRATION at `:7733`, which has NO
+# `durations` row (the flat `DEFAULT_FAST_WEIGHT` applies) — while `durations`, `durations_floors`,
+# `tier1`, `slow_files`, `carve_out` and `on_demand` carry none. So "the surface map and the weights
+# are `main`'s" is FALSE here in its first half and TRUE in its second, and a blanket word cannot
+# say either. ⛔ And the row #14723 registered (`tests/test_14691_structure_evidence.py`) is no
+# longer a head-only entry at all: it landed on `main`.
+# ⛔ NO POOL SIZE AND NO ROW COUNT IS STATED HERE as a claim about
 # this head, on purpose: written as figures they owe a re-measurement to whoever next moves one and
 # nothing grades them, which is exactly the rot this block's own doctrine names. ⛔ THE DELTA IS A
 # READING OF THIS HEAD, never a promise about the next fold: `fast_pool()` takes
