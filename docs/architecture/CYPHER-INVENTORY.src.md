@@ -35,8 +35,8 @@ this document classifies **statements**.
 | `fulltext` | 2 |
 | `ddl` | 17 |
 | `unresolved` (statement not statically resolvable) | 105 |
-| non-Cypher door calls (excluded from every shape total) | 268 |
-| **AST door calls** = census + non-Cypher | **1600** |
+| non-Cypher door calls (excluded from every shape total) | 269 |
+| **AST door calls** = census + non-Cypher | **1601** |
 
 > **The finding, with its count: 594 of 1332 product statements (44.6 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
@@ -97,15 +97,15 @@ population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
-1,655 occurrences of the door predicate across 113 files
+1,656 occurrences of the door predicate across 113 files
 2,414 occurrences of the verb predicate across 153 files   (upper-bound shape, see below)
 
-1,655  regex door-pattern occurrences
+1,656  regex door-pattern occurrences
   −55  occurrences on a line carrying NO door call (comments and docstrings)
-= 1,600  occurrences on a line carrying a door CALL          [measured]
+= 1,601  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
-= 1,600  AST door calls
-= 1332  classified Cypher statements + 268 non-Cypher door calls
+= 1,601  AST door calls
+= 1332  classified Cypher statements + 269 non-Cypher door calls
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
@@ -113,9 +113,9 @@ The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 318 files>` → **1,655** across **113** files: exactly the
-tool's number. A bare `rg … tortoise/` gives **1,661 / 114**, the 6 extra occurrences living in
-the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,655 / 113 on
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 318 files>` → **1,656** across **113** files: exactly the
+tool's number. A bare `rg … tortoise/` gives **1,662 / 114**, the 6 extra occurrences living in
+the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,656 / 113 on
 this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
@@ -153,7 +153,7 @@ exclusion dropped they read **2,126** and **2,404**. The 87-occurrence 2,404→2
 `tortoise/claude-hooks/volunteer-turn.sh` 1 — so a bare `rg -o` that reads as one number is THREE, and the population decides which.)
 
 The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−55** and
-the **= 1,600 on a door-call line** are both counts, not differences.⛔ The **residual** row is
+the **= 1,601 on a door-call line** are both counts, not differences.⛔ The **residual** row is
 the only derived one — it is the gap between the regex's own line-based count and the AST's node
 count, printed so a reader can see the arithmetic close, and a NON-zero there is the signal that the
 two measurements have stopped agreeing. It is also the value the first version of this tool silently
@@ -1074,6 +1074,22 @@ one.
 
 **The cut this reconciliation (#14624, `cy-14610`) makes — ONE added non-Cypher door call, TWO pins move, and NO statement moves.** Re-cut by RUNNING the tool on the merged tree with the index RESOLVED (`origin/main` `ff10fb328891` folded in), never by arithmetic on the markers. This branch adds no scanned product module and no Cypher statement, so `sites` **1332**, `files` **103**, `files_scanned` **318**, `unresolved` **105**, `candidates` **594**, `partial` **324** and every shape and shape-role pin hold. `tortoise/record_allocator.py::provision_graph_record`'s derived-floor read (`cur.execute(JOURNAL_COUNT_SQL, (org_id, graph_id))`, #14582's arm) opens ONE non-Cypher door, so `non_cypher_door_calls` 267→**268** and `ast_door_calls` 1599→**1600** (= 1332 + 268) — the `+1` is ATTRIBUTED rather than assumed: `git diff origin/main...HEAD -- 'tortoise/' | grep '^+' | grep -cE '\.(query|ro_query|execute)\('` reads **1**, and the one hit is that call. `--check` printed DRIFT for exactly those two pins before this re-cut. ⛔ **The re-cut moved the ANCHORS and this paragraph but NOT the three other PUBLICATIONS of the same pair, which is the false PASS `differential` caught (#14624): §0's `non-Cypher door calls` table row and `AST door calls` row, §1's decomposition line, and §1's door-predicate deck all still read `267` / `1,599` while the anchors read `268` / `1,600` — `tools/cypher_inventory.py --check` was GREEN over that tree, because it grades the anchor comments and nothing else.** All four are re-cut here to the measured pair (`--json` → `rg_totals`: `lines_door_calls` **1,655** across `files_door_calls` **113**, `door_occurrences_without_a_call` **55**, `door_occurrences_on_call_lines` **1,600**; a bare `rg -o` over `tortoise/` reads **1,661 / 114**, still the same 6-occurrence one-test-module gap), so the reconciliation now closes as `1,655 − 55 = 1,600 = 1332 + 268`. ⚠️ Over the UNRESOLVED index the same tool read `files_scanned` **320** — the conflicted-path double-count this section records — so every figure above was taken only after `git add` resolved the tree, and `git ls-tree -r --name-only HEAD tortoise | grep '\.py$' | grep -v '^tortoise/test_' | wc -l` and `git ls-files` both read **318** against the tool's own 318.
 
+**The cut this conflict resolution makes — ONE added non-Cypher door call, TWO pins move, and NO
+statement moves.** `tortoise/record_writer.py::_bound_provision_statements` scopes the creation hook's
+statement half over the transaction (`cursor.execute("SELECT set_config('statement_timeout', %s, true)",
+…)`), which the census folds to `non_cypher_door_calls` — a SQL call, not a Cypher statement — so
+`non_cypher_door_calls` 268→**269** and `ast_door_calls` 1600→**1601** (= 1332 + 269). `sites` **1332**,
+`files` **103**, `files_scanned` **318**, `unresolved` **105**, `candidates` **594**, `partial` **324** and
+every shape and shape-role pin hold: no statement was added, removed, re-classified or re-shaped, so
+§0's migration metric does not move. ⛔ ALL FOUR publications of the pair are re-cut together, which is
+the `#14624` paragraph's lesson rather than a preference: §0's two table rows, §1's decomposition
+(`1,656 occurrences` / `− 55` / `= 1,601` / `1332 + 269`), §1's door-predicate deck, and the anchors
+below. §1's rubric moves by exactly the one occurrence: `lines_door_calls` **1,656** across
+`files_door_calls` **113** with `door_occurrences_without_a_call` **55**, so the reconciliation closes as
+`1,656 − 55 = 1,601 = 1332 + 269`; a bare `rg -o` over `tortoise/` reads **1,662 / 114**, the same
+6-occurrence one-test-module gap. Measured with the tool's own `--json` on the merged tree with the
+index RESOLVED (`--check` now prints `25 pinned counts match`), never by arithmetic on the markers.
+
 <!-- cypher-inventory:sites = 1332 -->
 <!-- cypher-inventory:files = 103 -->
 <!-- cypher-inventory:files_scanned = 318 -->
@@ -1096,8 +1112,8 @@ one.
 <!-- cypher-inventory:shape_traversal_read = 3 -->
 <!-- cypher-inventory:shape_fulltext_read = 2 -->
 <!-- cypher-inventory:shape_unresolved_unresolved = 105 -->
-<!-- cypher-inventory:non_cypher_door_calls = 268 -->
-<!-- cypher-inventory:ast_door_calls = 1600 -->
+<!-- cypher-inventory:non_cypher_door_calls = 269 -->
+<!-- cypher-inventory:ast_door_calls = 1601 -->
 <!-- cypher-inventory:partial = 324 -->
 
 ---
