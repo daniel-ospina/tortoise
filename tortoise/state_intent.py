@@ -1171,9 +1171,10 @@ question was recognised. The `state_question` report rides the HOSTED
 the same payload rides the private
 `TortoiseSDK._tortoise_fts_query(..., _state_question_out=...)` sink. The report's
 keys, exactly: `{routed, population, cue}` on every payload \u2014 `cue` is the
-ending word that was SEEN (on a declined question it may be one that only
-MODIFIES a noun), so it is NOT proof that the route fired \u2014 plus `{shape}` on a
-routed read (the shape that fired), or `{reason, hint}` on a declined one
+wording that was SEEN and selected the population: the matched question on a
+routed read, the ending word on a declined one (where it may be one that only
+MODIFIES a noun), so its presence is NOT proof that the route fired \u2014 plus
+`{shape}` on a routed read (the shape that fired), or `{reason, hint}` on a declined one
 (`reason` is a closed token: `shape` when no shape applied, `family` when a shape
 fired but the requested entity_type has no arm for that population; `hint` is the
 remedy). Branch on `routed`, never on the presence of `shape`. So the line is:
@@ -1225,8 +1226,11 @@ MISSED_ROUTE_COMMITMENTS_HINT = (
     "(ONTOLOGY \u00a75) and this read's entity_type has no arm for them, so the "
     "RELEVANCE read answered instead \u2014 a point-scoped commitment question already "
     "returns the live claims, so this may be the answer you wanted. For the "
-    "commitment population itself, re-read with entity_type='object'; every row "
-    "then carries the kind and the stage it stands on."
+    "commitment population itself, re-read with entity_type='object' through the "
+    "`tortoise_search_knowledge` tool or the SDK's `tortoise_fts_query`; the "
+    "hosted `GET /v1/search` route takes no entity_type, so asking again there "
+    "returns this same notice. Every row then carries the kind and the stage it "
+    "stands on."
 )
 
 #: The reasons a strong cue can be seen without the population being served.

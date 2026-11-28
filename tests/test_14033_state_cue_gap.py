@@ -1463,19 +1463,28 @@ def test_the_served_report_contract_names_exactly_the_payloads_keys():
         "payload carries but the note omits is a field nobody can find")
 
 
-def test_the_served_note_describes_cue_as_the_word_SEEN_not_the_predicate():
-    """`cue` is the ending word that was seen \u2014 the note must not say otherwise.
+def test_the_served_note_describes_cue_on_both_arms():
+    """`cue` is the wording that was seen \u2014 and its value differs per arm.
 
     #14780 review, finding 2(b): the note said "the cue is the question's own
     PREDICATE, never an ending word that happens to sit near a wh-word", and the
     SAME change ships `state_cue()`, whose whole job is to fire on exactly such an
     ending word and whose result becomes the payload's `cue`. Pinned on the row the
     note itself files under DOES NOT ROUTE, so the two readings cannot drift apart.
+
+    #14780 review, cycle 2 finding 1: that fix over-corrected \u2014 it said `cue` is
+    "the ending word that was SEEN" for EVERY payload, while a ROUTED read
+    publishes the whole matched question (`detect_state_question` returns
+    `m.group(0)`). A caller encoding `cue in ENDING_WORDS` from that served
+    sentence reads False on every routed read. BOTH arms are measured below
+    against the payload builders the read itself uses, so the note can only
+    describe what they actually emit.
     """
     from tortoise.state_intent import (
         ROUTING_NOTE,
         detect_state_question,
         missed_route_payload,
+        routed_payload,
         state_cue,
     )
 
@@ -1490,10 +1499,23 @@ def test_the_served_note_describes_cue_as_the_word_SEEN_not_the_predicate():
         "the payload's `cue` is the ending word that was seen, so the note's "
         "description of the field has to be that \u2014 not the predicate")
 
+    # The ROUTED arm, measured against the builder the read itself uses: `cue`
+    # there is the whole matched question, NOT a single ending word.
+    routed_question = "what ended"
+    routed = routed_payload(detect_state_question(routed_question))
+    assert routed["cue"] == routed_question, (
+        "a routed read publishes the matched question as `cue`, so a note that "
+        "calls it an ending word is false on the arm that matters most")
+
     served = " ".join(ROUTING_NOTE.split())
-    assert "`cue` is the ending word that was SEEN" in served, (
-        "the served note does not say what `cue` carries: it is the ending word "
-        "seen (attributive on a declined question), never proof the route fired")
+    assert "`cue` is the wording that was SEEN and selected the population" in served, (
+        "the served note does not say what `cue` carries")
+    assert "the matched question on a routed read" in served, (
+        "the note omits the routed arm's value of `cue`")
+    assert "the ending word on a declined one" in served, (
+        "the note omits the declined arm's value of `cue`")
+    assert "NOT proof that the route fired" in served, (
+        "the note must keep saying a `cue` is not proof the route fired")
     assert "the cue is the question's own PREDICATE" not in served, (
         "the note again claims `cue` is the PREDICATE, which the shipped payload "
         "contradicts on `which archived report has the Q3 numbers` (cue=archived, "
