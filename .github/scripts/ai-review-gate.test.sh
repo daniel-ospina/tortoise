@@ -66,6 +66,17 @@
 #       dropped only when the entry carries a hunk, kept verbatim otherwise —
 #       hunk-header rewrite with the absent-count default of 1, mode-width
 #       boundary, and final-newline preservation)
+#   (s) the #1224 evidence channels: the PR body AND its issue comments, with the
+#       comment read's failure and provenance kept distinguishable from "no marker"
+#   (t) acceptance rule (c) (#4255) — the PATCH projection survives a base advance:
+#       pinned projection vectors (reviewed/live/edited/whitespace/renamed/deleted),
+#       the anti-vacuity pairs, and (t1)-(t26) the end-to-end cases: the carry, the
+#       three fail-closed arms, the probe cost bounds, the ANCHOR, the ANCESTRY and
+#       authored-commit preconditions and their mutations, one HMAC verifier, the
+#       relocation refusal, and every refusal's operator-facing diagnostic
+#   (u) rule (c) END TO END ON REAL GIT BYTES: a real repo, a real base advance, a
+#       real merge-forward — the reviewed record carries, one authored byte does not,
+#       and a whitespace-only edit does not
 #   (r) synthetic merge-queue batch (#5426): a `mergify[bot]`-authored PR on
 #       `mergify/merge-queue/<sha>` passes even with no evidence (it is not a
 #       review target and not a merge condition), while a NON-mergify author
@@ -417,14 +428,27 @@ cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 [ -n "${STUB_LOG:-}" ] && printf '%s\n' "$*" >> "$STUB_LOG"
 # ── rule (c) (#4255): the reviewed side, reconstructed by the gate ────────
-# The ANCESTRY read comes FIRST. `compare/<marker sha>...<head>` is asked with
-# `--jq .status` and answers whether the head DESCENDS from the reviewed commit
-# (`ahead`) or the branch was rewritten (`diverged`/`behind`). It must be routed
-# before the diff arm below: that arm matches ANY `/compare/` and would serve a
-# diff body where the gate expects one word, which would read as "not ahead" and
-# silently turn every rule-(c) case into a refusal.
-if grep -qE -- "/compare/" <<<"$*" && grep -qF -- "--jq .status" <<<"$*"; then
-    printf '%s\n' "${STUB_ANCESTOR_STATUS:-ahead}"
+# TWO compare shapes, routed apart by the media type and the ref pair:
+#   * `compare/<base>...<sha>` WITH the diff media type -> the reviewed DIFF bytes.
+#   * `compare/<p_sha>...<head>` and `compare/<base>...<head>` WITHOUT it -> the
+#     commit graph AS THE GATE'S OWN `--jq` WOULD RENDER IT (status, counts, a
+#     "sha:parent-count" list). The stub reproduces the jq EXPRESSION'S RESULT, not
+#     jq itself — so if the gate changes that expression, the shape assertion in the
+#     case that reads it reddens rather than the stub silently agreeing.
+#
+# The JSON arms come FIRST: a `compare/` request that reached the diff arm would be
+# served diff bytes where the gate expects JSON (an unparseable answer => a
+# fail-closed refusal), and every rule-(c) case would silently collapse to "red".
+if grep -qE -- "/compare/" <<<"$*" && ! grep -qF -- "application/vnd.github.v3.diff" <<<"$*"; then
+    if [ "${STUB_COMPARE_JSON_FAIL:-0}" = "1" ]; then exit 1; fi
+    if grep -qE -- "compare/${STUB_BASE_SHA:-}\.\.\." <<<"$*"; then
+        # The branch-side graph, post-`--jq`: <total_commits>\t<sha:parents ...>
+        printf '%s\t%s\n' "${STUB_BRANCH_TOTAL:-0}" "${STUB_BRANCH_SHAS:-}"
+        exit 0
+    fi
+    # The reviewed→head graph, post-`--jq`: status, total, count, "sha:parents" list.
+    printf '%s\t%s\t%s\t%s\n' "${STUB_ANCESTOR_STATUS:-ahead}" "${STUB_ANCESTOR_TOTAL:-0}" \
+        "${STUB_ANCESTOR_SEEN:-0}" "${STUB_ANCESTOR_COMMITS:-}"
     exit 0
 fi
 # Routed BEFORE the media-type arm: a `compare/<base>...<sha>` diff request
@@ -1366,7 +1390,7 @@ fi
 # ── (t7) MUTATION: remove the patch comparison and (t1) must FAIL ────────
 # Proves (t1) is the rule's doing, not an accident of the fixtures.
 MUT_PP="$T/mutant-no-patch-carry.sh"
-sed 's/^  \[ "$p_patch" = "$live_patch_hash" \] || return 1$/  return 1/' "$RUN_BLOCK" > "$MUT_PP"
+sed 's/^  if \[ "$p_patch" != "$live_patch_hash" \]; then$/  if true; then/' "$RUN_BLOCK" > "$MUT_PP"
 if cmp -s "$RUN_BLOCK" "$MUT_PP"; then
     bad "(t7) the mutation did not apply — the anchored comparison line changed shape, so this control proves NOTHING"
 else
@@ -1822,7 +1846,7 @@ assert_rc 0 "(t22) the SAME bytes on an ADVANCED branch still carry — so the r
 # (c) MUTATION: delete the ancestry precondition and (t22) must PASS. This is what
 # makes the guard load-bearing rather than decoration.
 MUT_ANC="$T/mutant-no-ancestry.sh"
-sed 's/^  if \[ "\$p_rel" != "ahead" \]; then$/  if false; then/' "$RUN_BLOCK" > "$MUT_ANC"
+sed 's/^  if \[ "\$p_rel" != "ahead" \]; then patch_rewritten=1; return 1; fi$/  :/' "$RUN_BLOCK" > "$MUT_ANC"
 if cmp -s "$RUN_BLOCK" "$MUT_ANC"; then
     bad "(t22) the ancestry mutation did not apply — the guard line changed shape, so this control proves NOTHING"
 else
@@ -1835,6 +1859,108 @@ else
     else
         bad "(t22) the MUTANT still refused (rc=$GATE_RC) — (t22) does not depend on the ancestry precondition"
     fi
+fi
+
+
+# ── (t23) A NEW AUTHORED COMMIT IS NOT A CARRY EITHER (review cycle 2, P1) ──
+# ⛔ THE HOLE (t22) DID NOT CLOSE. Reachability alone is satisfied by ANY commit on
+# top of the reviewed sha — `git commit` needs no force-push. Measured by the cycle-2
+# review: reviewed `if not ok: return` then `+audit()`, live `+audit()` then
+# `if not ok: return` — the same `+`/`-` lines relocated ACROSS an existing guard
+# (so `audit()` now runs when it must not), same hunk frame `@@ def f(ok):`, PATCH
+# identical, BINDING different (so rules (a)/(b) cannot carry it) — and the gate at
+# 85bde797 returned `rc=0 :: passed via PATCH match`. The branch had merely ADVANCED,
+# so the reachability precondition was satisfied and rule (c) carried a change the
+# reviewer never approved.
+#
+# The guard is now the shape of what was added: everything the branch gained after the
+# reviewed sha must be a MERGE commit. A base advance does exactly that; an authored
+# change does not. `NEWC` is a head-side commit the branch added after the review.
+NEWC="$(printf 'd%.0s' $(seq 1 12))"
+RELOCATED_MARKER="$(diff_marker "$STALE" "$SAME_SCOPE_ANCHOR")"   # anchor reproduces; patch would match
+printf '%s\n' "$RELOCATED_MARKER" > "$T/body-t23"
+# (a) A PLAIN COMMIT that relocates the reviewed lines: REFUSED.
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" \
+    STUB_ANCESTOR_STATUS=ahead STUB_ANCESTOR_TOTAL=1 STUB_ANCESTOR_SEEN=1 \
+    STUB_ANCESTOR_COMMITS="${NEWC}:1" STUB_BRANCH_SHAS="$NEWC" \
+    run_gate "$T/body-t23"
+assert_rc 1 "(t23) a NON-MERGE commit pushed after the review does NOT carry a review, even with the patch projection identical"
+assert_not_contains "(t23) …and no patch match is claimed" "passed via PATCH match"
+assert_contains "(t23) …and the operator is told the branch gained an authored commit" "NON-MERGE commit"
+# (b) THE SAME COMMIT AS A MERGE (2 parents) — this is the legal base-advance shape,
+# so the refusal above is the commit's SHAPE and not a rule that refuses everything.
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" \
+    STUB_ANCESTOR_STATUS=ahead STUB_ANCESTOR_TOTAL=1 STUB_ANCESTOR_SEEN=1 \
+    STUB_ANCESTOR_COMMITS="${NEWC}:2" STUB_BRANCH_SHAS="$NEWC" \
+    run_gate "$T/body-t23"
+assert_rc 0 "(t23) the SAME commit as a MERGE carries — so (a) refuses the authored-commit shape, not the carry itself"
+# (c) A COMMIT THE BASE BROUGHT IN (not in the branch-side list) is not the author's:
+# merging the base forward adds single-parent commits of main's, and those must NOT
+# refuse the carry, or `gh pr update-branch` would never carry anything.
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" \
+    STUB_ANCESTOR_STATUS=ahead STUB_ANCESTOR_TOTAL=1 STUB_ANCESTOR_SEEN=1 \
+    STUB_ANCESTOR_COMMITS="${NEWC}:1" STUB_BRANCH_SHAS="eeeeeeeeeeee" \
+    run_gate "$T/body-t23"
+assert_rc 0 "(t23) a single-parent commit that came from the BASE does not refuse the carry (the merge-forward shape still works)"
+# (d) TRUNCATION IS UNVERIFIABLE, NOT A PASS: a page that claims more commits than it
+# returned could hide the authored one.
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" \
+    STUB_ANCESTOR_STATUS=ahead STUB_ANCESTOR_TOTAL=9 STUB_ANCESTOR_SEEN=1 \
+    STUB_ANCESTOR_COMMITS="${NEWC}:2" STUB_BRANCH_SHAS="$NEWC" \
+    run_gate "$T/body-t23"
+assert_rc 1 "(t23) a TRUNCATED commit list refuses (unverifiable is never a pass)"
+assert_contains "(t23) …and says the graph could not be READ, not that the branch was rewritten" "could not READ this PR's commit graph"
+
+# ── (t24) AN UNREADABLE ANCESTRY ANSWER IS NOT A REWRITE (review cycle 2, P2) ──
+# A 502 on the compare call used to fall into the same branch as `diverged` and print
+# "the branch was REWRITTEN (force-push / rebase / amend)" — a false statement about
+# the operator's own PR whose advice is a 20–40 minute re-review for an API blip. The
+# refusal stays (fail-closed); the DIAGNOSIS now distinguishes the two.
+printf '%s\n' "$RELOCATED_MARKER" > "$T/body-t24"
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" STUB_COMPARE_JSON_FAIL=1 \
+    run_gate "$T/body-t24"
+assert_rc 1 "(t24) an UNREADABLE ancestry answer still refuses (fail-closed)"
+assert_contains "(t24) …and tells the operator the read FAILED and to re-run" "re-run this job before re-recording"
+assert_not_contains "(t24) …and does NOT claim the branch was rewritten" "REWRITTEN (force-push"
+
+# ── (t25) THE PATCH-MISMATCH REFUSAL IS AUDIBLE (review cycle 2, P2) ──────────
+# The docs tell an operator that a base advance rewriting the hunk's enclosing-scope
+# heading is a DECLARED over-block they can recognise in the log. Before this row the
+# gate printed NOTHING for it — the log was byte-identical to a genuine missing review,
+# so the documented over-block sent the operator hunting a "bug in this gate".
+printf '%s\n' "$(diff_marker "$STALE" "$PB_REVIEWED")" > "$T/body-t25"
+STUB_DIFF_FILE="$RELOC_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t25"
+assert_rc 1 "(t25) an authored change (or a heading rewrite) still refuses"
+assert_contains "(t25) …and the log SAYS the anchor held but the projection differs, naming the declared over-block" "the ANCHOR held"
+
+
+# ── (t26) REPEATED RECORDS COST ONE PROBE — AND WHAT IS NOT ATTRIBUTABLE ─────
+# The workflow header used to name four cases as pinning the two availability bounds;
+# the cycle-2 review measured that deleting the SIGNATURE-FIRST check reddens (t9)x2,
+# (t10)x2 and (t21) — not (t6)/(t8)/(t22) — and that deleting the in-loop (sha,diff)
+# `case` reddens NOTHING. This row pins the property that is reachable end to end:
+# repeating one record costs ONE probe. ⛔ Which of the two dedups delivers it is NOT
+# attributable from here, and that is stated rather than implied: `all_markers` is
+# de-duplicated UPSTREAM on the whole line (`awk '!seen[$0]++'`) and filtered to the
+# accepted marker shapes, so the in-loop `case` is unreachable defence in depth — a
+# mutation of it alone leaves this green (measured 2026-11-28). It is kept as a belt,
+# not counted as a pinned bound.
+DUPBODY="$T/body-t26"
+{ diff_marker "$STALE" "$PB_REVIEWED"; diff_marker "$STALE" "$PB_REVIEWED"; diff_marker "$STALE" "$PB_REVIEWED"; } > "$DUPBODY"
+STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$DUPBODY"
+assert_rc 0 "(t26) the same signed record repeated three times still carries"
+_t26="$(grep -cE -- "compare/${BASE_SHA}\\.\\.\\." "$T/gh.log" || true)"
+if [ "$_t26" -eq 1 ]; then
+    ok "(t26) three copies of ONE record bought exactly 1 reviewed-diff compare"
+else
+    bad "(t26) three copies of one record bought $_t26 reviewed-diff compares — the dedup is gone"
 fi
 
 

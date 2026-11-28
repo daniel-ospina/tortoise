@@ -105,19 +105,32 @@ entry condition closes that path.
   fresh 20–40 minute review for a diff nobody changed.
 
   **The patch arm requires the base to have ADVANCED, not the branch to have been
-  rewritten.** Before comparing patches the gate asks
-  `compare/<the marker's signed @ sha>...<this PR's head>` and requires `ahead` —
-  i.e. the reviewed commit is still reachable from the head. A base advance by
-  **merge** (`gh pr update-branch`, or merging `origin/main` into the branch)
-  keeps it reachable, so a genuine carry works. A **force-push, rebase or amend**
-  rewrites it out of the history and the gate answers `diverged`: the carry is
-  refused and the log says the branch was *rewritten*, not that the diff changed.
-  ⛔ This precondition is not decoration. Without it, a force-push that kept the
-  reviewed `+`/`-` lines and moved them **within one scope** carried the verdict —
-  measured end to end, `passed via PATCH match`, with the anchor reproducing
-  perfectly and **no base advance at all**. The anchor proves where the *reviewed*
-  bytes came from; it says nothing about the live branch, so it cannot bound this.
-  Reachability can, and does (harness case `(t22)`, mutation-controlled).
+  **The patch arm requires a BASE ADVANCE — it does not carry across a rewrite and it
+  does not carry across new authored commits.** Three checks, all fail-closed:
+
+  1. **Reachability.** `compare/<the marker's signed @ sha>...<this PR's head>` must
+     answer `ahead` (and not a truncated page): the reviewed commit is still reachable
+     from the head. A base advance by **merge** (`gh pr update-branch`, or merging
+     `origin/main` into the branch) keeps it reachable. A **force-push / rebase /
+     amend** rewrites it out of the history and the gate answers `diverged`: the carry
+     is refused and the log says the branch was *rewritten*.
+  2. **What was added.** Every commit the branch gained after the reviewed sha — i.e.
+     every head-side commit the **base does not already contain** — must be a **merge
+     commit**. A `git commit` after the review is not a base advance, however
+     reachable it is.
+  3. **If the graph cannot be read** (API failure, or a page that lists fewer commits
+     than it claims), the arm refuses and the log says the read FAILED and to re-run —
+     it does not guess.
+
+  ⛔ Checks 1 and 2 are not decoration, and check 1 alone was not enough. Measured on
+  this rule, end to end, each `passed via PATCH match` with the anchor reproducing
+  perfectly: a **force-push** that kept the reviewed `+`/`-` lines and moved them
+  within one scope (**no base advance at all**); and an **ordinary commit** on top of
+  the reviewed sha that relocated the same lines ACROSS an existing guard — so the
+  statement now runs where it used to be unreachable, with rules (a)/(b) correctly
+  refusing and rule (c) carrying. The anchor proves where the *reviewed* bytes came
+  from; it says nothing about the live branch, so it cannot bound either. Harness
+  `(t22)` (rewrite) and `(t23)` (authored commit) pin them, both mutation-controlled.
 
   ⛔ **The patch arm cannot mint evidence.** It is consulted only after the
   marker's own signed `diff=` has been REPRODUCED by the gate: it fetches
@@ -130,10 +143,12 @@ entry condition closes that path.
   blind" but it is not zero, and it is declared rather than hidden:
 
   - **A relocation WITHIN one scope** (or within a heading-less file) still
-    projects identically. Combined with the ancestry precondition this now needs
-    the reviewed history to survive, so it is reachable only through a
-    merge-resolution that moves the author's own lines inside one scope. Not
-    pinned by any case.
+    projects identically, so it is caught only by the shape checks above — i.e. it
+    needs the branch to have gained a non-merge commit, or its history to have been
+    rewritten. Both are refused, so the residual is: a **merge** whose conflict
+    resolution relocates the author's own lines inside one scope. Pinned as a
+    same-scope projection identity by `(t22)`/`(t23)`; the merge-resolution sub-case
+    itself is not constructed.
   - **A base advance that rewrites the hunk's enclosing-scope heading** — git
     derives the heading from the line preceding the hunk, so inserting a column-0
     line above the change (any markdown/text file, or a new `def` above the
@@ -355,7 +370,7 @@ is unambiguous:
 | `was found for <other>, not for <repo>` | marker is STALE **and** bound to a different repo | re-record for this repo |
 | `normalises to an empty value` | the configured secret is whitespace-only, so the HMAC key would be the empty (public) string | set a real `AI_REVIEW_GATE_KEY` |
 | `HMAC mismatch` | key or signed text differs; prints `sha256` prefixes of the text it checked | compare the prefix with the recording machine, then re-record |
-| `is stale` | marker is for another head sha, and its `diff=` is absent, could not be hashed live, matches neither the normalized nor the raw digest, AND its patch projection does not match this PR's (or its anchor could not be reproduced, or the reviewed commit is not reachable from the head) — check the run log for `passed via PATCH match`: if that line is present the gate DID carry, and the red you are reading is from a different job | re-run the review, re-record at the new head. ⛔ Before treating it as a bug in the gate, read the run log for two `::warning::` lines that name a **declared** refusal: *"is NOT an ancestor of this PR's head"* means the branch was force-pushed/rebas **rather than advanced onto a new base** — nothing was re-checked because a carry would approve a history this branch no longer has, so a fresh review IS owed; and *"the patch projection is UNCHANGED"*-style refusal after a base advance that rewrote the hunk's enclosing scope heading (a column-0 line inserted above the change) is a known **over-block**, not a broken rule. If neither warning is present, and the PR was refreshed onto a moved base by a **merge** with nothing you authored changed, then the patch arm should have carried it: treat a red here as a bug in this gate, not a missing review |
+| `is stale` | marker is for another head sha, and its `diff=` is absent, could not be hashed live, matches neither the normalized nor the raw digest, AND its patch projection does not match this PR's — or one of rule (c)'s preconditions refused. Check the run log for `passed via PATCH match`: if that line is present the gate DID carry, and the red you are reading is from a different job | re-run the review and re-record at the new head. ⛔ Before treating a red here as a gate bug, read the log for one of the FOUR `::warning::` lines rule (c) emits, each naming a *declared*, deliberate refusal: **`is NOT an ancestor of this PR's head`** — the branch was force-pushed/rebased/amended rather than advanced, so a carry would approve a history this branch no longer has; **`gained a NON-MERGE commit after the reviewed sha`** — the PR's own content changed after the review, which is not a base advance; **`could not READ this PR's commit graph`** — a FAIL-CLOSED refusal, not evidence the review is stale: **re-run the job first**, the carry may still apply; **`the ANCHOR held`** — the reviewed bytes were reproduced but the authored change still differs, which is either new content (a fresh review IS owed) or the declared OVER-BLOCK where a base advance rewrote the hunk's enclosing-scope heading. If NONE of the four is present, and the PR was refreshed onto a moved base by a **merge** with nothing you authored changed, the patch arm should have carried it: that is a bug in this gate, not a missing review |
 | `NO marker in this PR's body[ or its admitted comments] is bound to <head>` | the stale verdict, stated as what it examined: `or its admitted comments` appears only when the comment channel was actually read. It prints `candidate marker(s): N` (with their shas), the channel the last candidate came from, the head it expected, and the provenance of BOTH sources (`body=<rest-live\|event-snapshot>`, `comments=<read\|NOT-READ>`) | if `body=event-snapshot` the run judged a body frozen at the event, so re-run the check before acting — a record posted afterwards is invisible to it; if `comments=NOT-READ` the comment side was never examined; otherwise re-record at the head |
 | `the LIVE body could not be used (…)` | the run fell back to the event payload: the REST read failed, or it succeeded and returned an empty body | re-run the check before acting on the verdict; the evidence may still be valid |
 | `live diff hash could not be computed` | the REST diff fetch failed; a `diff=` marker fails closed rather than carrying forward | re-run the job once the API is reachable — the evidence may still be valid |
