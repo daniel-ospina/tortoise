@@ -806,19 +806,24 @@ _CENSUS_MODULES = (
     # (MEASURED over a mutant restoring that arm: zero hits). The row is
     # therefore a second line of defence, not the pin on this defect: the
     # structural pin below is what trips a reversion.
-    # ⛔ The membership arm is deliberately NOT added here. MEASURED at this head:
-    # teaching the detector `ast.In` produces ~10 pre-existing hits across
-    # `sdk.py` and `derived_invalidation.py`, and several are currency answers that
-    # read the word axis ALONE (`derived_invalidation.py:952`/`:999`,
-    # `sdk.py:27843`, `sdk.py:37177`, `sdk.py:37179`) — the SAME class #13450 fixed,
-    # whose widening is the ingest/direct-edge decision this PR states as a
-    # residual rather than a tidy-up. Landing the detector without that decision
-    # would either red four modules this PR does not own or exempt them by
-    # `(module, word)`, which is fail-open for any NEW bad membership there. The
-    # population is measured and filed instead; the ep.py reversion is caught
-    # STRUCTURALLY by `tests/test_13450_...::test_ep_imports_the_shared_answer...`
-    # (a real `ast.Call` to `ending_axes`, no `Name`/`Attribute` of the vocabulary),
-    # which is comment-immune — that is the arm the reversion trips.
+    # ⛔ The membership arm (`ast.In` / `ast.NotIn`) IS now taught, and it was
+    # measured before it shipped rather than assumed (#14796). The reason it was
+    # withheld until now is recorded here because it was TRUE of the detector as
+    # it stood: the arm keys on the operand's NAME, and every currency membership
+    # the fleet actually writes is spelled `x in TERMINAL_EXCLUDED_STATUSES` —
+    # whose COMPARATOR is an `ast.Name`, which `_name()` resolves to `""` unless
+    # the name is the bare local `status`. So the arm adds ZERO hits at this head
+    # across ALL of `tortoise/` (measured, both `ast.In` and `ast.NotIn`, over the
+    # whole tree): it catches a membership against a LITERAL vocabulary tuple
+    # (`status in ('retracted', 'superseded')`), which is how a future re-spelling
+    # would most naturally be written.
+    # ⛔ What it still does NOT catch, stated so the guard is not read as wider
+    # than it is: `status in TERMINAL_EXCLUDED_STATUSES`, `status.lower() in …`,
+    # and an `ast.Subscript` operand (`props["status"] == "retracted"`) are all
+    # invisible. The SPELLING census is therefore the second line of defence; the
+    # structural pin is the KEYWORD census below
+    # (`TestEveryCurrencyCallHandsItBothAxes`), which fails closed on the shared
+    # predicate itself and cannot be satisfied by a comment.
     "tortoise/ep.py",
 )
 
@@ -902,6 +907,18 @@ def _currency_comparisons(path: str) -> list[str]:
             for op, comp in zip(node.ops, node.comparators,
                                  strict=True):
                 right = _name(comp)
+                # #14796: membership too — a currency test written as
+                # `status in ('retracted', 'superseded')` answers the same
+                # question as `status == 'retracted'` and was invisible before.
+                if isinstance(op, (ast.In, ast.NotIn)):
+                    if "status" not in (left + right):
+                        continue
+                    word = (left if _PY_COMPARISON.match(left or "") else
+                            right if _PY_COMPARISON.match(right or "") else "")
+                    if word:
+                        found.append(f"{path}:{node.lineno}: "
+                                     f"{left} in {word!r}")
+                    continue
                 if not isinstance(op, (ast.Eq, ast.NotEq)):
                     continue
                 if "status" not in (left + right):
@@ -974,3 +991,198 @@ class TestNoReaderRespellsThePredicate:
             src = Path(module).read_text(encoding="utf-8")
             assert symbol in src, f"{module} no longer uses {symbol}"
             assert live.__name__ and symbol in dir(live)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 6. #14796 — the STRUCTURAL census: every call hands the predicate its axes
+# ══════════════════════════════════════════════════════════════════════════
+
+#: The predicate under census. BOTH spellings, because a module is free to alias
+#: the import (`from tortoise.live import is_terminal_status as _is_terminal_status`,
+#: which `mcp_server` does) and an alias is still a call to this rule.
+_PREDICATE_NAMES = frozenset({"is_terminal_status", "_is_terminal_status"})
+
+#: The two keyword-only inputs that carry the POSITION axis. ONE of them is
+#: enough: `is_closed` alone answers "the durable marker is set", and
+#: `stage_slot` alone answers "a terminal stage", and a caller that has only one
+#: of them must still hand over what it has.
+_AXIS_KEYWORDS = frozenset({"is_closed", "stage_slot"})
+
+#: ⛔ THE DECLARED EXCEPTIONS — one entry per CALLABLE, never per module, so a
+#: NEW call in an exempted module still reds. The key is
+#: ``(module, enclosing qualname)``; the value is the reason, and the reason is
+#: asserted non-empty (an empty reason is how an exemption list becomes a
+#: fail-open list).
+#:
+#: ⛔ Adding an entry is a DECISION, not a tidy-up: it says "this call cannot
+#: answer the position axis", and the argument has to be about the ROW it is
+#: given, not about the module it lives in or the amount of work it would take.
+_TERMINAL_CALL_EXCEPTIONS: dict[tuple[str, str], str] = {
+    ("tortoise/hosted_api.py", "_execute_commit_writes"): (
+        "The row is a 3-tuple from `live.classify_lifecycle_fanout` over "
+        "`live.LIFECYCLE_FANOUT_QUERY`, whose arity is shared IN LOCKSTEP with "
+        "`sdk._assert_lifecycle_guard`'s statement — the pre-check and the write "
+        "guard must ask the same question about the same row, so widening it "
+        "changes both statements, the classifier's public tuple and its five "
+        "consumers. That is the WRITE GUARD's own residual, recorded as #13450's "
+        "separate decision. See the site comment in hosted_api.py."),
+    ("tortoise/planned_occurrence.py", "_resolve_plan"): (
+        "The POSITION axis is answered by each CALLER, before any write: both "
+        "writers ask `plan_position(...)[\"ended\"]` — the ONE answer to 'still "
+        "open, ended, or unresolvable' — as their first act after this resolver "
+        "returns, and produce the '(closed marker set)' refusal this gate does "
+        "not. Re-deriving the resolved stage's slot here was tried and MEASURED "
+        "wrong (it reordered two pinned refusals and minted a second spelling of "
+        "a rule `plan_position` owns). A new caller must repeat that gate."),
+    ("tortoise/sdk.py", "_is_terminal_point_word"): (
+        "Not a currency call: its input is a status WORD from a row the caller "
+        "already holds, and what it feeds is the word reported in a refusal "
+        "message. It has no position axis to pass and none could be given to it; "
+        "renamed from `_is_terminal_point_status` so the census (and a reader) "
+        "can tell it apart from the reader rule."),
+}
+
+
+def _terminal_call_sites(path: str) -> list[tuple[str, int, frozenset[str]]]:
+    """Every CALL to the currency predicate in ``path`` — code, never prose.
+
+    Returns ``(enclosing qualname, lineno, keyword names)`` per call. ``live.py``
+    is scanned too, and its own calls are grandfathered BY NAME in the test —
+    the module that DECLARES the rule is not a consumer that has to import it.
+    """
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    out: list[tuple[str, int, frozenset[str]]] = []
+    stack: list[str] = []
+
+    def _visit(node: ast.AST) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            stack.append(node.name)
+            for child in ast.iter_child_nodes(node):
+                _visit(child)
+            stack.pop()
+            return
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = (fn.id if isinstance(fn, ast.Name)
+                    else fn.attr if isinstance(fn, ast.Attribute) else None)
+            if name in _PREDICATE_NAMES:
+                out.append((".".join(stack), node.lineno,
+                            frozenset(k.arg for k in node.keywords
+                                      if k.arg is not None)))
+        for child in ast.iter_child_nodes(node):
+            _visit(child)
+
+    _visit(tree)
+    return out
+
+
+def _axis_less_calls(paths) -> tuple[list[str], list[str], int]:
+    """``(offenders, exempted, total)`` over the given modules."""
+    offenders: list[str] = []
+    exempted: list[str] = []
+    total = 0
+    for path in paths:
+        rel = str(path)
+        for qualname, lineno, kwargs in _terminal_call_sites(rel):
+            total += 1
+            if kwargs & _AXIS_KEYWORDS:
+                continue
+            if (rel, qualname) in _TERMINAL_CALL_EXCEPTIONS:
+                exempted.append(f"{rel}:{lineno} ({qualname})")
+                continue
+            offenders.append(f"{rel}:{lineno} ({qualname or '<module>'}) "
+                             f"passes only {sorted(kwargs)}")
+    return offenders, exempted, total
+
+
+def _census_modules() -> list[Path]:
+    """Every ``tortoise/**/*.py`` except the module that DECLARES the predicate."""
+    return sorted(p for p in Path("tortoise").rglob("*.py")
+                  if p.name != "live.py" and "__pycache__" not in p.parts)
+
+
+class TestEveryCurrencyCallHandsItBothAxes:
+    """#14796 — the KEYWORD census. Structure, so a comment cannot satisfy it.
+
+    The spelling census above can only see a comparison written out by hand. The
+    defect this class exists for is the opposite shape: a module that DOES import
+    the shared predicate and then hands it two of its four inputs. That is
+    invisible to any regex over the source and visible to the AST in one pass —
+    so this test walks every call in the package and asks the one question that
+    decides it: did the caller pass `is_closed=` or `stage_slot=`?
+
+    ⛔ IT FAILS CLOSED. There is no module-level exemption and no "the module is
+    mostly converted" allowance: an unlisted axis-less call reds, and adding an
+    entry to `_TERMINAL_CALL_EXCEPTIONS` is a decision that has to be argued
+    about the ROW that call is given (see the reasons there). A key is a
+    ``(module, enclosing qualname)`` pair, so a NEW call inside an exempted
+    callable still reds, and a new callable in an exempted module certainly does.
+    """
+
+    def test_no_call_site_omits_the_position_axis(self):
+        offenders, exempted, total = _axis_less_calls(_census_modules())
+        assert not offenders, (
+            "these calls hand `is_terminal_status` the lifecycle word only, so a "
+            "record ended on the POSITION axis (`isClosed`, or a stage in the "
+            "resolved `terminal` slot) is classified as STILL CURRENT there. Pass "
+            "the axis from the row in hand (design §6 requires one question, two "
+            "sources), or register the call in `_TERMINAL_CALL_EXCEPTIONS` with "
+            "the reason the ROW cannot carry it:\n" + "\n".join(offenders))
+        # ⛔ NON-VACUITY: a census that scanned nothing would also report no
+        # offenders, which is the fail-open shape this class exists to prevent.
+        # The floor is the measured population at #14796's head (25 calls across
+        # 15 modules, 21 of them carrying the axis), stated as a FLOOR rather
+        # than an equality so a conversion that REMOVES a call (by deleting the
+        # read) is still allowed while a scan that silently stopped seeing the
+        # tree reds.
+        assert total >= 20, (
+            f"the keyword census found only {total} calls to the shared "
+            f"predicate across {len(_census_modules())} modules — it is no "
+            "longer looking at the tree it is meant to guard")
+        assert len(exempted) == 4, (
+            "the declared-exception population moved; the register and the tree "
+            f"must be re-measured together (exempted: {exempted})")
+
+    def test_the_exception_register_cannot_be_satisfied_by_a_module(self):
+        """A key is a CALLABLE, and it carries a reason — asserted, not assumed.
+
+        This is the anti-fail-open half of the register: a ``("tortoise/x.py",
+        "")`` entry would exempt a whole module, and an empty reason would make
+        the exemption undocumented. Both are refused here rather than described
+        in a comment.
+        """
+        for (module, qualname), reason in _TERMINAL_CALL_EXCEPTIONS.items():
+            assert module.startswith("tortoise/") and module.endswith(".py"), (
+                f"exception key is not a module path: {module!r}")
+            assert qualname, (
+                f"{module} carries a MODULE-LEVEL exemption — the census must "
+                "name the callable that cannot answer the axis")
+            assert len(reason.split()) >= 15, (
+                f"the exception for {module}::{qualname} is not a reason; a "
+                "bare token here is how an exemption list becomes fail-open")
+
+    def test_the_census_sees_an_axis_less_call(self, tmp_path):
+        """Non-vacuity pin, on a scratch module — the detector's own truth table.
+
+        Without this, a refactor that stopped resolving `ast.Call` nodes (or
+        started filtering on the wrong keyword set) would leave the test above
+        green over a tree of axis-less calls.
+        """
+        scratch = tmp_path / "scratch_axisless.py"
+        scratch.write_text(
+            "from tortoise.live import is_terminal_status\n"
+            "\n"
+            "def decide(row):\n"
+            "    return is_terminal_status(row[4], bool(row[5]))\n"
+            "\n"
+            "def decide_with_axis(row):\n"
+            "    return is_terminal_status(row[4], bool(row[5]),\n"
+            "                              is_closed=row[6])\n",
+            encoding="utf-8",
+        )
+        offenders, exempted, total = _axis_less_calls([scratch])
+        assert total == 2, (offenders, exempted, total)
+        assert len(offenders) == 1, offenders
+        assert "decide" in offenders[0] and "decide_with_axis" not in offenders[0], (
+            offenders)
