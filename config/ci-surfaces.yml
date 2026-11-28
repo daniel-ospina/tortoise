@@ -84,9 +84,9 @@ version: 1
 # (1680 / 828.6 = 2.0275) on every one of the eleven shards, so the two agree by construction
 # rather than by a hand re-read. ⛔ THE FIGURES ABOVE ARE A RE-MEASUREMENT ON THIS REBASED TREE with
 # `--emit-push-matrix`, and neither parent's spelling describes it: #14723 measured seven-and-four,
-# #14790 measured three-and-eight with only its own row on top of `main`, and this branch's
-# pre-rebase cut measured three-and-eight as well — on a DIFFERENT tree, which is why the shared pair
-# of figures is not the shared claim. A row landing moves the bins, so two parents' re-derivations
+# #14790 measured five-and-six (`git show 671bf806d2af0:config/ci-surfaces.yml`), and this branch's
+# pre-rebase cut measured three-and-eight — so the two sides do NOT share a figure, which is exactly
+# why neither spelling can be carried into a third tree. A row landing moves the bins, so two parents' re-derivations
 # must never be spliced into one sentence — that splice is what this re-derivation replaces.
 # ⛔ #14723 RE-DERIVED THIS SENTENCE ON `main` ITSELF, and the attribution is corrected here rather
 # than carried (#14587 review cycle 10, P2, MEASURED): `tests/test_14691_structure_evidence.py` is

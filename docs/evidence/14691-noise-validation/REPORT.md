@@ -17,7 +17,8 @@ in §7, never worked around.
 ## 1. The answer in one sentence
 
 **No — this is not yet a logical model of that business: the types are used and mostly correct, but
-two entities carry names the corpus never says, three relations are invented, and every fact is stored
+three of the seven orphans carry names below the naming band and three relations are unsupported (two
+of them landing on one invented entity, `the wholesale push`), and every fact is stored
 as a new sentence each time it is heard: on a second reading of the same six documents the Point layer
 grows **+81 %** (134 → 243) while the entity layers move far less — **Subject +0**, Object +4, Event +14
 — so the growth is almost entirely the claim layer, not the model.**
@@ -26,7 +27,7 @@ grows **+81 %** (134 → 243) while the entity layers move far less — **Subjec
 
 | # | test | verdict | the numbers |
 |---|---|---|---|
-| **T1** | duplicate multiplication | **FAIL** | pass 1 → `Point 134 · Event 12 · Subject 10 · Object 25 · Source 6`; pass 2 → `Point 243 · Event 26 · Subject 10 · Object 29 · Source 12`. **+109 Points (+81 %), +14 Events, +4 Objects, +6 Sources, +19 operators, +90 structure rows.** `Subject +0`, `0` same-name entity duplicates. **40 of the 61 Points created on pass 2 (66 %) re-state a pass-1 Point at ≥ 0.80 content-token overlap (31 of them at 1.00) — and all 40 were written anyway: 28 carry `dedup: "new"` (not recognised at all), and 12 took the `content_hash_hit` path, i.e. recognised as a duplicate and created regardless. Every one of the 12 content-hash hits is a restatement.** Relations did **not** grow: 26 written on pass 1, 21 on pass 2 (−5). |
+| **T1** | duplicate multiplication | **FAIL** | pass 1 → `Point 134 · Event 12 · Subject 10 · Object 25 · Source 6`; pass 2 → `Point 243 · Event 26 · Subject 10 · Object 29 · Source 12`. **+109 Points (+81 %), +14 Events, +4 Objects, +6 Sources, +19 operators, +90 structure rows.** `Subject +0`, `0` same-name entity duplicates. **40 of the 61 Points the write receipt reports for pass 2 (66 %)** re-state a pass-1 Point at ≥ 0.80 content-token overlap (31 of them at 1.00) — and all 40 were written anyway: 28 carry `dedup: "new"` (not recognised at all), and 12 took the `content_hash_hit` path, i.e. recognised as a duplicate and created regardless. Every one of the 12 content-hash hits is a restatement.** Relations did **not** grow: 26 written on pass 1, 21 on pass 2 (−5). |
 | **T2** | same fact, two wordings | **FAIL** | the goal fact ("40 restaurant accounts by December … 18 today, 22 to go") is stated in **doc-03** and restated in **doc-06**. Ingesting doc-06 added **+15 Points, +1 Object, +1 Event, +1 Source** and produced **2 distinct goal Points with no shared id** (`shared: []`) — so the *exactly ONE shared point* leg fails, and the entity delta is non-zero too. The retrieval probe's **top hit is `doc-03-replay`** — the pass-2 duplicate outranks the original. ⛔ The rule's *"carrying two sources"* leg is **not graded**: the `sources` door answers per-Source POINT COUNTS, not point→Source links, so the question cannot be put to the committed readback at all (gap **D7**). |
 | **T3** | orphan share | **FAIL** | of the **30 entities the doors can enumerate**, **7 (23.3 %)** have **no entity→entity edge** in either write receipt — so the *share* leg passes (23 % is far from "the majority is orphaned" — graded strictly: at exactly 50 % neither side is a majority, so the clause fails there). **The second conjunct fails**: `RULE_T3` also requires every orphan's name to be stated in the corpus, graded as verbatim or **≥ 0.80** of the name's own content-token overlap (the band `RULE_T1` uses), and **3 of the 7 fall below that** — `the ownership map` (`core:standard`, best 0.500 vs doc-04), `the cold-chain rules as operational preferences` (`core:strategy`, best 0.600) and `chilled-goods operation` (`core:workflow`, best 0.667). Every orphan is named in §5 with its traceability, and §5 states this predicate's two limits. The **door** says **0 of 30 are isolated** — because it counts a Point mention as a neighbour (§7 D4). |
 | **T4** | type collapse | **PASS** | flat distribution `Point 243 · Event 26 · Subject 10 · Object 29 · Source 12`; **13 distinct entity kinds used**: `core:naturalPerson` 3, `core:role` 3, `core:organization` 4, `core:workflow` 3, `core:strategy` 3, `core:agreement` 2, `core:standard` 2, `core:goal` 1, `core:decision` **1**, `core:Project` 1, `agent-ops:rule` 3, `venture:actionItem` 3, `product-strategy:customerSegment` 1. A decision is represented by a **decision-kind entity** (`the delivery partner decision`, `core:decision`), the **3 `core:role` entities are Subject-layer** (Sales Lead, Finance Director, Operations Lead), and documents land as **Sources** (6 per pass). ⛔ Disclosed, not graded: the decision **SENTENCES** are Points and land as `statement` kind — 2 decisions are stated and `decision_point_kinds` is `["statement"]`, with the 80 event-kind Points unrelated to them. The typed representation exists; the decision's own sentence is still a statement. |
@@ -99,14 +100,16 @@ Population: the 30 entities the typed full scan resolves (**20 of 29 Objects, 10
 | `the own refrigerated van option` | `core:strategy` | paraphrase of doc-01 Option C | a rejected option — standalone by nature |
 | `the 4 degrees Celsius cold-chain constraint` | `agent-ops:rule` | paraphrase of doc-02 | a rule with no declared part-of edge to a parent policy |
 | `restaurant account` | `product-strategy:customerSegment` | **verbatim** (doc-03/04/05/06) | the segment counted by the goal; it has no containment edge because nothing in the corpus contains it |
-| `the cold-chain rules as operational preferences` | `core:strategy` | **below the naming band** (best 0.50, doc-02/03) | invented label |
+| `the cold-chain rules as operational preferences` | `core:strategy` | **below the naming band** (best 0.60, doc-02/03) | invented label |
 | `chilled-goods operation` | `core:workflow` | **below the naming band** (best 0.667, doc-02/05) | the words *"chilled goods"* are in doc-02, but not as this name |
 
 **4 of 7 are verbatim or well above the naming band; 3 fall below it. T3 is FAIL** — the *share*
 criterion passes (23 % is far from "the majority is orphaned"), but `RULE_T3`'s **second conjunct
 does not**: every orphan's name must be stated in the corpus at ≥ 0.80 of its own content-token
-overlap (the same band T1 uses), and all three of these are below. The mechanism is the same naming defect T5's paraphrase tier measures (10
-of 47 edges have an endpoint the corpus does not name) one layer out.
+overlap (the same band T1 uses), and all three of these are below. The mechanism is the same naming
+defect T5 measures one layer out, and the two counts answer different questions: **3 of 47 relations**
+have an endpoint the corpus never names (T5's `none` tier — a further **10** are the extractor's own
+re-wordings and are `paraphrase`, i.e. SUPPORTED), and **3 of 7 orphans** have a name below this band.
 
 ⛔ **Two limits of this predicate, stated rather than left to be assumed away.** (a) It is a **NAME**
 test, at **T1's restatement band (0.80)**, not T5's narrower naming band (0.60). At 0.60 `chilled-goods
@@ -168,6 +171,16 @@ and the second source attached to a *second* thing rather than to the first.
   is not caught by this bundle, and that is a hole in the acceptance bar rather than a property of
   the extractor. Closing it needs a predicate-level check (the corpus's own verb, normalised to the
   ontology's predicate) which the doors do not offer today.
+* **D8 — three Point totals for one window do not reconcile.** Pass 2 moved `taxonomy.Point` by
+  **+109**, the graph's `pointkinds` by **+50 `statement` +40 `event`**, while the write receipt
+  reported **61** points. Every point the receipt reports is `statement` kind (`tests.T1.
+  point_totals_do_not_reconcile`), so the event-kind Points the graph mints internally never appear in
+  a receipt — and the receipt's 61 is therefore the restatement population `RULE_T1` grades, not the
+  graph's Point count. Recorded, not reconciled: reconciling them is a product question. It is also
+  why `RULE_T1` does not claim to count an event-kind Point re-minted for an already-stated sentence —
+  that population is not visible in this artifact — and why §4's "every event-kind Point minted on
+  pass 1 is minted again on pass 2, exactly" is **an inference from a count doubling (40 → 80), not a
+  per-point match**; D2 says events are not enumerable through the doors, so a match cannot be checked.
 * **D7 — a Point's SOURCES cannot be counted.** T2's rule asks whether the goal fact resolves to one
   point *carrying two sources*. The `sources` door answers per-Source **point counts**
   (`{"url": "session:doc-03", "points": 8}`), never point→Source links, so "how many sources does

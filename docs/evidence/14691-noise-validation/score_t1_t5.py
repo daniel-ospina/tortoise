@@ -37,8 +37,12 @@ RULE_T1 = ("PASS iff the second ingestion adds no RE-STATED knowledge: 0 new "
            "re-states an existing Point (>= 0.8 content-token overlap with a "
            "pass-1 Point). Events are reported SEPARATELY and are not counted as "
            "noise on the object axis: a re-ingestion IS an occurrence, so one "
-           "Event per capture is expected — but an event-kind POINT re-minted for "
-           "a sentence that was already stated is noise, and is counted.")
+           "Event per capture is expected. ⛔ The restatement population is the Points "
+           "the WRITE RECEIPT reports, and every one of them is `statement` kind — so "
+           "an event-kind Point re-minted for an already-stated sentence CANNOT be "
+           "counted from this artifact, and this rule does not claim to count it. The "
+           "graph's own `pointkinds` count (40 -> 80 event-kind Points) is reported "
+           "beside the verdict; the unreconciled Point totals are gap D8.")
 RULE_T2 = ("PASS iff the restatement (doc-06) adds 0 new ENTITIES and every "
            "doc-06 statement of the goal resolves to an EXISTING doc-03 point id — a "
            "complete merge, one thing carrying two sources, not a second copy (this "
@@ -48,7 +52,9 @@ RULE_T2 = ("PASS iff the restatement (doc-06) adds 0 new ENTITIES and every "
            "here is Object + Subject, NOT Event: doc-06's first ingest is one capture, "
            "and RULE_T1 states that one Event per capture is expected rather than "
            "noise, so counting it here would fail T2 on an axis this bundle declares "
-           "clean. Overlap is content-token overlap (lowercased alphanumeric tokens "
+           "clean. The goal fact's candidate Points are those scoring >= 0.45 content-token "
+           "overlap with either wording (both directions), and its ids are collected per "
+           "document. Overlap is content-token overlap (lowercased alphanumeric tokens "
            "of >2 characters, common English function words removed). ⛔ The rule's "
            "\"carrying two sources\" leg is NOT graded: the sources door answers "
            "per-Source POINT COUNTS, not point-to-Source links, so \"does this point "
@@ -359,6 +365,31 @@ def t1(receipt: dict) -> dict:
             "dedup_verdicts": dedup_hist,
             "merges": merges,
             "deletions": deletions,
+        },
+        # ── D8: three Point totals that do not reconcile ─────────────────────────
+        # `taxonomy.Point` (+109 on pass 2), `pointkinds` (+50 statement, +40 event) and the
+        # write receipt's own per-document points (+61) are three different numbers for the
+        # same window, and nothing in the tree explained the difference. The receipt reports
+        # only `statement`-kind units, the graph's `pointkinds` also counts event-kind Points
+        # it mints internally, and `taxonomy.Point` counts both plus whatever else lands.
+        # Recorded as a measured gap: it is why RULE_T1's restatement population is the
+        # receipt's points rather than the graph's Point count, and it is the gate's limit
+        # rather than a rounding artefact.
+        "point_totals_do_not_reconcile": {
+            "graded": False,
+            "why": ("D8 — three Point totals for one window: taxonomy.Point delta, "
+                    "pointkinds delta, and the write receipt's reported points. The "
+                    "receipt reports only statement-kind units; the graph mints "
+                    "event-kind Points internally. Recorded, not reconciled — a "
+                    "reconciled total is a product question, not a bundle one."),
+            "pass_2": {
+                "taxonomy_point_delta": d_pass_2.get("taxonomy.Point", 0),
+                "pointkinds_delta": {(k.split(".")[-1]): v
+                                     for k, v in d_pass_2.items()
+                                     if k.startswith("points_by_kind.")},
+                "receipt_reported_points": new_points_p2,
+                "receipt_point_kinds": sorted({pt.get("kind") for pt in points(receipt, 2)}),
+            },
         },
         "same_name_entities_after_both_passes": dup_names,
         "verdict": verdict,

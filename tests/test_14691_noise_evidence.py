@@ -826,3 +826,27 @@ def test_the_conjuncts_that_never_decide_on_this_run_are_still_pinned():
     assert named_twice["verdict"] == "FAIL", (
         "T1 PASSes a graph that counts the same name twice — its `not dup_names` "
         "conjunct is dropped")
+def test_both_no_data_arms_refuse_an_empty_population():
+    """An empty population must report NO-DATA, never a free PASS.
+
+    `NO-DATA` is the fail-open direction of both arms — turning either into PASS makes
+    an empty run read as a clean one — and neither was driven, so both mutations survived
+    a whole review round.
+    """
+    import unittest.mock as mock
+
+    module = _score_module()
+    corpus = _corpus()
+
+    empty_readback = {"entities": [], "neighbours": {}}
+    with mock.patch.object(module, "load", return_value=empty_readback):
+        row = module.t3({"passes": []}, corpus)
+    assert row["population"]["entities_enumerated_by_full_scan"] == 0
+    assert row["verdict"] == "NO-DATA", "T3 reports PASS on an EMPTY population"
+    assert row["orphan_legs"]["majority_are_not_orphans"] is False, \
+        "an empty population satisfies neither side of a majority, so the leg is False"
+
+    with mock.patch.object(module, "relation_rows", return_value=[]):
+        row = module.t5({}, corpus)
+    assert row["sampled"] == 0
+    assert row["verdict"] == "NO-DATA", "T5 reports PASS with NO relations sampled"
