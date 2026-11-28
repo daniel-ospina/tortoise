@@ -90,6 +90,25 @@ def _build_guarded_falkordb(_OriginalFalkorDB):
         """
 
         def __init__(self, *args, **kwargs):
+            # #3055: hold a terminating signal for the CONSTRUCTION window.
+            # `super().__init__()` is where redislite starts (or replays) the
+            # server, and the client can only be registered for the #2203
+            # teardown AFTER it returns — so a SIGTERM/SIGHUP arriving inside
+            # this window found an empty registry, tore nothing down, and left
+            # a daemonized `redis-server` behind (measured: 6/6 runs, and the
+            # orphan carried no owner record, so the reaper could never reap
+            # it either). Deferring the signal to the end of the window makes
+            # the ordinary last-client close do the work at a quiescent
+            # moment, which is the only thing that CAN work here: from a
+            # handler the process cannot tell its own in-flight connection
+            # from a co-tenant's. See `defer_terminating_signals`.
+            from tortoise.embedded_lifecycle import defer_terminating_signals
+
+            with defer_terminating_signals():
+                self._t_construct(*args, **kwargs)
+
+        def _t_construct(self, *args, **kwargs):
+            """The construction body, inside the #3055 signal-deferral window."""
             if args and args[0] is not None and isinstance(args[0], str):
                 path = args[0]
                 if path == ":memory:":

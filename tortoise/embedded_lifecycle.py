@@ -1638,32 +1638,371 @@ def _release_owner(client, inner, sock: str | None = None) -> None:
         pass
 
 
-def _embedded_term_handler(signum, _frame) -> None:
-    """Terminating-signal handler (issue #2203).
+# ── #3055: the construction window defers a terminating signal ────────────
+#
+# The #2203 guard above closes every live embedded client when a terminating
+# signal lands. It is only correct when the process is QUIESCENT at signal
+# time: `close_embedded_clients` reaches redislite's `_cleanup`, which takes
+# the server down only when `_connection_count() <= 1` — and during an
+# embedded CONSTRUCTION the process holds an in-flight server command, so the
+# count is 2, `_cleanup` disconnects the pool only, and the daemonized
+# `redis-server` (ppid=1, own session) is ORPHANED.
+#
+# `tortoise.FalkorDB.__init__` registers the client for teardown AFTER
+# `super().__init__()` returns (redislite can only hand back a socket once the
+# server is up), so a signal inside that window finds an EMPTY registry and
+# there is nothing to close at all. MEASURED on this tree (2026-11-28): a
+# SIGTERM delivered between redislite publishing `<db>.settings` and
+# construction returning orphaned the server in 6 of 6 runs (`rc=-15`, redis
+# pid alive after the parent was gone), and the server carried NO owner record
+# (the #4487 patch writes one only after `RedisMixin.__init__` returns), so the
+# reaper's fail-closed rule — no record ⇒ unknown ⇒ never reaped — left it for
+# good.
+#
+# The fix is not "shut down harder". From a signal handler the process cannot
+# tell its OWN in-flight connection from a CO-TENANT's, and embedded servers
+# are shared across processes, so a forceful SHUTDOWN could kill a server
+# another live process is using (the design decision recorded on #3055,
+# comment #issuecomment-7236177327: option 1, "defer terminating signals
+# across the construction window"; option 2, fd-held ownership in the reaper,
+# is already landed as #3599/#4487/#4577). Deferring is
+# safe precisely because construction is BOUNDED, and it needs no mask: the
+# signal is recorded here and re-delivered through the ordinary #2203 teardown
+# once the window closes, at which point the process IS quiescent and the
+# last-client close does the drain redislite already knows how to do.
+#
+# Why a HANDLER-level deferral rather than `signal.pthread_sigmask`:
+# a mask is PER-THREAD. `mcp_server` / `selfhost` / `hosted_api` are threaded,
+# and a thread that already exists when the window opens keeps its unblocked
+# mask, so it would still receive the signal and run the handler mid-window
+# (reproduced by the #3055 solution-verify round). CPython runs Python signal
+# handlers on the MAIN thread only, from a flag the C handler sets, so
+# recording the request in the handler is thread-agnostic by construction:
+# whichever thread the kernel picks, the request is parked and the window's
+# exit honours it. No mask means nothing to restore either — there is no
+# disposition left changed if the window is exited by an exception.
+#
+# Bounds and residuals, stated rather than implied:
+#   * The window is the construction only — never a long-running or blocking
+#     operation — so a stop is deferred by a server start (seconds), not
+#     indefinitely.
+#   * `_DEFER_DEADLINE_S` bounds a construction that is SLOW rather than
+#     hung, and it bounds BOTH ends of it (review F2): a signal arriving after
+#     the deadline is honoured immediately instead of parked, and a signal
+#     parked BEFORE it is honoured by a watchdog thread once the deadline
+#     passes — so a construction that never returns cannot hold a stop
+#     forever. (Bounding only the arrival decision was the first cut's defect:
+#     `_defer_started_at` had no second reader, so a parked request waited on
+#     the window's `finally`, which a blocked construction never reaches.)
+#     A construction blocked inside C still runs no Python handler at all —
+#     pre-existing behaviour, not something the deferral changes.
+#   * The bound is PROCESS-WIDE, not per window (declared, review round 3):
+#     `_defer_started_at` is stamped by the first window and cleared only when
+#     the LAST window closes, so overlapping constructions share one 30 s
+#     epoch. A chain of overlapping windows therefore cannot defer a stop
+#     forever — which is the intent — at the cost that a later overlapping
+#     window opens with a partly spent bound and can be torn down mid-
+#     construction. Bounded, logged, and preferable to an unbounded deferral.
+#   * The design this implements is the recorded decision on #3055 (comment
+#     #issuecomment-7236177327: option 1, "defer terminating signals across the
+#     construction window", with option 2 — fd-held ownership in the reaper —
+#     already landed as #3599/#4487/#4577). The longer scoping document lives
+#     on the unmerged branch `docs/scoping-3055` (commit 667761108); it is
+#     cited by branch and commit rather than by path because a path that is
+#     not in the tree is a 404 for the next reader.
+#   * A construction that ABORTS (raises) still leaves the window through the
+#     context manager's `finally`, and a deferred request is still honoured
+#     there: the termination request wins over the exception, which is what a
+#     SIGTERM means.
+#   * Constructions that bypass `tortoise.FalkorDB` (raw `redislite` clients)
+#     are NOT deferred, but they do get an owner record from the #4487 patch,
+#     so an orphan they leave is one the reaper can confirm and reap — the
+#     fail-closed path, not the permanent leak.
+_DEFER_DEADLINE_S = 30.0
+#: How often the watchdog re-reads the parked state. A tick, not a timer: the
+#: bound only has to be true, not precise, and a poll costs one wake-up per
+#: tick instead of a thread per construction.
+_DEFER_WATCHDOG_TICK_S = 0.5
 
-    Restore the default disposition FIRST (a second signal during teardown
-    means "hurry up and die" — instant default death), then close every
-    live embedded client (see close_embedded_clients — inline, never
-    raises), then re-raise the original signal so the process dies with the
-    conventional signal semantics (WIFSIGNALED; shell status 128+signum)
-    no matter what the preempted code was doing. The re-raised signal is
-    blocked while the handler runs (Python installs handlers without
-    SA_NODEFER), so the default-action death lands the moment this handler
-    returns.
+#: ⛔ THE HANDLER NEVER TAKES THIS LOCK (fresh-context review F1). Python runs
+#: signal handlers on the MAIN thread, at a bytecode boundary — including
+#: while that same thread is part-way through a critical section of this lock.
+#: `threading.Lock` is not reentrant, so a handler that took it would block on
+#: a lock its own thread holds and nothing could release it: no death, no
+#: teardown, no close, and the supervisor's SIGKILL then leaves exactly the
+#: unrecorded orphan this seam exists to prevent. (`RLock` is not the fix
+#: either — its ownership bookkeeping is not signal-safe.) The lock is
+#: therefore WINDOW-SIDE ONLY, guarding the depth counter against two
+#: construction threads; the handler reads plain ints and does one
+#: first-writer-wins store, all of which are single bytecodes under the GIL.
+_defer_lock = threading.Lock()
+_defer_depth = 0
+_defer_started_at: float | None = None
+_deferred_signum: int | None = None
+#: True from the moment the teardown starts. A signal that re-enters the
+#: handler while this is set is the "hurry up and die" case AND the guard
+#: against a recursion: on a non-main thread `signal.signal` raises, so the
+#: re-raised signal would land in this handler again instead of the default
+#: disposition.
+_teardown_in_progress = False
+#: The one watchdog thread that bounds how long a PARKED request may wait (F2).
+#: Nothing bounds it otherwise: `_DEFER_DEADLINE_S` is read by the handler to
+#: decide whether to park a NEW signal, and the parked one is otherwise
+#: honoured only by the window's `finally` — which a construction that never
+#: returns never reaches. The watchdog exists to be the second reader.
+_defer_watchdog: threading.Thread | None = None
+
+
+def _defer_terminating_signal(signum) -> bool:
+    """Park a terminating signal while a construction window is open (#3055).
+
+    Returns True when the signal was parked (the handler must return without
+    tearing anything down) and False when it must be honoured immediately —
+    no window open, or the window has already outrun `_DEFER_DEADLINE_S`.
+
+    ⛔ LOCK-FREE BY CONSTRUCTION (review F1): this is called ONLY from the
+    signal handler, on the main thread, at an arbitrary bytecode boundary of
+    that same thread. Taking `_defer_lock` here would deadlock whenever the
+    signal interrupted the window's own critical section — and it would break
+    the recorded wiring row "a second terminating signal inside the window is
+    parked like the first" into a hang on the path an operator reaches
+    precisely BECAUSE the first stop looked ineffective. Every read below is a
+    plain int/float load and the single write is idempotent (first request
+    wins), so no lock is needed for correctness.
     """
-    try:  # noqa: SIM105
+    global _deferred_signum
+    if _defer_depth <= 0:
+        return False
+    started = _defer_started_at
+    if started is not None and (time.monotonic() - started) > _DEFER_DEADLINE_S:
+        return False
+    if _deferred_signum is None:
+        # First request wins: a second terminating signal inside the same
+        # window is the same request ("stop"), and re-raising the FIRST one
+        # keeps the exit convention the caller observed.
+        _deferred_signum = int(signum)
+        # ⛔ RE-READ THE DEPTH — the store above is not atomic WITH the window's
+        # close (review round 3, F1). A WORKER thread can own the window
+        # (`mcp_server`/`selfhost`/`hosted_api`), and the GIL can switch
+        # between the depth check at the top of this function and this store:
+        # the close then harvests `_deferred_signum is None`, clears the
+        # stamps and returns normally, and no `finally` will ever come back
+        # for the request this caller just parked — the stop is dropped and
+        # the caller never dies (a Python handler cannot interleave with its
+        # OWN thread's `finally`, which is why only the multi-threaded case
+        # reaches this). The store is first-writer-wins, so the re-read is the
+        # proof that THIS caller owns the parked request; if no window is open
+        # any more, the stop is ours to honour now rather than park.
+        if _defer_depth <= 0:
+            return False
+    return True
+
+
+def _defer_watchdog_loop() -> None:
+    """Honour a PARKED request once the window has overrun its bound (#3055 F2).
+
+    The parked state is otherwise bounded by nothing: the window's `finally`
+    is the only reader, and a construction that blocks (a peer's `flock`, a
+    stale `<db>.settings`, an NFS `dir` — all reachable from
+    `RedisMixin.__init__`) never reaches it. Without this loop the stop is
+    simply dropped and the supervisor's SIGKILL produces the unrecorded
+    orphan the deferral exists to prevent.
+
+    Started OUTSIDE any signal context (never from the handler), so creating
+    the thread cannot itself re-enter the machinery it is bounding. It exits
+    on its own once the window is closed and no request is parked — i.e. as
+    soon as the state it bounds cannot exist — so it is one sleeping daemon
+    thread for the duration of a construction and nothing at rest.
+    """
+    global _defer_watchdog, _deferred_signum
+    while True:
+        time.sleep(_DEFER_WATCHDOG_TICK_S)
+        with _defer_lock:
+            depth = _defer_depth
+            started = _defer_started_at
+            parked = _deferred_signum
+            if depth <= 0 and parked is None:
+                _defer_watchdog = None
+                return
+            if parked is not None and (
+                    started is None
+                    or (time.monotonic() - started) > _DEFER_DEADLINE_S):
+                # `started is None` with a parked request is the stranded-park
+                # state (F1): the window that should carry it closed before the
+                # handler finished storing it. Honouring it here is the belt to
+                # the handler's re-read braces — whichever thread gets there
+                # first, the stop is honoured exactly once (`_teardown_and_die`
+                # is re-entrancy-safe).
+                _deferred_signum = None
+                overran = True
+            else:
+                overran = False
+        if overran:
+            logger.warning(
+                "#3055: embedded construction overran the %.0fs deferral bound "
+                "(or closed under a parked request) — honouring the terminating "
+                "signal (%d) now instead of holding the stop indefinitely. "
+                "NOTE: the in-flight construction guarantees redislite's "
+                "last-client close DECLINES here, so the server may survive as "
+                "an orphan — reaped when it carries an owner record, and "
+                "fail-closed (never reaped) if it never got one. Bounding the "
+                "STOP is the contract on this path; closing the server is not "
+                "available from a non-main thread mid-construction.",
+                _DEFER_DEADLINE_S, parked)
+            # EXIT CONVENTION ON THIS PATH, stated rather than accidental: the
+            # callback is not the main thread, so `signal.signal` is refused and
+            # the default disposition CANNOT be restored — re-raising would land
+            # in this module's own handler instead of killing the process. So
+            # `_teardown_and_die` takes its documented `os._exit(128+signum)`
+            # arm: status 143 for SIGTERM, not WIFSIGNALED. The supervisor sees
+            # the same "stopped" either way; what it must never see is a live
+            # process still serving. (The warning above states the server's own
+            # survival honestly — review round 3, F4.)
+            _teardown_and_die(parked)
+
+
+def _arm_defer_watchdog() -> None:
+    """Start the watchdog unless it is already running (never holds the lock).
+
+    NEVER RAISES (review round 3, F2): this runs on the construction path, so
+    `threading.Thread.start()`'s `RuntimeError` (pthread_create failing on
+    thread/FD exhaustion) must not fail an embedded construction. Losing the
+    watchdog degrades to "a parked request waits for the window's `finally`" —
+    the pre-round-2 behaviour — while the ARRIVAL-time deadline still declines
+    to park anything past the bound, so the degradation is bounded and logged
+    rather than silent.
+    """
+    global _defer_watchdog
+    thread = _defer_watchdog
+    if thread is not None and thread.is_alive():
+        return
+    # Two constructions can reach here at once; both may spawn a thread, and
+    # the loser simply exits on its first tick (depth/parked are re-read under
+    # the lock). One spare sleeping thread for one tick is cheaper than
+    # holding `_defer_lock` across `Thread.start()`.
+    try:
+        thread = threading.Thread(target=_defer_watchdog_loop,
+                                  name="tortoise-defer-watchdog", daemon=True)
+        _defer_watchdog = thread
+        thread.start()
+    except (RuntimeError, MemoryError, OSError) as exc:
+        _defer_watchdog = None
+        logger.warning(
+            "#3055: could not start the deferral watchdog (%s) — a parked "
+            "terminating signal now waits for the construction window to "
+            "close instead of being honoured at the %.0fs bound",
+            exc, _DEFER_DEADLINE_S)
+
+
+@contextlib.contextmanager
+def defer_terminating_signals():
+    """Hold a terminating signal until an embedded construction completes.
+
+    Wrap a construction window (see `tortoise.FalkorDB.__init__`): a
+    SIGTERM/SIGHUP/ignored-SIGINT delivered inside it is PARKED by
+    `_embedded_term_handler` instead of tearing down a half-built client, and
+    is re-delivered through the ordinary #2203 teardown on exit — when the
+    process is quiescent, so redislite's last-client close actually stops the
+    server (#3055).
+
+    Exit by exception is not a special case: the `finally` closes the window
+    like any other exit, and a parked request is honoured there — the
+    termination request outranks the exception.
+
+    When the signal was parked, this context manager DOES NOT RETURN from the
+    `finally`: the process dies by the signal, exactly as it would have
+    without the deferral, only after the server has been closed. Callers must
+    therefore not depend on running code after the `with` block on that path.
+    """
+    global _defer_depth, _defer_started_at, _deferred_signum
+    with _defer_lock:
+        _defer_depth += 1
+        if _defer_started_at is None:
+            _defer_started_at = time.monotonic()
+    try:
+        # ⛔ INSIDE the `try` (review round 3, F2): if arming ever raised, the
+        # increment and the stamp above would never be unwound — the depth
+        # would stay >= 1 for the rest of the process and, once the stale stamp
+        # passed the deadline, `_defer_terminating_signal` would decline every
+        # later signal, silently reverting to the pre-fix behaviour this whole
+        # seam exists to remove. `_arm_defer_watchdog` is itself never-raise;
+        # this is the second lock on that door.
+        _arm_defer_watchdog()
+        yield
+    finally:
+        parked: int | None = None
+        with _defer_lock:
+            # max(0, …): an out-of-order exit (a caller that swallows the
+            # generator, or a re-entrant window) must not drive the counter
+            # negative and silently disable deferral for the next window.
+            _defer_depth = max(0, _defer_depth - 1)
+            if _defer_depth == 0:
+                _defer_started_at = None
+                parked = _deferred_signum
+                _deferred_signum = None
+        if parked is not None:
+            _teardown_and_die(parked)
+
+
+def _teardown_and_die(signum) -> None:
+    """Close every live embedded client, then die by ``signum`` (#2203/#3055).
+
+    The one death path for the immediate case, the deferred case and the
+    watchdog's overrun case, so they cannot drift apart. `_teardown_in_progress`
+    makes a re-entrant signal an instant death — a second stop request while
+    this one is running is "hurry up and die".
+
+    Two exit conventions, and which one is taken is a property of the CALLER,
+    not a detail: on the main thread the default disposition is restored and
+    the signal re-raised, so the process dies by the signal (WIFSIGNALED, the
+    #2203 contract). `signal.signal` is refused off the main thread, so when
+    the restore does not happen the only honest exit is `os._exit(128+signum)`
+    — re-raising there would re-enter this module's own handler instead of
+    killing the process (review F2).
+    """
+    global _teardown_in_progress, _deferred_signum
+    if _teardown_in_progress:
+        os._exit(128 + int(signum))
+    _teardown_in_progress = True
+    _deferred_signum = None
+    try:
         _signal.signal(signum, _signal.SIG_DFL)
+        restored = True
     except (ValueError, OSError, RuntimeError):
-        pass
+        restored = False
     try:
         close_embedded_clients()
     finally:
+        if not restored:
+            # Not the main thread (or an unsupported signal): the disposition
+            # is still our handler, so the process must be terminated here.
+            os._exit(128 + int(signum))
         try:
             os.kill(os.getpid(), signum)
         except (OSError, ValueError):
             # Signal delivery failed (e.g. signum became invalid) — never
             # leave the process alive after a termination request.
-            os._exit(128 + signum)
+            os._exit(128 + int(signum))
+
+
+def _embedded_term_handler(signum, _frame) -> None:
+    """Terminating-signal handler (issue #2203, #3055).
+
+    While a construction window is open (#3055) the request is PARKED —
+    tearing down mid-construction is what orphaned the server — and the
+    window's exit re-delivers it. Otherwise: restore the default disposition
+    FIRST (a second signal during teardown means "hurry up and die" — instant
+    default death), then close every live embedded client (see
+    close_embedded_clients — inline, never raises), then re-raise the original
+    signal so the process dies with the conventional signal semantics
+    (WIFSIGNALED; shell status 128+signum) no matter what the preempted code
+    was doing. The re-raised signal is blocked while the handler runs (Python
+    installs handlers without SA_NODEFER), so the default-action death lands
+    the moment this handler returns.
+    """
+    if _defer_terminating_signal(signum):
+        return
+    _teardown_and_die(signum)
 
 
 def install_embedded_signal_cleanup() -> bool:
@@ -2194,6 +2533,35 @@ def _adopt_owner_records_after_fork() -> None:
                 os.close(_inherited.fd)
     _CONSTRUCT_LOCKS = {}
     _CONSTRUCT_LOCKS_GUARD = threading.Lock()
+    # #3055 (fresh-context review F3): the signal-deferral state is the same
+    # hazard, on a fourth registry — and it is the WIDEST of them, because the
+    # window it describes spans a whole construction (seconds), not a
+    # microsecond critical section. Three separate failures, all reachable from
+    # a fork taken by ANOTHER thread while any construction is in flight:
+    #   1. an inherited `_defer_depth >= 1` can never return to 0 in this child
+    #      (the thread that opened the window does not exist here), so the
+    #      child's first terminating signal — parked inside the inherited
+    #      window's apparent bound — would never be re-delivered: a stop
+    #      silently swallowed, the fail-open class #4879 fixed for
+    #      `_in_flight_replays` and #4926 for the claim lock;
+    #   2. an inherited `_teardown_in_progress == True` makes the child's FIRST
+    #      signal an `os._exit` with no `close_embedded_clients()` — an
+    #      untorn-down orphan;
+    #   3. an inherited `_defer_lock` held by a thread that is not here
+    #      deadlocks the child's next construction.
+    # The child has no window open and no teardown running, so the correct
+    # state is the pristine one, exactly as the two locks above are reset.
+    global _defer_lock, _defer_depth, _defer_started_at, _deferred_signum
+    global _teardown_in_progress, _defer_watchdog
+    _defer_lock = threading.Lock()
+    _defer_depth = 0
+    _defer_started_at = None
+    _deferred_signum = None
+    _teardown_in_progress = False
+    # The parent's watchdog thread is not inherited either: the child re-arms
+    # its own on its first window (a stale binding would just be a dead thread
+    # object, but clearing it keeps the state honest and testable).
+    _defer_watchdog = None
     # #4926: the ON-DISK claim is deliberately NOT retracted here. Its
     # filename names the PARENT's pid, and a claim is retracted only by the
     # construction that published it — a forked child unlinking it would drop
