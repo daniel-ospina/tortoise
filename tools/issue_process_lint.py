@@ -1824,8 +1824,17 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # file's own ranking an over-abstention is the cheap error and a false PASS is the
             # expensive one, so the floor stays fail-closed and clause scoping is NOT reapplied
             # unless it can tell ellipsis from a new subject — which `_ELSEWHERE_RE` cannot.
-            if _ids_in(line, rows) and (_DISCLAIMER_RE.search(line)
-                                        or _ELSEWHERE_RE.search(line)):
+            # ⛔ AND "NAMES A ROW" IS READ WITHOUT THE CLAIM-SIDE RANGE BLANKING (review round 25, P1).
+            # This is a NEGATIVE read, but it was gated on `_ids_in`, whose rule BLANKS the endpoints of
+            # any range that is not the whole claim — a rule that exists so a range cannot INFLATE a
+            # claim. On a disclaimer line the range is never the whole claim, so `_ids_in` returned
+            # empty and the cue was never seen: `V3–V6 remain unmeasured` on its own line left
+            # `disclaimed` False, while the identical sentence comma-spelled was caught. Every range
+            # spelling (`V3–V6`, `V3-V6`, `V3..V6`, `V3 to V6`, `rows V3 through V6`) read `clean`
+            # beside a `Closes #N (rows V1–V6)` that closes all six — the headline false PASS. A range
+            # MENTION is row-naming for a negative read; only the claim side may discount it.
+            if ((_explicit_ids(line, rows) or _range_matches(line, rows))
+                    and (_DISCLAIMER_RE.search(line) or _ELSEWHERE_RE.search(line))):
                 disclaimed = True
             continue
         # ⛔ THE LINE IS THE UNIT, the clause is the polarity boundary: the range read needs the whole

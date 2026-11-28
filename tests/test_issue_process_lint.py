@@ -3916,6 +3916,27 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
         findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
         assert stats["finding"] == 1 and stats["clean"] == 0, (body, stats)
         assert findings[0].evidence["claimed"] == ["V2"], (body, findings[0].as_dict())
+    # ⛔ AND A RANGE-SPELLED DISCLOSURE ON ITS OWN LINE IS ROW-NAMING TOO (review round 25, P1). The
+    # own-line read was gated on `_ids_in`, whose CLAIM-side rule blanks the endpoints of a range that
+    # is not the whole claim — on a disclaimer line it never is, so the cue was invisible and every one
+    # of these read `clean` beside a `Closes #N (rows V1–V6)` that closes all six: the headline false
+    # PASS, one punctuation away from the comma spelling above. A range MENTION names rows for a
+    # NEGATIVE read; only the claim side may discount a range. All five spellings pinned because the
+    # bug was spelling-wide, not dash-specific.
+    for disclosure in ("V3–V6 remain unmeasured", "V3-V6 remain unmeasured",
+                       "V3..V6 remain unmeasured", "Rows V3 through V6 remain unmeasured",
+                       "V3 to V6 stay open in later PRs"):
+        for body in (
+            f"Closes #13036 (rows V1–V6)\n{disclosure}\n",
+            f"Closes #13036\n\nSatisfies #13036: V1, V2, V3, V4, V5, V6\n{disclosure}\n",
+        ):
+            findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
+            assert findings == [] and stats["clean"] == 0 and stats["ambiguous"] == 1, (body, stats)
+    # CONTROL: a range that closes the issue with NO disclosure stays clean — the read above must not
+    # turn a range into a rejection on its own.
+    findings, stats = L.classify_partial_close(
+        "Closes #13036 (rows V1–V6)\n", 500, {13036: _scope(rows)})
+    assert findings == [] and stats["clean"] == 1, stats
 
 
 def test_naming_every_row_ANYWHERE_is_a_complete_close():
