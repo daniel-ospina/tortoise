@@ -396,6 +396,63 @@ def test_a_backfill_declines_in_the_payload_and_names_the_reason():
         "declining the closure must not also drop the declared edge")
 
 
+def test_an_absent_start_declines_and_keeps_the_declared_edge():
+    """No world-time instant on the NEW side → DECLINE, and keep the NAND.
+
+    ⛔ THE P2 THIS PINS (#14794 review, measured). The direction gate used to
+    fall through to ARRIVAL ORDER when the payload point named no `when`, on the
+    reasoning that "with no parseable start there is no instant to compare".
+    That premise is false about the WRITE side, so the fallback was not a
+    tie-break — it was a coin flip the consumer then refused:
+
+    * `sdk.py` gives a `when`-less point a `validFrom` taken from an ASSERTED
+      date in its content (`_asserted = asserted_date(content)`), and
+    * a dedup hit writes no props at all, so a restated claim keeps the
+      canonical's OLDER stored start.
+
+    Both put the successor's stored start somewhere this pass cannot see; the
+    record is emitted inverted, `sdk._supersede_point` refuses the window
+    (#4021), and — because this arm SUPPRESSES the operator — the declaration
+    ends in NO representation at all: 0 NAND edges, 0 CORRECTS edges, both
+    claims live, beside a receipt claiming the interval was closed. Measured on
+    the pre-fix head with a `when`-less payload point:
+    `operators == []`, `applied: 0`, the consumer raising
+    `InvertedSupersedeWindow` — while the SAME payload on the base tree KEEPS
+    the NAND, so the arm was strictly worse than not existing on that shape.
+
+    The gate therefore DECLINES and leaves the declared edge exactly as it
+    would be without this arm. Both lookup arms are exercised: the decline must
+    not become an operator DROP on the wiring route, which is the regression
+    that made the loss invisible in the first place.
+    """
+    for coverage, label in ((_RESOLVED, "resolved"), (_PARTIAL, "partial")):
+        out, payload = _shape_run({
+            "entities": [], "events": [],
+            # ⛔ NO `when` KEY AT ALL: the shape that took the arrival branch.
+            "points": [{"content": AUDIT, "pointKind": "statement",
+                        "about_entities": ["ColdPath Logistics"],
+                        "quote": AUDIT, "search_keys": ["cold-chain audit"]}],
+            "operators": [{"op_type": "NAND", "src": AUDIT, "dst": CERT}],
+        }, coverage)
+        assert out.get("supersessions") == [], (
+            f"[{label}] an unordered pair must not be closed on arrival order — "
+            "the consumer refuses the inverted window, and because this arm "
+            "suppresses the operator the declaration then survives in NEITHER "
+            "representation")
+        said = [w for w in out.get("warnings") or [] if "not closed" in w]
+        assert said and "BOTH" in said[0], (
+            f"[{label}] the decline must name the missing instant as its reason, "
+            f"rather than reporting a closure: {said}")
+        assert not any("is recorded as a supersession" in w
+                       for w in out.get("warnings") or []), (
+            f"[{label}] the run must not claim a closure it did not record")
+        if coverage is _RESOLVED:
+            # ⛔ THE COSTLY HALF: declining must not also DROP the declared edge.
+            assert payload.get("operators"), (
+                f"[{label}] declining the closure must not suppress the declared "
+                "NAND — that is how the pre-fix head lost the declaration")
+
+
 def test_an_event_side_is_dropped_not_recorded_as_a_supersession(make_graph):
     """A NAND whose emitted side is an Event closes nothing — and says so.
 

@@ -12441,8 +12441,10 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         Imported lazily and degrading to the unparseable bucket: this helper
         exists to AGREE with `sdk._supersede_window_end`, and an import that
         failed would otherwise turn an ordering question into a raise. A
-        ``(1, …)`` bucket means "no instant", which the caller reads as "fall
-        back to arrival order" — the same answer an unparseable value gets.
+        ``(1, …)`` bucket means "no instant", which the caller reads as "this
+        pair cannot be ORDERED here" and DECLINES on — never as a licence to
+        fall back to arrival order, which the write path can contradict (see the
+        gate in `_close_prior_contradiction`).
         """
         try:
             from tortoise.search_engine import _created_sort_key
@@ -12458,8 +12460,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         added. On the WIRING route the older id is the fold's own graph id and
         the row was not kept — but the same prior set is in `search`, so the
         start is read from there rather than re-queried. Both are best-effort:
-        an empty answer is a fact about the input, and the caller falls back to
-        arrival order.
+        an empty answer is a fact about the input, and the caller DECLINES on it
+        rather than ordering by capture membership.
         """
         if isinstance(prior_row, dict) and prior_row.get("when"):
             return str(prior_row.get("when") or "")
@@ -12493,10 +12495,16 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
           earlier world date); `sdk._supersede_point` refuses that inverted
           window (#4021), so the fold failed and BOTH claims stayed live — the
           #14198 defect through the backfill door, warned as a generic failure.
-          With no parseable start on either side there is no instant to
-          compare, so arrival order stands (the prior set IS what existed
-          before this capture); a tie keeps it too, since a zero-length
-          predecessor window is legal.
+          With no instant established on BOTH sides there is nothing this
+          pass can order on, and ARRIVAL ORDER IS NOT A SAFE FALLBACK: the
+          write path resolves the successor's start from sources this pass
+          cannot see (an asserted date in the content, or a dedup hit keeping
+          the canonical's stored start), so arrival order can emit a window
+          the consumer refuses as inverted — and because the operator is
+          suppressed, that loses the declaration from BOTH representations
+          while the receipt claims a closure (#14794 review, P2). So that
+          shape DECLINES too, and says so; a tie still closes, since a
+          zero-length predecessor window is legal.
           ⛔ The backfill DIRECTION is now DECLINED rather than emitted (see the
           branch below): the record's `superseded` side must already be a graph
           id, so this channel cannot carry it, and emitting it anyway produced a
@@ -12585,7 +12593,47 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # the consumer's own instants removes both.
         k_new = _instant_key(new_when)
         k_old = _instant_key(older_when)
-        if k_new[0] == 0 and k_old[0] == 0 and k_new < k_old:
+        if k_new[0] != 0 or k_old[0] != 0:
+            # ⛔ NO INSTANT ON (AT LEAST) ONE SIDE — and ARRIVAL ORDER IS NOT A
+            # SAFE SUBSTITUTE (#14794 review, P2, MEASURED). This used to fall
+            # through to the arrival branch, on the reasoning that "with no
+            # parseable start there is no instant to compare". That premise is
+            # false about the WRITE side: `sdk._supersede_window_end` compares
+            # the predecessor's STORED `validFrom` against the successor's
+            # RESOLVED start, and two documented routes give the successor a
+            # start this arm cannot see —
+            #   * `sdk.py` `_asserted = asserted_date(content)`: a payload point
+            #     with NO `when` whose content says "as of 2026-01-01 …" is
+            #     created with `validFrom = 2026-01-01`;
+            #   * a dedup hit (in-capture fold or graph-level resolution) writes
+            #     NONE of those props — the `validFrom` fold rides the CREATE
+            #     branch only — so a restated claim keeps its OLDER stored start.
+            # In both shapes the arm emitted the record on arrival order, the
+            # consumer's window check then refused it as inverted (#4021), and
+            # because the operator is suppressed below the declaration survived
+            # in NO representation at all: 0 NAND edges, 0 CORRECTS edges, both
+            # claims live, while the receipt beside them claimed the interval
+            # was closed. That was WORSE than the pre-arm behaviour on the same
+            # payload (which kept the NAND), so this gate DECLINES instead —
+            # the same "a truthful non-closure beats a false closure" rule the
+            # backfill branch below states. The declared edge is handled exactly
+            # as it would be without this arm.
+            warnings.append(
+                "NAND contradiction ACROSS CAPTURES not closed (#14198): this "
+                "arm can order the two rivals by world time only when BOTH "
+                f"starts name an instant ({new_when!r} vs the prior's "
+                f"{older_when!r}), and the write path resolves the "
+                "successor's start from sources this pass cannot see (an "
+                "asserted date in the content, or a dedup hit that keeps the "
+                "canonical's stored start). Closing on arrival order there "
+                "emits a window the consumer refuses as inverted, which would "
+                "leave the declaration in NO representation while this receipt "
+                "claimed a closure. No interval is closed; the declared edge "
+                "is emitted when the older side resolves (the wiring route) "
+                "and dropped with the active decision when it does not "
+                "(the hold route)")
+            return False
+        if k_new < k_old:
             # BACKFILL, and this channel CANNOT express it (#14198 review 2).
             # World time says the PRIOR is the newer fact, so the closure would
             # have to read `superseded = <this capture's claim>, supersedes_by =

@@ -131,10 +131,17 @@ protection.
    (`2026-03-05T23:00:00-05:00` = 04:00Z on 03-06 vs `2026-03-06T01:00:00Z`)
    compares BACKWARDS — either way the producer emitted the window the consumer
    then refused, leaving both claims live. The arm now uses the same
-   `_created_sort_key` instants, falling back to arrival order only when either
-   start names no instant (the prior set IS what existed before this capture, so
-   that is the honest fallback; equality keeps it too, since a zero-length
-   predecessor window is legal).
+   `_created_sort_key` instants, and it DECLINES when either start names no
+   instant: arrival order is NOT an honest fallback there, because the write
+   path resolves the successor's start from sources this pass cannot see (an
+   asserted date in the content, `sdk.py`'s `asserted_date(content)` →
+   `validFrom`; or a dedup hit, which writes no props and keeps the canonical's
+   stored start). Ordering by capture membership in those shapes emitted a
+   window the consumer refused as inverted, and — because this arm suppresses
+   the operator — the declaration then survived in NEITHER representation while
+   the receipt claimed a closure (#14794 review, P2, measured). Equality still
+   closes: two parseable instants that compare equal are a zero-length
+   predecessor window, which `_supersede_point` accepts.
 
 No new node kind, no new relation vocabulary, no MCP/SDK surface change.
 
@@ -376,20 +383,26 @@ Regression surface run alongside, all green: `test_extractor_v2`,
    later refuter of the same prior can still close it. Closing a backfill needs
    a producer of the other shape (a graph-id `superseded`), which is a
    different change.
-6. **An unknown world-time start falls back to arrival order** — and the ordering
-   is decided on the consumer's OWN instants (`_created_sort_key`), never on a
-   date prefix. The prior's
-   `when` reaches the arm through S3's `_enrich_point_priors` (best-effort), and
-   the new claim's is its own `when` on the payload point. When either is
-   missing or unparseable there is no instant to compare, so the arm orders by
-   capture membership — the pre-fix order. For a backfill whose dates are
-   unknown this means it does NOT decline (the dates are absent) and the
-   consumer refuses the inverted window with its own warning and skip. Stated
-   rather than hidden: the decline is only as good as the dates. (A TIE is NOT
-   this case: two parseable instants that compare equal are a zero-length
-   predecessor window, which `_supersede_point` accepts, so a same-day pair is
-   ordered by its instants and closes — the date-prefix implementation treated
-   it as unknown instead.)
+6. **An unknown world-time start DECLINES, and the ordering is on the
+   consumer's OWN instants** (`_created_sort_key`), never on a date prefix. The
+   prior's `when` reaches the arm through S3's `_enrich_point_priors`
+   (best-effort), and the new claim's is its own `when` on the payload point.
+   When either is missing or unparseable the arm does NOT order by capture
+   membership: the WRITE side can still hold an instant this pass cannot see
+   (`sdk.py` gives a `when`-less point a `validFrom` from an asserted date in
+   its content; a dedup hit writes no props and keeps the canonical's older
+   stored start), so membership order produced an inverted window the consumer
+   refused — and because the operator is suppressed, the declaration was lost
+   from both representations while the receipt claimed the interval was closed.
+   Measured on the pre-fix head: a `when`-less payload point gave 0 NAND edges,
+   0 CORRECTS edges and `InvertedSupersedeWindow`, where the SAME payload on the
+   base tree keeps the NAND. So that shape declines, names the missing instant,
+   and spends no budget. Stated rather than hidden: a closure this pass cannot
+   ORDER is not attempted, which costs recall in corpora whose points carry no
+   `when` at all. (A TIE is NOT this case: two parseable instants that compare
+   equal are a zero-length predecessor window, which `_supersede_point`
+   accepts, so a same-day pair is ordered by its instants and closes — the
+   date-prefix implementation treated it as unknown instead.)
 7. **Provenance in the declined direction is not touched** — because nothing is
    folded there. `_supersede_point`'s edge transfer (which moves
    `extractedFrom` and the other structural edges to the successor) therefore
