@@ -4260,6 +4260,11 @@ def test_read_scope_reads_each_issue_once(monkeypatch):
     "V1, V2–V3, V4, V5, V6",
     "V1–V3, V4, V5, V6",
     "V1, V2, V3, V4–V6",
+    # ⛔ THE ROW-NOUN PREFIX IS A SEPARATE BRANCH OF `_clause_is_a_pure_id_list`, AND IT IS
+    # LOAD-BEARING (review round 32, P2): residue is `rows` here, so the prefix allowance is what
+    # makes this clean — without it the claim collapsed to `V3` again. Deleting that branch left the
+    # suite green because no case spelt the list with the noun, which is how a branch reads as dead.
+    "rows V1–V2, V3, V4–V6",
 ])
 def test_a_complete_close_spelled_as_ranges_beside_ids_is_clean(spelling):
     """A PURE ID LIST IS ONE CLAIM, NOT A SET OF INDEPENDENT MENTIONS (review round 32, P1).
@@ -4352,6 +4357,85 @@ def test_a_declined_closing_ref_is_still_a_target_because_github_will_close_it()
         "Closes #13036 (rows V1–V6).\n\nThis does not close #13036 as a whole.\n",
         500, {13036: _scope(rows)})
     assert control["clean"] == 0, control
+
+
+@pytest.mark.parametrize("body", [
+    # the disclosure on its own line — the spelling the first fix covered
+    "Closes #13036 (row V2 only).\n\nThis does not close #13036 as a whole.\n",
+    # ⛔ AND THE SAME SENTENCE ON ONE LINE — the spelling the first fix MISSED (review round 32, P2).
+    # `_decline_targets` is line-scoped, so here the ref was recorded ONLY as declined and never
+    # reached `closing`: the population stayed ZERO and the counters line printed
+    # `0 closing ref(s) read — 0 clean, 0 flagged`, rc 0. A punctuation difference must not decide
+    # whether the arm's headline instance is read at all.
+    "Closes #13036 (row V2 only) — this does not close #13036 as a whole.\n",
+])
+def test_a_declined_closing_ref_is_read_in_both_spellings(body):
+    rows = L.row_ids([CAPSTONE_BODY])
+    assert L.closing_targets(body, 500, "daniel-ospina/tortoise") == [13036]
+    findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)},
+                                               "daniel-ospina/tortoise")
+    assert len(findings) == 1, (body, stats)
+    assert findings[0].evidence["claimed"] == ["V2"], body
+    assert findings[0].evidence["unclaimed"] == ["V1", "V3", "V4", "V5", "V6"], body
+    # CONTROL — the same decline beside a COMPLETE claim must not become a pass: a body that both
+    # closes all six and says it does not close the issue is the contradiction the arm already routes
+    # to UNANSWERABLE. Unchanged by this fix.
+    _, control = L.classify_partial_close(
+        "Closes #13036 (rows V1–V6).\n\nThis does not close #13036 as a whole.\n",
+        500, {13036: _scope(rows)}, "daniel-ospina/tortoise")
+    assert control["clean"] == 0, control
+
+
+@pytest.mark.parametrize("rider,expected", [
+    # ⛔ `;` AND `but` MUST NOT DISAGREE ABOUT ONE SENTENCE (review round 32, P2). The trailing-`but`
+    # veto was written before the rider rule existed and it vetoed the WHOLE LINE unconditionally, so
+    # it silently overrode the pure-id-list escape: a COMPLETE close was accused of claiming `V3`
+    # alone, with remediation telling its author to rewrite it as the partial form, while the same
+    # sentence joined by `;` read `clean`. Four cells, one variable each.
+    ("; the evidence doc is attached", "clean"),
+    ("but the evidence doc is attached", "clean"),
+    ("; two are missing", "ambiguous"),
+    ("but two are missing", "ambiguous"),
+])
+def test_a_rider_is_judged_the_same_way_whichever_separator_joins_it(rider, expected):
+    rows = L.row_ids([CAPSTONE_BODY])
+    body = f"Closes #13036 (V1–V2, V3, V4–V6){rider}\n"
+    findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)},
+                                               "daniel-ospina/tortoise")
+    assert stats[expected] == 1, (body, stats)
+    assert findings == [], (body, findings)
+
+
+def test_a_qualified_foreign_close_is_not_read_as_this_issues_rows_without_a_repo():
+    """⛔ AN UNRESOLVED REPO MUST NOT WIDEN WHAT COUNTS AS THIS ISSUE'S ROWS (review round 32, P3).
+
+    `_claims_in` drops every `owner/repo#N` when the ambient repo is unknown, so with `repo=None` the
+    foreign qualifier vanished from the exclusion and `(V2)` was read as this issue's narrowing — a
+    COMPLETE close accused of claiming V2, in the LIVE `--pr` mode whenever `resolve_repo` fails. The
+    skipped sink names the refs' NUMBERS, which is enough to know a clause is about another issue.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    for repo in (None, "daniel-ospina/tortoise"):
+        body = "Closes #13036 (V1–V6), closes daniel-ospina/tortoise#13037 (V2)\n"
+        findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)}, repo)
+        assert [f for f in findings if f.evidence.get("issue") == 13036] == [], (repo, findings)
+        assert stats["clean"] == 1, (repo, stats)
+
+
+def test_a_semicolon_split_satisfies_list_is_an_abstention_not_a_pass():
+    """⛔ A RECORD'S CONTROL THAT STOPPED HOLDING (review round 32, P3).
+
+    The PR's round-29 comment pinned `Closes #N` + `Satisfies #N: V1, V2; V3, V4, V5, V6` as `clean`.
+    Measured across heads, that body read `clean` at `3311c89`/`e61af34`/`f1aa81f` and reads
+    `ambiguous` from `0f3093b` on — a counted abstention (never a pass), and the `;`-split list is the
+    only spelling in its family with no test at all. Pinned to the behaviour that holds, so a lane
+    reading the old table cannot believe the opposite is guarded.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(
+        "Closes #13036\n\nSatisfies #13036: V1, V2; V3, V4, V5, V6\n", 500,
+        {13036: _scope(rows)}, "daniel-ospina/tortoise")
+    assert findings == [] and stats["ambiguous"] == 1 and stats["clean"] == 0, stats
 
 
 def test_the_tick_state_wins_when_the_issue_ALSO_declares_row_headings():
@@ -5008,17 +5092,22 @@ def test_a_range_close_beside_a_second_closing_ref_is_never_accused_of_the_other
     spellings here is the point: the read must not depend on how the rows were written.
     """
     rows = L.row_ids([CAPSTONE_BODY])
-    # `#13037` declares its own, unrelated rows, so nothing below can be a finding about it either.
-    other = ["A1", "A2"]
+    # ⛔ THE FOREIGN QUALIFIER MUST NAME A ROW THE ACCUSED ISSUE ALSO DECLARES, OR THE CASE CANNOT FAIL
+    # (review round 32, P2 — found by a fresh reviewer). `A1` is not a row of `#13036`, so
+    # `_narrowing_ids` had nothing to misread and this case passed on the PRE-FIX code as well: it
+    # pinned the sentence, not the mechanism. `V2` is a declared row of both, which is exactly what
+    # makes the misread possible.
+    other = ["V2", "Z9"]
     scopes = {13036: _scope(rows), 13037: _scope(other)}
     for spelling in ("V1-V6", "V1–V6", "rows V1–V6", "V1, V2, V3, V4, V5, V6"):
-        body = f"Closes #13036 ({spelling}), closes #13037 (A1)\n"
+        body = f"Closes #13036 ({spelling}), closes #13037 (V2)\n"
         findings, stats = L.classify_partial_close(body, 500, scopes, "daniel-ospina/tortoise")
         # ⛔ THE CLAIM, NOT A VERDICT CLASS: #13036 is a COMPLETE close, so it must never be the
-        # subject of a FINDING naming V2. (The verdict may be `ambiguous` where the whole-body
-        # subset read cannot expand a bare range — a counted abstention, which is the cheap error —
-        # but it must never be an accusation against a correct close.)
+        # subject of a FINDING, and the arm must say so — `clean`, MEASURED at this head for all four
+        # spellings (a bare range beside a foreign close is no longer an abstention; the whole-body
+        # subset read is foreign-aware now). The only finding here is #13037's own.
         assert [f for f in findings if f.evidence.get("issue") == 13036] == [], (body, findings)
+        assert stats["clean"] == 1, (body, stats)
         assert L.claimed_row_ids(body, 13036, rows) == set(rows), (body, stats)
 
 

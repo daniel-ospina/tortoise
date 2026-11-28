@@ -1050,7 +1050,7 @@ def _claims_in(text: str, own_number: int | None = None,
     the shape this module refuses everywhere else (`Unmeasurable`, never a pass).
     """
     found: dict[str, list[int]] = {"closing": [], "satisfies": [], "weak": [], "declined": [],
-                                   "continued_resolving": []}
+                                   "continued_resolving": [], "closed_but_declined": []}
     decline_targets = _decline_targets(text)
     line_starts = [0]
     for line in text.splitlines(keepends=True):
@@ -1098,6 +1098,14 @@ def _claims_in(text: str, own_number: int | None = None,
                 continue  # `owner/repo#N` for another repo is not this PR's business
             if num in declined_here:
                 found["declined"].append(num)
+                # ⛔ A DECLINED REF BOUND BY A CLOSING KEYWORD IS STILL A REF GITHUB WILL CLOSE
+                # (review round 32, P2). GitHub's parser does not read prose, so
+                # `Closes #N (row V2 only) — this does not close #N as a whole.` closes #N on merge.
+                # It lands in its OWN key, never in `closing`: arm 1's question is "did you answer the
+                # claim?", and moving the ref into `closing` would answer it wrongly. Arm 3 asks the
+                # vendor's question and reads both keys.
+                if word in CLOSING_WORDS:
+                    found["closed_but_declined"].append(num)
             elif word in CLOSING_WORDS:
                 (found["weak"] if continued else found["closing"]).append(num)
                 if continued:
@@ -1496,6 +1504,12 @@ def _clause_is_a_pure_id_list(clause: str, rows: list[str]) -> bool:
     for row in sorted(rows, key=len, reverse=True):
         residue = re.sub(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", " ", residue)
     residue = _ID_LIST_FILLER_RE.sub(" ", residue).strip()
+    # ⛔ RESIDUE IS EMPTY **OR IS A LEADING ROW NOUN** — say it, because the branch is load-bearing and
+    # reads as redundant with "empty" (review round 32, P2, found by a fresh reviewer after deleting it
+    # left the suite green). `rows V1–V2, V3, V4–V6` leaves residue `rows`; refusing it reintroduces the
+    # exact headline defect this function exists for, in the `rows`-prefixed spelling. A noun is not
+    # prose: `_BARE_PREFIX` is the SAME allowance `_range_is_the_whole_claim` already gives a bare
+    # range, so `of`, `bar`, `see`, `landed` stay residue either way.
     return residue == "" or bool(_BARE_PREFIX.match(residue))
 
 
@@ -1557,6 +1571,17 @@ def _range_is_the_whole_claim(text: str, match: re.Match, rows: list[str],
     # otherwise see a bare range followed by a rowless clause, call it the WHOLE claim and read
     # `clean` — a shape that was AMBIGUOUS before the boundary existed. A rider introduced by `but`
     # qualifies the claim, so the range is a mention and the line abstains.
+    # ⛔ AND THE SAME RIDER RULE ENDS THE `but` VETO FOR A PURE ID LIST (review round 32, P2). The
+    # veto below was written before `_a_rowless_rider_understates_the_rows` existed, to stop
+    # `(rows V1–V6 but two are missing)` reading `clean`. It survived into a world where the rider read
+    # decides that question — and it vetoed the WHOLE LINE, unconditionally, so it silently overrode
+    # `_clause_is_a_pure_id_list`'s escape: `Closes #N (V1–V2, V3, V4–V6) but the evidence doc is
+    # attached` fell back to the bare `V3` and emitted the one-row accusation, with remediation telling
+    # a correct close to rewrite itself as a partial one — while the SAME sentence joined by `;` read
+    # `clean`. `;` and `but` do not get to disagree about one sentence: a pure id list is the whole
+    # claim, and the rider read (pointer ⇒ clean, count ⇒ UNANSWERABLE) decides the verdict.
+    if _clause_is_a_pure_id_list(line[own[0]:own[1]], rows):
+        return True
     return not re.search(r"\bbut\b", line[own[1]:])
 
 
@@ -1929,7 +1954,16 @@ def _foreign_closing_clauses(line: str, rows: list[str], issue: int | None,
     spans = _clause_spans(line, rows)
     foreign: set[int] = set()
     for i, (a, b) in enumerate(spans):
-        if not set(_claims_in(line[a:b], None, repo)["closing"]) - {issue}:
+        # ⛔ A QUALIFIED REF THE AMBIENT REPO CANNOT RESOLVE IS NOT PROVEN NATIVE (review round 32,
+        # P3). `_claims_in` drops every `owner/repo#N` when `repo` is None, so with the repo unresolved
+        # `Closes #N (V1–V6), closes daniel-ospina/tortoise#M (V2)` looked like ONE closing ref and the
+        # foreign qualifier was read as this issue's narrowing — a complete close accused of claiming
+        # V2, in the live `--pr` mode whenever `resolve_repo` fails. The skipped sink names those refs'
+        # NUMBERS, so a clause about a different issue is still recognisable without knowing the repo;
+        # a skipped ref that IS this issue stays native.
+        skipped: list[int] = []
+        closing = set(_claims_in(line[a:b], None, repo, skipped)["closing"])
+        if not (closing - {issue}) and not (set(skipped) - {issue}):
             continue
         foreign.add(i)
         if i + 1 < len(spans):
@@ -2247,7 +2281,16 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
         # above it: `clean` on the exact shape the arm was filed for. The module already owns the
         # binding grammar (`CLAIM_RE` via `_claims_in`, the same test `closing_targets` trusts), so the
         # line qualifies only when that grammar says the keyword resolves THIS issue here.
-        if issue not in _claims_in(line, None, repo)["closing"]:
+        # ⛔ AND A CLOSING KEYWORD BESIDE A SAME-LINE DECLINE STILL QUALIFIES (review round 32, P2).
+        # `_decline_targets` is line-scoped, so in
+        #     `Closes #13036 (row V2 only) — this does not close #13036 as a whole.`
+        # the ref is recorded ONLY as declined and `closing` never holds it. The population fix in
+        # `closing_targets` made the ARM read the ref, but this gate then skipped the only line that
+        # claimed it, so the verdict fell to AMBIGUOUS — a counted abstention, but strictly worse than
+        # the FINDING the SAME sentence earns when the disclosure is on its own line, for a difference
+        # of punctuation. A decline is arm 1's answer; this read asks what GitHub will fire on.
+        _line_claims = _claims_in(line, None, repo)
+        if issue not in set(_line_claims["closing"]) | set(_line_claims["closed_but_declined"]):
             # ⛔ NOT a closing line, but it can still DISCLAIM. A disclosure written on its OWN line
             # is the shape the careful author produces — `Closes #N` on one line, then `V2 is proved;
             # V1, V3–V6 remain unmeasured and are follow-ups` on the next — and reading disclaimers
@@ -2590,7 +2633,14 @@ def closing_targets(body: str, number: int | str, repo: str | None = None,
     # `_DISCLAIMER_RE` routes such a body to UNANSWERABLE instead of to a pass. Arm 3 therefore asks
     # the question its own docstring states ("the refs a `Closes` will actually fire on") and leaves
     # the declined set to arm 1.
-    return list(c["closing"])
+    # ⛔ AND THE SAME-LINE SPELLING NEEDS THE THIRD KEY, NOT JUST THIS ONE (review round 32, P2 —
+    # found by a fresh reviewer after the first version of this fix). `_decline_targets` is
+    # LINE-scoped, so for `Closes #N (row V2 only) — this does not close #N as a whole.` the ref never
+    # reaches `closing` at all: it is recorded ONLY as declined, and the population stayed zero while
+    # the counters line printed the exact pre-fix sentence. `_claims_in` now also reports the refs a
+    # CLOSING keyword bound that a same-line decline swallowed, which is the population this arm is
+    # about.
+    return sorted(set(c["closing"]) | set(c["closed_but_declined"]))
 
 
 def classify_partial_close(body: str, number: int | str,
