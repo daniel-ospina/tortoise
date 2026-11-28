@@ -1025,38 +1025,36 @@ jobs:
             # list (so `0` ⟺ an empty list), and the status must be one of the four
             # GitHub statuses. A short, absent or differently-shaped row is UNREADABLE —
             # never a consistent page, and never a rewrite.
-            # ⛔ WHICH ROW PINS WHICH GUARD — the attribution is NOT one row per guard, and
-            # pretending otherwise is the defect this paragraph has produced in EVERY cycle.
-            # Re-measured 2026-11-28 by removing each guard ALONE, and reporting RED ROW
-            # COUNT only: absolute PASS totals drift every time a row is added, so a quoted
-            # total is a claim that expires. (No sha is pinned either — a comment cannot stay
-            # bound to a moving head; the measurement is the mutation, re-runnable any time.)
-            #   · status allowlist          -> 2 red rows, `(t32c)`      (pinned ALONE)
-            #   · reviewed-side list arity  -> 3 red rows, `(t32d)`      (pinned ALONE)
-            #   · branch-side list arity    -> 3 red rows, `(t32e)`      (pinned ALONE)
-            #   · `[ "$p_seen" -ge 1 ]`     -> 3 red rows, `(t32g)`      (pinned ALONE).
-            #   · branch-side `p_btotal >= 1` -> 3 red rows, `(t33)`      (pinned ALONE):
-            #     the reviewed side's zero guard one page over, and its own mutant covers
-            #     both sides. (`(t33)` also pins the `.sha[0:12]` WIDTH inside the pinned
-            #     `--jq` substrings — without it, mutating the width left the suite green
-            #     while every 12-char token missed the membership test.)
-            #     Its control `(t32h)` is NOT a behavioural pin: with the guard already gone
-            #     its own mutation finds nothing to strip and self-reports, which is why the
-            #     `(t32g)` count is the one that matters.
-            #   · numeric presence on BOTH counts -> 0 red rows. It is MASKED: with it gone,
-            #     `p_total`/`p_seen` are `""`, the arity guard refuses, and the
-            #     self-consistency guard refuses again (`[ "" -ge 1 ]` is an ARITHMETIC error,
-            #     rc 2, so it takes the refuse arm). Removing presence AND reviewed arity
-            #     reddens `(t32d)` ONLY — NOT `(t32a)`/`(t32b)`, which the self-consistency
-            #     guard still refuses (measured; an earlier version of this paragraph claimed
-            #     all three carried, which was false the moment `(t32g)` was added).
-            #     `(t32f)` strips FIVE guards at once (allowlist, presence, equality,
-            #     reviewed arity, self-consistency) and is the only control under which the
-            #     short row carries — so a single deletion here LOOKS green. Do not delete
-            #     any one of them on the strength of a green suite.
-            #   · `[ -z "$p_row" ]` (the empty-parse arm) and the BRANCH-side numeric
-            #     presence check are SUBSUMED by their siblings — 0 red rows alone, kept as
-            #     defence in depth, not as a pinned bound. Stated, not implied.
+            # ⛔ WHICH GUARD IS PINNED BY WHICH ROW — AND WHICH GUARDS ARE NOT PINNED AT ALL.
+            # The attribution is NOT one row per guard, and a quoted TALLY drifts the moment a
+            # row is added, so this lists NAMES, never numbers. Verify any line by removing
+            # exactly that guard and running the harness: a guard is "pinned" only if its own
+            # removal reddens a row. (No sha is pinned either — a comment cannot stay bound to
+            # a moving head, and the mutation is re-runnable at any time.)
+            #   PINNED ALONE (its own removal reddens the row named):
+            #     · status allowlist ............. `(t32c)`
+            #     · `p_total = p_seen` ........... `(t23)` — a TRUNCATED reviewed page
+            #     · `p_btotal = p_bcount` ........ `(t23)` — a TRUNCATED branch page
+            #     · reviewed-side list arity ..... `(t32d)`
+            #     · branch-side list arity ....... `(t32e)`
+            #     · `[ "$p_seen" -ge 1 ]` ........ `(t32g)`. Its control `(t32h)` is NOT a
+            #       behavioural pin: with the guard already gone its mutation finds nothing
+            #       to strip and self-reports, so `(t32g)` is the row that counts.
+            #     · branch `p_btotal >= 1` ....... `(t33)` — pins THIS side only; the
+            #       reviewed side's zero guard is `(t32g)`/`(t32h)` and nothing else.
+            #       `(t33)` also pins the `.sha[0:12]` WIDTH in the pinned `--jq` substrings.
+            #   MASKED (0 red rows alone):
+            #     · numeric presence on BOTH counts. With it gone `p_total`/`p_seen` are `""`,
+            #       the arity guard refuses, and `[ "" -ge 1 ]` is an ARITHMETIC error (rc 2)
+            #       that takes the refuse arm — so removing presence AND reviewed arity
+            #       reddens `(t32d)` ONLY, never `(t32a)`/`(t32b)`. `(t32f)` strips the masked
+            #       set (allowlist, presence, equality, reviewed arity, self-consistency) and
+            #       is the only control under which the short row CARRIES: a single deletion
+            #       here LOOKS green, so delete none of them on the strength of a green suite.
+            #   SUBSUMED (0 red rows alone; kept as defence in depth, not as a pinned bound):
+            #     · `[ -z "$p_row" ]` (the empty-parse arm), the BRANCH-side numeric presence
+            #       check, and `[ -z "$p_bside" ]` — for the last one only its JOINT removal
+            #       with the branch-side arity check is attributable, as `(t30)` states.
             # Both reads therefore refuse on anything unreadable or truncated, so a
             # transient (or a mis-shaped) answer can only NARROW rule (c), never widen it.
             p_base="$(gh api "repos/${REPO_NAME}/pulls/${PR_NUMBER}" --jq .base.sha 2>/dev/null || true)"

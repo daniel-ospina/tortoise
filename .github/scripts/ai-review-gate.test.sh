@@ -455,11 +455,13 @@ if grep -qE -- "/compare/" <<<"$*" && ! grep -qF -- "application/vnd.github.v3.d
         # removing it, and its `:x` default, reddened no row at all).
         [ "${STUB_BRANCH_FAIL:-0}" = "1" ] && exit 1
         # ⛔ THE EXPRESSION IS PART OF THE CONTRACT (final review of #4255). The rows that
-        # pin it are the ones that EXPECT A CARRY, not a row of their own: measured
-        # 2026-11-28 on the fixed tree, mutating the reviewed-side expression to
-        # `.status | @tsv` reddens 29 assertions and the branch-side one to
-        # `.total_commits | @tsv` reddens 4 — before this emulation existed, both
-        # mutants were GREEN (PASS=259 FAIL=0).
+        # pin it are the ones that EXPECT A CARRY (`(t1)`, `(u3)`, `(t22)`, `(t23)`, `(t26)`,
+        # `(t27)`, `(t28)`, …), not a row of their own: mutating either expression to one
+        # that renders fewer fields reddens those rows instead of leaving the suite green.
+        # ⛔ NO COUNTS ARE QUOTED HERE, DELIBERATELY. The first version pinned "29" and "4";
+        # both were correct when written and had expired by the next commit, because later
+        # rows and the branch-side guards change which fixtures reach the refusal. Re-measure
+        # the mutant — never trust a number in a comment.
         # The gate reads this row by ARITY — a changed expression that renders fewer
         # fields makes it REFUSE (a safe over-block), but a stub that keeps rendering
         # the OLD field set would report a green suite while the gate has started

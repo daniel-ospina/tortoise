@@ -150,12 +150,14 @@ entry condition closes that path.
      expression rendering literal zeros cannot skip the authored-commit loop; and an
      unrecognised status is reported as an UNREADABLE graph, not as a rewrite, which
      would send you to buy a 20–40 minute re-review for an API blip (harness cases
-     `(t32a)`–`(t32h)`, whose comments state which guard each row pins, by RED ROW COUNT
-     rather than by a PASS total: five are pinned alone, one is masked by two siblings
+     `(t32a)`–`(t33)`). The workflow header names, guard by guard, which row pins it — and
+     which guards are NOT individually pinned at all: the numeric-presence check is MASKED
      (removing it reddens nothing, and removing it together with the arity check reddens
-     `(t32d)` only — the other rows are refused by a further guard), and two are subsumed.
-     `(t32f)` is the only control that strips the whole masked set at once, which is why a
-     single deletion there LOOKS green).
+     `(t32d)` only, because a further guard still refuses), and the empty-parse arm, the
+     branch-side numeric-presence check and `[ -z "$p_bside" ]` are SUBSUMED. `(t32f)` is
+     the only control that strips the whole masked set at once, which is why a single
+     deletion there LOOKS green. ⛔ Neither artifact quotes a tally or a PASS total: both
+     drift as rows are added, so the list is by NAME and the mutation is re-runnable.
 
   ⛔ Checks 1 and 2 are not decoration, and check 1 alone was not enough. Measured on
   this rule, end to end, each `passed via PATCH match` with the anchor reproducing
