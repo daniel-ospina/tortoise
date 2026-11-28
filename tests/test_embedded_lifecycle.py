@@ -1333,6 +1333,39 @@ _DEFER_DEADLINE_CHILD = (
 )
 
 
+#: Test 6's child (review round 3, F1): the window closes from ANOTHER thread
+#: between the handler's depth check and its store. `_defer_depth` is replaced
+#: by an object that answers "open" on the first comparison and "closed" on
+#: the next, which is the interleaving exactly — deterministic, with no real
+#: thread race. Post-fix the handler re-reads after storing, sees the window
+#: gone and honours the stop; pre-fix it returns "parked" and the request is
+#: stranded (no `finally` will ever come back for it).
+_DEFER_STRANDED_PARK_CHILD = (
+    "import sys, time, os, signal\n"
+    "sys.path.insert(0, %(root)r)\n"
+    "import tortoise.embedded_lifecycle as lc\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
+    "try:\n"
+    "    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})\n"
+    "except (AttributeError, OSError, ValueError):\n"
+    "    pass\n"
+    "lc.install_embedded_signal_cleanup()\n"
+    "print('HANDLER_INSTALLED=%%s' %% (signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL,),"
+    " flush=True)\n"
+    "class ClosedUnderTheHandler:\n"
+    "    def __init__(self):\n"
+    "        self.reads = 0\n"
+    "    def __le__(self, other):\n"
+    "        self.reads += 1\n"
+    "        return self.reads > 1\n"
+    "lc._defer_depth = ClosedUnderTheHandler()\n"
+    "lc._defer_started_at = time.monotonic()\n"
+    "lc._embedded_term_handler(signal.SIGTERM, None)\n"
+    "print('PARKED_INSTEAD', flush=True)\n"
+    "time.sleep(30)\n"
+)
+
+
 def _run_child_and_read(argv, prefixes):
     """Run ``argv``, read its stdout until every prefix in ``prefixes`` has
     appeared (in any order), and return (proc, {prefix: line})."""
@@ -1644,6 +1677,73 @@ def test_signal_handler_never_takes_the_deferral_lock():
     finally:
         lc._defer_lock = original_lock
         window.__exit__(None, None, None)
+
+
+def test_a_window_closing_under_the_handler_does_not_strand_the_stop(tmp_path):
+    """#3055 review round 3, F1: no park may outlive the window that owns it.
+
+    The park is lock-free (so it cannot deadlock the main thread) while the
+    close takes the lock, so a WORKER-owned window can close between the
+    handler's depth check and its first store. Without a re-read the request is
+    parked into a state nobody harvests and nobody bounds: the stop is dropped
+    and the supervisor's SIGKILL leaves the unrecorded orphan this seam exists
+    to remove. The child simulates that exact interleaving deterministically.
+    """
+    child = _DEFER_STRANDED_PARK_CHILD % {"root": _REPO_ROOT}
+    proc, lines = _run_child_and_read(
+        [sys.executable, "-c", child, str(tmp_path)], ("HANDLER_INSTALLED=",))
+    try:
+        assert lines["HANDLER_INSTALLED="] == "HANDLER_INSTALLED=True", (
+            "#6177: the child did not install the guard "
+            f"({lines['HANDLER_INSTALLED=']!r})")
+        proc.wait(timeout=60)
+    except _subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail("#3055 F1: the parked request was stranded — the child "
+                    "survived with no window left to honour it; "
+                    f"child said: {_child_diagnosis(proc)}")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        if proc.returncode is None:
+            proc.wait()
+    out = _child_diagnosis(proc)
+    assert proc.returncode == -int(_signal.SIGTERM), (
+        "#3055 F1: a stop whose window closed underneath it must be honoured "
+        f"immediately (expected rc={-int(_signal.SIGTERM)}, got "
+        f"{proc.returncode}); child said: {out}")
+    assert "PARKED_INSTEAD" not in out, (
+        f"#3055 F1: the handler parked a request no window can harvest; {out}")
+
+
+def test_a_failed_watchdog_arm_does_not_leave_the_window_open(monkeypatch):
+    """#3055 review round 3, F2: a failed arm must leave the state as it found it.
+
+    `threading.Thread.start()` raises `RuntimeError` when pthread_create fails
+    (thread/FD exhaustion). With the arm outside the `try`, the depth stayed
+    incremented for the rest of the process and the stale start stamp then made
+    every later signal decline to park — a silent reversion to the pre-fix
+    behaviour, invisible to every other assertion here.
+    """
+    from tortoise import embedded_lifecycle as lc
+
+    def _boom():
+        raise RuntimeError("pthread_create: Resource temporarily unavailable")
+
+    monkeypatch.setattr(lc, "_arm_defer_watchdog", _boom)
+    with pytest.raises(RuntimeError), lc.defer_terminating_signals():
+        pytest.fail("the window body ran even though arming failed")
+    assert lc._defer_depth == 0, (
+        "#3055 F2: a failed watchdog arm left the window open "
+        f"(depth={lc._defer_depth!r}) — every later terminating signal would "
+        "decline to park and the deferral would be silently disabled for the "
+        "rest of the process")
+    assert lc._defer_started_at is None, (
+        "#3055 F2: the start stamp survived a failed arm "
+        f"({lc._defer_started_at!r}) — the next window would open with an "
+        "already-expired bound")
+    assert lc._deferred_signum is None
 
 
 def test_sigkill_owner_record_lets_reaper_reclaim_the_server(tmp_path,

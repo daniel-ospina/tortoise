@@ -1662,9 +1662,10 @@ def _release_owner(client, inner, sock: str | None = None) -> None:
 # The fix is not "shut down harder". From a signal handler the process cannot
 # tell its OWN in-flight connection from a CO-TENANT's, and embedded servers
 # are shared across processes, so a forceful SHUTDOWN could kill a server
-# another live process is using (the design decision recorded on #3055 and
-# scoped in docs/plans/2026-09-12-3055-embedded-server-lifetime.md: option 1,
-# "defer terminating signals across the construction window"). Deferring is
+# another live process is using (the design decision recorded on #3055,
+# comment #issuecomment-7236177327: option 1, "defer terminating signals
+# across the construction window"; option 2, fd-held ownership in the reaper,
+# is already landed as #3599/#4487/#4577). Deferring is
 # safe precisely because construction is BOUNDED, and it needs no mask: the
 # signal is recorded here and re-delivered through the ordinary #2203 teardown
 # once the window closes, at which point the process IS quiescent and the
@@ -1695,6 +1696,20 @@ def _release_owner(client, inner, sock: str | None = None) -> None:
 #     the window's `finally`, which a blocked construction never reaches.)
 #     A construction blocked inside C still runs no Python handler at all —
 #     pre-existing behaviour, not something the deferral changes.
+#   * The bound is PROCESS-WIDE, not per window (declared, review round 3):
+#     `_defer_started_at` is stamped by the first window and cleared only when
+#     the LAST window closes, so overlapping constructions share one 30 s
+#     epoch. A chain of overlapping windows therefore cannot defer a stop
+#     forever — which is the intent — at the cost that a later overlapping
+#     window opens with a partly spent bound and can be torn down mid-
+#     construction. Bounded, logged, and preferable to an unbounded deferral.
+#   * The design this implements is the recorded decision on #3055 (comment
+#     #issuecomment-7236177327: option 1, "defer terminating signals across the
+#     construction window", with option 2 — fd-held ownership in the reaper —
+#     already landed as #3599/#4487/#4577). The longer scoping document lives
+#     on the unmerged branch `docs/scoping-3055` (commit 667761108); it is
+#     cited by branch and commit rather than by path because a path that is
+#     not in the tree is a 404 for the next reader.
 #   * A construction that ABORTS (raises) still leaves the window through the
 #     context manager's `finally`, and a deferred request is still honoured
 #     there: the termination request wins over the exception, which is what a
@@ -1766,6 +1781,20 @@ def _defer_terminating_signal(signum) -> bool:
         # window is the same request ("stop"), and re-raising the FIRST one
         # keeps the exit convention the caller observed.
         _deferred_signum = int(signum)
+        # ⛔ RE-READ THE DEPTH — the store above is not atomic WITH the window's
+        # close (review round 3, F1). A WORKER thread can own the window
+        # (`mcp_server`/`selfhost`/`hosted_api`), and the GIL can switch
+        # between the depth check at the top of this function and this store:
+        # the close then harvests `_deferred_signum is None`, clears the
+        # stamps and returns normally, and no `finally` will ever come back
+        # for the request this caller just parked — the stop is dropped and
+        # the caller never dies (a Python handler cannot interleave with its
+        # OWN thread's `finally`, which is why only the multi-threaded case
+        # reaches this). The store is first-writer-wins, so the re-read is the
+        # proof that THIS caller owns the parked request; if no window is open
+        # any more, the stop is ours to honour now rather than park.
+        if _defer_depth <= 0:
+            return False
     return True
 
 
@@ -1795,31 +1824,54 @@ def _defer_watchdog_loop() -> None:
             if depth <= 0 and parked is None:
                 _defer_watchdog = None
                 return
-            if parked is not None and started is not None and (
-                    time.monotonic() - started) > _DEFER_DEADLINE_S:
+            if parked is not None and (
+                    started is None
+                    or (time.monotonic() - started) > _DEFER_DEADLINE_S):
+                # `started is None` with a parked request is the stranded-park
+                # state (F1): the window that should carry it closed before the
+                # handler finished storing it. Honouring it here is the belt to
+                # the handler's re-read braces — whichever thread gets there
+                # first, the stop is honoured exactly once (`_teardown_and_die`
+                # is re-entrancy-safe).
                 _deferred_signum = None
                 overran = True
             else:
                 overran = False
         if overran:
             logger.warning(
-                "#3055: embedded construction outran the %.0fs deferral bound "
-                "with a terminating signal parked — closing the servers and "
-                "dying now (%d) instead of holding the stop indefinitely",
+                "#3055: embedded construction overran the %.0fs deferral bound "
+                "(or closed under a parked request) — honouring the terminating "
+                "signal (%d) now instead of holding the stop indefinitely. "
+                "NOTE: the in-flight construction guarantees redislite's "
+                "last-client close DECLINES here, so the server may survive as "
+                "an orphan — reaped when it carries an owner record, and "
+                "fail-closed (never reaped) if it never got one. Bounding the "
+                "STOP is the contract on this path; closing the server is not "
+                "available from a non-main thread mid-construction.",
                 _DEFER_DEADLINE_S, parked)
             # EXIT CONVENTION ON THIS PATH, stated rather than accidental: the
             # callback is not the main thread, so `signal.signal` is refused and
             # the default disposition CANNOT be restored — re-raising would land
             # in this module's own handler instead of killing the process. So
             # `_teardown_and_die` takes its documented `os._exit(128+signum)`
-            # arm after closing the servers: status 143 for SIGTERM, not
-            # WIFSIGNALED. The supervisor sees the same "stopped" either way;
-            # what it must never see is a live process with a live server.
+            # arm: status 143 for SIGTERM, not WIFSIGNALED. The supervisor sees
+            # the same "stopped" either way; what it must never see is a live
+            # process still serving. (The warning above states the server's own
+            # survival honestly — review round 3, F4.)
             _teardown_and_die(parked)
 
 
 def _arm_defer_watchdog() -> None:
-    """Start the watchdog unless it is already running (never holds the lock)."""
+    """Start the watchdog unless it is already running (never holds the lock).
+
+    NEVER RAISES (review round 3, F2): this runs on the construction path, so
+    `threading.Thread.start()`'s `RuntimeError` (pthread_create failing on
+    thread/FD exhaustion) must not fail an embedded construction. Losing the
+    watchdog degrades to "a parked request waits for the window's `finally`" —
+    the pre-round-2 behaviour — while the ARRIVAL-time deadline still declines
+    to park anything past the bound, so the degradation is bounded and logged
+    rather than silent.
+    """
     global _defer_watchdog
     thread = _defer_watchdog
     if thread is not None and thread.is_alive():
@@ -1828,10 +1880,18 @@ def _arm_defer_watchdog() -> None:
     # the loser simply exits on its first tick (depth/parked are re-read under
     # the lock). One spare sleeping thread for one tick is cheaper than
     # holding `_defer_lock` across `Thread.start()`.
-    thread = threading.Thread(target=_defer_watchdog_loop,
-                              name="tortoise-defer-watchdog", daemon=True)
-    _defer_watchdog = thread
-    thread.start()
+    try:
+        thread = threading.Thread(target=_defer_watchdog_loop,
+                                  name="tortoise-defer-watchdog", daemon=True)
+        _defer_watchdog = thread
+        thread.start()
+    except (RuntimeError, MemoryError, OSError) as exc:
+        _defer_watchdog = None
+        logger.warning(
+            "#3055: could not start the deferral watchdog (%s) — a parked "
+            "terminating signal now waits for the construction window to "
+            "close instead of being honoured at the %.0fs bound",
+            exc, _DEFER_DEADLINE_S)
 
 
 @contextlib.contextmanager
@@ -1859,8 +1919,15 @@ def defer_terminating_signals():
         _defer_depth += 1
         if _defer_started_at is None:
             _defer_started_at = time.monotonic()
-    _arm_defer_watchdog()
     try:
+        # ⛔ INSIDE the `try` (review round 3, F2): if arming ever raised, the
+        # increment and the stamp above would never be unwound — the depth
+        # would stay >= 1 for the rest of the process and, once the stale stamp
+        # passed the deadline, `_defer_terminating_signal` would decline every
+        # later signal, silently reverting to the pre-fix behaviour this whole
+        # seam exists to remove. `_arm_defer_watchdog` is itself never-raise;
+        # this is the second lock on that door.
+        _arm_defer_watchdog()
         yield
     finally:
         parked: int | None = None
