@@ -417,6 +417,16 @@ cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 [ -n "${STUB_LOG:-}" ] && printf '%s\n' "$*" >> "$STUB_LOG"
 # ── rule (c) (#4255): the reviewed side, reconstructed by the gate ────────
+# The ANCESTRY read comes FIRST. `compare/<marker sha>...<head>` is asked with
+# `--jq .status` and answers whether the head DESCENDS from the reviewed commit
+# (`ahead`) or the branch was rewritten (`diverged`/`behind`). It must be routed
+# before the diff arm below: that arm matches ANY `/compare/` and would serve a
+# diff body where the gate expects one word, which would read as "not ahead" and
+# silently turn every rule-(c) case into a refusal.
+if grep -qE -- "/compare/" <<<"$*" && grep -qF -- "--jq .status" <<<"$*"; then
+    printf '%s\n' "${STUB_ANCESTOR_STATUS:-ahead}"
+    exit 0
+fi
 # Routed BEFORE the media-type arm: a `compare/<base>...<sha>` diff request
 # carries the SAME media type as the live-diff request, so a stub that routed
 # on the media type first would silently serve the LIVE diff as the REVIEWED
@@ -1103,21 +1113,30 @@ echo "── (t) acceptance rule (c): the PATCH projection survives a base advan
 #
 # The fixtures below are the REAL BYTES of that measurement: a git repo where a PR inserts
 # `PR-LINE` and `main` then inserts `MAIN-INSERT` inside the hunk's context window, with
-# the branch merged forward. The digests are LITERALS produced by agent-infra's own
-# `scripts/lib/diff-normalize.py` (the producer half), so this is also the CROSS-REPO
-# CONTRACT VECTOR: if either side's projection changes, one of these two files reddens.
+# the branch merged forward. The digests are LITERALS pinned to the projection THIS file
+# extracts from the workflow, and each is RECOMPUTED from the fixture before it is
+# compared (see `check_patch`), so a pin that stops reproducing reddens instead of
+# passing. ⛔ They are NOT pinned to the producer's bytes: measured 2026-11-27 against
+# agent-infra `origin/main` `scripts/lib/diff-normalize.py --patch-only`, the producer
+# DROPS the hunk frame entirely, so the two projections differ on every hunk-bearing
+# entry and the digests below do NOT equal the producer's. That divergence is DECLARED
+# in the workflow header (this consumer is the stricter half; agent-infra#4261 aligns the
+# producer). A comment here used to claim these were "recomputed from agent-infra's
+# --patch-only" and that "both sides changed together" — false, and unbackable: the
+# harness never executes the producer.
 #
-#   reviewed binding dfebaa86…   patch f7f1d204…
-#   live     binding 4d4d1118…   patch f7f1d204…   ← binding MOVED, patch IDENTICAL
-#   one byte edited  patch d747ddd2…               ← a fresh review IS owed
-#   whitespace added patch 13c304e8…               ← a fresh review IS owed (anti-patch-id)
-#   RENAMED file     patch 52810b48…               ← a fresh review IS owed (path is identity)
-#   DELETED line     patch d6e0cf6a…               ← a fresh review IS owed
+#   reviewed binding dfebaa86…   patch b2434708…
+#   live     binding 4d4d1118…   patch b2434708…   ← binding MOVED, patch IDENTICAL
+#   one byte edited  patch c71ae6af…               ← a fresh review IS owed
+#   whitespace added patch d99fac9b…               ← a fresh review IS owed (anti-patch-id)
+#   RENAMED file     patch 98ae79a1…               ← a fresh review IS owed (path is identity)
+#   DELETED line     patch 8662d5bd…               ← a fresh review IS owed
 # The rename/delete pairs exist because the workflow header used to claim BOTH
 # were "pinned by the harness" while no fixture carried either — a coverage
 # claim the harness did not back. They are also checked to move AWAY from the
 # reviewed digest, so neither pin can pass vacuously.
-#   RELOCATED into another scope  patch a DIFFERENT digest  ← a fresh review IS owed (t10)
+#   RELOCATED into another scope  patch a DIFFERENT digest  ← a fresh review IS owed (t20)
+#   REWRITTEN branch             refused on ANCESTRY      ← a fresh review IS owed (t22)
 #
 # ⛔ THE PATCH LITERALS MOVED ONCE, DELIBERATELY (fresh review of #4255, P1). The
 # projection used to drop the `@@ … @@` frame ENTIRELY, which made it position-blind:
@@ -1125,9 +1144,11 @@ echo "── (t) acceptance rule (c): the PATCH projection survives a base advan
 # projected IDENTICALLY, so a force-push that only MOVED the reviewed lines carried
 # the verdict with no base advance at all. The frame is now kept with its
 # enclosing-scope heading and without its numbers (`@@ l7` above — this fixture's hunk
-# has the heading `l7`). Both sides of the cross-repo contract changed together; the
-# literals above were recomputed from agent-infra's `diff-normalize.py --patch-only`
-# at the same head, and the inline twin produced the same three digests.
+# has the heading `l7`), and the digests above were recomputed from THIS projection.
+# ⛔ THE HEADING DOES NOT CLOSE THE WHOLE CLASS: a relocation WITHIN one scope still
+# projects identically (that is (t22)'s fixture, deliberately), and a base advance that
+# rewrites the heading (a column-0 line inserted above the change) REFUSES — an
+# over-block, documented in the workflow header. Both are declared, neither is silent.
 REVIEWED_DIFF_FILE="$T/rev-base-moved.diff"
 cat > "$REVIEWED_DIFF_FILE" <<'DIFFEOF'
 diff --git a/f.md b/f.md
@@ -1431,11 +1452,12 @@ diff_marker "$STALE" "$PB_REVIEWED" >> "$FORGED"
 STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
     STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$FORGED"
 assert_rc 0 "(t9) 25 forged marker lines beside ONE signed record: the signed record still carries"
-_t9_compares="$(grep -c -- "/compare/" "$T/gh.log" || true)"
-if [ "$_t9_compares" -le 1 ]; then
-    ok "(t9) the forged lines bought NO probe (${_t9_compares} compare call(s) — signature verified FIRST)"
+_t9_compares="$(grep -cE -- "compare/${BASE_SHA}\.\.\." "$T/gh.log" || true)"
+_t9_all_calls="$(grep -cE -- '/compare/|--jq \.base\.sha' "$T/gh.log" || true)"
+if [ "$_t9_compares" -le 1 ] && [ "$_t9_all_calls" -le 3 ]; then
+    ok "(t9) the forged lines bought NO probe (${_t9_compares} reviewed-diff compare(s), ${_t9_all_calls} rule-(c) call(s) — signature verified FIRST)"
 else
-    bad "(t9) the body's forged lines bought $_t9_compares compare calls — the probe fan-out is a function of PR TEXT"
+    bad "(t9) the body's forged lines bought ${_t9_compares} reviewed-diff compare(s) / ${_t9_all_calls} rule-(c) call(s) — the probe fan-out is a function of PR TEXT"
 fi
 if grep -qE -- "/compare/[0-9a-f]+\.\.\.0{20}" "$T/gh.log"; then
     bad "(t9) a forged marker's sha reached a compare probe (log: $(cat "$T/gh.log"))"
@@ -1454,11 +1476,23 @@ if [[ "$CAP_PIN" =~ ^[0-9]+$ ]]; then
     STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
         STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$CAPBODY"
     assert_rc 1 "(t9) signed stale records that match nothing still FAIL closed"
-    _t9_cap_compares="$(grep -c -- "/compare/" "$T/gh.log" || true)"
+    # ⛔ COUNT THE SHAPE, NOT THE ENDPOINT. Since the ancestry precondition the gate
+    # makes up to THREE calls per probe (ancestry read, base sha, reviewed diff) and
+    # ALL of them are repo-scoped `gh api` calls against the shared budget — so the
+    # assertion is two-sided: the EXPENSIVE per-probe compare is exactly CAP_PIN, and
+    # the rule-(c) call total is bounded by 3 x CAP_PIN. Counting `/compare/` alone
+    # would have read a correct 3-call probe as a cap violation (measured: 16 for 8).
+    _t9_cap_compares="$(grep -cE -- "compare/${BASE_SHA}\.\.\." "$T/gh.log" || true)"
+    _t9_cap_all="$(grep -cE -- '/compare/|--jq \.base\.sha' "$T/gh.log" || true)"
     if [ "$_t9_cap_compares" -eq "$CAP_PIN" ]; then
-        ok "(t9) the probe cap holds (${_t9_cap_compares} compares for $((CAP_PIN + 3)) signed records, cap $CAP_PIN)"
+        ok "(t9) the probe cap holds (${_t9_cap_compares} reviewed-diff compares for $((CAP_PIN + 3)) signed records, cap $CAP_PIN)"
     else
-        bad "(t9) $_t9_cap_compares compare calls for $((CAP_PIN + 3)) signed records (cap is $CAP_PIN) — the bound is not enforced"
+        bad "(t9) $_t9_cap_compares reviewed-diff compare calls for $((CAP_PIN + 3)) signed records (cap is $CAP_PIN) — the bound is not enforced"
+    fi
+    if [ "$_t9_cap_all" -le $((CAP_PIN * 3)) ]; then
+        ok "(t9) …and the TOTAL rule-(c) API spend is bounded (${_t9_cap_all} calls ≤ 3 x $CAP_PIN)"
+    else
+        bad "(t9) $_t9_cap_all rule-(c) calls for a $CAP_PIN-probe cap — a probe costs at most 3, so the bound leaked"
     fi
     assert_contains "(t9) …and the cap is reported, not silent" "stopped after ${CAP_PIN} distinct SIGNED patch probes"
 else
@@ -1667,8 +1701,12 @@ HEAD="$_saved_head"
 # inside `def alpha()` and shipped inside `def zulu()` projected IDENTICALLY, so a
 # force-push that only MOVED the reviewed lines carried the verdict — with no base advance
 # at all, which is not the harm this rule exists for. Keeping the hunk frame's
-# enclosing-scope heading closes that: the heading is derived from the enclosing
-# definition, which a base advance does not rewrite.
+# enclosing-scope heading closes THAT half of the class (a relocation between scopes).
+# ⛔ It does NOT close a relocation WITHIN one scope, and it is not free: git derives the
+# heading from the line preceding the hunk, so a base advance inserting a column-0 line
+# above the change rewrites it and the carry is REFUSED (an over-block, measured — see
+# §(u)'s "CONTEXT LINES ARE INDENTED ON PURPOSE" note, which is why that fixture cannot
+# see it). The same-scope half is closed by the ANCESTRY precondition, pinned in (t22).
 RELOC_REVIEWED="$T/reloc-reviewed.diff"
 cat > "$RELOC_REVIEWED" <<'DIFFEOF'
 diff --git a/g.py b/g.py
@@ -1710,6 +1748,94 @@ assert_rc 1 "(t20) the RELOCATED change is REFUSED end to end (anchor reproduces
 STUB_DIFF_FILE="$RELOC_REVIEWED" STUB_BASE_SHA="$BASE_SHA" \
     STUB_COMPARE_FILE="$RELOC_REVIEWED" run_gate "$T/body-t8"
 assert_rc 0 "(t20) and the UNRELOCATED change still carries — so the refusal above is the relocation, not a dead rule"
+
+
+# ── (t22) A REWRITTEN BRANCH IS NOT A CARRY (fresh review of #4255, P1) ────
+# ⛔ THE HOLE THIS CLOSES, MEASURED. The projection keeps the enclosing-scope heading,
+# so a relocation into ANOTHER scope is refused ((t20)). But a relocation WITHIN one
+# scope — the same `+`/`-` bytes, moved from after an early `return` to the end of the
+# same function — projects IDENTICALLY, and nothing else in rule (c) related the
+# reviewed sha to the head. Measured end to end on a bare force-push, with NO base
+# advance at all: `rc=0`, `passed via PATCH match`. The ANCHOR reproduced perfectly,
+# which is why the header's old claim that the residual was "bounded by the anchor"
+# was FALSE — the anchor proves where the REVIEWED bytes came from and says nothing
+# about the live branch.
+#
+# THE FIX IS REACHABILITY, NOT ANOTHER DIGEST: `compare/<marker sha>...<head>` answers
+# `ahead` only when the head DESCENDS from the reviewed commit. A base advance by merge
+# ("Update branch") keeps that true — that is the carry this rule exists for. A
+# force-push / rebase / amend rewrites the commit out of the history and answers
+# `diverged`, so rule (c) refuses and the verdict cannot ride a move.
+SAME_SCOPE_REVIEWED="$T/same-scope-reviewed.diff"
+cat > "$SAME_SCOPE_REVIEWED" <<'DIFFEOF'
+diff --git a/g.py b/g.py
+index 1111111..2222222 100644
+--- a/g.py
++++ b/g.py
+@@ -3,4 +3,6 @@ def alpha(x):
+     a1
++    if x: return -1
++    danger = os.system("rm -rf /tmp/x")
+     a2
+     a3
+DIFFEOF
+SAME_SCOPE_LIVE="$T/same-scope-live.diff"
+cat > "$SAME_SCOPE_LIVE" <<'DIFFEOF'
+diff --git a/g.py b/g.py
+index 5555555..6666666 100644
+--- a/g.py
++++ b/g.py
+@@ -3,4 +3,6 @@ def alpha(x):
++    if x: return -1
+     a1
+     a2
+     a3
++    danger = os.system("rm -rf /tmp/x")
+DIFFEOF
+SAME_SCOPE_ANCHOR="$(normalize_review_diff < "$SAME_SCOPE_REVIEWED" | openssl dgst -sha256 | awk '{print $NF}')"
+_ss_r="$(patch_projection_review_diff < "$SAME_SCOPE_REVIEWED" | openssl dgst -sha256 | awk '{print $NF}')"
+_ss_l="$(patch_projection_review_diff < "$SAME_SCOPE_LIVE" | openssl dgst -sha256 | awk '{print $NF}')"
+if [ "$_ss_r" = "$_ss_l" ]; then
+    ok "(t22) the fixture reproduces the blind spot: a SAME-SCOPE relocation projects identically (so the refusal below is the ancestry guard, not the projection)"
+else
+    bad "(t22) the same-scope fixture no longer projects identically — this case would pass for the WRONG reason, so the ancestry guard below is unattributed"
+fi
+# (a) The HARM the guard exists for: rewritten history, patch equal, anchor reproducible.
+diff_marker "$STALE" "$SAME_SCOPE_ANCHOR" > "$T/body-t22"
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" STUB_ANCESTOR_STATUS=diverged run_gate "$T/body-t22"
+assert_rc 1 "(t22) a FORCE-PUSHED branch does NOT carry a review, even though the patch projection matches (the ANCESTRY precondition)"
+assert_not_contains "(t22) …and no patch match is claimed" "passed via PATCH match"
+assert_contains "(t22) …and the operator is told the branch was REWRITTEN, not handed the generic stale-diff message" \
+    "is NOT an ancestor of this PR's head"
+if grep -qE -- "repos/${REPO_NAME}/compare/${STALE}\.\.\.${HEAD}" "$T/gh.log"; then
+    ok "(t22) the ancestry question was asked as compare/<marker sha>...<head> (the discriminator is reachability, not another digest)"
+else
+    bad "(t22) the gate never asked whether the reviewed commit is reachable from the head (stub log: $(cat "$T/gh.log"))"
+fi
+# (b) The other direction on the SAME bytes: an ADVANCED branch (the head descends from
+# the reviewed commit) still carries, so the refusal above is the rewrite and not a
+# rule that refuses everything. Without this half, deleting rule (c) would look green.
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" run_gate "$T/body-t22"
+assert_rc 0 "(t22) the SAME bytes on an ADVANCED branch still carry — so the refusal above is the rewrite, not a dead rule"
+# (c) MUTATION: delete the ancestry precondition and (t22) must PASS. This is what
+# makes the guard load-bearing rather than decoration.
+MUT_ANC="$T/mutant-no-ancestry.sh"
+sed 's/^  if \[ "\$p_rel" != "ahead" \]; then$/  if false; then/' "$RUN_BLOCK" > "$MUT_ANC"
+if cmp -s "$RUN_BLOCK" "$MUT_ANC"; then
+    bad "(t22) the ancestry mutation did not apply — the guard line changed shape, so this control proves NOTHING"
+else
+    _saved_block="$RUN_BLOCK"; RUN_BLOCK="$MUT_ANC"
+    STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+        STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" STUB_ANCESTOR_STATUS=diverged run_gate "$T/body-t22"
+    RUN_BLOCK="$_saved_block"
+    if [ "$GATE_RC" = "0" ]; then
+        ok "(t22) the MUTANT carries the force-push — so the ancestry precondition is what refuses it"
+    else
+        bad "(t22) the MUTANT still refused (rc=$GATE_RC) — (t22) does not depend on the ancestry precondition"
+    fi
+fi
 
 
 # ── (t21) AN UNSIGNED MARKER-SHAPED LINE BUYS NO API CALL (fresh review of #4255, P2) ──

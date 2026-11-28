@@ -141,10 +141,22 @@ name: ai-review-gate
 #     rendered artifact, and `main` landing work in a file this PR also changes
 #     rewrites the context lines around the PR's hunks.
 #   PATCH digest (#1377) = sha256 of the `--patch-only` projection: blob ids,
-#     hunk line numbers AND hunk context are dropped; every `+`/`-` line, the
-#     `diff --git`/`---`/`+++` path lines, mode/rename/binary lines and
-#     whitespace pass through BYTE-EXACT. It is BASE-MOVE INVARIANT, and it is
+#     hunk line numbers/counts AND hunk context are dropped; every `+`/`-` line,
+#     the `diff --git`/`---`/`+++` path lines, mode/rename/binary lines and
+#     whitespace pass through BYTE-EXACT, and each hunk's FRAME is kept as its
+#     enclosing-scope heading (`@@ def f():`, `@@` when there is none). It is
 #     the only projection that answers "did the AUTHORED change move?".
+#     ⛔ IT IS NOT UNCONDITIONALLY BASE-MOVE INVARIANT (corrected after the
+#     fresh review of #4255). Dropping CONTEXT and the numbers makes it
+#     invariant across a base advance that only rewrites context. The HEADING
+#     can still move: git derives it from the line preceding the hunk, so a base
+#     advance that inserts a column-0 line ABOVE the change (any markdown/text
+#     file, or a new `def` above the edited one) rewrites it. That case is
+#     REFUSED — an OVER-BLOCK, i.e. the pre-#4255 verdict, never a pass. Same for
+#     any base advance that re-groups the PR's hunks (one hunk becomes two). The
+#     heading is kept anyway because it is what makes the projection
+#     POSITION-BEARING, and a position-blind projection accepts a change that
+#     was MOVED — the one direction a gate must never fail in.
 # ⛔ Do NOT try to make the BINDING digest base-move invariant by dropping
 # context there: it is what `diff=` means to every producer in the fleet, and
 # changing it silently invalidates every marker ever signed (the #3076 shape).
@@ -154,6 +166,19 @@ name: ai-review-gate
 # compared are the bytes that marker was minted over (the same ANCHOR
 # agent-infra's `patch_dimension_carry` uses) — a marker whose reconstruction
 # does not reproduce its own `diff=` is refused, never guessed at.
+#
+# ⛔ WHAT THE ANCHOR DOES **NOT** PROVE (fresh review of #4255, P1). It proves the
+# provenance of the REVIEWED bytes. It says NOTHING about the live side, so it
+# cannot by itself bound the patch comparison's blind spot — an earlier version of
+# this header claimed it did, and that claim was false: the reviewed hunks and the
+# live hunks could be the same `+`/`-` bytes RELOCATED inside one scope, with the
+# anchor reproducing perfectly (measured: `rc=0, passed via PATCH match` on a bare
+# force-push that moved a reviewed line, with NO base advance at all). What bounds
+# it is a SEPARATE precondition enforced in `patch_arm_ok`: the marker's own signed
+# `@ sha` must be an ANCESTOR of this PR's head. A base advance by merge (what
+# `gh pr update-branch` does) keeps the reviewed commit reachable, so a genuine
+# carry still works; a REWRITTEN branch — force-push, rebase, amend — does not, and
+# rule (c) refuses there (documented degradation: pre-#4255 behaviour).
 #
 # WHY (c) EXISTS: without it, a clean review cannot survive the base advancing.
 # MEASURED (agent-infra#4255): one PR adds a line, `main` inserts a line inside
@@ -188,10 +213,11 @@ name: ai-review-gate
 # WHAT (c) COSTS, AND WHY THAT IS BOUNDED. It is consulted ONLY when (a) and (b)
 # found nothing, and within that it probes only markers whose HMAC VERIFIES,
 # de-duplicated on (sha,diff) and capped at PATCH_PROBE_CAP. Both bounds exist
-# because each probe makes two repo-scoped API calls while the marker list comes
+# because each probe makes THREE repo-scoped API calls (the ancestry read, the base
+# sha, and the compare) while the marker list comes
 # from PR TEXT on a `pull_request_target` workflow — see the full rationale at
 # the loop itself. Removing either bound re-opens the availability defect they
-# close; §(t6)/(t8)/(t9) of the harness redden if you do.
+# close; §(t6)/(t8)/(t9)/(t22) of the harness redden if you do.
 #
 # The signature is HMAC-SHA256 over the marker text, keyed by the
 # AI_REVIEW_GATE_KEY repo secret (the agent machine holds the same key at
@@ -619,9 +645,26 @@ jobs:
           # another function projected identically, so a force-push that only moved
           # the reviewed lines carried the verdict with no base advance at all
           # (measured by the fresh review of #4255). A relocation under the SAME
-          # heading still projects the same — a residual DECLARED here, and bounded
-          # by the anchor: the marker's signed `diff=` must still be reproduced from
-          # its own `@ sha` against the current base before this arm is consulted.
+          # heading still projects the same — a NARROW residual, DECLARED here, and
+          # NOT bounded by the anchor (the anchor proves the reviewed side's
+          # provenance and says nothing about the live one; a flat force-push that
+          # relocated a reviewed line carried with the anchor reproducing perfectly).
+          # It is bounded instead by the ANCESTOR precondition in `patch_arm_ok`:
+          # the reviewed sha must be reachable from the head, so the branch was
+          # ADVANCED, not rewritten. What is left is a merge-resolution that moves
+          # the author's own lines within one scope — which the heading check already
+          # catches whenever the scope changes, and which is pinned nowhere.
+          #
+          # ⛔ DECLARED DIVERGENCE FROM THE PRODUCER (measured 2026-11-27 against
+          # agent-infra origin/main `scripts/lib/diff-normalize.py --patch-only`): the
+          # producer at that head DROPS the hunk frame entirely, so the two
+          # projections differ byte-wise on every hunk-bearing entry. This consumer is
+          # therefore STRICTER, and the producer's verdict is a superset: where
+          # `record-review.sh --check-carry` says "carry", this gate may still refuse
+          # (never the reverse). `daniel-ospina/agent-infra#4261` aligns the producer
+          # with this frame; until it lands, a producer-side carry can end in a red
+          # gate, and the operator remedy is the one the diagnostic already prints —
+          # re-record on the current head.
           # KEPT, VERBATIM: the `diff --git`/`---`/`+++` lines (so the PATH is part of the identity),
           # every mode/rename/copy/similarity line, every `+`/`-` line BYTE-EXACT
           # including whitespace, and `\ No newline at end of file` markers. An entry
@@ -723,7 +766,8 @@ jobs:
               # standing on its own — the same fail-closed posture as (b).
               if [ -n "$live_diff_hash_norm" ]; then
                 live_patch_tmp="$(mktemp)"
-                if patch_projection_review_diff < "$live_diff_tmp" > "$live_patch_tmp"; then
+                if patch_projection_review_diff < "$live_diff_tmp" > "$live_patch_tmp" \
+                   && [ -s "$live_patch_tmp" ]; then
                   live_patch_hash="$(openssl dgst -sha256 < "$live_patch_tmp" | awk '{print $NF}')"
                 fi
                 rm -f "$live_patch_tmp"
@@ -864,8 +908,9 @@ jobs:
           # is narrowed to OWNER|MEMBER|COLLABORATOR, but the PR BODY is not
           # narrowed at all, and this workflow is `pull_request_target` BY DESIGN,
           # so a fork PR's body reaches the loop below. A marker LINE is ~257 bytes,
-          # so a 64 KiB body holds ~254 of them, and probing each one costs TWO
-          # repo-scoped `gh api` calls (base sha + compare) against the
+          # so a 64 KiB body holds ~254 of them, and probing each one costs THREE
+          # repo-scoped `gh api` calls (the ancestry read, the base sha, and the
+          # compare) against the
           # 1,000-request/hour-PER-REPOSITORY `GITHUB_TOKEN` budget that every
           # workflow in this repo shares. `ai-review-gate` is the Mergify queue's
           # ENTRY condition (#5433), so exhausting that budget would red the merge
@@ -879,7 +924,7 @@ jobs:
           PATCH_PROBE_CAP=8
 
           patch_arm_ok() { # <marker line> -> 0 iff its reviewed PATCH == this PR's live PATCH
-            local line="$1" p_sha="" p_diff="" p_base="" p_rt="" p_anchor="" p_patch=""
+            local line="$1" p_sha="" p_diff="" p_base="" p_rel="" p_rt="" p_anchor="" p_patch=""
             p_sha="$(printf '%s' "$line" | sed -nE 's/^.* @ ([0-9a-f]{40}).*$/\1/p')"
             p_diff="$(printf '%s' "$line" | sed -nE 's/^.* diff=([0-9a-f]{64}) \(.*$/\1/p')"
             [ "${#p_sha}" -eq 40 ] && [ "${#p_diff}" -eq 64 ] || return 1
@@ -887,6 +932,26 @@ jobs:
             [ "$p_sha" != "$expected" ] || return 1
             [ -n "$live_patch_hash" ] || return 1
             command -v gh >/dev/null 2>&1 || return 1
+            # ⛔ THE BRANCH MUST HAVE ADVANCED, NOT BEEN REWRITTEN (fresh review of
+            # #4255, P1). Rule (c) answers "did the REVIEWED change move?" — it is
+            # NOT an answer to "is this the same commit history?". Without this
+            # precondition a bare force-push that kept the reviewed `+`/`-` lines and
+            # moved them inside one scope carried the verdict: measured, `rc=0`
+            # `passed via PATCH match`, with the ANCHOR reproducing perfectly — the
+            # anchor proves the reviewed bytes' provenance and says nothing about the
+            # live side, so it cannot bound this. The discriminator is reachability:
+            # a base advance by MERGE (what `gh pr update-branch` does) leaves the
+            # reviewed commit an ANCESTOR of the head, while a force-push / rebase /
+            # amend rewrites it out of the history. `compare/<sha>...<head>` answers
+            # it in ONE call, whose `status` is `ahead` exactly when the head descends
+            # from that sha (`identical` cannot reach here — the head-bound case
+            # returned above). An unreadable answer refuses, so this can only NARROW
+            # rule (c), never widen it.
+            p_rel="$(gh api "repos/${REPO_NAME}/compare/${p_sha}...${expected}" --jq .status 2>/dev/null || true)"
+            if [ "$p_rel" != "ahead" ]; then
+              patch_ancestry_rejected=1
+              return 1
+            fi
             p_base="$(gh api "repos/${REPO_NAME}/pulls/${PR_NUMBER}" --jq .base.sha 2>/dev/null || true)"
             [[ "$p_base" =~ ^[0-9a-f]{40}$ ]] || return 1
             p_rt="$(mktemp)"
@@ -898,7 +963,13 @@ jobs:
             fi
             p_anchor="$(normalize_review_diff < "$p_rt" | openssl dgst -sha256 | awk '{print $NF}')"
             if [ "$p_anchor" != "$p_diff" ]; then rm -f "$p_rt"; return 1; fi
+            # ⛔ `[ -s ]` ON THE PROJECTION'S OWN OUTPUT, mirroring the producer
+            # (`record-review.sh`'s `diff_identity_pair`): a zero-byte projection still
+            # exits 0, and `sha256("")` is the CONSTANT e3b0c442…, which satisfies the
+            # 64-hex shape check — so an empty projection would compare EQUAL to an
+            # empty projection on the other side instead of refusing.
             p_patch="$(patch_projection_review_diff < "$p_rt" | openssl dgst -sha256 | awk '{print $NF}')"
+            if [ ! -s "$p_rt" ] || [ -z "$p_patch" ]; then rm -f "$p_rt"; return 1; fi
             rm -f "$p_rt"
             [[ "$p_patch" =~ ^[0-9a-f]{64}$ ]] || return 1
             [ "$p_patch" = "$live_patch_hash" ] || return 1
@@ -907,6 +978,7 @@ jobs:
           patch_sig_rejected=0
           patch_shape_rejected=0
           patch_probe_capped=0
+          patch_ancestry_rejected=0
           if [ -z "$candidates" ] && [ -n "$all_markers" ]; then
             patch_probes=0
             patch_probe_keys="|"
@@ -958,6 +1030,15 @@ jobs:
             candidates="$(printf '%s' "$candidates" | sed '/^$/d')"
             if [ "$patch_probe_capped" -eq 1 ]; then
               echo "::warning::AI review rule (c): stopped after ${PATCH_PROBE_CAP} distinct SIGNED patch probes (newest first); older recorded review records were not compared. This can only REFUSE evidence, never accept it — re-record on the current head if the carry matters."
+            fi
+            # ⛔ A DIAGNOSIS THE OPERATOR CAN ACT ON, not another "diff changed". When the
+            # only reason (c) refused is that the reviewed commit is not reachable from
+            # the head, the branch was REWRITTEN (force-push / rebase / amend) rather
+            # than advanced, and no amount of re-checking the digest will carry the
+            # review: a fresh review is owed. Without this line the operator sees the
+            # generic stale-diff message and hunts a base advance that already matches.
+            if [ "$patch_ancestry_rejected" -eq 1 ] && [ -z "$candidates" ]; then
+              echo "::warning::AI review rule (c): the recorded review's commit is NOT an ancestor of this PR's head, so the branch was REWRITTEN (force-push / rebase / amend) and not merely advanced onto a new base. A carried review would approve a history this branch no longer has, so rule (c) refuses: re-record a fresh review on the current head."
             fi
           fi
 
