@@ -6285,6 +6285,25 @@ test("#14359: a failed rewrite restores unusable transcript bytes and refuses fa
   assert.ok(refused.discards.some((d) => d.reason === "spool_write_failed"));
 });
 
+test("#14359: an orphan that is the only copy for the session being written is not credited", () => {
+  // Twin of `test_an_only_copy_orphan_for_the_session_being_written_is_not_credited`.
+  // The key has its meta AND its log, plus its own orphan. Without the session
+  // being written the orphan is superseded and spendable; for that session
+  // `pruneSpool` skips it, so the predicate must not credit it either.
+  const spool = tmpSpool();
+  const sid = "sess-credit-keep";
+  writeSpoolEntry(spool, snapshot(sid));
+  const log = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(`${log}.orphan`, "o".repeat(400));
+  const bounds = { maxEntries: 10, maxTotalBytes: spoolEntryBytes(spool, sid) + 10 };
+  assert.equal(spoolSaturated(spool, bounds), false, "a superseded orphan is credited");
+  assert.equal(
+    spoolSaturated(spool, bounds, { keepSessionId: sid }),
+    true,
+    "the orphan the prune skips for this session was credited against the ceiling",
+  );
+});
+
 test("#14359: duplicate metadata counts one physical entry in saturation and pruning", () => {
   // ⛔ EACH HALF MUST BE ABLE TO GO RED ON ITS OWN, and the first version of this
   // test could not: it asserted saturation on a FILED entry, and the predicate

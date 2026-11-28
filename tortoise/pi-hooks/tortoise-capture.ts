@@ -2969,7 +2969,7 @@ export function pruneSpool(
 export function spoolSaturated(
   dir: string,
   bounds: SpoolBounds = DEFAULT_BOUNDS,
-  projection: { projectedBytes?: number; replacesSessionId?: string } = {},
+  projection: { projectedBytes?: number; replacesSessionId?: string; keepSessionId?: string } = {},
   opts: { repair?: boolean } = {},
 ): boolean {
   // `repair: false` keeps the meta scan from MUTATING the spool (no ledger line,
@@ -3031,7 +3031,7 @@ export function admissionSaturated(
     )
       return false;
   }
-  return spoolSaturated(dir, bounds, { projectedBytes, replacesSessionId });
+  return spoolSaturated(dir, bounds, { projectedBytes, replacesSessionId, keepSessionId: sessionId });
 }
 
 /** The ceiling arithmetic of `spoolSaturated`, over an ALREADY-READ scan.
@@ -3048,15 +3048,24 @@ function saturatedForMetas(
   dir: string,
   metas: SpoolMeta[],
   bounds: SpoolBounds = DEFAULT_BOUNDS,
-  projection: { projectedBytes?: number; replacesSessionId?: string } = {},
+  projection: { projectedBytes?: number; replacesSessionId?: string; keepSessionId?: string } = {},
 ): boolean {
-  // Bytes `pruneSpool` may reclaim WITHOUT spending an undelivered entry: the
-  // orphan class is byte-evictable only (see below).
-  const reclaimableOrphanBytes = orphanPaths(dir).reduce((sum, path) => sum + fileSize(path), 0);
+  // USAGE is every byte on disk, the only-copy orphans included. CREDIT is only
+  // what `pruneSpool` may SPEND: an orphan that is the only copy of a capture is
+  // skipped by `orphanIsOnlyCopy`, so crediting it admits a write nothing can
+  // make room for. The keep witness must be the one `pruneSpool` gets for this
+  // write (the session being written, or the entry it replaces) — the mirror of
+  // `capture_spool._saturated_for_metas`.
+  const { projectedBytes, replacesSessionId, keepSessionId } = projection;
+  const keep = keepSessionId ?? replacesSessionId;
+  const orphans = orphanPaths(dir);
+  const orphanBytes = orphans.reduce((sum, path) => sum + fileSize(path), 0);
+  const reclaimableOrphanBytes = orphans
+    .filter((path) => !orphanIsOnlyCopy(dir, path, keep))
+    .reduce((sum, path) => sum + fileSize(path), 0);
   let total =
     [...entryBytesBySession(dir, metas).values()].reduce((sum, bytes) => sum + bytes, 0) +
-    reclaimableOrphanBytes;
-  const { projectedBytes, replacesSessionId } = projection;
+    orphanBytes;
   if (projectedBytes === undefined && replacesSessionId === undefined) {
     // STRICT: the question is whether ADDING an entry would cross the ceiling, so
     // a spool exactly AT the count ceiling is already saturated.
@@ -4063,8 +4072,9 @@ export async function flushSpool(
               restored !== undefined
                 ? "no turn log, but an `.orphan` for this key held its bytes —" +
                   " put back as the log and kept"
-                : "no turn log, but an `.orphan` for this key exists — a writer" +
-                  " moved the bytes aside before its replacement landed; kept",
+                : "no turn log, but an `.orphan` for this key exists and could" +
+                  " not be put back as the log (a log may have landed, or hard" +
+                  " links are unsupported) — kept",
               nowMs,
             ),
           );

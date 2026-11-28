@@ -2547,6 +2547,7 @@ def spool_saturated(
     *,
     projected_bytes: int | None = None,
     replaces_session_id: str | None = None,
+    keep_session_id: str | None = None,
     repair: bool = True,
 ) -> bool:
     """Is the spool at a ceiling with NOTHING EVICTABLE left to reclaim?
@@ -2607,7 +2608,8 @@ def spool_saturated(
     return _saturated_for_metas(
         root, metas, bounds,
         projected_bytes=projected_bytes,
-        replaces_session_id=replaces_session_id)
+        replaces_session_id=replaces_session_id,
+        keep_session_id=keep_session_id)
 
 
 def _saturated_for_metas(
@@ -2617,6 +2619,7 @@ def _saturated_for_metas(
     *,
     projected_bytes: int | None = None,
     replaces_session_id: str | None = None,
+    keep_session_id: str | None = None,
 ) -> bool:
     """The ceiling arithmetic of :func:`spool_saturated`, over an ALREADY-READ scan.
 
@@ -2644,8 +2647,12 @@ def _saturated_for_metas(
     # The predicate and the prune must agree on what is spendable, exactly as
     # `_saturated_for_metas` and `prune_spool` must agree on the entry side.
     orphan_bytes = sum(_file_size(p) for p in orphans)
+    # The keep witness must be the SAME one `prune_spool` is given for this write
+    # (the session being written, or the entry it replaces); otherwise the credit
+    # counts this write's own fresh orphan that the prune will skip.
+    keep = keep_session_id if keep_session_id is not None else replaces_session_id
     reclaimable_orphan_bytes = sum(
-        _file_size(p) for p in orphans if not _orphan_is_only_copy(root, p, None))
+        _file_size(p) for p in orphans if not _orphan_is_only_copy(root, p, keep))
     # #14359: one count per DISTINCT session_id. Two metas naming the same
     # session address the same files, so a per-meta sum counted them twice and
     # could exceed the cheap scan, which sums each file once and is the upper
@@ -2731,7 +2738,8 @@ def _admission_saturated(
     return spool_saturated(
         root, bounds,
         projected_bytes=projected_bytes,
-        replaces_session_id=replaces_session_id)
+        replaces_session_id=replaces_session_id,
+        keep_session_id=session_id)
 
 
 def _orphan_is_only_copy(root: Path, orphan: Path, keep_session_id: str | None) -> bool:

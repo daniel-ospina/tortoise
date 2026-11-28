@@ -5960,3 +5960,25 @@ def test_saturation_counts_an_only_copy_orphan_as_USAGE_not_credit(tmp_path):
     assert only_copy.exists(), "the only-copy orphan must survive the prune"
     assert not spendable.exists(), "the spendable orphan is the class the prune pays with"
     assert _meta_path(root, live).exists(), "an UNFILED entry is never evicted"
+
+
+def test_an_only_copy_orphan_for_the_session_being_written_is_not_credited(tmp_path):
+    """#14359 review cycle 7 — the saturation credit must use the prune's keep witness.
+
+    The key has its meta AND its log, plus its own orphan. For any other session the
+    orphan is superseded and spendable. For the session being written, `prune_spool`
+    is given that session as `keep` and skips the orphan, so the predicate must not
+    credit it either — otherwise it admits a write nothing can make room for.
+    """
+    from tortoise.capture_spool import _entries_dir, _entry_bytes, _log_path, spool_saturated
+
+    root = tmp_path / "credit-keep"
+    sid = "14359-credit-keep"
+    write_spool_entry(root, _snapshot(sid, turns=[{"role": "user", "content": "k" * 200}]))
+    orphan = _entries_dir(root) / f"{_log_path(root, sid).name}.orphan"
+    orphan.write_bytes(b"o" * 400)
+    bounds = Bounds(max_total_bytes=_entry_bytes(root, sid) + 10)
+
+    assert spool_saturated(root, bounds) is False, "a superseded orphan was not credited"
+    assert spool_saturated(root, bounds, keep_session_id=sid) is True, (
+        "the orphan the prune skips for this session was credited against the ceiling")
