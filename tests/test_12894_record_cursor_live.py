@@ -1259,6 +1259,14 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
                 "the ARMED arm's outage half must key the FORM on the cursor "
                 "ROW — `journal_skipped=False` does not imply an active row "
                 f"(`UNCUT_GRAPHS_SQL` is `no row OR mode <> active`): {text[-400:]!r}")
+            # ⛔ THE COUNT TWIN (review P3, round 40). The ENUMERATED arm got a
+            # count guard for this claim; the ARMED arm had none, so a
+            # duplicated bare "an outage is healed by a replay" could be
+            # prepended here with the leg green (measured: `1 passed`).
+            assert text.lower().count("an outage is healed by a replay") == 1, (
+                "the ARMED arm states the heal claim more than once — the "
+                "qualified form is the only one it may state: "
+                f"{text[-400:]!r}")
             assert "with NO `record_cursor` row a plain replay writes unchanged" in text, (
                 "the NO-ROW half is the one a plain replay heals; steering it to "
                 f"an allocating replay is refused there: {text[-400:]!r}")
@@ -1431,7 +1439,12 @@ def test_the_generic_write_failed_arm_names_the_remedy_for_its_arm(
             # leg green (measured: `1 passed`). One occurrence is the qualified
             # form itself; any re-added bare claim makes it two. The
             # retryable-half negative is spelled twice for this same reason.
-            assert text.count("an OUTAGE is healed by a replay") == 1, (
+            # ⛔ `.lower()` (review P2, round 40): a CASE-SENSITIVE count missed
+            # a second bare claim written as its own sentence — "An OUTAGE is
+            # healed by a replay.", the most natural way to prepend one, and the
+            # all-lowercase spelling too. Both measured `1 passed`. Case-folding
+            # is what makes the count match the SHAPE rather than one spelling.
+            assert text.lower().count("an outage is healed by a replay") == 1, (
                 "the ENUMERATED arm states the heal claim more than once — "
                 "which FORM follows the cursor row is the ONLY heal it may "
                 f"state: {text[-400:]!r}")
