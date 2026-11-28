@@ -842,7 +842,17 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # instrument prescribed the lost-belief shape it exists to report.
         "     head(collect(coalesce(carrier.is_operator, false))) "
         "AS carrier_is_operator, "
-        "     head(collect(carrier.op_type)) AS carrier_op_type\n"
+        "     head(collect(carrier.op_type)) AS carrier_op_type, "
+        # #14796: the POSITION axis of the carrier, from the SAME group (no
+        # fourth OPTIONAL MATCH, so ``count4b`` and SAMPLE_LIMIT are untouched).
+        # EP's ``_live_only`` reads both axes, so a successor closed by
+        # ``isClosed`` (or parked in a ``terminal`` slot) is EP-dead exactly like
+        # a terminal-STATUS one — and this row is handed a real bool for the
+        # marker, the same way ``carrier_outdated`` is, so the mirror reads a
+        # value whose truthiness IS its comparison.
+        "     head(collect(coalesce(carrier.isClosed, false))) "
+        "AS carrier_closed, "
+        "     head(collect(carrier.pipelineSlot)) AS carrier_slot\n"
         # ⛔ ONE HOP OF LOOKAHEAD, because "the successor is itself terminal" is NOT
         # the same fact as "there is a live head to re-point onto": the Object lane can
         # terminalize without a supersession (so the successor names no successor at
@@ -857,6 +867,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "AND id(nxt) <> id(sup) AND id(nxt) <> carrier_id\n"
         "WITH sup, r, active, carrier_count, carrier_id, carrier_status, "
         "     carrier_sb, carrier_is_operator, carrier_op_type, carrier_outdated, "
+        "     carrier_closed, carrier_slot, "
         "     count(nxt) AS next_count, "
         "     head(collect(nxt.status)) AS next_status, "
         "     head(collect(coalesce(nxt.outdated, false))) AS next_outdated, "
@@ -871,7 +882,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # ⛔ The same SHAPE rule one hop out: EP's DIRECT-edge arm refuses an
         # ``op_type``-only node, so a successor that carries only that is not a head
         # a direct edge can be re-pointed onto (see the carrier note above).
-        "     head(collect(nxt.op_type)) AS next_op_type\n"
+        "     head(collect(nxt.op_type)) AS next_op_type, "
+        # #14796: the next hop's POSITION axis, for the reason hop 1 carries it.
+        "     head(collect(coalesce(nxt.isClosed, false))) AS next_closed, "
+        "     head(collect(nxt.pipelineSlot)) AS next_slot\n"
         # ``r.idx`` and the OPERATOR's ``direction`` are projected because the repair
         # differs in the idx-0 source slot (ep.py's ``source_stripped`` hazard),
         # ``op_type`` because EP's operator predicate is the flag OR ``op_type``
@@ -918,7 +932,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "carrier_count, "
         "carrier_id, carrier_status, carrier_sb, carrier_is_operator, "
         "carrier_op_type, carrier_outdated, next_count, next_status, "
-        "next_outdated, next_is_operator, next_op_type "
+        "next_outdated, next_is_operator, next_op_type, "
+        # #14796: appended LAST so every existing index keeps its position.
+        "carrier_closed, carrier_slot, next_closed, next_slot "
         f"LIMIT {SAMPLE_LIMIT}",
     )
 
@@ -939,7 +955,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
          _sup_flag, sup_op_type,
          carrier_count, _carrier_id, carrier_status, carrier_sb,
          carrier_is_operator, carrier_op_type, carrier_outdated, next_count,
-         next_status, next_outdated, next_is_operator, next_op_type) = row
+         next_status, next_outdated, next_is_operator, next_op_type,
+         carrier_closed, carrier_slot, next_closed, next_slot) = row
         # ⛔ ``is True`` is the whole test, and the INTEGER ``1`` must NOT pass it:
         # ``update_entity(p, is_operator=1)`` is a door (measured — the property then
         # holds ``1``), but this engine does NOT compare ``1 = true`` (``RETURN 1 =
@@ -1041,12 +1058,23 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # — and that comparison is strict too, so the mirror is handed a real
             # bool rather than a value whose truthiness may not be its comparison.
             "carrier_outdated": carrier_outdated is True,
+            # #14796: the POSITION marker is handed on as a real bool too, for
+            # the same reason — and the slot as stored, compared exactly by the
+            # shared predicate.
+            "carrier_closed": carrier_closed is True,
+            "carrier_slot": carrier_slot,
             "carrier_terminal": is_terminal_status(carrier_status,
-                                                   carrier_outdated is True),
+                                                   carrier_outdated is True,
+                                                   is_closed=carrier_closed is True,
+                                                   stage_slot=carrier_slot),
             "next_count": next_count, "next_status": next_status,
             "next_outdated": next_outdated is True,
+            "next_closed": next_closed is True,
+            "next_slot": next_slot,
             "next_terminal": is_terminal_status(next_status,
-                                                next_outdated is True),
+                                                next_outdated is True,
+                                                is_closed=next_closed is True,
+                                                stage_slot=next_slot),
             # ...and the same pair one hop out (see the carrier note above).
             "next_is_operator": next_is_operator is not False,
             "next_is_shaped": (next_is_operator is not False
@@ -2950,7 +2978,13 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             f"MATCH (n:Point) WHERE {_kinds_w('n')} "
             "AND n.validFrom IS NOT NULL AND n.validTo IS NOT NULL "
             "RETURN n.id, n.validFrom, n.validTo, n.status, "
-            "coalesce(n.outdated, false) "
+            "coalesce(n.outdated, false), "
+            # #14796: the POSITION axis rides the same page, so the branch below
+            # asks the two-axis rule — a claim ended only by `isClosed` / a
+            # `terminal` slot is frozen by the same SDK-wide guard (#9649) and the
+            # executable-looking `tortoise_update_point` remedy is unexecutable
+            # for it, which is the whole reason this branch exists.
+            "coalesce(n.isClosed, false), n.pipelineSlot "
             # `n.id` is NOT unique (colliding ids are a tested shape), so
             # ordering by it alone is not a total order. This scan pages with
             # SKIP/LIMIT, and each page is a SEPARATE query, so a tie group
@@ -2964,7 +2998,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             f"SKIP {offset} LIMIT {CHECK8_PAGE}",
             params=params,
         )
-        for wid, w_from, w_to, w_status, w_outdated in window_rows:
+        for wid, w_from, w_to, w_status, w_outdated, w_closed, \
+                w_slot in window_rows:
             k_from = _created_sort_key(w_from)
             k_to = _created_sort_key(w_to)
             if k_from[0] != 0 or k_to[0] != 0:
@@ -2987,7 +3022,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     # and never PRESCRIBES one: a `tortoise_update_point(...)`
                     # call here would be the unexecutable repair the pre-#7819
                     # text handed out.
-                    if is_terminal_status(w_status, bool(w_outdated)):
+                    if is_terminal_status(w_status, bool(w_outdated),
+                                          is_closed=w_closed,
+                                          stage_slot=w_slot):
                         _fix = (
                             f"Not repairable through the SDK: point {wid} is a "
                             "terminal claim, whose temporal record every "

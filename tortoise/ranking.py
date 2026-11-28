@@ -1410,7 +1410,16 @@ class GraphRanker:
             # only a posterior statistic when the pair is stored — the 1.0
             # defaults above otherwise answer the Beta(1,1) maximum 1/12 for a
             # claim with no belief (see `ep_pair_stored`).
-            "  n.posterior_alpha, n.ep_alpha, n.posterior_beta, n.ep_beta"
+            "  n.posterior_alpha, n.ep_alpha, n.posterior_beta, n.ep_beta, "
+            # #14796: the POSITION axis rides the TAIL after the pair
+            # (14 = `isClosed`, 15 = `pipelineSlot`) so the #2490 gate below can
+            # hand `is_terminal_status` every input it takes. A record ended
+            # ONLY on that axis — `isClosed` true, `status` still `live`, no
+            # `outdated` — otherwise kept its stored posterior classified as
+            # MEASURED EP on this ranker. Appended, never inserted: the
+            # 10..13 pair indices `ep_pair_stored` reads keep their meaning
+            # under the len guards.
+            "  coalesce(n.isClosed, false), n.pipelineSlot"
         )
         rows = epistemic_sweep(
             self.projection.g, cypher, {"ids": ids})
@@ -1442,11 +1451,16 @@ class GraphRanker:
                      else EP_STATE_MEASURED if measured_raw
                      else EP_STATE_BASELINE)
             has_ep = measured_raw
-            # #2490: terminal rows (status in the terminal vocab OR the legacy
-            # outdated flag) never surface as measured/contested EP. The len
-            # guard tolerates test doubles mirroring the pre-#2490 row shape
-            # (the live query always returns the status/outdated columns).
-            if len(row) > 8 and is_terminal_status(row[7], bool(row[8])):
+            # #2490: terminal rows (ended on EITHER axis — the terminal vocab,
+            # the legacy outdated flag, or #14796's position axis) never surface
+            # as measured/contested EP. The len guard tolerates test doubles
+            # mirroring the pre-#2490 row shape (the live query always returns
+            # the status/outdated columns) and, for the position columns at
+            # 14/15, the pre-#14796 shape.
+            if len(row) > 8 and is_terminal_status(
+                    row[7], bool(row[8]),
+                    is_closed=row[14] if len(row) > 14 else None,
+                    stage_slot=row[15] if len(row) > 15 else None):
                 has_ep = False
             # #11702: fold the #2490 gate into the STATE, through the shared
             # resolver — a terminal claim's decayed (1,1) posterior is a stored
@@ -2034,7 +2048,12 @@ class StateRanker:
             "  n.confidence, n.posterior_alpha, n.ep_alpha, "
             # #11702: the raw β columns too, so `ep_pair_stored` can tell a
             # stored pair from the coalesced 1.0 default (see GraphRanker).
-            "  n.posterior_beta, n.ep_beta"
+            "  n.posterior_beta, n.ep_beta, "
+            # #14796: the POSITION axis (13 = `isClosed`, 14 = `pipelineSlot`),
+            # appended after the 8..12 belief tail so every index
+            # `ep_pair_stored`/`has_prior` read keeps its meaning. See
+            # GraphRanker._fetch_point_signals for why the gate needs it.
+            "  coalesce(n.isClosed, false), n.pipelineSlot"
         )
         rows = epistemic_sweep(
             self.projection.g, cypher, {"ids": ids})
@@ -2047,9 +2066,14 @@ class StateRanker:
             # #2490: terminal rows never surface as measured/contested EP (len
             # guard — see GraphRanker). #2598: the len guard also covers the
             # test fakes' 5-tuple row shape, so an absent status column reads
-            # as "not a draft" rather than raising.
+            # as "not a draft" rather than raising. #14796: the position
+            # columns (13/14) are read under the same guard, so a pre-#14796
+            # row shape answers from the word axis rather than raising.
             status = row[5] if len(row) > 5 else ""
-            if len(row) > 6 and is_terminal_status(row[5], bool(row[6])):
+            if len(row) > 6 and is_terminal_status(
+                    row[5], bool(row[6]),
+                    is_closed=row[13] if len(row) > 13 else None,
+                    stage_slot=row[14] if len(row) > 14 else None):
                 has_ep = False
             # #11702: a width needs BOTH operands stored — see
             # `ep_pair_stored`, the one rule `why` and `annotate_ep_batch`
@@ -2606,7 +2630,11 @@ class GapsRanker:
             # follow the same precedence GraphRanker and StateRanker use.
             "  n.confidence, n.posterior_alpha, n.ep_alpha, "
             # #11702: the raw β columns (10/11) — see `ep_pair_stored`.
-            "  n.posterior_beta, n.ep_beta",
+            "  n.posterior_beta, n.ep_beta, "
+            # #14796: the POSITION axis (12 = `isClosed`, 13 = `pipelineSlot`),
+            # appended after the 8..11 belief tail. See
+            # GraphRanker._fetch_point_signals for why the gate needs it.
+            "  coalesce(n.isClosed, false), n.pipelineSlot",
             {"ids": ids},
             labels=labels,
         )
@@ -2619,9 +2647,14 @@ class GapsRanker:
             # #2490: terminal rows never surface as measured/contested EP (len
             # guard — see GraphRanker). #2598: the len guard also covers the test
             # fakes' 4-tuple row shape, so an absent status column reads as "not a
-            # draft" rather than raising.
+            # draft" rather than raising. #14796: the position columns (12/13)
+            # are read under the same guard — an ended-on-position record stops
+            # being reported as measured EP on this ranker too.
             status = row[4] if len(row) > 4 else ""
-            if len(row) > 5 and is_terminal_status(row[4], bool(row[5])):
+            if len(row) > 5 and is_terminal_status(
+                    row[4], bool(row[5]),
+                    is_closed=row[12] if len(row) > 12 else None,
+                    stage_slot=row[13] if len(row) > 13 else None):
                 has_ep = False
             # #11702: a width needs BOTH operands stored (see StateRanker).
             pair_stored = (ep_pair_stored(posterior_alpha=row[8],
@@ -2936,11 +2969,17 @@ class SubgraphExpander:
             "    ELSE null END "
             "  ELSE null END AS confidence, "
             f"  CASE WHEN labels(n)[0] = 'Point' THEN {ep_state_cypher('n')} "
-            "  ELSE null END AS ep_state",
+            "  ELSE null END AS ep_state, "
+            # #14796: the POSITION axis (10 = `isClosed`, 11 = `pipelineSlot`),
+            # appended so the #2490 fold below can hand `is_terminal_status`
+            # every input it takes — this was the FIFTH read surface still
+            # answering from the lifecycle word alone.
+            "  coalesce(n.isClosed, false), n.pipelineSlot",
             params={"ids": list(nodes)},
         ).result_set
         for (nid, label, display, kind, is_op, status, outdated,
-             measured_raw, confidence, state) in rows:
+             measured_raw, confidence, state, is_closed,
+             pipeline_slot) in rows:
             node = nodes.get(nid)
             if node is None:
                 continue
@@ -2974,7 +3013,12 @@ class SubgraphExpander:
                 node["ep_state"] = ep_state_resolve(
                     state,
                     measured=bool(measured_raw) and not is_terminal_status(
-                        status or "", bool(outdated)))
+                        status or "", bool(outdated),
+                        # #14796: the position axis, from the same row — an
+                        # `isClosed` record (or one parked in a `terminal`
+                        # slot) is not a measurement either.
+                        is_closed=is_closed,
+                        stage_slot=pipeline_slot))
                 node["confidence"] = (None if confidence is None
                                       else round(float(confidence), 6))
 

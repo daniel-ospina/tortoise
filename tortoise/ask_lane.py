@@ -848,16 +848,27 @@ def _ask_d8_decoration_unavailable(hits: list[dict]) -> bool:
     evidence would render superseded content as current — surfaced as
     ``retrieval_degraded=True`` (never a silent success).
 
-    Terminality is decided by the SHARED ``live.is_terminal_status`` on
-    ``(status, outdated)`` — the one vocabulary every read surface uses
-    (#2901), never a hand-written status subset. The legacy ``outdated``
+    Terminality is decided by the SHARED ``live.is_terminal_status`` — the one
+    vocabulary every read surface uses (#2901), never a hand-written status
+    subset — asked of all four of its inputs (#14796: the word, the legacy flag,
+    ``isClosed``, and a stage in the resolved ``terminal`` slot). The legacy ``outdated``
     flag matters here because ``invalidate_point`` writes the flag and
     leaves ``status`` untouched: a status-only test read an invalidated
     claim as CURRENT and returned ``False`` (no degradation) on exactly the
     shape this gate exists to catch (#2294)."""
     from tortoise.live import is_terminal_status
     for h in hits:
-        if (is_terminal_status(h.get("status"), bool(h.get("outdated")))
+        # #14796: BOTH axes. A hit ended on the POSITION axis (`isClosed`, or a
+        # stage in the resolved `terminal` slot) with its status still `live` is
+        # terminal to every other reader, and its missing supersession markers
+        # are exactly the decoration failure this gate reports — reading the word
+        # alone let it through as a silent success. The markers ride the hit's
+        # state map (`fetch_point_epistemic_state` carries them), so `.get()` is
+        # the honest read: a hit that carries no position key was written before
+        # the axis existed, which is the same answer as an unstored marker.
+        if (is_terminal_status(h.get("status"), bool(h.get("outdated")),
+                               is_closed=h.get("isClosed"),
+                               stage_slot=h.get("pipelineSlot"))
                 and not (h.get("superseded_by") or h.get("supersedes")
                          or h.get("valid_from") or h.get("valid_to")
                          or h.get("expired_at"))):

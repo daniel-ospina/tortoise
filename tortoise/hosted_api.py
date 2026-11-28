@@ -27784,6 +27784,19 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # dedup resolution carries NO terminal filter, so it can re-key
             # the successor onto an already-dead node and raise on the
             # TARGET — the identical retry-proof 500 on the other endpoint.
+            # ⛔ #14796 DECLARED EXCEPTION — these two calls cannot carry the
+            # position axis, and the reason is the CONTRACT, not this call site:
+            # `_prior_state` is a `(status, outdated)` PAIR produced by
+            # `live.classify_lifecycle_fanout` over `live.LIFECYCLE_FANOUT_QUERY`
+            # (3 columns), whose tuple arity is shared with
+            # `sdk._assert_lifecycle_guard`'s statement IN LOCKSTEP — the whole
+            # point of that helper is that the pre-check and the guard ask the
+            # SAME question about the SAME row. Widening it means changing both
+            # statements, the classifier's public tuple and its five consumers
+            # (including the log lines below, which index `[0]`/`[1]`) — a
+            # change to the WRITE GUARD's own residual, which #13450 records as
+            # its separate decision rather than a tidy-up here. Passing an axis
+            # this row does not have would read as answered and answer nothing.
             _prior_state = _terminal_state(pr.existing_id)
             _succ_state = _terminal_state(resolved_pid)
             if _prior_state is not None and _is_terminal_status(*_prior_state):

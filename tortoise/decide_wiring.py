@@ -40,7 +40,7 @@ def find_operators(proj, op_type: str, source_id: str, target_id: str,
     """Existing operators on this bridge, as dicts with the facts EP needs.
 
     Each row is ``{"id", "status", "outdated", "label", "direction",
-    "targets"}``.
+    "targets", "isClosed", "pipelineSlot"}``.
 
     Returns ALL matches, not just the first: a graph already polluted by an
     earlier run has duplicate copies of every edge, and a relevance edge must
@@ -71,7 +71,10 @@ def find_operators(proj, op_type: str, source_id: str, target_id: str,
         "WHERE op.op_type = $op AND ri.idx = 0 AND ro.idx > 0 "
         + label_arm +
         "RETURN op.id, op.status, coalesce(op.outdated, false), "
-        "coalesce(op.label, ''), coalesce(op.direction, '')",
+        "coalesce(op.label, ''), coalesce(op.direction, ''), "
+        # #14796: the POSITION axis rides the SAME row, so `is_ranked` /
+        # `status_note` ask EP's own two-axis rule without a second read.
+        "coalesce(op.isClosed, false), op.pipelineSlot",
         params={"sid": source_id, "tid": target_id, "op": op_type,
                 "label": label},
     ).result_set
@@ -90,6 +93,9 @@ def find_operators(proj, op_type: str, source_id: str, target_id: str,
     return [{"id": row[0], "status": row[1] or "live",
              "outdated": bool(row[2]), "label": row[3] or "",
              "direction": row[4] or "",
+             # #14796: the position markers, so this row answers both axes.
+             "isClosed": bool(row[5]) if len(row) > 5 else False,
+             "pipelineSlot": row[6] if len(row) > 6 else None,
              "targets": int(counts.get(row[0], 0))} for row in rows]
 
 
@@ -110,11 +116,25 @@ def shared_bridges(rows: list[dict]) -> list[dict]:
 
 
 def is_ranked(row: dict) -> bool:
-    """EP's own rule (`tortoise.live._live_only`): not draft, not terminal."""
+    """EP's own rule (`tortoise.live._live_only`): not draft, not terminal.
+
+    ⛔ BOTH AXES (#14796). `_live_only` is a CYPHER predicate that has always
+    read the position axis (`isClosed`, or a stage in the resolved `terminal`
+    slot) beside the lifecycle word; this mirror read only the word, so a bridge
+    the graph records as ended — closed on the position axis, status still
+    `live` — was reported as RANKED, and `status_note` then declined to say why
+    it was excluded, because neither of its branches fired. The two inputs ride
+    the SAME `find_operators` row (`coalesce(op.isClosed, false)` /
+    `op.pipelineSlot`), so no caller does a second read; `.get()` because a
+    caller that builds a row by hand (a test double) reads as "no position",
+    which is the same answer as an unstored marker.
+    """
     from tortoise.live import is_draft_status, is_terminal_status
 
     return (not is_draft_status(row["status"])
-            and not is_terminal_status(row["status"], row["outdated"]))
+            and not is_terminal_status(row["status"], row["outdated"],
+                                       is_closed=row.get("isClosed"),
+                                       stage_slot=row.get("pipelineSlot")))
 
 
 def status_note(row: dict) -> str | None:
@@ -135,7 +155,32 @@ def status_note(row: dict) -> str | None:
                 "the ranking until it is promoted "
                 "(update_point(id, status='live')); it is NOT duplicated "
                 "(#6671)")
-    if is_terminal_status(row["status"], row["outdated"]):
+    if is_terminal_status(row["status"], row["outdated"],
+                          is_closed=row.get("isClosed"),
+                          stage_slot=row.get("pipelineSlot")):
+        # #14796: `_live_only` reads BOTH axes, so this branch is now reached by
+        # a bridge ended only on the POSITION axis — whose status is still
+        # `live`. Saying "a TERMINAL status" about that row would be false, so
+        # the note names the axis that actually excluded it, from the ONE
+        # declaration (`live.ending_axes`). The word-axis wording is unchanged,
+        # because it is a contract the decide surface already states
+        # (`tests/test_decide.py` pins `TERMINAL` + `status=<word>` on it).
+        from tortoise.live import TERMINAL_STAGE_SLOT, ending_axes
+
+        axes = ending_axes(row["status"], row["outdated"],
+                           is_closed=row.get("isClosed"),
+                           stage_slot=row.get("pipelineSlot"))
+        if not ({"status", "outdated"} & set(axes)):
+            markers = ", ".join(
+                "isClosed=true" if m == "isClosed"
+                else f"pipelineSlot={TERMINAL_STAGE_SLOT!r}"
+                for m in axes)
+            return (f"elected operator {row['id']}, {markers} "
+                    f"(status={row['status']}) — an ENDED record on the "
+                    "POSITION axis (#13034's second source, #14796); EP "
+                    "excludes it and the lifecycle doors cannot resurrect "
+                    "it, so this bridge stays out of the ranking; it is NOT "
+                    "duplicated (#6671)")
         return (f"elected operator {row['id']}, status={row['status']} — a "
                 "TERMINAL status; EP excludes it (#2422) and update_point "
                 "cannot resurrect it, so this bridge stays out of the ranking; "

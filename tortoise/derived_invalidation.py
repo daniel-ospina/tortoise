@@ -132,6 +132,10 @@ from .goal_judgement import (
 from .live import (
     TERMINAL_EXCLUDED_STATUSES,
     is_position_ended,  # #13034: the position half of the currency rule
+    # #14796: the ONE predicate the READER rule is answered from — the goal's
+    # own retirement question is the same question, so it asks the same
+    # function rather than re-spelling a vocabulary test beside it.
+    is_terminal_status,
 )
 
 __all__ = [
@@ -1044,12 +1048,24 @@ def _retired_by_status(goal: dict) -> bool:
     #13065 review finding 1. The type-first test is the same one the write
     guard applies (``_is_lifecycle_word``): a membership test over a raw value
     raises ``TypeError`` on an unhashable one, and a repair route that raises is
-    not a repair route.
+    not a repair route — so a NON-``str`` status is read as the empty word, which
+    is what the pre-#14796 spelling answered too (its ``issubclass`` guard
+    short-circuited the membership test).
+
+    ⛔ AND THE POSITION AXIS (#14796). The question is "is this goal retired?",
+    not "does its lifecycle word say so" — design §6's rule has two sources and
+    either one alone is an ending. Answered from the word alone, a goal closed by
+    ``isClosed`` (or parked in a stage whose slot is ``terminal``) still had its
+    ``goalState`` cache repaired as live, i.e. this function reported LIVE for a
+    goal the graph records as ended. The dict comes from ``get_entity``, which is
+    ``properties(n)``, so both markers are already in hand — the caller's
+    hand-built dict (:func:`reconcile_goal_states`) now selects them too.
     """
     status = goal.get("status")
-    ended_on_status = (issubclass(type(status), str)
-                       and str.__str__(status) in TERMINAL_EXCLUDED_STATUSES)
-    return ended_on_status or bool(goal.get("outdated"))
+    word = str.__str__(status) if issubclass(type(status), str) else ""
+    return is_terminal_status(word, bool(goal.get("outdated")),
+                              is_closed=goal.get("isClosed"),
+                              stage_slot=goal.get("pipelineSlot"))
 
 
 def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
@@ -1235,8 +1251,14 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
 #: two scans is counted, reported and repaired twice.
 _GOAL_STATE_CANDIDATES = (
     "MATCH (n) WHERE NOT n:Point AND toStringOrNull(n.goalState) IN $words "
+    # #14796: the POSITION columns ride this scan so the sweep asks the goal's
+    # ``status`` axis the SAME question the door does (`_retired_by_status`),
+    # from the same row — no second read of a node already in hand. Without them
+    # a goal closed by `isClosed` (or in a `terminal` slot) short-circuited as
+    # `consistent` while the door cleared its word.
     "RETURN n.id AS id, n.goalState AS word, n.status AS status, "
-    "n.outdated AS outdated "
+    "n.outdated AS outdated, coalesce(n.isClosed, false) AS is_closed, "
+    "n.pipelineSlot AS pipeline_slot "
     "ORDER BY n.id LIMIT $lim"
 )
 
@@ -1589,8 +1611,8 @@ def reconcile_goal_states(
         _GOAL_STATE_CANDIDATES,
         params={"words": words, "lim": limit + 1},
     ).result_set or []
-    rows: list[tuple[str, str, Any, Any]] = [
-        (row[0], row[1], row[2], row[3])
+    rows: list[tuple[str, str, Any, Any, Any, Any]] = [
+        (row[0], row[1], row[2], row[3], row[4], row[5])
         for row in result if row and row[0]]
     # A matched node with no `id` cannot be named to the entity surface, so it is
     # not repairable here — and it is COUNTED rather than filtered away: a
@@ -1630,7 +1652,8 @@ def reconcile_goal_states(
               "consistent": 0, "preserved": 0, "gone": 0, "failed": 0,
               "wouldRepair": 0, "notDurable": not_durable,
               "unaddressable": unaddressable}
-    for goal_id, word, stored_status, stored_outdated in rows:
+    for goal_id, word, stored_status, stored_outdated, stored_closed, \
+            stored_slot in rows:
         counts["scanned"] += 1
         record: dict[str, Any] = {"goalId": goal_id, "from": word}
         # ⛔ #13065 review round 5, finding 2: "the word already stands" is NOT
@@ -1652,7 +1675,12 @@ def reconcile_goal_states(
         # door clears (measured: `SET n.outdated = true` + a `met` cache ⇒
         # `consistent: 1`, word left standing, door answers `cleared: True`).
         retired = _retired_by_status({"status": stored_status,
-                                      "outdated": stored_outdated})
+                                      "outdated": stored_outdated,
+                                      # #14796: the position axis, from the
+                                      # same scan row — see the sweep note
+                                      # above on why the two cannot differ.
+                                      "isClosed": stored_closed,
+                                      "pipelineSlot": stored_slot})
         try:
             standing = latest_judgement(sdk, goal_id=goal_id)
             state = standing.get("judgementState") if standing else None

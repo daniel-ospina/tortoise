@@ -7350,12 +7350,21 @@ _SUPERSESSION_DEAD_SETS: dict[str, frozenset[str]] = {
 }
 
 
-def _is_terminal_point_status(status) -> bool:
+def _is_terminal_point_word(status) -> bool:
     """`live.is_terminal_status` without the legacy flag — the STATUS half only.
 
     The guard reads one column, so it asks the recorded predicate about that
     column rather than re-deriving a vocabulary (#10371's rule). The flag half is
     not consulted because the guard's question is worded from `status`.
+
+    ⛔ NOT THE READER RULE, and renamed so a census of one can tell (#14796). Its
+    input is a status WORD from a row the caller already holds, never the row, so
+    it has no position axis to pass and none could be given to it — and what it
+    feeds is a WORD for a refusal message (`dead_seen`), not a currency verdict.
+    It used to be called ``_is_terminal_point_status``, name-colliding with the
+    shared predicate exactly as ``cache_projection._is_terminal_status`` did.
+    When a caller needs CURRENCY it must call `live.is_terminal_status` with both
+    axes, and the census fails closed on that call.
     """
     from tortoise.live import is_terminal_status
     return is_terminal_status(status)
@@ -24232,12 +24241,18 @@ class TortoiseSDK:
             if result.result_set:
                 return True
             rows = proj.g.query(
-                "MATCH (n:Point {id:$id}) RETURN n.status, n.outdated",
+                # #14796: the POSITION columns ride the SAME read, so the
+                # re-issue conjunct below asks the two-axis rule the WHERE it
+                # mirrors asks (`_live_only` reads both).
+                "MATCH (n:Point {id:$id}) RETURN n.status, n.outdated, "
+                "coalesce(n.isClosed, false), n.pipelineSlot",
                 params={"id": id},
             ).result_set
             if not rows:
                 return False
-            status, outdated = rows[0]
+            status, outdated = rows[0][0], rows[0][1]
+            _pos_closed = rows[0][2] if len(rows[0]) > 2 else None
+            _pos_slot = rows[0][3] if len(rows[0]) > 3 else None
             if status == 'live':
                 # #1088: already-live is an idempotent success for a
                 # STATUS-ONLY promote (the arm's post-check completes the
@@ -24261,7 +24276,8 @@ class TortoiseSDK:
             # the refusal. The predicate is the shared mirror
             # (`live.is_terminal_status`), never a second `outdated` test.
             if (status is None or status == 'draft') and not is_terminal_status(
-                    status, bool(outdated)):
+                    status, bool(outdated),
+                    is_closed=_pos_closed, stage_slot=_pos_slot):
                 return False
             if _raise_update_point_status_error(
                     proj, id, status_only=len(_props_param) == 1,
@@ -50305,7 +50321,11 @@ class TortoiseSDK:
             rows = proj.g.query(
                 "MATCH (p:Point {id:$id}) RETURN p.content, p.validFrom, "
                 "p.validTo, p.createdAt, p.validFromPrecision, "
-                "p.validToPrecision, p.status, p.outdated",
+                "p.validToPrecision, p.status, p.outdated, "
+                # #14796: the POSITION columns ride the SAME read, so the
+                # `terminal` field on each chain entry answers the two-axis
+                # rule instead of the lifecycle word alone.
+                "coalesce(p.isClosed, false), p.pipelineSlot",
                 params={"id": cur},
             ).result_set
             if not rows:
@@ -50315,7 +50335,8 @@ class TortoiseSDK:
                             "point_id": point_id,
                             "at_date": at_date, "chain": []}
                 break
-            content, vf, vt, created, vfp, vtp, st, od = rows[0]  # noqa: RUF059
+            (content, vf, vt, _created, vfp, vtp, st, od,
+             _p_closed, _p_slot) = rows[0]
             entry = {"id": cur, "content": content,
                      "valid_from": vf, "valid_to": vt,
                      # #11826: the STORED state, on the chain entry so
@@ -50328,7 +50349,9 @@ class TortoiseSDK:
                      # (``live.is_terminal_status``, the one mirror), so a
                      # caller reading this field cannot disagree with the loader
                      # about whether the entry point is dead.
-                     "terminal": is_terminal_status(st, bool(od))}
+                     "terminal": is_terminal_status(
+                         st, bool(od), is_closed=_p_closed,
+                         stage_slot=_p_slot)}
             entry.update(window_read_fields(vf, vt, vfp, vtp))
             chain.append(entry)
             older = proj.g.query(
@@ -54801,7 +54824,7 @@ class TortoiseSDK:
                     nameless.append("Point")
             for _id, _nid, stored_status, _succ in rows:
                 if (dead_seen is None and stored_status != _SUPERSEDED_STATUS
-                        and _is_terminal_point_status(stored_status)):
+                        and _is_terminal_point_word(stored_status)):
                     dead_seen = str(stored_status)
         if not nameless:
             # Every bound row ALREADY names a successor: the pair is coherent
