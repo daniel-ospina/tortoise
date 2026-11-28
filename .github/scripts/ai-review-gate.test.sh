@@ -2237,7 +2237,72 @@ STUB_DIFF_FILE="$DUP_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
 assert_rc 1 "(t20b) …and an authored commit after the review is refused"
 
 
-# ── (t26) REPEATED RECORDS COST ONE PROBE — AND WHAT IS NOT ATTRIBUTABLE ─────
+# ── (t29) AN EMPTY PROJECTION NEVER CARRIES (the sha256("") class) ───────────
+# ⛔ THE ONE FALSE PASS THE MUTATION SWEEP FOUND UNPINNED. `sha256("")` is the CONSTANT
+# `e3b0c442…`, which satisfies every 64-hex shape check — so if BOTH projections came out
+# empty they would compare EQUAL and the arm would carry. TWO guards prevent it (the live
+# side's `[ -s "$live_patch_tmp" ]` and the reviewed side's `[ -s "$p_patch_fn_out" ]`),
+# and neither was individually pinned: removing ONE is invisible because the other
+# refuses (measured — the single-guard mutants redden nothing). So this section pins the
+# CLASS in both directions: with the guards in place the empty projection is REFUSED, and
+# with both removed it CARRIES — which is the false pass they exist to stop.
+_pp_empty_mutant() { # <dst> [strip-guards]
+    python3 - "$RUN_BLOCK" "$1" "${2:-0}" <<'PYEOF'
+import re, sys
+src, dst, strip = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+text = open(src).read()
+lines = text.split("\n")
+out, skip = [], False
+for line in lines:
+    if line.startswith("patch_projection_review_diff() {"):
+        out.append("patch_projection_review_diff() { cat >/dev/null; }")
+        skip = True
+        continue
+    if skip:
+        if line == "}":
+            skip = False
+        continue
+    if strip:
+        line = re.sub(r'^[ ]*&& \[ -s "\$live_patch_tmp" \]; then$', '    && true; then', line)
+        line = re.sub(r'^[ ]*if \[ ! -s "\$p_patch_fn_out" \]; then rm -f "\$p_rt" "\$p_patch_fn_out"; return 1; fi$', '  :', line)
+    out.append(line)
+open(dst, "w").write("\n".join(out))
+PYEOF
+}
+MUT_PP_EMPTY="$T/mutant-empty-projection.sh"
+_pp_empty_mutant "$MUT_PP_EMPTY" 0
+if cmp -s "$RUN_BLOCK" "$MUT_PP_EMPTY"; then
+    bad "(t29) the empty-projection mutation did not apply — the projector's shape changed, so this control proves NOTHING"
+else
+    _saved_block="$RUN_BLOCK"; RUN_BLOCK="$MUT_PP_EMPTY"
+    STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+        STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t1"
+    RUN_BLOCK="$_saved_block"
+    if [ "$GATE_RC" = "0" ]; then
+        bad "(t29) an EMPTY projection CARRIED — sha256(\"\") matched itself into a pass"
+    else
+        ok "(t29) a projection that emits nothing is REFUSED (sha256(\"\") cannot become evidence)"
+    fi
+fi
+# …and the two guards are what refuse it: remove BOTH and the same fixtures carry.
+MUT_PP_EMPTY2="$T/mutant-empty-projection-unguarded.sh"
+_pp_empty_mutant "$MUT_PP_EMPTY2" 1
+if cmp -s "$MUT_PP_EMPTY" "$MUT_PP_EMPTY2"; then
+    bad "(t29) the guard-stripping mutation did not apply — so the CARRIES half below proves nothing"
+else
+    _saved_block="$RUN_BLOCK"; RUN_BLOCK="$MUT_PP_EMPTY2"
+    STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+        STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t1"
+    RUN_BLOCK="$_saved_block"
+    if [ "$GATE_RC" = "0" ]; then
+        ok "(t29) with BOTH non-empty guards removed the empty projections match and the gate CARRIES — so those two guards are what stop this false pass"
+    else
+        bad "(t29) even with both guards removed the gate refused (rc=$GATE_RC) — something else refuses this, so the empty-projection hazard is not what the guards address"
+    fi
+fi
+
+
+# ── (t26) REPEATED RECORDS COST ONE PROBE# ── (t26) REPEATED RECORDS COST ONE PROBE — AND WHAT IS NOT ATTRIBUTABLE ─────
 # The workflow header used to name four cases as pinning the two availability bounds;
 # the cycle-2 review measured that deleting the SIGNATURE-FIRST check reddens (t9)x2,
 # (t10)x2 and (t21) — not (t6)/(t8)/(t22) — and that deleting the in-loop (sha,diff)
