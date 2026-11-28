@@ -3985,6 +3985,13 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
         # an accident of the population.
         "V1–V3 landed in this PR.", "V1 through V3 landed.", "V1..V3 landed.",
         "V3–V1 landed.", "Satisfies #13036: V1–V3", "Only V1–V3 landed.",
+        # ⛔ round 31 P1-a: a subset range BESIDE a full range. Round 30 fixed the union of ranges with
+        # the ids but still folded the ranges into each other, so a full-span range absorbed the subset
+        # and masked it — the fix is that every range is judged ALONE. These spellings are the only
+        # ones that execute that: without a co-occurring full range the fold is harmless.
+        "V1–V3 of V1–V6 landed in this PR.", "The bar is V1–V6; this PR does V1–V3.",
+        "Rows V1–V3 of the V1–V6 bar are proved.", "V1–V6 — this PR proves V1–V3.",
+        "| V1–V3 of V1–V6 | done |",
         # round 28 P1-b/R1: a subset `Satisfies` beside a complete closing claim
         "Satisfies #13036: V2", "Satisfies #13036: V2, V3",
         "V3–V6 are in the predecessor PR", "V1–V6 — see the predecessor PR",
@@ -4008,6 +4015,25 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
             body = place(disclosure)
             findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
             assert stats["clean"] == 0, (body, stats)
+    # ⛔ round 31 P1-b: the CLAUSE-granular narrowing beside a COMPLETE CLOSING CLAIM, asserted
+    # explicitly because its witness line is an AFFIRMATIVE clause naming all six — putting it in the
+    # matrix above would be wrong (in most placements that sentence IS a correct complete close).
+    # The clause read existed only for the whole-body fallback, so with the closing line already
+    # claiming every row the fallback never ran and the narrowing split across two clauses of one
+    # line was invisible: the datum was computed and then not read. Removing the clause call from the
+    # refusal makes all four of these `clean` (measured).
+    for body in (
+        "Closes #13036 (rows V1–V6)\n"
+        "V1, V2, V3, V4, V5, V6 verified in the programme. This PR: V2.\n",
+        "Closes #13036\nSatisfies #13036: V1, V2, V3, V4, V5, V6\n"
+        "V1, V2, V3, V4, V5, V6 verified in the programme. This PR: V2.\n",
+        "Closes #13036 (V1, V2, V3, V4, V5, V6)\n"
+        "The programme covers V1, V2, V3, V4, V5, V6. This PR: V2.\n",
+        "Closes #13036 (rows V1–V6)\n"
+        "All six rows V1, V2, V3, V4, V5, V6 are proved in the programme. This PR: V2.\n",
+    ):
+        findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
+        assert findings == [] and stats["clean"] == 0 and stats["ambiguous"] == 1, (body, stats)
     # ⛔ AND THE SPLIT FORM MUST AGREE WITH THE ONE-LINE FORM (round 26). The enumeration was only
     # catching the one-line spelling because an id from the PREVIOUS sentence happened to land on the
     # same line; one-sentence-per-line is the natural PR-body style, so the split form is the common

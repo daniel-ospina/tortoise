@@ -1623,16 +1623,27 @@ def _names_a_proper_subset_in(unit: str, rows: list[str]) -> bool:
     #   narrow — explicit ids, plus only ranges that ARE the whole claim (so `(row V2 of V1–V6)` is
     #            V2 here, as it is to `_row_range_span`).
     # Neither can invent a row: both expand from the issue's own order.
+    # ⛔ AND EACH RANGE IS INDEPENDENT EVIDENCE — IT IS NEVER FOLDED INTO THE OTHERS (review round 31,
+    # P1). Round 30 fixed the union of ranges with the ids, but the ranges were still UNIONED WITH EACH
+    # OTHER into `wide`, so a full-span range on the same line absorbed a subset range and masked it:
+    #   `V1–V3 of V1–V6 landed in this PR.`    -> wide = {V1..V6}, narrow = {} -> `clean`
+    #   `The bar is V1–V6; this PR does V1–V3.` -> same
+    #   `| V1–V3 of V1–V6 | done |`             -> same (table cell)
+    # Six such cells, each one step from a pinned shape and all visible with the issue's own ids.
+    # A fold can only ever answer "is the UNION of what this line mentions a subset?", which is the
+    # wrong question: `V1–V3` is a proper subset of the six whatever else the line also mentions. So
+    # every candidate set is judged ALONE — the explicit ids, and then EACH range's span — and a
+    # negative read refuses if ANY of them is a proper subset. `Closes #N (rows V1–V6)` still reads
+    # complete because its only candidate is the full span.
     order = {row: i for i, row in enumerate(rows)}
     explicit = set(_explicit_ids(unit, rows))
-    wide, narrow = set(explicit), set(explicit)
+    if explicit and not set(rows) <= explicit:
+        return True
     for match in _range_matches(unit, rows):
         lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
-        span = set(rows[lo:hi + 1])
-        wide |= span
-        if _range_is_the_whole_claim(unit, match, rows):
-            narrow |= span
-    return any(reading and not set(rows) <= reading for reading in (wide, narrow))
+        if not set(rows) <= set(rows[lo:hi + 1]):
+            return True
+    return False
 
 
 def _names_a_proper_subset(text: str, rows: list[str]) -> bool:
@@ -1660,7 +1671,9 @@ def _names_a_proper_subset(text: str, rows: list[str]) -> bool:
                for line in strip_code(text, strict=True)[0].splitlines())
 
 
-def _a_clause_names_a_proper_subset(text: str, rows: list[str]) -> bool:
+def _a_clause_names_a_proper_subset(text: str, rows: list[str],
+                                   issue: int | None = None,
+                                   repo: str | None = None) -> bool:
     """Does any CLAUSE of `text` name SOME but not ALL of the rows — the fallback's partiality test?
 
     ⛔ WHY THE WHOLE-BODY FALLBACK NEEDS IT, AND WHY AT CLAUSE GRANULARITY (review round 29, P2).
@@ -1678,9 +1691,21 @@ def _a_clause_names_a_proper_subset(text: str, rows: list[str]) -> bool:
     subset without help from here, and a duplicate expansion would be the second implementation this
     file keeps having to remove.
     """
-    return any(_names_a_proper_subset_in(clause, rows)
-               for line in strip_code(text, strict=True)[0].splitlines()
-               for clause in _clauses(line, rows))
+    # ⛔ A CLAUSE THAT CLOSES A DIFFERENT ISSUE IS NOT A STATMENT ABOUT THIS ONE'S ROWS (review round 31,
+    # P1 — caught by a pinned test, not by prose). `Closes #13036 (V1 … V6), closes #13037 (V2)` is ONE
+    # complete close of #13036 plus a second, unrelated close; read as clauses, `closes #13037 (V2)`
+    # names V2 — a declared row of #13036 — so this returned True and accused a COMPLETE close of
+    # claiming only V2. A foreign closing clause (and its attached qualifier) is excluded here, the same
+    # exclusion `_narrowing_sibling_ids` makes, so the two reads agree about what a clause is about.
+    for line in strip_code(text, strict=True)[0].splitlines():
+        spans = _clause_spans(line, rows)
+        foreign = _foreign_closing_clauses(line, rows, issue, repo)
+        for i, (a, b) in enumerate(spans):
+            if i in foreign:
+                continue
+            if _names_a_proper_subset_in(line[a:b], rows):
+                return True
+    return False
 
 # ⛔ THE POSITIVE MARKER FOR *IDs* (review round 9): round 8 retired the prose-cue blocklist for
 # RANGES, but the ids read still decided polarity by vocabulary — anything `_DISCLAIMER_RE` did not
@@ -1770,6 +1795,34 @@ def _narrowing_ids(line: str, match: re.Match, rows: list[str]) -> set[str]:
     return ids
 
 
+def _foreign_closing_clauses(line: str, rows: list[str], issue: int | None,
+                             repo: str | None) -> set[int]:
+    """Clause indices that CLOSE A DIFFERENT ISSUE, including each one's attached qualifier.
+
+    ⛔ ONE IMPLEMENTATION, TWO READERS (review round 31, P1). `Closes #13036 (V1 … V6), closes #13037
+    (V2)` is one complete close of #13036 plus an unrelated close of #13037. Read as clauses,
+    `closes #13037 (V2)` names V2 — a declared row of #13036 too — so a NEGATIVE read called a
+    COMPLETE close partial and accused it of claiming V2. The first fix for this lived inside
+    `_narrowing_sibling_ids`; `_a_clause_names_a_proper_subset` then re-derived a worse version of it
+    and disagreed with it, which is exactly the second-implementation drift this file keeps removing.
+    The qualifier belongs to the foreign close by the SAME attachment rule the closing-line read uses
+    (a bracket or a spaced dash), so `, closes #M (V2)` puts V2 out of scope rather than in it.
+    """
+    if issue is None:
+        return set()
+    spans = _clause_spans(line, rows)
+    foreign: set[int] = set()
+    for i, (a, b) in enumerate(spans):
+        if not set(_claims_in(line[a:b], None, repo)["closing"]) - {issue}:
+            continue
+        foreign.add(i)
+        if i + 1 < len(spans):
+            sep = line[b:spans[i + 1][0]].strip()
+            if sep == "(" or sep in {"—", "–"} or "(" in sep:
+                foreign.add(i + 1)
+    return foreign
+
+
 def _narrowing_sibling_ids(line: str, rows: list[str], claimable: set[int],
                            issue: int | None = None, repo: str | None = None) -> set[str]:
     """The ids a NARROWING sibling clause names when NO RANGE matched — `(V1, …, V6; V2 only)` ⇒ V2.
@@ -1799,18 +1852,7 @@ def _narrowing_sibling_ids(line: str, rows: list[str], claimable: set[int],
     ids: set[str] = set()
     order = {row: i for i, row in enumerate(rows)}
     spans = _clause_spans(line, rows)
-    foreign: set[int] = set()
-    for i, (a, b) in enumerate(spans):
-        if issue is None or not set(_claims_in(line[a:b], None, repo)["closing"]) - {issue}:
-            continue
-        foreign.add(i)
-        # …and its ATTACHED qualifier (a bracket or a spaced dash), by the same attachment rule the
-        # closing-line read uses: `, closes #M (V2)` puts the foreign claim's rows in the NEXT
-        # clause, and reading them as this issue's narrowing is the wrong-claim-set finding above.
-        if i + 1 < len(spans):
-            sep = line[b:spans[i + 1][0]].strip()
-            if sep == "(" or sep in {"—", "–"} or "(" in sep:
-                foreign.add(i + 1)
+    foreign = _foreign_closing_clauses(line, rows, issue, repo)
     for i, (a, b) in enumerate(spans):
         if i in claimable or i in foreign:
             continue
@@ -2200,7 +2242,14 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
     # (`V2 needed the migration; V1-V3, V5, V6 were renames`) now reads AMBIGUOUS. That is the cheap
     # error in this file's ranking — a counted abstention, never a pass — and it is the price of not
     # shipping a false PASS that only a longer word list would have caught.
-    if set(rows) <= named and _names_a_proper_subset(text, rows):
+    # ⛔ AND THE CLAUSE READING GATES THIS REFUSAL TOO (review round 31, P1). `_a_clause_names_a_proper
+    # _subset` was consulted ONLY by the whole-body fallback, so a narrowing split across two CLAUSES of
+    # one line was invisible whenever the closing line already claimed every row — the fallback never
+    # ran, and `Closes #N (rows V1–V6)` + `V1 … V6 verified in the programme. This PR: V2.` read
+    # `clean`. The datum was computed and then not read. Both granularities are asked here, so the
+    # same sentence cannot get different answers from the two paths.
+    if set(rows) <= named and (_names_a_proper_subset(text, rows)
+                               or _a_clause_names_a_proper_subset(text, rows, issue, repo)):
         named = set()
         refused = True
     # ⛔ THE REFUSAL MUST BE REPORTED TO THE CALLER, NOT JUST APPLIED HERE (review round 28, P1). Returning
@@ -2413,7 +2462,7 @@ def classify_partial_close(body: str, number: int | str,
             # `clean` at the reviewed head with no cue word anywhere, which is why the test has to be
             # structural. Refusing here yields AMBIGUOUS (the caller's next branch) — a counted
             # abstention, never a pass.
-            if affirmative_all and not _a_clause_names_a_proper_subset(body, rows):
+            if affirmative_all and not _a_clause_names_a_proper_subset(body, rows, issue, repo):
                 stats["clean"] += 1
                 continue
             stats["ambiguous"] += 1
