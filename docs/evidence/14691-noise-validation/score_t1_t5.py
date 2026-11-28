@@ -35,7 +35,10 @@ OUT = HERE / "out"
 RULE_T1 = ("PASS iff the second ingestion adds no RE-STATED knowledge: 0 new "
            "Objects, 0 new Subjects, 0 same-name entities, and no Point whose text "
            "re-states an existing Point (>= 0.8 content-token overlap with a "
-           "pass-1 Point). Events are reported SEPARATELY and are not counted as "
+           "pass-1 Point). The POPULATION for the same-name leg is the entities the typed "
+           "full scan RESOLVES — not every entity in the graph — so the coverage is "
+           "reported beside the result; names the scan cannot enumerate are not examined. "
+           "Events are reported SEPARATELY and are not counted as "
            "noise on the object axis: a re-ingestion IS an occurrence, so one "
            "Event per capture is expected. ⛔ The restatement population is the Points "
            "the WRITE RECEIPT reports, and every one of them is `statement` kind — so "
@@ -394,6 +397,17 @@ def t1(receipt: dict) -> dict:
             },
         },
         "same_name_entities_after_both_passes": dup_names,
+        # ⛔ The same-name leg can only see what the typed full scan RESOLVES, and
+        # `population_coverage` says how much that is. Stated as numbers because the
+        # unstated version read as a whole-graph "0 names resolve to two ids", which 35
+        # unexamined entities cannot support.
+        "same_name_population": {
+            "entities_examined": len(readback.get("entities") or []),
+            "coverage": (readback.get("population_coverage") or {}),
+            "note": ("`entities_examined` is every entity the typed full scan resolves; "
+                     "`coverage.unresolved` counts the ones it cannot, which this leg "
+                     "never sees"),
+        },
         "verdict": verdict,
     }
 
@@ -420,8 +434,13 @@ def t2(receipt: dict, corpus: dict) -> dict:
         if pt["doc_id"] not in fact["stated_in"]:
             continue
         text = str(pt.get("text") or "")
+        # ⛔ FOUR directions, both wordings each way — RULE_T2 says "both directions", and
+        # an earlier cut dropped `wording_b`'s reverse and still printed "both". Dropping a
+        # direction can only MISS a candidate, and a missed candidate is a missed
+        # `unresolved` id, i.e. an easier PASS (fail-open). Pinned by
+        # `test_t2s_candidate_filter_uses_all_four_directions`.
         best = max(overlap(text, wording_a), overlap(text, wording_b),
-                   overlap(fact["wording_a"], text))
+                   overlap(fact["wording_a"], text), overlap(fact["wording_b"], text))
         if best >= 0.45:
             scored.append({"doc_id": pt["doc_id"], "point_id": pt.get("point_id")
                            or pt.get("id"), "kind": pt.get("kind"),
@@ -467,7 +486,9 @@ def t2(receipt: dict, corpus: dict) -> dict:
     # conjunct that cannot vary is dead weight in a rule a reader is asked to recompute
     # (review round 5, finding 1 — the arm it drives sits in the conjuncts test below).
     one_goal = bool(ids_b) and not unresolved
-    verdict = "PASS" if (entity_delta == 0 and one_goal) else "FAIL"
+    # ⛔ `<= 0`, not `== 0`: RULE_T2 says the restatement ADDS 0 entities, and a net
+    # DELETION is not an addition — the same reading RULE_T1 uses for the same predicate.
+    verdict = "PASS" if (entity_delta <= 0 and one_goal) else "FAIL"
     return {
         "test": "T2",
         "rule": RULE_T2,
@@ -479,7 +500,9 @@ def t2(receipt: dict, corpus: dict) -> dict:
         "goal_point_candidates": scored,
         "goal_point_ids": {"doc_03": sorted(ids_a), "doc_06": sorted(ids_b),
                            "shared": sorted(shared)},
-        "legs": {"entity_delta_zero": entity_delta == 0,
+        "legs": {"entity_delta_zero": entity_delta <= 0,
+                 "entity_adds_nothing": "delta <= 0 — a net DELETION is not an addition, the same "
+                                "reading RULE_T1 uses; Event excluded per RULE_T1",
                  "entity_axes": "Object + Subject (Event excluded — RULE_T1 declares one "
                                 "Event per capture expected)",
                  "goal_resolves_to_one_thing": one_goal,
@@ -542,6 +565,14 @@ def t3(receipt: dict, corpus: dict) -> dict:
     for row in orphans_receipt:
         name = norm(row.get("name"))
         if not name:
+            # ⛔ An UNNAMED orphan must not vanish from the traceability sample: the share
+            # leg still counts it in the denominator, so `continue`-ing here made the
+            # conjunct pass it BY ABSENCE (fail-open). It is unexplained by construction —
+            # nothing can be standalone in the text under a name it does not have.
+            named_in_corpus.append({"name": row.get("name"), "kind": row.get("kind"),
+                                    "exact_doc_hits": [], "near_doc_hits": [],
+                                    "best_overlap": {"doc": None, "share": 0.0},
+                                    "unnamed": True})
             continue
         hits = [doc for doc, text in texts.items() if name and name in norm(text)]
         # ⛔ The band is RULE_T3's band — "content-token overlap ... the same near-match
@@ -566,7 +597,7 @@ def t3(receipt: dict, corpus: dict) -> dict:
     # is the same near-match band the T1 restatement test uses, so "traceable" means
     # the same thing in both places.
     # The second conjunct's predicate is NAME PRESENCE, and `RULE_T3` now says so with
-    # its band: exact, or >= 0.8 of the name's own >4-character tokens. ⛔ That band is
+    # its band: exact, or >= 0.8 content-token overlap (tokens >2 characters, function words removed). ⛔ That band is
     # T1's RESTATEMENT band, not T5's NAMING band (0.6), and the two are not
     # interchangeable: at 0.6 `chilled-goods operation` (0.667 against doc-02) would be
     # traceable, at 0.8 it is not. ⛔ It is also a NAME test, not the rule's full

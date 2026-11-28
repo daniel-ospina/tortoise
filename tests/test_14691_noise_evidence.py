@@ -372,10 +372,10 @@ def test_t3_share_leg_is_graded_at_the_majority_boundary(monkeypatch):
         "T4 PASSes a graph with no `core:role` entity — any subject-layer entity is "
         "being read as a role")
 
-    # ── T2: the rule states TWO graded legs; the committed run fails both. Force the
-    #        shared-id leg TRUE on the committed data and the verdict must STILL be FAIL
-    #        because the entity delta is non-zero — which is what proves the entity-delta
-    #        conjunct is read, the one the review measured as deletable with 21 passed.
+    # ── T2: the rule states TWO graded legs; the committed run fails both. Resolve the
+    #        goal leg on the committed data and the verdict must STILL be FAIL because the
+    #        entity delta is non-zero — which is what proves the entity-delta conjunct is
+    #        read, the one a review measured as deletable with every row still green.
     readback_t2 = json.loads(json.dumps(_readback()))
     monkeypatch.setattr(module, "load", lambda name: readback_t2)
     receipt_t2 = json.loads(json.dumps(_receipt()))
@@ -668,16 +668,19 @@ def test_the_artifact_is_byte_identical_under_a_different_hash_seed():
 
 
 def test_the_conjuncts_that_never_decide_on_this_run_are_still_pinned():
-    """Three rule conjuncts are TRUE on the committed data, so no fixture in this run can
-    red them — and a prior round measured all three as freely deletable with the suite
-    green. Each is driven here with the OTHER legs held true, so the conjunct under test is
-    the only thing that can decide, in both directions.
+    """The conjuncts that cannot decide on the committed run, driven in both directions.
 
-    - T2's `exactly ONE shared point` (two shared ids is FAIL, one is PASS). The scorer's
-      own comment sells this property and nothing exercised it.
+    Each of these is TRUE on this run (or decides in only one direction here), so no
+    committed number moves when it is deleted — and earlier rounds measured several as
+    freely deletable with the suite green. Each is driven with the OTHER legs held true, so
+    the conjunct under test is the only thing that can decide.
+
     - T4's `at least one Source per document ingested`.
     - T1's `no Point whose text re-states an existing Point`, which is the only thing
       keeping T1 red once the entity layers hold.
+    - T2's goal leg, as a RESOLUTION: a complete merge must PASS and a half merge FAIL
+      (two shared ids is a COMPLETE merge on this corpus, not a failure — an earlier
+      `len(shared) == 1` inverted that).
     """
     import copy
     import unittest.mock as mock
@@ -715,7 +718,7 @@ def test_the_conjuncts_that_never_decide_on_this_run_are_still_pinned():
         "T1 fails a re-ingestion that adds no entity and re-states nothing — the "
         "restatement conjunct is not reading the detector")
 
-    # ── T2: the entity delta is forced to zero, so `exactly ONE shared point` decides.
+    # ── T2: the entity delta is forced to zero, so the goal RESOLUTION decides.
     cands = _score()["tests"]["T2"]["goal_point_candidates"]
     ids3 = [c["point_id"] for c in cands if c["doc_id"] == "doc-03"]
     ids6 = [c["point_id"] for c in cands if c["doc_id"] == "doc-06"]
@@ -869,3 +872,130 @@ def test_both_no_data_arms_refuse_an_empty_population():
         row = module.t5({}, corpus)
     assert row["sampled"] == 0
     assert row["verdict"] == "NO-DATA", "T5 reports PASS with NO relations sampled"
+
+    # ⛔ An UNNAMED orphan must not pass the traceability conjunct BY ABSENCE. The share leg
+    # counts it in the denominator, so skipping it here makes the second conjunct grade a
+    # population it silently shrank — fail-open, and nothing pinned it.
+    # THREE entities with ONE orphan, so the share leg passes under the STRICT majority
+    # (1/3 = 0.333 < 0.5) and only the traceability conjunct can decide.
+    unnamed = {
+        "entities": [{"id": "e1", "name": "Priya Nair", "kind": "core:naturalPerson",
+                      "layer": "subject"},
+                     {"id": "e2", "name": "", "kind": "core:strategy",
+                      "layer": "object"},
+                     {"id": "e3", "name": "ColdPath Logistics", "kind": "core:organization",
+                      "layer": "object"}],
+        "neighbours": {},
+    }
+    edges = {"passes": [{"pass": 1, "documents": [{"doc_id": "doc-01", "result": {
+        "relation_write": {"edges": [{"src_id": "e1", "dst_id": "e1"},
+                                     {"src_id": "e3", "dst_id": "e3"}]}}}]}]}
+    with mock.patch.object(module, "load", return_value=unnamed):
+        row = module.t3(edges, corpus)
+    assert row["orphan_legs"]["majority_are_not_orphans"] is True, \
+        "the fixture keeps the share leg passing, so only the second conjunct decides"
+    unexplained = row["orphan_legs"]["unexplained"]
+    assert [r["name"] for r in unexplained] == [""], (
+        "an UNNAMED orphan vanished from the traceability sample — the conjunct then passes "
+        "it by absence while the share leg still counts it")
+    assert row["verdict"] == "FAIL", (
+        "T3 PASSes an unnamed orphan: nothing can be standalone in the text under a name "
+        "it does not have")
+
+
+def test_t2s_candidate_filter_uses_all_four_directions():
+    """`RULE_T2` says "both directions" for BOTH wordings; the code must use four.
+
+    An earlier cut computed three (`wording_b`'s reverse was missing) while printing "both".
+    A missing direction can only drop a candidate, and a dropped candidate is a dropped
+    `unresolved` id — an easier PASS. Each direction is removed in turn and the filter must
+    be seen to lose a point it otherwise keeps, in a fixture built so that exactly one
+    direction carries the match.
+    """
+    module = _score_module()
+    corpus = _corpus()
+    fact = corpus["_declared_facts"]["goal"]
+    a, b = module.norm(fact["wording_a"]), module.norm(fact["wording_b"])
+
+    # A text that matches ONLY b->text (its own words are in wording_b, and wording_b's
+    # words are not a subset of it), so the b-reverse direction is the sole argmax.
+    probe = b
+    dirs = {
+        "text->a": module.overlap(probe, a),
+        "text->b": module.overlap(probe, b),
+        "a->text": module.overlap(fact["wording_a"], probe),
+        "b->text": module.overlap(fact["wording_b"], probe),
+    }
+    assert dirs["b->text"] == 1.0, "the probe must be carried by the b->text direction"
+    assert dirs["a->text"] < 1.0, "the probe must NOT be carried by a->text as well"
+    # Every direction is reachable, so no one of them is dead code the rule overstates.
+    assert all(v >= 0.0 for v in dirs.values())
+
+    # And the scorer's own argmax includes the reverse of BOTH wordings: a text that only
+    # the b-reverse explains still clears the 0.45 candidate band.
+    cands = module.t2(_receipt(), corpus)["goal_point_candidates"]
+    assert cands, "the committed run has candidates; the direction set is what produces them"
+    # The four-direction set is what the rule prints — pinned against the source so a
+    # narrowing back to three reds, whether or not a committed number moves.
+    src = (BUNDLE / "score_t1_t5.py").read_text()
+    for direction in ('overlap(text, wording_a)', 'overlap(text, wording_b)',
+                      'overlap(fact["wording_a"], text)', 'overlap(fact["wording_b"], text)'):
+        assert direction in src, f"RULE_T2 says 'both directions'; {direction} is missing"
+
+
+def test_t4s_role_leg_requires_the_subject_layer_and_t2_allows_a_net_deletion():
+    """Two legs whose second half was unpinned, both fail-open as shipped.
+
+    - `RULE_T4` says roles land as **Subject-layer** `core:role` entities. Deleting the
+      `layer == "subject"` check left the suite green, because no committed `:role` sits off
+      the subject layer — so a role landing as an object would have PASSed T4.
+    - `RULE_T2` says the restatement *adds* 0 entities; `adds` is `delta <= 0`, the reading
+      `RULE_T1` already uses. `== 0` made a net DELETION fail, and nothing pinned either
+      direction.
+    """
+    import copy
+    import unittest.mock as mock
+
+    module = _score_module()
+    corpus = _corpus()
+
+    readback = copy.deepcopy(_readback())
+    readback["overview"]["taxonomy"] = {"Point": 100, "Event": 26, "Subject": 10,
+                                        "Object": 25, "Source": 6}
+    readback["overview"]["sources"] = {"total": 6, "with_points": 6}
+    readback["entities"] = [
+        {"id": "s1", "name": "Sales Lead", "layer": "object", "kind": "core:role"},
+        {"id": "s2", "name": "the delivery partner decision", "layer": "object",
+         "kind": "core:decision"},
+    ]
+    with mock.patch.object(module, "load", return_value=readback):
+        row = module.t4({}, corpus)
+    assert row["role_leg"]["graded"] is False, (
+        "a `core:role` entity on the OBJECT layer satisfied the role leg — the "
+        "`layer == subject` half of RULE_T4 is not read")
+    assert row["verdict"] == "FAIL"
+    readback["entities"][0]["layer"] = "subject"
+    with mock.patch.object(module, "load", return_value=readback):
+        assert module.t4({}, corpus)["verdict"] == "PASS", "the control must pass"
+
+    # T2: a net DELETION is not an addition, so `adds 0 entities` holds.
+    cands = _score()["tests"]["T2"]["goal_point_candidates"]
+    ids3 = [c["point_id"] for c in cands if c["doc_id"] == "doc-03"]
+    ids6 = [c["point_id"] for c in cands if c["doc_id"] == "doc-06"]
+    receipt = copy.deepcopy(_receipt())
+    d6 = next(d for d in receipt["passes"][0]["documents"] if d["doc_id"] == "doc-06")
+    shrunk = copy.deepcopy(d6["overview_before"])
+    shrunk["taxonomy"]["Object"] = max(0, shrunk["taxonomy"].get("Object", 0) - 2)
+    d6["overview_after"] = shrunk
+    for doc in receipt["passes"][0]["documents"]:
+        for pt in ((doc.get("result") or {}).get("points") or []):
+            if pt.get("point_id") == ids3[0]:
+                pt["point_id"] = ids6[0]
+            elif pt.get("point_id") == ids3[1]:
+                pt["point_id"] = ids6[1]
+    row = module.t2(receipt, corpus)
+    assert row["legs"]["entity_delta_zero"] is True, (
+        "a net deletion was graded as an ADDITION — `delta <= 0` is not being read")
+    assert row["verdict"] == "PASS", (
+        "T2 fails a complete merge that nets a deletion — `adds 0 entities` means delta "
+        "<= 0, the reading RULE_T1 already uses")
