@@ -35,12 +35,15 @@ dump — and doc-05's own warning says the identity lookup was PARTIAL
 {"partial": 6}`). doc-01 is prior to doc-05 by the corpus's own order, so its
 emitted points are the only evidence of what that prior set held.
 
-So the replay demonstrates *"IF the prior set contains the certificate claim,
-the closure now happens"* — a strictly WEAKER statement than *"the shipped
-pipeline closes this corpus's contradiction"*. A hold is not a closure, and
-where the prior set was partial the endpoint can still be HELD. The shipped
-number requires a fresh-graph re-ingest (the #14198 owner comment's 5-document
-run, reading doc-05's `supersessions`), and this file does not stand in for it.
+So the replay can only demonstrate what THIS tree's arm does with the receipt's
+own declaration — and on this head that is a DECLINE, not a closure (see the ⚠️
+below): the receipt's point rows carry no `when`, so neither rival's start is an
+instant and the gate refuses to order them. It is therefore a strictly WEAKER
+statement than *"the shipped pipeline closes this corpus's contradiction"*: a
+hold is not a closure, and where the prior set was partial the endpoint can
+still be HELD. The shipped number requires a fresh-graph re-ingest (the #14198
+owner comment's 5-document run, reading doc-05's `supersessions`), and this file
+does not stand in for it.
 
 ⚠️ It also cannot exercise a CLOSURE: the receipt's point rows carry no `when`
 (props are `quote`/`search_keys`/`source_turn_id`), so neither rival's start is

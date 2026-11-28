@@ -2188,7 +2188,14 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
         f"reformatted and the sweep below is not reading it: {pairs}")
     for symbol, lineno in pairs:
         text = sources["extractor_v2"][int(lineno) - 1]
-        assert symbol.split(".")[-1] in text, (
+        # ⛔ THE CALL FORM, NOT A SUBSTRING (#14794 review, P2, MEASURED). This
+        # read `name in text`, which the SIBLING `_collect_classify_items` line
+        # satisfies for `classify_items` — so a re-derivation that moved the
+        # cite one line up onto `items = _collect_classify_items(embed_list)`
+        # passed here while naming a DIFFERENT function than the row claims.
+        # The table's column is "call site", so the citation is a call, and the
+        # test for a call is `name(`.
+        assert (symbol.split(".")[-1] + "(") in text, (
             f"README cites `{symbol}` at extractor_v2.py:{lineno}, which reads "
             f"{text.strip()!r} — the line moved and the cite did not: "
             f"`{symbol.split('.')[-1]}` "
@@ -2219,7 +2226,11 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     for first, second, lineno in step_pairs:
         text = sources["extractor_v2"][int(lineno) - 1]
         named = [s.split(".")[-1] for s in (first, second) if s]
-        assert all(sym in text for sym in named), (
+        # ⛔ Same call-form rule as (b), for the same measured reason: a bare
+        # substring is satisfied by a DIFFERENT function whose name contains
+        # the cited one (`_collect_classify_items` for `classify_items`, which
+        # is exactly what the re-derivation landed on).
+        assert all((sym + "(") in text for sym in named), (
             f"the probe cites `{first}`"
             + (f" / `{second}`" if second else "")
             + f" at extractor_v2.py:{lineno}, which reads {text.strip()!r} — "

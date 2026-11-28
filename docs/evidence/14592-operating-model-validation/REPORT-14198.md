@@ -198,7 +198,9 @@ artifact now reads:
 ```text
 $ python docs/evidence/14592-operating-model-validation/replay_14198.py --arm after
 # replay arm: after
+# tree: <the head this section was re-derived at>
 # lookup state: partial
+# extractor_v2 from: <that tree>/tortoise/extractor_v2.py
 # new claim (this capture) : pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5
 # older claim (prior)      : pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078
 
@@ -278,15 +280,16 @@ the *surviving* claims to rank first) is neither implemented nor needed here.
 | **negative (event side)** | a NAND whose emitted side is an Event closes nothing AND does not claim it did (no `recorded as a supersession` warning), AND is refused by the POINT guard with its own attribution (no "only when BOTH starts name an instant" line — the instant gate is not the cause). Passes on the base commit too. ⚠️ Measured at this head: removing `_written_point_ids` reds the MINTED-successor case, and leaves this one green — the instant gate refuses the same Event input on its own, so this case does not distinguish the guard | ✅ | ✅ |
 | **negative (minted successor)** | a `NAND` whose newer side is named only INSIDE the edge closes nothing and claims nothing — the `#2552` mint would be pruned once the operator is suppressed, so the closure would name a point that was never written and the document's own claim would vanish (measured in review as the arm's worst shape: `supersessions_written: 0`, "the contradiction is recorded …" still warned) | ✅ | ✅ |
 | **negative (second refuter)** | 2 refuters of one claim → 1 closure, and the SECOND refuter KEEPS its `NAND` (the consumer would skip it silently as an idempotent no-op, so suppressing both would erase that evidence) — pre-fix: `2 operators, 0 closures` | ❌ | ✅ |
+| **positive (unordered → DECLINE)** | a cross-capture NAND whose rivals carry NO world-time start is REFUSED rather than ordered on arrival: no supersession is written, the receipt says `not closed` and names both values, and the declared edge is handled exactly as it would be without the arm (emitted on the wiring route, dropped with a stated reason on the hold route). Both halves of the gate are pinned — the NEW side's start and the PRIOR's | ❌ | ✅ |
 | **negative (undeclared)** | a corpus that reverses itself in **wording** but declares no edge gains no contradiction. ⛔ A PIN, not coverage: no mutation of the arm can red it (the `none` shape emits no operator at all) | ✅ | ✅ |
 
 Suite: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_14198_contradiction_closure.py -q`
-→ **20 passed**, and **14 RED on the base commit** (`3f134560b6c`). Both figures
+→ **22 passed**, and **16 RED on the base commit** (`3f134560b6c`). Both figures
 are MEASURED, not counted by hand, and the NAMES below are the base run's own
 output (`git archive 3f134560b6c` + this file, `TORTOISE_TEST_CARVE_OUT=1`), so
 the paragraph cannot drift from the table:
 
-**red on base (14)** — `test_declared_cross_capture_contradiction_closes_the_older_claim`,
+**red on base (16)** — `test_declared_cross_capture_contradiction_closes_the_older_claim`,
 `test_the_other_emission_order_closes_the_same_claim`,
 `test_a_world_time_ordering_is_decided_on_instants_not_date_prefixes`,
 `test_the_closure_does_not_depend_on_which_lookup_arm_ran`,
@@ -299,6 +302,8 @@ the paragraph cannot drift from the table:
 `test_the_backfill_decline_is_instant_granular_not_day_granular`,
 `test_a_prior_another_producer_closed_keeps_this_declaration_as_evidence`,
 `test_the_cross_producer_warning_does_not_promise_retention_on_the_drop_route`,
+`test_an_unordered_pair_declines_instead_of_closing_on_arrival_order`,
+`test_an_absent_start_declines_and_keeps_the_declared_edge`,
 `test_a_second_refuter_keeps_its_edge`.
 
 **green on base (6)** — `test_a_backfill_DECLINES_and_says_so`,
