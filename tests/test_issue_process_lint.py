@@ -3973,6 +3973,12 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
         "V3, V4, V5, V6 only.", "rows V3-V6 only.", "V1, V2 only.",
         "Just V2 landed here.", "Solely V2.", "V2 alone.", "Nothing but V2.",
         "So far, V2.", "Partial: V2 delivered.", "V2 exclusively.",
+        # round 28 P1-c: a range that CONTAINS the subset must not mask it
+        "Only V2 of V1–V6 landed.", "Just V2 of V1–V6 is proved here.",
+        "Satisfies #13036: V2 (of rows V1–V6)",
+        # round 28 P1-a: id-free `only`, which the subset rule cannot see (it names no row)
+        "Only the first row is proved here.", "Only part of this landed.",
+        # round 28 P1-b/R1: a subset `Satisfies` beside a complete closing claim
         "Satisfies #13036: V2", "Satisfies #13036: V2, V3",
         "V3–V6 are in the predecessor PR", "V1–V6 — see the predecessor PR",
         "V3-V6 are tracked in #14715",
@@ -3984,6 +3990,11 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
         lambda d: f"Closes #13036 ({d})\n",
         lambda d: f"Closes #13036 (rows V1–V6); {d}\n",
         lambda d: f"{d}\n\nCloses #13036\n",
+        # ⛔ round 28 P1-b: the FALLBACK BAIT. A complete claim was refused on structural evidence,
+        # but the refusal carried no cue word, so the whole-body fallback re-derived the claim from
+        # this affirmative line and reported `clean` — undoing the refusal. This placement is what
+        # reddens if the refused flag stops being routed to UNANSWERABLE.
+        lambda d: f"Closes #13036 (rows V1–V6)\nThe bar: V1, V2, V3, V4, V5, V6 are proved.\n{d}\n",
     )
     for disclosure in disclosures:
         for place in placements:

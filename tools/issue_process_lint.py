@@ -1584,6 +1584,14 @@ _DISCLAIMER_RE = re.compile(
     r"|follow[\s-]?ups?|deferred|out\s+of\s+scope|excluded|except|apart\s+from|other\s+than",
     re.IGNORECASE)
 
+# ⛔ `only` IS A DISCLAIMER CUE ON AN OWN LINE AND STAYS INERT ON A CLOSING LINE. On the closing line it
+# is the verb's qualifier and LIMITS an affirmative claim (`Closes #N (row V2 only)` claims V2, pinned),
+# so it is not a negative cue there — this regex is consulted only in the OWN-LINE branch. On an own line
+# there is no claim for it to limit. Deliberately NOT folded into `_DISCLAIMER_RE`, which is shared with
+# the closing-line read where that pinned claim would break.
+_ONLY_RE = re.compile(r"\bonly\b", re.IGNORECASE)
+
+
 def _names_a_proper_subset(text: str, rows: list[str]) -> bool:
     """Does any line of `text` name SOME but not ALL of the issue's declared rows?
 
@@ -1608,6 +1616,14 @@ def _names_a_proper_subset(text: str, rows: list[str]) -> bool:
         # reading is the safe one.
         order = {row: i for i, row in enumerate(rows)}
         for match in _range_matches(line, rows):
+            # ⛔ GATED, NOT UNCONDITIONAL (review round 28, P1). Expanding every range mention let a
+            # line that CONTAINS the full range mask a subset on that same line — `Only V2 of V1–V6
+            # landed.` and `Satisfies #N: V2 (of rows V1–V6)` both widened to all six here, so the
+            # subset signal vanished and the body read `clean`. For a NEGATIVE read, naming MORE rows
+            # is the UNSAFE direction: it suppresses the refusal this function exists to raise. The
+            # gate is the same one `_row_range_span` uses, so `(row V2 of V1–V6)` is V2 to both reads.
+            if not _range_is_the_whole_claim(line, match, rows):
+                continue
             lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
             named |= set(rows[lo:hi + 1])
         if named and not set(rows) <= named:
@@ -1768,7 +1784,7 @@ def _satisfies_claim(text: str, issue: int, rows: list[str], repo: str | None) -
 
 
 def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
-                        repo: str | None = None) -> tuple[set[str], bool]:
+                        repo: str | None = None) -> tuple[set[str], bool, bool]:
     """`(rows this PR claims, did a closing line DISCLAIM rows)` — the polarity-aware read.
 
     Two sources, and both are GROUNDED in the issue's declared rows, so a token the issue does not use
@@ -1877,7 +1893,16 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # of the rows while claiming ALL of them is self-contradictory whatever the surrounding
             # prose says. The cue read below still covers the implicit family (`The rest are
             # follow-ups`), which names no row at all and so needs a word.
-            if _DISCLAIMER_RE.search(line) or _ELSEWHERE_RE.search(line):
+            # ⛔ `only` COMES BACK AS A CUE, FOR THE FAMILY THE STRUCTURAL RULE CANNOT SEE (review round
+            # 28, P1). Round 27 deleted it as "the enumeration"; but the subset rule can only fire on a
+            # line that NAMES rows, and `Only the first row is proved here.` / `Only part of this
+            # landed.` name none — so deleting the cue lost coverage there (both read `clean` beside a
+            # `Closes #N (rows V1–V6)`). The two mechanisms are complementary, not alternatives: the
+            # subset rule needs no vocabulary for rows it can see, and this word covers the rows a
+            # line only alludes to. On a CLOSING line `only` still LIMITS a claim and this branch is
+            # never reached there, so the pinned `(row V2 only)` decision is untouched.
+            if (_DISCLAIMER_RE.search(line) or _ELSEWHERE_RE.search(line)
+                    or _ONLY_RE.search(line)):
                 disclaimed = True
             continue
         # ⛔ THE LINE IS THE UNIT, the clause is the polarity boundary: the range read needs the whole
@@ -1918,7 +1943,15 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # is a mention on the closing line exactly as it is in the body, so `_ELSEWHERE_RE` is
             # consulted here too — `… all six rows V1 … V6 come in later PRs` was a CLAIM one line up
             # from where the same sentence was a mention.
-            if _DISCLAIMER_RE.search(line[a:b]) or _ELSEWHERE_RE.search(line[a:b]):
+            # ⛔ `only` IS A CUE IN A CLAUSE THAT NAMES NO ROW, AND STAYS INERT WHERE IT QUALIFIES THE
+            # ROW IT NAMES (review round 28, residual). On this path `only` is normally the verb's
+            # qualifier — `Closes #N (row V2 only)` claims V2, pinned since round 7 — but written as a
+            # SIBLING clause it is an ordinary disclosure: `Closes #N (rows V1–V6); Only the first row
+            # is proved here.` read `clean`. The two are separable without a vocabulary, by the same
+            # structural test the rest of this file uses: the qualifier form NAMES the rows it limits,
+            # the disclosure form names none. So `only` counts only in a clause with no declared id.
+            if (_DISCLAIMER_RE.search(line[a:b]) or _ELSEWHERE_RE.search(line[a:b])
+                    or (_ONLY_RE.search(line[a:b]) and not _ids_in(line[a:b], rows))):
                 disclaimed = True
                 claimable.discard(i)
             # ⛔ BLANK EVERY CLAUSE THAT IS NOT CLAIMABLE — NOT JUST THE RECOGNISED DISCLAIMERS
@@ -1988,8 +2021,10 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
     # closing claim beside a disclosure of the remaining rows (`(row V2 only); V1, V3, V4, V5, V6
     # remain unmeasured`, `… are separate PRs`) is the careful author's correct form and still yields
     # the finding on V2 — that claim is not complete, so this refusal never fires on it.
+    refused = False
     if disclaimed and set(rows) <= named:
         named = set()
+        refused = True
     # ⛔ AND A PROPER SUBSET ANYWHERE IN THE BODY REFUSES A COMPLETE CLAIM (review round 27, R1+R2).
     # `Closes #N (rows V1–V6)` beside `Satisfies #N: V2` claimed all six and read `clean` (the arm's
     # headline false PASS, through the same path round 24 closed for `disclaimed`); `Just V2.` and its
@@ -2001,7 +2036,14 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
     # shipping a false PASS that only a longer word list would have caught.
     if set(rows) <= named and _names_a_proper_subset(text, rows):
         named = set()
-    return named, disclaimed
+        refused = True
+    # ⛔ THE REFUSAL MUST BE REPORTED TO THE CALLER, NOT JUST APPLIED HERE (review round 28, P1). Returning
+    # only `(named, disclaimed)` left the caller unable to tell "the closing line said nothing" from "a
+    # claim was refused on evidence" — so for a SUBSET refusal (which carries no cue word, hence no
+    # `disclaimed`) the whole-body fallback ran, re-derived a complete claim from the body and reported
+    # `clean`, re-doing exactly what round 24 fixed for the disclaimer case. The third element is that
+    # distinction, and the caller routes it to UNANSWERABLE before the fallback.
+    return named, disclaimed, refused
 
 
 def claimed_row_ids(pr_body: str, issue: int, rows: list[str],
@@ -2156,17 +2198,23 @@ def classify_partial_close(body: str, number: int | str,
             # issue has, so "did this PR close part of it" is UNANSWERABLE. Never a pass.
             stats["abstained"] += 1
             continue
-        named_rows, disclaimed = _closing_line_claim(body, issue, rows, repo)
+        named_rows, disclaimed, refused = _closing_line_claim(body, issue, rows, repo)
         named_rows &= set(rows)
         if not named_rows:
+            # ⛔ A CLAIM REFUSED ON EVIDENCE MUST NOT REACH THE FALLBACK EITHER (review round 28, P1).
+            # The fallback exists for a PR that named nothing; a PR whose COMPLETE claim was refused —
+            # because a disclaimer or a proper-subset line contradicted it — has already been answered,
+            # and re-deriving the same complete claim from the body silently undoes the refusal.
             # ⛔ THE FALLBACK IS NOT A PASS EITHER. A PR that never puts a row id on its closing line
             # may still be claiming every row in a TABLE further down (#13886's own body carries such
             # a table), so "names all of them ANYWHERE" is a complete close — but "names none of them
             # anywhere" is indistinguishable from a silent partial, and is reported as AMBIGUOUS.
             # The closing-line read takes PRIORITY precisely because #13886 has both: a table naming
             # all six rows AND a qualifier naming one, and it is the qualifier that is the claim.
-            if disclaimed:
-                # ⛔ AND THE FALLBACK IS REFUSED WHERE THE CLOSING LINE DISCLAIMED ROWS. Its rows sit
+            if disclaimed or refused:
+                # ⛔ AND THE FALLBACK IS REFUSED WHERE THE CLOSING LINE DISCLAIMED ROWS, OR WHERE A
+                # COMPLETE CLAIM WAS REFUSED ON STRUCTURAL EVIDENCE (`refused`) — the subset case has
+                # no cue word, so `disclaimed` alone leaves it open. Its rows sit
                 # in the body BY CONSTRUCTION, so the whole-body read would find all six and report
                 # `clean` — on the exact sentence (`V1–V6 remain unmeasured`, beside a `Closes`) that
                 # GitHub closes whole. UNANSWERABLE is the honest verdict: the PR told us what it is
