@@ -528,7 +528,7 @@ def test_t5_every_sampled_relation_is_traced_and_the_tiers_are_separate():
     # (44.7 %) — measured, `relation_rows` over the committed receipt. ⛔ Pass-1-only
     # sampling does NOT rescue the verdict: it samples 26 with tiers
     # {verbatim 17, paraphrase 7, none 2} and still FAILs. So the wider population is here
-    # because a third of the run went unexamined, not because the FAIL depends on it — it
+    # because 21 of 47 (44.7 %) went unexamined, not because the FAIL depends on it — it
     # strengthened the evidence from 2 unsupported edges to 3. (Two earlier spellings of
     # this comment were wrong: one said the only failing edge lived in the excluded half,
     # and its replacement said "two thirds of the run", which no denominator produces.)
