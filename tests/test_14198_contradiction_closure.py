@@ -959,8 +959,9 @@ def test_a_fuzzy_closure_still_discloses_its_recall_band():
     did not happen — but the sink first swallowed its SUCCESS line too: `#8503`'s
     recall-band disclosure, which is the only audit trail for terminalising a
     live belief on an edge-trimmed match (and there is no un-supersede API to
-    repair a wrong one). It shares the `point supersedes=` prefix with the
-    refusals, so it is forwarded by its own words.
+    repair a wrong one). Its line reads `point-supersede recall band (#8503):
+    ref …` — a DIFFERENT shape from the `point supersedes=` refusals
+    (hyphenated, no `=`), so it is forwarded by its own words.
     """
     from tortoise.extractor_v2 import execute_embed
 

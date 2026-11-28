@@ -12692,9 +12692,11 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 # was decided on a NON-EXACT match ("the same claim once frame
                 # words at its edges are disregarded"), and that is the only
                 # audit trail for terminalising a live belief — in a module whose
-                # own docstring notes there is no un-supersede API. It shares the
-                # `point supersedes=` prefix with the refusals, so it is
-                # forwarded by its own words; the refusals stay dropped, and this
+                # own docstring notes there is no un-supersede API. Its line is
+                # `point-supersede recall band (#8503): ref …` — a DIFFERENT
+                # shape from the `point supersedes=` refusals (hyphenated, no
+                # `=`), so it is forwarded by its own words; the refusals stay
+                # dropped, and this
                 # warning path's `0 or 2+ candidates` detail is therefore DROPPED
                 # deliberately — the fall-through drop warning is a fixed
                 # template (`operator dropped: src/dst did not resolve …`) that
