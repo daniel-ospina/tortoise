@@ -475,8 +475,16 @@ if grep -qE -- "/compare/" <<<"$*" && ! grep -qF -- "application/vnd.github.v3.d
         # The middle field is the page length, so a case can reproduce a TRUNCATED
         # response (total > returned) and prove the gate refuses instead of treating a
         # missing sha as "came from the base". Default: a consistent page.
-        printf '%s\t%s\t%s\n' "${STUB_BRANCH_TOTAL:-0}" \
-            "${STUB_BRANCH_COUNT:-${STUB_BRANCH_TOTAL:-0}}" "${STUB_BRANCH_SHAS:-}"
+        # ⛔ THE COUNTS DEFAULT TO THE LIST'S OWN ARITY (review cycle 2). Before the
+        # list-arity guard, a fixture could set only `STUB_BRANCH_SHAS` and leave the
+        # counts at 0 — claiming one sha and rendering a list of one while the row said
+        # `0\t0`. The gate tolerated it; the guard now refuses it, and a fixture must not
+        # be able to create that inconsistency by OMISSION. Fixtures that deliberately
+        # render a TRUNCATED page set BOTH explicitly (e.g. TOTAL=9 COUNT=1) and still do.
+        _bs_shas="${STUB_BRANCH_SHAS:-}"
+        _bs_count="${STUB_BRANCH_COUNT:-$(printf '%s' "$_bs_shas" | wc -w | tr -d ' ')}"
+        _bs_total="${STUB_BRANCH_TOTAL:-$_bs_count}"
+        printf '%s\t%s\t%s\n' "$_bs_total" "$_bs_count" "$_bs_shas"
         exit 0
     fi
     # The reviewed→head graph, post-`--jq`: status, total, count, "sha:parents" list.
@@ -494,8 +502,14 @@ if grep -qE -- "/compare/" <<<"$*" && ! grep -qF -- "application/vnd.github.v3.d
         printf '%s\n' "${STUB_ANCESTOR_STATUS:-ahead}"
         exit 0
     fi
-    printf '%s\t%s\t%s\t%s\n' "${STUB_ANCESTOR_STATUS:-ahead}" "${STUB_ANCESTOR_TOTAL:-0}" \
-        "${STUB_ANCESTOR_SEEN:-0}" "${STUB_ANCESTOR_COMMITS:-}"
+    # Same rule as the branch side above: the counts default to the LIST's arity, so a
+    # fixture that sets only the commit list is internally consistent; a deliberately
+    # truncated page still sets TOTAL/SEEN explicitly.
+    _an_commits="${STUB_ANCESTOR_COMMITS:-}"
+    _an_seen="${STUB_ANCESTOR_SEEN:-$(printf '%s' "$_an_commits" | wc -w | tr -d ' ')}"
+    _an_total="${STUB_ANCESTOR_TOTAL:-$_an_seen}"
+    printf '%s\t%s\t%s\t%s\n' "${STUB_ANCESTOR_STATUS:-ahead}" "$_an_total" \
+        "$_an_seen" "$_an_commits"
     exit 0
 fi
 # Routed BEFORE the media-type arm: a `compare/<base>...<sha>` diff request
@@ -2412,6 +2426,7 @@ MUT_BSIDE="$T/mutant-no-bside-guards.sh"
 sed -E -e 's/^ *(if \[ -z "\$p_bside" \]; then patch_ancestry_unreadable=1; return 1; fi)$/:/' \
        -e 's/^ *(\[\[ "\$p_btotal" =~ \^\[0-9\]\+\$ && "\$p_bcount" =~ \^\[0-9\]\+\$ \]\] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
        -e 's/^ *(\[ "\$p_btotal" = "\$p_bcount" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
+       -e 's/^ *(\[ "\$\(printf .%s. "\$p_bshas" \| wc -w\)" = "\$p_bcount" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
     "$RUN_BLOCK" > "$MUT_BSIDE"
 if cmp -s "$RUN_BLOCK" "$MUT_BSIDE"; then
     bad "(t30) the branch-side guard mutation did not apply — the guards changed shape, so this control proves NOTHING"
@@ -2454,35 +2469,65 @@ assert_not_contains "(t32a) …and does NOT claim the branch was rewritten" "REW
 # ── (t32b) counts present but EMPTY — the same defect one shape over.
 STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
     STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" STUB_ANCESTOR_ROW="$(printf 'ahead\t\t')" run_gate "$T32_BODY"
-assert_rc 1 "(t32b) EMPTY counts refuse — `'' = ''` must not read as a consistent page"
+assert_rc 1 "(t32b) EMPTY counts refuse — an empty pair must not read as a consistent page"
 assert_contains "(t32b) …and says the graph could not be READ" "could not READ this PR's commit graph"
-# ── (t32c) an ABSENT status is a READ failure, not a force-push: the misdiagnosis arm.
+# ── (t32c) A STATUS OUTSIDE THE ALLOWLIST IS UNREADABLE, NOT A REWRITE ────────
+# ⛔ THE FIXTURE MATTERS (review cycle 2). The first version of this row fed a
+# LEADING-TAB row (\t0\t0\t) to reproduce an absent status — but `IFS=<tab> read`
+# strips LEADING IFS whitespace, so that row parses as p_rel="0", p_total="0",
+# p_seen="" (measured). It was therefore refused by the ARITY guard, not by the
+# allowlist, and deleting the allowlist left the suite green: the row named a
+# direction it never exercised. This fixture keeps every other field valid — counts
+# numeric and equal, list arity matching seen — so ONLY the allowlist can refuse it.
 STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
-    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" STUB_ANCESTOR_ROW="$(printf '\t0\t0\t')" run_gate "$T32_BODY"
-assert_rc 1 "(t32c) an ABSENT status refuses"
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" STUB_ANCESTOR_ROW="$(printf 'sideways\t1\t1\t%s:2' "$NEWC")" run_gate "$T32_BODY"
+assert_rc 1 "(t32c) a status outside ahead/behind/diverged/identical REFUSES (the allowlist, not a later guard)"
 assert_contains "(t32c) …as UNREADABLE, not as a rewrite" "could not READ this PR's commit graph"
 assert_not_contains "(t32c) …so the operator is not sent to buy a 20-40 minute review for an API blip" "REWRITTEN (force-push"
-# ── (t32d) MUTATION: strip the presence guards → the short row CARRIES, the false
-# pass they prevent — so the class is attributable even though each guard alone
-# may be covered by other rows.
+# ── (t32d) THE COUNTS CAN AGREE AND THE LIST STILL BE MISSING (reviewed side) ──
+# Measured by review cycle 2: `ahead\t1\t1\t` — counts present, numeric, EQUAL, sha
+# list EMPTY — passed every check and then fell out of `[ -n "$p_added" ]`, skipping the
+# branch-side read and the authored-commit loop silently (`rc=0`, `passed via PATCH
+# match`, on an authored commit). `p_seen` must equal the list's arity.
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" STUB_ANCESTOR_ROW="$(printf 'ahead\t1\t1\t')" run_gate "$T32_BODY"
+assert_rc 1 "(t32d) counts that AGREE with an EMPTY sha list refuse — a missing list must not skip the authored-commit guard"
+assert_contains "(t32d) …and says the graph could not be READ" "could not READ this PR's commit graph"
+assert_not_contains "(t32d) …and no patch match is claimed" "passed via PATCH match"
+# ── (t32e) …AND THE SAME INVARIANT ON THE BRANCH SIDE ────────────────────────
+# The dangerous shape: the branch gained a single-parent AUTHORED commit, and the
+# branch-side sha list is EMPTY while its counts agree — so every token misses the
+# membership test and the authored commit reads as "the base brought it in".
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" \
+    STUB_ANCESTOR_STATUS=ahead STUB_ANCESTOR_TOTAL=1 STUB_ANCESTOR_SEEN=1 \
+    STUB_ANCESTOR_COMMITS="${NEWC}:1" \
+    STUB_BRANCH_TOTAL=1 STUB_BRANCH_COUNT=1 STUB_BRANCH_SHAS="" \
+    run_gate "$T32_BODY"
+assert_rc 1 "(t32e) an EMPTY branch-side sha list with agreeing counts REFUSES — it must never read as 'came from the base'"
+assert_contains "(t32e) …and says the graph could not be READ" "could not READ this PR's commit graph"
+assert_not_contains "(t32e) …and no patch match is claimed" "passed via PATCH match"
+# ── (t32f) MUTATION: strip the presence AND list-arity guards → the short row
+# CARRIES, which is the false pass they prevent.
 MUT_T32="$T/mutant-no-arity-guards.sh"
-sed -E -e 's/^( *)(\[\[ "\$p_rel" =~ \^\(ahead\|behind\|diverged\|identical\)\$ \]\] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/\1:/' \
-       -e 's/^( *)(\[\[ "\$p_total" =~ \^\[0-9\]\+\$ && "\$p_seen" =~ \^\[0-9\]\+\$ \]\] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/\1:/' \
-       -e 's/^( *)(\[ "\$p_total" = "\$p_seen" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/\1:/' \
+sed -E -e 's/^ *(\[\[ "\$p_rel" =~ \^\(ahead\|behind\|diverged\|identical\)\$ \]\] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
+       -e 's/^ *(\[\[ "\$p_total" =~ \^\[0-9\]\+\$ && "\$p_seen" =~ \^\[0-9\]\+\$ \]\] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
+       -e 's/^ *(\[ "\$p_total" = "\$p_seen" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
+       -e 's/^ *(\[ "\$\(printf .%s. "\$p_added" \| wc -w\)" = "\$p_seen" \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
     "$RUN_BLOCK" > "$MUT_T32"
 if cmp -s "$RUN_BLOCK" "$MUT_T32"; then
-    bad "(t32d) the arity-guard mutation did not apply — this control proves NOTHING"
+    bad "(t32f) the arity-guard mutation did not apply — this control proves NOTHING"
 elif ! bash -n "$MUT_T32"; then
-    bad "(t32d) the arity mutant does not PARSE — an unparseable mutant cannot attribute anything"
+    bad "(t32f) the arity mutant does not PARSE — an unparseable mutant cannot attribute anything"
 else
     _saved_block="$RUN_BLOCK"; RUN_BLOCK="$MUT_T32"
     STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
         STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" STUB_ANCESTOR_ROW="ahead" run_gate "$T32_BODY"
     RUN_BLOCK="$_saved_block"
     if [ "$GATE_RC" = "0" ]; then
-        ok "(t32d) with the presence guards removed the SHORT row CARRIES — so those guards are load-bearing"
+        ok "(t32f) with the presence+arity guards removed the SHORT row CARRIES — so those guards are load-bearing"
     else
-        bad "(t32d) the mutant still refused (rc=$GATE_RC) — something else refuses this, so the row above attributes nothing"
+        bad "(t32f) the mutant still refused (rc=$GATE_RC) — something else refuses this, so the rows above attribute nothing"
     fi
 fi
 
