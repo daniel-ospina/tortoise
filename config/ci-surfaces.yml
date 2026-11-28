@@ -57,10 +57,6 @@ version: 1
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — re-measured on the tree this block MERGES
 # INTO, never carried from the branch that first wrote it, and never spliced from BOTH parents: a
 # fold that keeps two re-derivations makes the guard read the clause twice, which is a red no
-# reader of the prose can see. On THIS tree — the LAST `origin/main` fold on this branch, plus THIS
-# lane's own row (`tests/test_14721_superseded_never_outranks.py`, `ep`, at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) — the verb packs five shards at 828.2 s (a, g, i, j, k) and six at
-# 828.1 s (b, c, d, e, f, h), so `ceil(828.2/60 x 2)` = 28 m governs (a shard's job-level wall clock is
 # reader of the prose can see. On THIS tree — the LAST `origin/main` fold on this branch, which
 # ALREADY carries `tests/test_14691_structure_evidence.py` (`core`, at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) as #14723's row, not as this lane's (#14587 review cycle 11, P2: the
@@ -76,33 +72,24 @@ version: 1
 # differ by `124/118` (a stable pair — `git diff a01675b50c 344a1c086e --
 # config/ci-surfaces.yml` -> `124 118`, both endpoints named so the reading is reproducible), and
 # the row is present in `origin/main`'s
-# manifest and ABSENT from the PRE-FOLD BASE's, so the fold brought it in) — the verb packs seven shards at 828.0 s (a, f, g, h, i, j, k) and four at
-# 827.9 s (b, c, d, e), so `ceil(828.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is
+# manifest and ABSENT from the PRE-FOLD BASE's, so the fold brought it in) — the verb packs five shards at 828.2 s (a, g, i, j, k) and six at
+# 828.1 s (b, c, d, e, f, h), so `ceil(828.2/60 x 2)` = 28 m governs (a shard's job-level wall clock is
 # the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
 # `watchdog_headroom: 2.03` (1680 / 828.2 = 2.0285) on every one of the eleven shards, so the two
 # agree by construction rather than by a hand re-read.
-# ⛔ #14721 RE-DERIVED THIS SENTENCE ON THE RESOLVED TREE, and names the move rather than leaving it
-# unattributed: this lane registers one `ep` row at the flat 2.0 s, which puts ONE more file in
-# `fast_pool()` and re-packs the bins — `main` at this base splits seven and four, and this tree
-# splits five and six, while the MINUTE (28 m) and the headroom (2.03) are the same on BOTH sides.
-# That is why the PARTITION is stated and not only the minute: an arithmetic check on `28 m` cannot
-# see a carried figure, and a reader comparing only minutes would call this move cosmetic.
-# ⛔ THE POOL DELTA IS RE-COUNTED ON THE RESOLVED TREE AND STATED AS THE OPERATION — never carried,
-# and never as a pair of counts: `set(fast_pool(head)) - set(fast_pool(main))` returns exactly ONE
-# entry, `tests/test_14721_superseded_never_outranks.py` (`ep`, flat 2.0 s), the row this lane registers,
-# and the reverse difference is empty — measured by loading each tree's OWN manifest
-# (`git show origin/main:config/ci-surfaces.yml`) through `fast_pool()`.
 # ⛔ #14723 RE-DERIVED THIS SENTENCE ON `main` ITSELF, and the attribution is corrected here rather
 # than carried (#14587 review cycle 10, P2, MEASURED): `tests/test_14691_structure_evidence.py` is
 # `main`'s row — it is already in `git show 344a1c086e06:config/ci-surfaces.yml` — so it is NOT this
-# lane's delta. At THIS head the two manifests' pools are IDENTICAL: loading each side's own manifest
-# through `fast_pool()` gives the same file SET (⛔ no figure — a pool size is a live census here, and
+# lane's delta. At THIS head the two manifests' pools differ by exactly ONE entry: loading each
+# side's own manifest through `fast_pool()` (⛔ no figure — a pool size is a live census here, and
 # this sentence stated `1343` until #14587 review cycle 12, P2: true the day it was written, unfenced,
 # bound to no sha, and invisible to `_POOL_CENSUS_RE` because `gives` is not one of the verbs it
-# reads), `set(fast_pool(head)) - set(fast_pool(main))` is
-# EMPTY and so is the reverse, and the partition is seven-at-828.0 / four-at-827.9 on BOTH sides. So
-# the only honest statement of the delta here is that there is none, and the `nine-and-two ->
-# seven-and-four` move #14723 measured belongs to `main`'s own commit, not to this branch.
+# reads), `set(fast_pool(head)) - set(fast_pool(main))` is exactly
+# `tests/test_14721_superseded_never_outranks.py` — this lane's own `ep` row — and the reverse
+# difference is EMPTY. That ONE row is what re-packs the bins: `main` is seven-at-828.0 /
+# four-at-827.9, while this tree is five-at-828.2 / six-at-828.1, with `28 m` and `2.03` identical on
+# BOTH sides. The `nine-and-two ->
+# seven-and-four` move #14723 measured still belongs to `main`'s own commit, not to this branch.
 # ⛔ THAT IS WHY THE PARTITION IS STATED AND NOT ONLY THE MINUTE: an arithmetic check on `28 m`
 # cannot see a carried figure, and a reader comparing only minutes would call the move cosmetic.
 # ⛔ No pool SIZE is restated BY THIS RE-DERIVATION, and the reason is a recorded ruling rather
@@ -156,10 +143,6 @@ version: 1
 # (`tests/test_mcp_selfcheck.py`, `tests/test_recall_neighborhood.py`), `#14671`'s
 # `tests/test_13450_ep_position_axis_participation.py` row in `durations` — `core`-registered — and
 # `#14726`'s dual registration, `tests/test_own_site_fragment_targets.py` row in
-# `durations`, on `core` AND `onboarding`, and `#14721`'s own suite
-# (`tests/test_14721_superseded_never_outranks.py`, `ep`, at the flat 2.0 s `DEFAULT_FAST_WEIGHT`).
-# ⛔ NO emission is restated HERE: the merged tree's
-# partition is the re-derivation above (this lane's own row is in the pool), and this list is the
 # `durations`, on `core` AND `onboarding`. ⛔ NO emission is restated HERE: the merged tree's
 # partition is the re-derivation above (#14723's `tests/test_14691_structure_evidence.py` is in the
 # pool — the fold's row, not this lane's), and this list is the
@@ -190,8 +173,8 @@ version: 1
 # head carries”, so the RULE survives and the label is re-pointed by hand on each fold — a residual
 # named on the artifact, which is the convention this block uses BELOW for the row-exemption class.
 # ⛔ EVERY file named above EXISTS on `main` — the claim is that none is a file this change ADDS,
-# not that none is touched: `tests/test_expansion_fusion_14344.py` IS edited here (a docstring
-# citation re-cut, `search_engine.py:5075` → `:5079`), so the bare "is `main`'s
+# not that none is touched: `tests/test_14560_operator_vectors.py` IS edited here (its section
+# banner stops claiming "no database needed" over an arm that needs one), so the bare "is `main`'s
 # at this head" the earlier wording carried was false on the face of this diff.
 # ⛔ Not claiming "and every one is `core`": registration status is a THIS-HEAD fact, and `#14544`
 # is the proof it moves (the sentence below records that file leaving `core`) — which is why the
@@ -274,10 +257,6 @@ version: 1
 # and the parse on this tree compare EQUAL to `main`'s — every surface list, every `durations` row,
 # every `durations_floors` entry and `tier1`, value by value, zero differing". That was TRUE of the
 # fold whose delta it measured (a two-sentence prose repair, which touched neither the surface map
-# nor the selector) and FALSE from the moment a lane that REGISTERS a row carried it: on this tree
-# the `ep` surface list and the `durations` map each hold one entry `main` does not, while
-# `durations_floors` and `tier1` still compare equal — so the blanket word was the defect, not the
-# per-key reading it replaced. ⛔ NO POOL SIZE AND NO ROW COUNT IS STATED HERE as a claim about
 # nor the selector) and it was FALSE for as long as a lane that REGISTERS a row carried it (on that
 # tree the `core` surface list and the `durations` map each held an entry `main` did not). ⛔ IT IS
 # TRUE AGAIN AT THIS HEAD, and the reason is not a wording change: that lane's row landed on `main`
@@ -13835,6 +13814,7 @@ durations_floors:
 # but it is no longer a reason to refuse a PR for a fast-pool file.
 # Pinned by tests/test_ci_manifest.py::test_a_fast_file_with_no_row_is_a_default_not_a_defect.
 durations:
+  test_14721_superseded_never_outranks.py: 2.0  # unmeasured — new in #14721 (PR #14737). The #3400/#4348 trap applies: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so this is the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `ep` registration above is what puts the file in `fast_pool()`, and `--integrity` is a 0.90 RATIO check that stays green over an absent row, so only this row records the weight. Hermetic: it imports `tortoise.ranking` only — no DB, no graph, no docker, no network, no model call. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local seconds figure and no case count are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_14357_fallback_thinking.py: 2.0  # new in #14357 (PR #14362) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` + `eval` registrations above are what put the file in `fast_pool()`, and `--integrity` stays green either way (the coverage check is a 0.90 RATIO with headroom), so only this row records the weight. ⛔ MEASURED at the #14362 review's head: the file was in `fast_pool()` with NO row here, and `--integrity` passed — the same absence `test_13422_object_subject_dense_leg.py`'s note records surviving a round, which is why the file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD` (the ENTRY-RULE pin iterates an EXPLICIT tuple and cannot see a file nobody listed). `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file. What the weight covers, hermetic — no DB, no graph, no network, no model call (every wire leg patches `requests.sessions.Session.post` and asserts the body it captured; the yield-guard legs drive a stub adapter in-process; the eval-grade leg reads `report.RECOVERABLE_CENSUS_CLASSES` directly): the three extractor pool members' WIRE BODIES all carrying a suppression (`thinking` on the direct member, `reasoning.effort: none` on openrouter, `venice_parameters.disable_thinking` on venice) while `deepseek-v4-pro` keeps its default on all three and the ask lane's hop members stay byte-identical; the lane gate being required AND keyword-only on the signature; the flash-FAMILY match over one literal; the failover-SERVED body and the keyless sole-member body; a bounded thinking budget still outranking suppression; and the yield guard's four arms — an empty `finish_reason=length` answer raising `_ReasoningCollapse` with its route/model interpolated, fatal by type (one call, no retry), censused as `reasoning_collapse`, an ESCALATED collapse not re-wrapped as a recoverable `truncated_parse_error`, a non-empty `length` answer still returned, and an empty `stop` answer still legitimate — plus the fail-closed eval grade and the end-to-end "no document, but recorded" extraction. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_14371_offline_embed_json.py: 2.0  # new in #14371 (this PR) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file. What the weight covers, hermetic (no DB, no graph, no network, no model call, no provider key — committed receipts plus `tortoise.extractor_v2`): the `embed-json` verb's per-emission before/after/delta and aggregate cells (77,561 -> 52,346, 25,215 saved, 1,801/emission), its per-document arithmetic (12,411.5 x 1.14 -> 14,149.1; -4,599.9/doc; 64,799 -> 60,199.1) and the floor counts it prints (46->49 / 61->66 / 370->398), the parsed-object + key-order round-trip of both layouts on all 14 real emissions, the posture guard in BOTH directions (a render-moving value is refused; a value resolving to the recorded render is not), the verb's no-provider-call and one-instrument structural pins, and the committed artifact's recorded cells. The end-to-end measurement leg SKIPS where no tiktoken BPE cache exists (fetching it is egress from a deterministic test) and pins the artifact instead. No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from.
   test_extractor_embed_json_14343.py: 2.0  # new in #14343 (this PR) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts the file in `fast_pool()`, and `--integrity` stays green either way (the coverage check is a 0.90 RATIO with headroom), so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file; the file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because that ENTRY-RULE pin iterates an EXPLICIT tuple and cannot see a file nobody listed. What the weight covers, hermetic (no DB, no graph, no network, no model call, no provider key — `tortoise.extractor_v2` is imported for its renderers and the lever is an env read): the default render is BYTE-identical to the pre-change `json.dumps(embed, indent=1)` for unset, blank and garbage values (a typo can never move a production prompt), `compact` changes the LAYOUT and nothing else, an unrecognised value FALLS BACK to the shipped default (it is never refused, and that fallback is what the file pins), and the flag is read per CALL rather than at import (a hoisted constant reds). ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
@@ -16442,7 +16422,6 @@ durations:
   # run in CI. `--integrity` cannot see a missing row, so this line is what records the
   # weight; re-point it from a real junit reading once CI has measured the file.
   test_14700_capture_in_flight_typed_refusal.py: 2.0
-  test_14721_superseded_never_outranks.py: 2.0  # unmeasured — new in #14721 (PR #14737). The #3400/#4348 trap applies: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so this is the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `ep` registration above is what puts the file in `fast_pool()`, and `--integrity` is a 0.90 RATIO check that stays green over an absent row, so only this row records the weight. Hermetic: it imports `tortoise.ranking` only — no DB, no graph, no docker, no network, no model call. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local seconds figure and no case count are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_13084_demand_census.py: 0.1
   test_13084_ram_cap.py: 2.4
   test_13084_ram_window_census.py: 0.1
