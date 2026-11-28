@@ -1584,6 +1584,20 @@ _DISCLAIMER_RE = re.compile(
     r"|follow[\s-]?ups?|deferred|out\s+of\s+scope|excluded|except|apart\s+from|other\s+than",
     re.IGNORECASE)
 
+# ⛔ A TOTALISING PHRASE NAMES THE ISSUE'S ROWS WITHOUT SPELLING AN ID (review round 26, found by
+# enumerating the placement x spelling matrix rather than one spelling per review). The own-line
+# disclaimer read requires the line to NAME a row before a cue on it counts — so `all six rows are
+# proved — not by this PR` named nothing, `disclaimed` stayed False, and beside a complete claim
+# (a `(rows V1–V6)` close, or a complete `Satisfies`) the body read `clean`. `_AFFIRM_RE` already
+# recognises `all six` / `every row` as the same idea on the POSITIVE side; this is the negative-side
+# counterpart, kept narrow so it can only ever widen a disclaimer (never a claim).
+# ⛔ `only` IS DELIBERATELY ABSENT (pinned since round 7): `Closes #N (row V2 only)` LIMITS an
+# affirmative claim and must stay a claim on V2, so `only` is not a disclaimer cue anywhere.
+_TOTALISING_RE = re.compile(
+    r"\ball\s+(?:six|\d+|the\s+rows|of\s+(?:them|the\s+rows))|\bevery\s+row\b"
+    r"|\bboth\s+rows\b|\bthe\s+whole\s+issue\b|\beach\s+row\b",
+    re.IGNORECASE)
+
 # ⛔ THE POSITIVE MARKER FOR *IDs* (review round 9): round 8 retired the prose-cue blocklist for
 # RANGES, but the ids read still decided polarity by vocabulary — anything `_DISCLAIMER_RE` did not
 # recognise was unioned in as a CLAIM. That made a NEGATION of the close earn the pass: `We do not
@@ -1833,7 +1847,8 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # spelling (`V3–V6`, `V3-V6`, `V3..V6`, `V3 to V6`, `rows V3 through V6`) read `clean`
             # beside a `Closes #N (rows V1–V6)` that closes all six — the headline false PASS. A range
             # MENTION is row-naming for a negative read; only the claim side may discount it.
-            if ((_explicit_ids(line, rows) or _range_matches(line, rows))
+            if ((_explicit_ids(line, rows) or _range_matches(line, rows)
+                    or _TOTALISING_RE.search(line))
                     and (_DISCLAIMER_RE.search(line) or _ELSEWHERE_RE.search(line))):
                 disclaimed = True
             continue

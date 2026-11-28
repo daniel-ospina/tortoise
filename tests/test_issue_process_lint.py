@@ -3937,6 +3937,41 @@ def test_a_closing_line_that_only_disclaims_rows_is_never_a_pass():
     findings, stats = L.classify_partial_close(
         "Closes #13036 (rows V1–V6)\n", 500, {13036: _scope(rows)})
     assert findings == [] and stats["clean"] == 1, stats
+    # ⛔ THE PLACEMENT × SPELLING MATRIX, SO THE SURFACE IS DECLARED RATHER THAN REDISCOVERED. Rounds
+    # 24 and 25 each found one more spelling of the same blind spot (closing line vs own line, then a
+    # range spelled without commas); enumerating the cross-product found the TOTALISING one
+    # (`all six rows are proved — not by this PR` names no row ID, so the cue was invisible). Every
+    # cell here must be non-`clean`: a body that discloses undelivered rows must never read as a
+    # complete close, whichever side of the keyword the disclosure sits on.
+    # ⛔ THE ONE DELIBERATE EXCEPTION is `only` (see `_TOTALISING_RE`'s note): `Closes #N (row V2
+    # only)` LIMITS an affirmative claim and is pinned as a claim on V2 by its own test, so `only` is
+    # not treated as a disclosure cue. That residual is recorded here rather than left to be found.
+    disclosures = (
+        "V1, V3, V4, V5, V6 remain unmeasured", "V1, V3, V4, V5, V6 are follow-ups",
+        "V1, V3, V4, V5, V6 are separate PRs", "V1, V3, V4, V5, V6 landed in later PRs",
+        "V1, V3–V6 remain unmeasured", "V1, V3-V6 remain unmeasured",
+        "V1, V3..V6 are follow-ups", "V1, V3 to V6 stay open",
+        "rows V1, V3 through V6 remain unmeasured",
+        "V3–V6 remain unmeasured", "V3-V6 remain unmeasured", "V3..V6 remain unmeasured",
+        "V3 to V6 stay open in later PRs", "Rows V3 through V6 remain unmeasured",
+        "all six rows are proved — not by this PR",
+        "all six are proved — in the predecessor PR",
+        "V3–V6 are in the predecessor PR", "V1–V6 — see the predecessor PR",
+        "V3-V6 are tracked in #14715",
+    )
+    placements = (
+        lambda d: f"Closes #13036\n\n{d}.\n",
+        lambda d: f"Closes #13036 (rows V1–V6)\n{d}.\n",
+        lambda d: (f"Closes #13036\n\nSatisfies #13036: V1, V2, V3, V4, V5, V6\n{d}.\n"),
+        lambda d: f"Closes #13036 ({d})\n",
+        lambda d: f"Closes #13036 (rows V1–V6); {d}\n",
+        lambda d: f"{d}.\n\nCloses #13036\n",
+    )
+    for disclosure in disclosures:
+        for place in placements:
+            body = place(disclosure)
+            findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)})
+            assert stats["clean"] == 0, (body, stats)
 
 
 def test_naming_every_row_ANYWHERE_is_a_complete_close():
