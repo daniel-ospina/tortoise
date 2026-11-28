@@ -9329,7 +9329,7 @@ class CollisionPreflightTest(unittest.TestCase):
             message=f"claim owner=box-a nonce=9806\nrenewal note, previous lease_until={past}")
         self.assertTrue(claimed, basis)
         self.assertTrue(unreadable, basis)
-        self.assertIn("OUTSIDE the minted line", basis)
+        self.assertIn("AFTER the minted one", basis)
         self.assertNotIn("EXPIRED", basis, f"a junk line must not free the claim:\n{basis}")
         # ARM 2 — a HEADER may not contribute either: the author NAME carries the token.
         claimed, basis, unreadable = self.claim_read(
@@ -9371,7 +9371,25 @@ class CollisionPreflightTest(unittest.TestCase):
             message=f"claim lease_until={past}\rlease_until={future}")
         self.assertTrue(claimed, basis)
         self.assertTrue(unreadable, basis)
-        self.assertIn("OUTSIDE the minted line", basis)
+        self.assertIn("AFTER the minted one", basis)
+        self.assertNotIn("EXPIRED", basis, f"a CR must not free the claim:\n{basis}")
+        self.assertNotIn("s left", basis, f"no lease may be quoted here:\n{basis}")
+
+    def test_a_cr_splitting_off_a_non_lease_remainder_does_not_free_the_claim(self):
+        """The CR class is "the minted line was split", NOT "the remainder looks like a lease".
+
+        Review round 3's finding: the narrower predicate ("a lease token after the minted line")
+        read `claim owner=box-a lease_until=<past>\rjunk` as a clean expired lease and FREED it,
+        while `claims.sh:_lease_of` joins the halves into `lease_until=<past>junk`, finds no
+        whole-token match, and answers unparseable → LIVE. The remainder's SHAPE must not decide,
+        because the divergence is the boundary itself.
+        """
+        past = int(time.time()) - 86400
+        claimed, basis, unreadable = self.claim_read(
+            message=f"claim owner=box-a lease_until={past}\rjunk")
+        self.assertTrue(claimed, basis)
+        self.assertTrue(unreadable, basis)
+        self.assertIn("AFTER the minted one", basis)
         self.assertNotIn("EXPIRED", basis, f"a CR must not free the claim:\n{basis}")
         self.assertNotIn("s left", basis, f"no lease may be quoted here:\n{basis}")
 
