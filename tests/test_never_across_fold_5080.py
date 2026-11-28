@@ -25,7 +25,14 @@ A refused fold produces ADD / no hit, so both claims survive.  A differing
 NUMBER or DATE is a new value for one attribute and keeps superseding (UPDATE);
 a differing NEGATION, CONDITION, marker SCOPE, LANGUAGE, substituted content,
 CONNECTIVE OPERATOR or ROLE INVERSION means the two are rival claims, which may
-be neither folded nor superseded.
+be neither folded nor superseded **by this boundary's verdict**.
+
+⛔ SCOPE (#14198): that is the LEXICAL verdict, not a promise about the whole
+pipeline. A rival is still closed when a model EXPLICITLY DECLARES the
+contradiction — `execute_embed` records a supersession for a claim an earlier
+capture emitted when a `NAND` names it (the arm added for #14198), and it never
+consults `_boundary`/`supersede_allowed`. Nothing below changes: the tables here
+pin the classifier, and a same-capture pair is untouched by that arm.
 
 Every never-across pair in the tables below carries token overlap at or above
 ``NOOP_MIN_OVERLAP``, so the assertion is that the boundary refuses a fold the

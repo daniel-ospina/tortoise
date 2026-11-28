@@ -25,19 +25,19 @@ the corrected reading:
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
    (the ``def`` at ``sdk.py:21138``, called at ``:20027``) →
-   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:14678``) calls
-   ``_edus_from_conversation`` (S0, ``:14801``) and then ``_arm_extract`` — the
+   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:15115``) calls
+   ``_edus_from_conversation`` (S0, ``:15238``) and then ``_arm_extract`` — the
    S1→S2→S2.2 prefix, which it calls twice since `#11002`: the first arm and the
-   retry — and that one function drives ``run_s1`` (S1, ``:17970``), ``run_s2``
-   (S2.1, ``:18002``) and ``_run_vet_pass`` (S2.2, ``:18056``).
+   retry — and that one function drives ``run_s1`` (S1, ``:18407``), ``run_s2``
+   (S2.1, ``:18439``) and ``_run_vet_pass`` (S2.2, ``:18493``).
    ``extract_session_v2`` itself calls ``kind_classifier.classify_items`` (S2.3,
-   ``:15255``), ``_apply_classify_kinds`` (S2.3, ``:15256``), ``search_graph``
-   (S3, ``:15272``), ``run_s4`` (the gap filler, ``:15293``), and
-   ``execute_embed`` (S5+S6, ``:15630``). ONE cite per symbol, on the line that symbol is on:
+   ``:15692``), ``_apply_classify_kinds`` (S2.3, ``:15693``), ``search_graph``
+   (S3, ``:15709``), ``run_s4`` (the gap filler, ``:15730``), and
+   ``execute_embed`` (S5+S6, ``:16067``). ONE cite per symbol, on the line that symbol is on:
    S2.3 makes TWO calls two lines apart, and the single ``:NNNN`` a
    ``a``/``b`` pair cite could carry is only ever checkable for one of them —
-   that pair form is how ``_apply_classify_kinds`` sat on ``:9210`` (naming
-   ``classify_items``' line) while the README's one-symbol row was right. The
+   that pair form is how ONE number came to stand for BOTH of S2.3's calls, two lines apart,
+   while the README's one-symbol row was right. The
    SYMBOL is authoritative and the line is a convenience — the three
    FILE-NAMED cites above are resolved against the tree by the bundle's pin,
    and EACH of the nine bare step cites is resolved by the same pin
