@@ -1100,6 +1100,7 @@ jobs:
           patch_probe_capped=0
           patch_rewritten=0
           patch_newcommit=0
+          patch_head_rejected=0
           patch_ancestry_unreadable=0
           patch_diff_rejected=0
           if [ "$candidates_acceptable" -eq 0 ] && [ -n "$all_markers" ]; then
@@ -1127,6 +1128,15 @@ jobs:
                 if [ "${#p_sha_bad}" -eq 40 ] && [ "${#p_diff_bad}" -eq 64 ] \
                    && [ "$p_sha_bad" != "$expected" ]; then
                   patch_sig_rejected=$((patch_sig_rejected + 1))
+                elif [ "${#p_sha_bad}" -eq 40 ] && [ "$p_sha_bad" = "$expected" ]; then
+                  # ⛔ A HEAD-BOUND marker is rule (a)'s, and its 40-hex sha IS this
+                  # head — so the signature is the problem, not the shape. Counting it
+                  # in the shape bucket printed "a 40-hex @ sha that is NOT this head,
+                  # plus a 64-hex diff= … no recording key would have made them
+                  # probeable", every clause of which is FALSE for it (final review of
+                  # #4255: reproduced with one head-bound bad-sig body, and the hoist
+                  # above had just made that line reachable in a new population).
+                  patch_head_rejected=$((patch_head_rejected + 1))
                 else
                   patch_shape_rejected=$((patch_shape_rejected + 1))
                 fi
@@ -1223,6 +1233,9 @@ jobs:
               # instead of the HMAC-mismatch diagnostic. Name it, or the stale
               # verdict below blames the DIFF for what is a KEY problem.
               echo "::error::${patch_sig_rejected} STALE-sha evidence marker(s) carried BOTH the 40-hex @ sha and the diff= that rule (c) anchors on, but their signature did NOT verify against AI_REVIEW_GATE_KEY — so rule (c) did not probe them. If the authored change is unchanged since the review, the recording KEY is the problem — not the diff."
+            fi
+            if [ "${patch_head_rejected:-0}" -gt 0 ]; then
+              echo "::error::${patch_head_rejected} evidence marker(s) are HEAD-BOUND (their 40-hex @ sha IS this head) but their signature did NOT verify against AI_REVIEW_GATE_KEY. Rule (a) would carry this marker with a CORRECT key — so the recording KEY is the problem, and fixing it may carry the verdict without a fresh review."
             fi
             if [ "${patch_shape_rejected:-0}" -gt 0 ]; then
               # The other class, and it must NOT get the key advice: without a

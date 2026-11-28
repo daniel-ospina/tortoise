@@ -1645,6 +1645,7 @@ assert_rc 1 "(t10b) a decoy beside a wrong-key stale diff= marker still fails cl
 assert_contains "(t10b) …and the operator is TOLD the stale marker's signature is the problem, despite the HMAC-mismatch exit" \
     "STALE-sha evidence marker(s) carried BOTH"
 assert_contains "(t10b) …and both diagnoses are printed, not one" "HMAC mismatch"
+cp "$T/gate.out" "$T/gate-t10b-decoy.out"
 # The anti-vacuity half: a VALID stale record carries, and must NOT print that error.
 {
     printf '%s sig=%s\n' "$DECOY_HEAD" "$BAD_SIG_T10B"
@@ -1653,10 +1654,28 @@ assert_contains "(t10b) …and both diagnoses are printed, not one" "HMAC mismat
 STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
     STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t10b-carry"
 assert_rc 0 "(t10b) a decoy beside a VALID stale record still carries"
-assert_not_contains "(t10b) …and prints NO key error on a carry (the empty-marker guard)" \
-    "STALE-sha evidence marker(s) carried BOTH"
-assert_not_contains "(t10b) …and no shape-error either (that is the OTHER diagnostic the same guard covers)" \
+# ⛔ WHICH DIAGNOSTIC CAN A CARRY EVEN PRINT? Only the HEAD-BOUND one — the decoy in
+# this fixture is head-bound with a bad signature, and `patch_sig_rejected` cannot be
+# non-zero on a carry by construction (the probe loop runs only when
+# `candidates_acceptable -eq 0`, and a carry contradicts that). An earlier revision of
+# this row asserted the KEY diagnostic's absence, which was unfalsifiable (final review).
+assert_not_contains "(t10b) …and prints NO diagnostic for its head-bound decoy on a carry (the empty-marker guard)" \
+    "are HEAD-BOUND"
+assert_not_contains "(t10b) …and no shape-error either (the third class the same guard covers)" \
     "failed the signature check AND lack the shape"
+# ORDER, on the diagnostics the hoist actually moved: the key diagnosis must appear
+# BEFORE the HMAC-mismatch line, or the operator reads "fix your key" without the reason
+# the carry was refused. `|| true` on both probes on purpose — under `set -euo pipefail`
+# a bare `grep | head | cut` assignment TERMINATES the run in exactly the case the row
+# detects (the line absent), which would kill every row after it.
+_kt_ln="$(grep -n 'STALE-sha evidence marker(s) carried BOTH' "$T/gate-t10b-decoy.out" | head -1 | cut -d: -f1 || true)"
+_hm_ln="$(grep -n 'HMAC mismatch' "$T/gate-t10b-decoy.out" | head -1 | cut -d: -f1 || true)"
+if [ -n "$_kt_ln" ] && { [ -z "$_hm_ln" ] || [ "$_kt_ln" -lt "$_hm_ln" ]; }; then
+    ok "(t10b) …and the key diagnosis PRECEDES the HMAC-mismatch line (order, not just presence)"
+else
+    bad "(t10b) the key diagnosis at line ${_kt_ln:-none} does not precede the HMAC line ${_hm_ln:-none} — the hoist is not doing its job"
+fi
+unset _kt_ln _hm_ln
 # MUTATION: drop that guard, and the carry above must sprout a false ::error::.
 MUT_GUARD="$T/mutant-no-marker-guard-on-diag.sh"
 # The OUTER guard is the one that matters: the two diagnostics are nested inside
@@ -1672,8 +1691,8 @@ else
     STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
         STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t10b-carry"
     RUN_BLOCK="$_saved_block"
-    if printf '%s' "$GATE_OUT" | grep -q "failed the signature check AND lack the shape"; then
-        ok "(t10b) the MUTANT annotates a GREEN run with a key error — so the guard is load-bearing"
+    if printf '%s' "$GATE_OUT" | grep -q "are HEAD-BOUND"; then
+        ok "(t10b) the MUTANT annotates a GREEN run with a head-bound key error — so the guard is load-bearing"
     else
         bad "(t10b) the mutant printed no key error on the carry — the not_contains assertion above attributes nothing"
     fi
@@ -1960,19 +1979,15 @@ STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
 assert_rc 1 "(t22) a decoy line beside a REWRITTEN branch still FAILS CLOSED"
 assert_contains "(t22) …and the operator is STILL told the branch was rewritten (a pasted line does not silence the diagnosis)" \
     "is NOT an ancestor of this PR's head"
-# …and the ACCURATE reason must come BEFORE the HMAC-mismatch line, not after it. The
-# diagnostics used to sit inside the no-candidate classification block, so a decoy — the
-# very population the acceptable-marker entry condition serves — preempted them and the
-# operator read "HMAC mismatch" with no reason above it. Order, not presence: both lines
-# can be true at once, and only the order says which one is the blocker.
-_rew_ln="$(grep -n 'is NOT an ancestor of this PR' "$T/gate.out" | head -1 | cut -d: -f1)"
-_hmac_ln="$(grep -n 'does not verify against AI_REVIEW_GATE_KEY' "$T/gate.out" | head -1 | cut -d: -f1)"
-if [ -n "$_rew_ln" ] && { [ -z "$_hmac_ln" ] || [ "$_rew_ln" -lt "$_hmac_ln" ]; }; then
-    ok "(t22) …and the reason PRECEDES any HMAC-mismatch line (the decoy does not bury the diagnosis)"
-else
-    bad "(t22) the rewrite diagnosis at line ${_rew_ln:-none} does not precede the HMAC line ${_hmac_ln:-none} — a decoy buries the reason"
-fi
-unset _rew_ln _hmac_ln
+# ⛔ A ROW WAS DELETED HERE (final review). It asserted that the REWRITE diagnosis
+# precedes the HMAC-mismatch line in a decoy run — but the rewrite warning was never
+# one of the two blocks the hoist moved (`git log -S 'is NOT an ancestor of this PR'`
+# dates it three commits earlier), so the row passed on the pre-hoist code and pinned
+# nothing. Worse, both line probes were `grep | head | cut` assignments with no
+# `|| true` under this file's `set -euo pipefail`, so the population the row existed
+# for — the diagnosis ABSENT — killed the harness at that line instead of reporting
+# it. The ORDER property is pinned in `(t10b)` instead, against the blocks that
+# actually moved.
 # (b) The other direction on the SAME bytes: an ADVANCED branch (the head descends from
 # the reviewed commit) still carries, so the refusal above is the rewrite and not a
 # rule that refuses everything. Without this half, deleting rule (c) would look green.
@@ -2351,6 +2366,15 @@ else
     _pp_rc2=0
     python3 "$_pp_producer" --patch-only < "$T/pp-shape.diff" > "$T/pp-shape.out" 2>/dev/null || _pp_rc2=$?
     _pp_out=$(wc -c < "$T/pp-shape.out" 2>/dev/null || echo 0)
+    # ⛔ AND THE DIGEST THAT IS ACTUALLY COMPARED BELOW. `_pp_out` byte-counts the
+    # SYNTHETIC shape probe only; a producer that is silent on the REVIEWED fixture
+    # still produced `sha256("")`, which would be reported as DRIFT — the one message
+    # that invites aligning the consumer to a broken producer (final review, measured
+    # with a stub producer that is empty for f.md and normal for the shape probe).
+    _pp_rev_out=$(
+        python3 "$_pp_producer" --patch-only < "$REVIEWED_DIFF_FILE" 2>/dev/null | wc -c || echo 0
+    )
+    [ "${_pp_rev_out:-0}" -gt 0 ] || _pp_out=0
     if [ "$_pp_rc" -ne 0 ] || [ "$_pp_rc2" -ne 0 ]; then
         echo "  ⏭  (t) the LOCAL producer at $_pp_producer FAILED (rc=${_pp_rc}/${_pp_rc2}) — cross-repo agreement NOT measured (this is not a pass, NOT the pre-#4261 shape, and NOT drift)"
     elif [ "${_pp_out:-0}" -eq 0 ]; then
