@@ -343,6 +343,33 @@ def test_the_other_emission_order_closes_the_same_claim(make_graph):
     assert _pid(CERT) not in live_ids
 
 
+def test_an_unordered_pair_declines_instead_of_closing_on_arrival_order():
+    """EITHER side lacking an instant DECLINES — both halves of the gate.
+
+    ⛔ MEASURED (#14794 review): the first cut of this gate tested only the NEW
+    point's start. A prior row with no `when` (reachable: `_prior_start` returns
+    `""`) then fell into the world-time branch, where `(0, ts) < (1, "")` is
+    TRUE, so the arm fired the BACKFILL refusal and told the receipt that
+    "world time says the prior point … is the NEWER fact" — false, since its
+    start is merely UNKNOWN. Both halves are now gated, and both are pinned:
+    this case has the prior undated, the case above has the new point undated.
+    """
+    second = "ColdPath's certificate was revoked in the March audit"
+    out, _payload = _shape_run({
+        "entities": [], "events": [],
+        "points": [_statement(second, when="2026-05-01")],
+        "operators": [{"op_type": "NAND", "src": second, "dst": CERT}],
+    }, _RESOLVED, prior_when="")          # the PRIOR's start is unknown
+    assert out.get("supersessions") == [], (
+        "an unordered pair must not close on arrival order")
+    said = " ".join(out.get("warnings") or [])
+    assert "only when BOTH" in said, (
+        "the decline must name the real reason: the starts are not comparable")
+    assert "cannot express that direction" not in said, (
+        "and it must NOT claim the prior is the newer fact — its start is "
+        "unknown, not later")
+
+
 def test_a_backfill_DECLINES_and_says_so(make_graph):
     """A later capture carrying an EARLIER world date (the backfill shape).
 
@@ -446,6 +473,7 @@ def test_an_absent_start_declines_and_keeps_the_declared_edge():
         assert not any("is recorded as a supersession" in w
                        for w in out.get("warnings") or []), (
             f"[{label}] the run must not claim a closure it did not record")
+
         if coverage is _RESOLVED:
             # ⛔ THE COSTLY HALF: declining must not also DROP the declared edge.
             assert payload.get("operators"), (
@@ -711,6 +739,9 @@ def test_a_minted_successor_is_never_named_as_a_superseder():
         assert not any("is recorded as a supersession" in w
                        for w in out.get("warnings") or []), (
             f"[{label}] the run must not claim a closure it did not record")
+        assert not any("only when BOTH" in w for w in out.get("warnings") or []), (
+            f"[{label}] the point guard is what refuses this shape — the instant "
+            "gate must not be blamed for it")
         if label == "resolved":
             # the minted claim must still reach the payload: the prune only
             # removes what no surviving operator references, and here the
@@ -1000,6 +1031,17 @@ def test_the_cross_producer_warning_does_not_promise_retention_on_the_drop_route
     assert ops == [], (
         "on the hold route this arm does not keep the edge — the pre-existing "
         f"#10997 hold drops it, so the payload cannot be expected to carry it (got {ops})")
+    # ⛔ THE GUARD'S OWN ATTRIBUTION, not just the outcome: with
+    # `_written_point_ids` in place an Event/minted successor reaches THIS
+    # refusal, so the receipt says "did not resolve". Without that guard the same
+    # shape falls through to the instant gate and the receipt instead claims
+    # "only when BOTH starts name an instant" — a sentence about a comparability
+    # the real cause has nothing to do with. Asserting the ABSENCE of that line
+    # is what pins the guard at this head (deleting it leaves the closure verdict
+    # unchanged — measured — because an Event/minted point carries no instant).
+    assert not any("only when BOTH" in w for w in out.get("warnings") or []), (
+        "an Event successor must be refused by the point guard, and named as an "
+        "unresolved endpoint — not folded into the instant-comparability gate")
     said = [w for w in out.get("warnings") or [] if "ALREADY closed by" in w]
     assert said, "the receipt must still say the claim was already closed"
     assert "kept as the evidence" not in said[0], (

@@ -42,12 +42,13 @@ where the prior set was partial the endpoint can still be HELD. The shipped
 number requires a fresh-graph re-ingest (the #14198 owner comment's 5-document
 run, reading doc-05's `supersessions`), and this file does not stand in for it.
 
-⚠️ It also cannot exercise the WORLD-TIME order: the receipt's point rows carry
-no `when` (props are `quote`/`search_keys`/`source_turn_id`), so the arm takes
-its arrival-order fallback here —
-`test_a_backfill_DECLINES_and_says_so` and
-`test_the_backfill_decline_is_instant_granular_not_day_granular` cover the other
-branches, and this file does not.
+⚠️ It also cannot exercise a CLOSURE: the receipt's point rows carry no `when`
+(props are `quote`/`search_keys`/`source_turn_id`), so neither rival's start is
+an instant and the arm DECLINES (there is no arrival-order fallback any more —
+see `test_an_unordered_pair_declines_instead_of_closing_on_arrival_order`). The
+closure is covered by
+`test_a_world_time_ordering_is_decided_on_instants_not_date_prefixes`, and this
+file is not a substitute for it.
 
 Nothing is invented: every content string and id below is read out of the
 receipt by id, and the run refuses rather than substituting a value it could not
@@ -208,8 +209,12 @@ def main(argv: list[str]) -> int:
              if str(s.get("superseded")) == old_id
              and str(s.get("supersedes_by")) == new_id]
     warnings = out.get("warnings") or []
+    # ⛔ A DECLINE MUST NAME ITSELF (#14198 review: the arm can now DECLINE a
+    # declaration instead of closing it, and the first filter printed NOT
+    # RECORDED with no reason at all). "not closed" is the decline's marker;
+    # "earlier-capture" the closure's; the drop line is the pre-arm outcome.
     named = [w for w in warnings
-             if "earlier-capture" in w.lower()
+             if "earlier-capture" in w.lower() or "not closed (#14198)" in w
              or (NAND_DST_REF[:40] in w and "dropped" in w)]
 
     print(f"# replay arm: {arm}")

@@ -188,36 +188,40 @@ $ python docs/evidence/14592-operating-model-validation/replay_14198.py --arm be
 replay REFUSED: --arm before names an arm the imported module is not (the cross-capture arm is present in …/tortoise/extractor_v2.py) — point PYTHONPATH at the tree you mean instead of relabelling it
 ```
 
-The AFTER side, verbatim:
+The AFTER side, verbatim — and ⛔ **it is a DECLINE, not a closure, since the
+arm learned to refuse an unordered pair** (`ad9b209`). The receipt's point rows
+carry no `when` (props are `quote`/`search_keys`/`source_turn_id`), so neither
+rival's start is an instant here, and the arm refuses to order them on arrival
+order — that is the behaviour its own test file pins, and it is why this
+artifact now reads:
 
 ```text
 $ python docs/evidence/14592-operating-model-validation/replay_14198.py --arm after
 # replay arm: after
-# tree: /home/cmux/tortoise/.worktrees/14198-contra
 # lookup state: partial
-# extractor_v2 from: .../14198-contra/tortoise/extractor_v2.py
 # new claim (this capture) : pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5
 # older claim (prior)      : pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078
 
-supersessions recorded      : 1
-supersessions naming the pair: 1
-  superseded=pt_fc8b3e47bb7e0599328d968073671eef8c9cecbc376ca2bbd6e05476f2c078  supersedes_by=pt_9af28546e85d11f414e05b658580e4afe46f2c21ec9a9e58dce89b8a288aa5
-  evidence="declared NAND contradiction across captures — the older claim's interval is closed (retained, never deleted)"
+supersessions recorded      : 0
+supersessions naming the pair: 0
 
 warnings naming the pair:
-  - operator endpoint is an EARLIER-CAPTURE claim (#14198): NAND dst 'ColdPath Logistics holds a validated cold-chain certificate' resolved to prior point 'pt_fc8b3e47bb7e05993' outside this capture — the contradiction is recorded as a supersession (closed interval 'pt_fc8b3e47bb7e05993' ← 'pt_9af28546e85d11f41'), so the older claim is retained and closed rather than left as a second live truth
+  - NAND contradiction ACROSS CAPTURES not closed (#14198): this arm can order the two rivals by world time only when BOTH starts name an instant ('' vs the prior's ''; this capture's point 'pt_9af28546e85d11f41' against prior 'pt_fc8b3e47bb7e05993'), and the write path resolves the successor's start from sources this pass cannot see (an asserted date in the content, or a dedup hit that keeps the canonical's stored start). Closing on arrival order there emits a window the consumer refuses as inverted, which would leave the declaration in NO representation while this receipt claimed a closure. No interval is closed; the declared edge is emitted when the older side resolves (the wiring route) and dropped with the active decision when it does not (the hold route)
+  - operator dropped: src/dst did not resolve to an emitted point/event ('The cold-chain audit failed ColdPath Logistics last week' → 'ColdPath Logistics holds a validated cold-chain certificate')
 
 operators naming the pair : 0
 
-VERDICT: the cross-document contradiction is RECORDED
+VERDICT: the cross-document contradiction is NOT RECORDED
 ```
 
-The `before` warning is **byte-identical** to the one the recorded run wrote —
-that is the check that the replay is a replay, not a different run. ⛔ `--arm`
-is CHECKED against the imported module and refuses when the label and the tree
-disagree, and `--tree` selects the checkout that is imported (never the ambient
-import path — this box's venv has the MAIN checkout installed, so a bare run
-measured `/home/cmux/tortoise` and printed a verdict for code it never loaded).
+⛔ **This is the correct outcome for THIS artifact and a weaker one than the
+tests prove.** The replay's prior rows are reconstructed from the receipt's
+emitted points, which carry no `when`; the closure the test file proves needs a
+start on both sides, and the receipt does not record one. So §3 no longer
+demonstrates a closure end-to-end — it demonstrates the DECLINE, on the very
+corpus it replays, which is residual §6.6's cost landing on this PR's own
+evidence. What the closure rests on is §5's suite (a pair whose starts are known
+closes; either start absent declines and keeps the declared edge).
 
 ⚠️ **What this artifact proves, exactly.** The prior set here is a
 **RECONSTRUCTION**: the receipt does not record doc-05's S3 prior set (its
@@ -228,11 +232,11 @@ happens"* — not *"the shipped pipeline closes this corpus's contradiction"*. A
 hold is not a closure. The shipped number still requires a fresh-graph
 re-ingest (the 5-document run in #14198's owner comment, reading doc-05's
 `supersessions`), and this file is not a substitute for it. It also cannot
-exercise gate 3: the receipt's point rows carry no `when`, so the replay takes
-the arrival-order fallback: the backfill branch DECLINES (§6.5), and the two
-instant/precision shapes are covered by
-`test_a_backfill_DECLINES_and_says_so` and
-`test_a_world_time_ordering_is_decided_on_instants_not_date_prefixes`.
+exercise gate 3: the receipt's point rows carry no `when`, so the replay now
+DECLINES (§6.6 — there is no arrival-order fallback left to take), and the
+closure shape is covered by
+`test_a_world_time_ordering_is_decided_on_instants_not_date_prefixes` and the
+decline by `test_an_unordered_pair_declines_instead_of_closing_on_arrival_order`.
 
 ## 4. Compose with retrieval — what a reader sees now
 
@@ -271,7 +275,7 @@ the *surviving* claims to rank first) is neither implemented nor needed here.
 | **negative (instant granularity of the decline)** | the decline and the consumer agree on the SAME measure: a backfill whose two `when` values are instants on one calendar day is still a backfill (declined, named), not an "unknown date" fallback — and a cross-offset pair that the date prefixes invert closes instead of being declined | ❌ | ✅ |
 | **positive (read)** | a current-scope query for the old claim's own wording no longer answers with it; the terminal scope still does | ❌ | ✅ |
 | **negative (support)** | the *same* two documents with the model declaring `IMPL` (support) close **nothing**; the older claim keeps its open interval and stays current | ✅ | ✅ |
-| **negative (event side)** | a NAND whose emitted side is an Event closes nothing AND does not claim it did (no `recorded as a supersession` warning). Passes on the base commit too, and is REAL coverage for the surviving guard: removing `_written_point_ids` reds this case and the minted-successor one (measured) | ✅ | ✅ |
+| **negative (event side)** | a NAND whose emitted side is an Event closes nothing AND does not claim it did (no `recorded as a supersession` warning), AND is refused by the POINT guard with its own attribution (no "only when BOTH starts name an instant" line — the instant gate is not the cause). Passes on the base commit too. ⚠️ Measured at this head: removing `_written_point_ids` reds the MINTED-successor case, and leaves this one green — the instant gate refuses the same Event input on its own, so this case does not distinguish the guard | ✅ | ✅ |
 | **negative (minted successor)** | a `NAND` whose newer side is named only INSIDE the edge closes nothing and claims nothing — the `#2552` mint would be pruned once the operator is suppressed, so the closure would name a point that was never written and the document's own claim would vanish (measured in review as the arm's worst shape: `supersessions_written: 0`, "the contradiction is recorded …" still warned) | ✅ | ✅ |
 | **negative (second refuter)** | 2 refuters of one claim → 1 closure, and the SECOND refuter KEEPS its `NAND` (the consumer would skip it silently as an idempotent no-op, so suppressing both would erase that evidence) — pre-fix: `2 operators, 0 closures` | ❌ | ✅ |
 | **negative (undeclared)** | a corpus that reverses itself in **wording** but declares no edge gains no contradiction. ⛔ A PIN, not coverage: no mutation of the arm can red it (the `none` shape emits no operator at all) | ✅ | ✅ |
