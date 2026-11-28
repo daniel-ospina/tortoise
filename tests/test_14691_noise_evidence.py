@@ -753,6 +753,25 @@ def test_the_conjuncts_that_never_decide_on_this_run_are_still_pinned():
     assert half["verdict"] == "FAIL", (
         "T2 PASSes a half merge — the partial fix still leaves a second copy of the goal, "
         "which is the defect this leg exists to grade")
+    # ⛔ The THIRD case, and the one the non-emptiness guard exists for: doc-06
+    #    contributed NO goal candidate at all (the fact dropped, or reworded below the
+    #    0.45 candidate band) with no entity growth. `ids_b - ids_a` is then empty, so a
+    #    containment test alone PASSes total loss — the acceptance gate this issue sets,
+    #    open on the worst outcome (review round 4, finding 1).
+    receipt_absent = copy.deepcopy(_receipt())
+    doc6_absent = next(d for d in receipt_absent["passes"][0]["documents"]
+                       if d["doc_id"] == "doc-06")
+    doc6_absent["overview_after"] = copy.deepcopy(doc6_absent["overview_before"])
+    for pt in ((doc6_absent.get("result") or {}).get("points") or []):
+        pt["text"] = "zzz nothing about the goal in common zzz"
+    absent = module.t2(receipt_absent, corpus)
+    assert absent["legs"]["entity_delta_zero"] is True, "the fixture must hold the entity leg true"
+    assert absent["legs"]["doc_06_ids_unresolved_in_doc_03"] == [], \
+        "the fixture must leave NOTHING unresolved, so only the non-emptiness guard decides"
+    assert absent["legs"]["goal_resolves_to_one_thing"] is False
+    assert absent["verdict"] == "FAIL", (
+        "T2 PASSes a restatement that produced no goal point at all — the leg's "
+        "non-emptiness guard is dropped, so total loss satisfies a containment test")
 
     # ── T4: Sources below one-per-document must FAIL, everything else true.
     readback = copy.deepcopy(_readback())

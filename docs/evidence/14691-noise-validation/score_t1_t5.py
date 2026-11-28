@@ -457,7 +457,14 @@ def t2(receipt: dict, corpus: dict) -> dict:
     # fail T2 on an axis this bundle declares clean.
     entity_delta = (d.get("taxonomy.Object", 0) + d.get("taxonomy.Subject", 0))
     unresolved = sorted(ids_b - ids_a)
-    one_goal = bool(ids_b) and bool(ids_a) and not unresolved
+    # ⛔ The non-emptiness guard is LOAD-BEARING, not decoration: `ids_b - ids_a` is
+    # EMPTY when doc-06 contributed no goal candidate at all, so `not unresolved` alone
+    # PASSes the worst outcome this leg exists to catch — the fact dropped, or reworded
+    # below the 0.45 candidate band, with no entity growth. `bool(ids_a)` is deliberately
+    # NOT written: `ids_b ⊆ ids_a ∧ ids_b ≠ ∅ ⇒ ids_a ≠ ∅`, so it can never decide, and a
+    # conjunct that cannot vary is dead weight in a rule a reader is asked to recompute
+    # (review round 4, finding 1 — the arm is `test_both_no_data_arms…`'s sibling below).
+    one_goal = bool(ids_b) and not unresolved
     verdict = "PASS" if (entity_delta == 0 and one_goal) else "FAIL"
     return {
         "test": "T2",
