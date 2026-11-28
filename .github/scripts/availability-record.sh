@@ -914,9 +914,19 @@ render_record() { # <days> <now>
   printf 'DOWN_MIN = minutes the service was OBSERVED DOWN. DEGRADED_MIN is the same measure for DEGRADED incidents, in its OWN column — DOWN and DEGRADED are never summed. ⛔ MINUTES ARE WALL-CLOCK AND UNIONED: overlapping incidents are counted ONCE, and a minute is attributed to the UTC day it OCCURRED (the incident COUNT columns next to them attribute each incident to the day it was FIRST observed — a count belongs to the incident, a minute belongs to the clock). UNBOUNDED_INC = incidents that produce NO minutes and are disclosed here instead: still open, closed with an unreadable recovery stamp, closed as not_planned/duplicate (not a recovery), a recovery stamp that precedes the first failure, no parseable first_failure_ts, or a usable span with no parseable kind. Each carries its own label in the per-incident list, so an unknown end is never printed as "down right now". DOWN_MIN is a LOWER BOUND wherever UNBOUNDED_INC > 0. Resolution = the probe cadence printed above — a span shorter than one probe interval cannot be told apart from one interval.\n'
   printf '  incident totals: down=%s degraded=%s unknown=%s restart_attempts=%s\n' \
     "$total_down_inc" "$total_degraded_inc" "$total_unknown_inc" "$total_restarts"
-  printf '  recovered downtime: %s min DOWN and %s min DEGRADED — never summed. These are WALL-CLOCK minutes (overlapping incidents union, not add) attributed to the UTC day the minute OCCURRED, so a span that BEGAN BEFORE this window still contributes its in-window minutes. The incidents FIRST OBSERVED inside this window are %s DOWN and %s DEGRADED — a count belongs to the incident and a minute to the clock, so the two are STATED SEPARATELY and are not a ratio. %s incident(s) have NO usable span and contribute NOTHING, so every figure here is a LOWER BOUND wherever that count is non-zero.\n' \
-    "$total_down_min" "$total_degraded_min" "$total_recovered" "$total_recovered_deg" "$total_unbounded"
-  printf '  (those totals are WINDOW-SCOPED — summed from the day columns above. The list below covers the\n'
+  # ⛔ THE COUNT CLAUSE NAMES A POPULATION, SO IT MUST PRINT THAT POPULATION (review round 8 P2).
+  # "FIRST OBSERVED inside this window" is `down_inc`/`degraded_inc` (every in-window incident);
+  # `total_recovered` is the RECOVERED subset, which differs whenever anything in the window is
+  # unbounded — so the round-7 rewording published "are 1 DOWN" on a day whose TOTAL row says
+  # down_inc=4. A count the document contradicts one line above is the class this PR closes.
+  printf '  recovered downtime: %s min DOWN and %s min DEGRADED — never summed. These are WALL-CLOCK minutes (overlapping incidents union, not add) attributed to the UTC day the minute OCCURRED, so a span that BEGAN BEFORE this window still contributes its in-window minutes. The incidents FIRST OBSERVED inside this window are %s DOWN and %s DEGRADED (of which %s and %s recovered) — a count belongs to the incident and a minute to the clock, so the two are STATED SEPARATELY and are not a ratio. %s incident(s) have NO usable span and contribute NOTHING, so every figure here is a LOWER BOUND wherever that count is non-zero.\n' \
+    "$total_down_min" "$total_degraded_min" "$total_down_inc" "$total_degraded_inc" "$total_recovered" "$total_recovered_deg" "$total_unbounded"
+  # ⛔ "SUMMED FROM THE DAY COLUMNS" IS NOT TRUE OF `unbounded_inc` (review round 8 P3): the
+  # undated class is added to that TOTAL and has no day row, so the sentence must name the
+  # exception instead of implying a reconciliation that cannot be performed.
+  printf '  (those totals are WINDOW-SCOPED — summed from the day columns above, EXCEPT `unbounded_inc`,\n'
+  printf '   which also counts incidents with no parseable `first_failure_ts` (they have no day row).\n'
+  printf '   The list below covers the\n'
   printf '   whole ledger, so it can name an incident that is outside this window. They are NOT the sum of\n'
   printf '   the per-incident down_for= lines: overlapping spans union, and every minute is clipped to its\n'
   printf '   UTC day, so a line is evidence — not an addend.)\n'
@@ -992,10 +1002,17 @@ render_record() { # <days> <now>
               # arm the same way (`inc_end` is numeric), and the header promises each unbounded
               # class its OWN label — so an undated row was told it held a clock inversion that
               # does not exist, and pointed at the wrong field to repair.
+              # ⛔ AND A STAMP AHEAD OF NOW INVENTS A DURATION HERE TOO (review round 8, latent):
+              # a future `first_failure_ts` with a later readable `closed_at` printed
+              # `down_for=1226 min` for a day that is in no column. The guard is the same one,
+              # applied before this arm instead of only in the open arm.
+              ff_i="$(to_int "$inc_ff" 0)"
               if [ "$inc_day" = "n/a" ] || [ "$inc_ff" = "-" ]; then
                 down_disp="unknown (no parseable first_failure_ts)"
-              elif [ "$inc_end" -ge "$(to_int "$inc_ff" 0)" ]; then
-                down_disp="$(( (inc_end - $(to_int "$inc_ff" 0)) / 60 )) min"
+              elif [ "$ff_i" -gt "$(now_epoch)" ]; then
+                down_disp="unknown (first_failure_ts is in the FUTURE — NOT counted)"
+              elif [ "$inc_end" -ge "$ff_i" ]; then
+                down_disp="$(( (inc_end - ff_i) / 60 )) min"
               else
                 down_disp="unusable (recovery stamp precedes the first failure — NOT counted)"
               fi

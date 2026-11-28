@@ -654,6 +654,14 @@ assert_contains "$OUT" "1 incident(s) carry no parseable first_failure_ts: liste
 assert_contains "$ERR" "has no parseable kind=" "the unparsable kind is warned about"
 assert_contains "$ERR" "has no parseable first_failure_ts — listed, counted in the TOTAL's unbounded_inc but on no day row" \
   "the undated warning AGREES with the disclosure (counted in the TOTAL, on no day row)"
+# ⛔ THE COUNT CLAUSE MUST NAME THE POPULATION IT PRINTS (review round 8 P2). "FIRST OBSERVED"
+# is down_inc/degraded_inc (1 dated DOWN here), NOT the recovered subset (0 here). And the
+# "summed from the day columns" sentence must name its own exception, because this TOTAL's
+# unbounded_inc (3) exceeds the day column (2) by the undated incident.
+assert_contains "$OUT" "The incidents FIRST OBSERVED inside this window are 1 DOWN and 0 DEGRADED (of which 0 and 0 recovered)" \
+  "the count clause prints the first-observed population, not the recovered subset"
+assert_contains "$OUT" "summed from the day columns above, EXCEPT \`unbounded_inc\`" \
+  "the totals note names the one column the TOTAL cannot reconcile against the day rows"
 
 # ── 18: the in-progress UTC day is scored on elapsed intent (P2-6) ──────────
 echo
@@ -833,6 +841,11 @@ assert_contains "$OUT" "excluded (closed as not_planned/duplicate — not a reco
   "a not_planned close is NOT read as a recovery (its closed_at would invent a span)"
 assert_contains "$OUT" "recovered downtime: 60 min DOWN and 0 min DEGRADED — never summed" \
   "the total is WINDOW-SCOPED: exactly the one recovered incident contributes"
+# ⛔ 1 RECOVERED but 4 FIRST OBSERVED: the two populations differ, and the clause must print
+# the one it names. Printing the recovered subset here produced "are 1 DOWN" beside a TOTAL
+# row reading down_inc=4 — the contradiction class this PR exists to close.
+assert_contains "$OUT" "The incidents FIRST OBSERVED inside this window are 4 DOWN and 0 DEGRADED (of which 1 and 0 recovered)" \
+  "the count clause prints all four in-window DOWN incidents, not only the recovered one"
 assert_contains "$OUT" "DOWN_MIN is a LOWER BOUND wherever UNBOUNDED_INC > 0" \
   "the total is declared a lower bound while any outage is unbounded"
 assert_eq "$(printf '%s\n' "$OUT" | awk '$1 == "TOTAL" { print $(NF-2), $(NF-1), $NF }')" "60 0 3" \
@@ -936,7 +949,10 @@ run_record 3 --print-only
 assert_eq "$(row_downtime "$OUT" 2026-09-16)" "240 0 0" \
   "the 1h overlap is counted ONCE: 180 union minutes + 60 disjoint, never 300 summed"
 assert_contains "$OUT" "recovered downtime: 240 min DOWN and 0 min DEGRADED — never summed" \
-  "the union minutes are stated on their own, never welded to a per-incident count" \
+  "the union minutes are stated on their own, never welded to a per-incident count"
+# ⛔ THIS ASSERTION MUST BE ITS OWN CALL (review round 8 P3): a stray trailing `\` made it
+# a 7-argument continuation of the call above, so `assert_contains` read only $1..$3 and the
+# count clause was UNGUARDED — the summary mutant reddened only the minutes row.
 assert_contains "$OUT" "The incidents FIRST OBSERVED inside this window are 4 DOWN and 0 DEGRADED" \
   "the count is per-incident while the minutes are per-wall-clock — stated separately"
 
@@ -1123,6 +1139,23 @@ assert_contains "$OUT" "The incidents FIRST OBSERVED inside this window are 0 DO
   "the count is stated as a separate fact: 0 incidents were first observed here"
 assert_not_contains "$OUT" "60 min DOWN over 0" \
   "no sentence welds a wall-clock minute total to a count with 'over'"
+
+# ── 37: a future stamp with a readable end invents no duration either ────────
+# The round-7 guard sat only in the `inc_end == "-"` arm, so a future
+# `first_failure_ts` with a LATER readable `closed_at` still printed a span
+# (`down_for=1226 min`) for a day that is in no column.
+echo
+echo "37. a future first_failure_ts with a readable end still prints no duration"
+reset_case
+export STUB_LEDGER_SEARCH_JSON='{"total_count":1,"items":[
+ {"number":9901,"user":{"login":"github-actions[bot]"},"title":"a","body":"<!-- watchdog-state kind=down first_failure_ts=1999999999 restarts= -->\n<!-- availability-watchdog-state -->","closed_at":"2033-05-19T00:00:00Z","state_reason":"completed","state":"closed"}]}' \
+       STUB_RUNS_JSON='{"workflow_runs":[{"conclusion":"success","created_at":"2026-09-16T09:00:00Z"}]}'
+run_record 3 --print-only
+assert_eq "$RC" "0" "a future stamp with a readable end does not fail the record"
+assert_contains "$OUT" "down_for=unknown (first_failure_ts is in the FUTURE — NOT counted)" \
+  "the future stamp is named in the readable-end arm too"
+assert_not_contains "$OUT" "down_for=1226 min" \
+  "no duration is invented from two future stamps"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
