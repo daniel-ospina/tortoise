@@ -72,21 +72,21 @@ version: 1
 # differ by `124/118` (a stable pair — `git diff a01675b50c 344a1c086e --
 # config/ci-surfaces.yml` -> `124 118`, both endpoints named so the reading is reproducible), and
 # the row is present in `origin/main`'s
-# manifest and ABSENT from the PRE-FOLD BASE's, so the fold brought it in), and `main` now also
-# carries `tests/test_relation_orientation_14304.py` (`core`, the same flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) from #14790 — so this tree holds BOTH of `main`'s rows rather than either
-# standing in for the other, and this PR registers ONE row of its OWN on top of them
-# (`tests/test_14198_contradiction_closure.py`).
-# With `main`'s two rows AND this PR's registration on the tree, the verb packs three shards at
-# 828.4 s (a, j, k) and eight at
-# 828.3 s (b, c, d, e, f, g, h, i), so `ceil(828.4/60 x 2)` = 28 m governs (a shard's job-level wall
-# clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.03`
-# (1680 / 828.4 = 2.0280) on every one of the eleven shards, so the two agree by construction
+# manifest and ABSENT from the PRE-FOLD BASE's, so the fold brought it in), and `main` now carries
+# BOTH `tests/test_14691_structure_evidence.py` (#14723) and
+# `tests/test_relation_orientation_14304.py` (`core`, the same flat 2.0 s `DEFAULT_FAST_WEIGHT`,
+# #14790) — so this tree holds both of `main`'s rows, and this PR registers ONE row of its OWN on
+# top of them: `tests/test_14691_noise_evidence.py` (the T1–T5 noise bundle, `core`, flat 2.0 s).
+# With `main`'s two rows AND this PR's registration on the tree, the verb packs one shard at
+# 828.6 s (j) and ten at 828.5 s (a, b, c, d, e, f, g, h, i, k), so `ceil(828.6/60 x 2)` = 28 m
+# governs (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
+# `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
+# (1680 / 828.6 = 2.0275) on every one of the eleven shards, so the two agree by construction
 # rather than by a hand re-read. ⛔ THE FIGURES ABOVE ARE A RE-MEASUREMENT ON THIS REBASED TREE with
 # `--emit-push-matrix`, and neither parent's spelling describes it: #14723 measured seven-and-four,
-# #14790 measured five-and-six with only its own row on top of that, and an earlier cut of this
-# branch measured five-and-six too. A row landing moves the bins, so two parents' re-derivations
+# #14790 measured five-and-six (`git show 671bf806d2af0:config/ci-surfaces.yml`), and this branch's
+# pre-rebase cut measured three-and-eight — so the two sides do NOT share a figure, which is exactly
+# why neither spelling can be carried into a third tree. A row landing moves the bins, so two parents' re-derivations
 # must never be spliced into one sentence — that splice is what this re-derivation replaces.
 # ⛔ #14723 RE-DERIVED THIS SENTENCE ON `main` ITSELF, and the attribution is corrected here rather
 # than carried (#14587 review cycle 10, P2, MEASURED): `tests/test_14691_structure_evidence.py` is
@@ -99,13 +99,13 @@ version: 1
 # reads). Measured by loading each tree's OWN manifest through `fast_pool()` — `git show
 # origin/main:config/ci-surfaces.yml` for the other side:
 # `set(fast_pool(head)) - set(fast_pool(main))` returns exactly ONE entry,
-# `tests/test_14198_contradiction_closure.py` (`core`, flat 2.0 s) — the registration THIS PR adds;
-# #14790's `tests/test_relation_orientation_14304.py` is `main`'s own row and is on both sides, so it
-# is not this delta — and
+# `tests/test_14691_noise_evidence.py` (`core`, flat 2.0 s) — the registration THIS PR adds. Both of
+# `main`'s rows (`tests/test_14691_structure_evidence.py`, `tests/test_relation_orientation_14304.py`)
+# are on both sides, so neither is this delta — and
 # the reverse difference is empty. So the delta here is that one registration and nothing else.
 # ⛔ THAT IS WHY THE PARTITION IS STATED AND NOT ONLY THE MINUTE: an arithmetic check on `28 m`
 # cannot see a carried figure, and a reader comparing only minutes would call the move cosmetic. The
-# same lesson recurs one notice down: three-and-eight is not #14723's seven-and-four, and the MINUTE
+# same lesson recurs one notice down: one-and-ten is not #14723's seven-and-four, and the MINUTE
 # and the headroom are identical on every spelling.
 # ⛔ No pool SIZE is restated BY THIS RE-DERIVATION, and the reason is a recorded ruling rather
 # than a preference (#14691 review, round 15, finding 4): the repo's own doctrine is at
@@ -3329,6 +3329,16 @@ surfaces:
   # matrix would red afterwards. ⛔ Deleting the row again is caught, not silent:
   # `test_the_own_site_fragment_guard_is_selected_by_every_tree_it_scans` reds naming the tree.
   - test_14691_structure_evidence.py
+  # #14691 T1-T5 (new file, this PR): the noise bundle. Same reason as the T6 row above — an
+  # unregistered file is never selected on a `tortoise/`-only diff, and the unconditional
+  # `manifest-integrity` leg refuses a file with no row. What it covers, hermetically (no DB,
+  # no docker, no LLM, no network): the five verdicts out of the bundle's own `out/t1-t5-score.json`,
+  # T1's re-ingestion deltas and its restatement/dedup split, T2's two-wordings-two-points result,
+  # T3's orphan share WITH its population and the door's disagreeing read, T4's per-kind
+  # distribution, T5's three support tiers, the freshness guard's REFUSAL (driven with crafted
+  # overviews), the corpus's byte-identity to #14592's fixture for doc-01..doc-05, and the
+  # scorer staying artifact-only.
+  - test_14691_noise_evidence.py
 
   # #14592 Phase A: the REST read parity suite (`/v1/objects`, `/v1/subjects`,
   # `/v1/sources`, `/v1/entities/{id}/relations`, `/v1/entities/{id}/belief`).
@@ -16507,6 +16517,11 @@ durations:
   # being the artifacts' numbers. No graph, no docker, no network, no model call — it imports the
   # bundle's scorer by path and reads committed JSON.
   test_14691_structure_evidence.py: 2.0
+  # #14691 T1-T5 (new file, this PR): the ENTRY RULE applies — the value is the header's flat
+  # `DEFAULT_FAST_WEIGHT`, not a local reading (a hand-picked number is this host's wall clock,
+  # and `fast_pool()` feeds the shard balancer). `--integrity` cannot see a missing row, so this
+  # line is what records the weight.
+  test_14691_noise_evidence.py: 2.0
   test_embedding_boundary_8419_8430.py: 5.0
   test_extractor_cost_measure.py: 18.2
   test_longmem_ingest_profile.py: 0.1
