@@ -1151,6 +1151,223 @@ def test_terminating_signal_closes_embedded_server_with_inherited_sig_ign(
         _signal.SIGHUP, dbdir, "child's SIGHUPed parent (inherited SIG_IGN)")
 
 
+# ── Issue #3055: a terminating signal must not orphan a HALF-BUILT server ──
+#
+# The #2203 guard above is correct only when the process is QUIESCENT at
+# signal time: `close_embedded_clients` reaches redislite's `_cleanup`, which
+# shuts the server down only when `_connection_count() <= 1`, and during an
+# embedded CONSTRUCTION the process holds an in-flight server command. Worse,
+# `tortoise.FalkorDB.__init__` registers the client for teardown only AFTER
+# `super().__init__()` returns, so a signal inside the window finds an EMPTY
+# registry and there is nothing to close at all.
+#
+# MEASURED on the fix's own tree (2026-11-28): SIGTERM delivered between
+# redislite publishing `<db>.settings` and construction returning orphaned the
+# server in 6 of 6 runs (parent rc=-15, redis pid alive afterwards), and the
+# orphan carried no owner record — the #4487 patch writes one only after
+# `RedisMixin.__init__` returns — so the reaper's fail-closed rule (no record
+# ⇒ unknown ⇒ never reaped) left it permanently.
+#
+# The fix defers the terminating signal across the construction window and
+# re-delivers it through the ordinary #2203 teardown once the process is
+# quiescent (see `defer_terminating_signals`). These tests vary ONE thing —
+# where the signal lands — so a failure names which half broke.
+
+#: Test 1's child: signal the process from INSIDE the construction window.
+#:
+#: Determinism without racing redislite's start-up: the child parks itself in
+#: `record_owner`, which the #4487 patch calls at the end of
+#: `RedisMixin.__init__` — i.e. AFTER the server is up and BEFORE
+#: `FalkorDB.__init__` registers the client for teardown. That is exactly the
+#: window the issue names (server live, nothing registered), and the child
+#: waits for the signal to be PARKED rather than for a wall-clock delay, so a
+#: loaded box cannot move the signal outside the window. `DEFERRED=False` is
+#: printed when the park never happened, so the test fails with evidence
+#: instead of silently testing the quiescent path.
+_SIGNAL_DURING_CONSTRUCTION_CHILD = (
+    "import sys, time, os, signal\n"
+    "sys.path.insert(0, %(root)r)\n"
+    "import tortoise.embedded_lifecycle as lc\n"
+    "lc.install_embedded_signal_cleanup()\n"
+    "_orig = lc.record_owner\n"
+    "def _parked_record_owner(sock):\n"
+    "    print('IN_CONSTRUCTION', flush=True)\n"
+    "    deadline = time.time() + 60\n"
+    "    while time.time() < deadline and getattr(lc, '_deferred_signum', None) is None:\n"
+    "        time.sleep(0.01)\n"
+    "    print('DEFERRED=%%s' %% (getattr(lc, '_deferred_signum', None),), flush=True)\n"
+    "    return _orig(sock)\n"
+    "lc.record_owner = _parked_record_owner\n"
+    "from tortoise import FalkorDB\n"
+    "db = FalkorDB(sys.argv[1])\n"
+    "print('CONSTRUCTED', flush=True)\n"
+    "time.sleep(600)\n"
+)
+
+#: Tests 2/3's child: open the window by hand, self-signal inside it, and
+#: report whether the process was still alive afterwards. No redislite, no
+#: construction — this isolates the deferral seam itself, so a regression is
+#: not hidden behind whether a server happened to exist.
+_DEFER_WINDOW_CHILD = (
+    "import sys, time, os, signal\n"
+    "sys.path.insert(0, %(root)r)\n"
+    "from tortoise.embedded_lifecycle import (\n"
+    "    defer_terminating_signals, install_embedded_signal_cleanup)\n"
+    "install_embedded_signal_cleanup()\n"
+    "with defer_terminating_signals():\n"
+    "    os.kill(os.getpid(), %(signum)d)\n"
+    "    time.sleep(0.25)\n"
+    "    print('ALIVE_INSIDE_WINDOW', flush=True)\n"
+    "    if %(raise_inside)d:\n"
+    "        raise RuntimeError('construction aborted')\n"
+    "print('REACHED_AFTER_WINDOW', flush=True)\n"
+    "time.sleep(600)\n"
+)
+
+
+def _run_child_and_read(argv, prefixes):
+    """Run ``argv``, read its stdout until every prefix in ``prefixes`` has
+    appeared (in any order), and return (proc, {prefix: line})."""
+    proc = _subprocess.Popen(
+        argv, stdin=_subprocess.PIPE, stdout=_subprocess.PIPE,
+        stderr=_subprocess.PIPE, text=True, env=_child_env(),
+    )
+    lines = {}
+    try:
+        for prefix in prefixes:
+            lines[prefix] = _read_child_line(proc, prefix)
+    except AssertionError:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        raise
+    return proc, lines
+
+
+def test_terminating_signal_during_construction_still_closes_the_server(tmp_path):
+    """#3055: the measured repro — SIGTERM inside the construction window.
+
+    Pre-fix the parent died by the signal with its `redis-server` orphaned and
+    unrecorded (6/6 measured), because redislite's last-client guard declines
+    to shut a server down while an in-flight command holds a second connection
+    and the client was not yet registered for teardown. Post-fix the signal is
+    deferred to the end of the window, where the quiescent teardown closes the
+    server before the process dies.
+
+    The assertion is the FULL contract, both halves: the parent still dies BY
+    THE SIGNAL (deferral must not swallow a stop) AND its server is gone.
+    """
+    signum = _signal.SIGTERM
+    dbdir = tmp_path / "mid-construction"
+    dbdir.mkdir()
+    child = _SIGNAL_DURING_CONSTRUCTION_CHILD % {"root": _REPO_ROOT}
+    # The child parks inside `record_owner` until it has SEEN the signal
+    # parked, so the signal must be sent as soon as the child is in the
+    # window — reading `DEFERRED=` first would deadlock (the marker is
+    # printed only once the wait is over).
+    proc, _lines = _run_child_and_read(
+        [sys.executable, "-c", child, str(dbdir / "sig.db")],
+        ("IN_CONSTRUCTION",))
+    redis_pid = None
+    try:
+        os.kill(proc.pid, signum)
+        try:
+            deferred_line = _read_child_line(proc, "DEFERRED=")
+        except AssertionError as exc:
+            raise AssertionError(
+                "#3055: the child left the construction window without ever "
+                "parking the signal — the deferral seam did not engage "
+                f"({exc})") from exc
+        assert deferred_line == f"DEFERRED={signum}", (
+            "#3055: the signal was NOT parked while the construction window was "
+            f"open ({deferred_line!r}) — the deferral seam did not engage, "
+            "so the handler tore down a half-built client instead")
+        try:
+            proc.wait(timeout=60)
+        except _subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            pytest.fail("child survived SIGTERM after a deferred construction; "
+                        f"child said: {_child_diagnosis(proc)}")
+        assert proc.returncode == -signum, (
+            f"#3055: a deferred terminating signal must still kill the process "
+            f"by the signal (expected rc={-signum}, got {proc.returncode}); "
+            f"child said: {_child_diagnosis(proc)}")
+        # The server the window was building: read its pid from redislite's
+        # registry if it is still there, and assert it is GONE either way.
+        redis_pid = _registry_redis_pid(dbdir / "sig.db")
+        if redis_pid is not None:
+            assert _wait_server_dead(redis_pid, timeout=_SERVER_DEATH_TIMEOUT_S), (
+                f"#3055: the deferred teardown did not close embedded "
+                f"redis-server (pid {redis_pid}) — the mid-construction signal "
+                "still orphaned the server")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        if redis_pid is not None and _pid_alive(redis_pid):
+            _kill_quiet(redis_pid)
+
+
+@pytest.mark.parametrize("signum", [_signal.SIGTERM, _signal.SIGHUP])
+def test_defer_window_holds_the_signal_until_it_closes(tmp_path, signum):
+    """#3055: a terminating signal inside the window is PARKED, not honoured.
+
+    The child self-signals inside `defer_terminating_signals()` and must still
+    be alive 0.25 s later (`ALIVE_INSIDE_WINDOW`), then die by the signal the
+    moment the window closes (`REACHED_AFTER_WINDOW` must never print).
+    """
+    child = _DEFER_WINDOW_CHILD % {
+        "root": _REPO_ROOT, "signum": int(signum), "raise_inside": False}
+    proc, _lines = _run_child_and_read(
+        [sys.executable, "-c", child, str(tmp_path)], ("ALIVE_INSIDE_WINDOW",))
+    try:
+        proc.wait(timeout=60)
+    except _subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail("the parked signal was never honoured after the window "
+                    f"closed; child said: {_child_diagnosis(proc)}")
+    out = _child_diagnosis(proc)
+    assert proc.returncode == -signum, (
+        f"expected the deferred signal death (rc={-signum}), rc={proc.returncode}; "
+        f"child said: {out}")
+    assert "REACHED_AFTER_WINDOW" not in out, (
+        "the code after the deferral window ran even though a terminating "
+        f"signal was parked; child said: {out}")
+
+
+def test_defer_window_honours_the_signal_when_the_construction_raises(tmp_path):
+    """#3055: an exception must not lose a parked stop request.
+
+    The sharpest residual named on the issue: a window that can be entered
+    without a guaranteed exit would make the deferral worse than the defect.
+    The child raises INSIDE the window; the `finally` closes the window, and
+    the parked SIGTERM is honoured there — so the process dies by the signal
+    rather than continuing with a half-built client, and no exception path
+    leaves the deferral armed.
+    """
+    signum = _signal.SIGTERM
+    child = _DEFER_WINDOW_CHILD % {
+        "root": _REPO_ROOT, "signum": int(signum), "raise_inside": True}
+    proc, _lines = _run_child_and_read(
+        [sys.executable, "-c", child, str(tmp_path)], ("ALIVE_INSIDE_WINDOW",))
+    try:
+        proc.wait(timeout=60)
+    except _subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail("the parked signal was not honoured on the exception exit; "
+                    f"child said: {_child_diagnosis(proc)}")
+    out = _child_diagnosis(proc)
+    assert proc.returncode == -signum, (
+        "an exception inside the deferral window must still honour the parked "
+        f"terminating signal (expected rc={-signum}, got {proc.returncode}); "
+        f"child said: {out}")
+    assert "REACHED_AFTER_WINDOW" not in out, (
+        f"the exception escaped the deferral window unhonoured; child said: {out}")
+
+
 def test_sigkill_owner_record_lets_reaper_reclaim_the_server(tmp_path,
                                                              monkeypatch):
     """#3599 ACCEPTANCE (the SIGKILL branch): teardown CANNOT run under

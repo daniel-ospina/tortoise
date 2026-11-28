@@ -1638,19 +1638,162 @@ def _release_owner(client, inner, sock: str | None = None) -> None:
         pass
 
 
-def _embedded_term_handler(signum, _frame) -> None:
-    """Terminating-signal handler (issue #2203).
+# ── #3055: the construction window defers a terminating signal ────────────
+#
+# The #2203 guard above closes every live embedded client when a terminating
+# signal lands. It is only correct when the process is QUIESCENT at signal
+# time: `close_embedded_clients` reaches redislite's `_cleanup`, which takes
+# the server down only when `_connection_count() <= 1` — and during an
+# embedded CONSTRUCTION the process holds an in-flight server command, so the
+# count is 2, `_cleanup` disconnects the pool only, and the daemonized
+# `redis-server` (ppid=1, own session) is ORPHANED.
+#
+# `tortoise.FalkorDB.__init__` registers the client for teardown AFTER
+# `super().__init__()` returns (redislite can only hand back a socket once the
+# server is up), so a signal inside that window finds an EMPTY registry and
+# there is nothing to close at all. MEASURED on this tree (2026-11-28): a
+# SIGTERM delivered between redislite publishing `<db>.settings` and
+# construction returning orphaned the server in 6 of 6 runs (`rc=-15`, redis
+# pid alive after the parent was gone), and the server carried NO owner record
+# (the #4487 patch writes one only after `RedisMixin.__init__` returns), so the
+# reaper's fail-closed rule — no record ⇒ unknown ⇒ never reaped — left it for
+# good.
+#
+# The fix is not "shut down harder". From a signal handler the process cannot
+# tell its OWN in-flight connection from a CO-TENANT's, and embedded servers
+# are shared across processes, so a forceful SHUTDOWN could kill a server
+# another live process is using (the design decision recorded on #3055 and
+# scoped in docs/plans/2026-09-12-3055-embedded-server-lifetime.md: option 1,
+# "defer terminating signals across the construction window"). Deferring is
+# safe precisely because construction is BOUNDED, and it needs no mask: the
+# signal is recorded here and re-delivered through the ordinary #2203 teardown
+# once the window closes, at which point the process IS quiescent and the
+# last-client close does the drain redislite already knows how to do.
+#
+# Why a HANDLER-level deferral rather than `signal.pthread_sigmask`:
+# a mask is PER-THREAD. `mcp_server` / `selfhost` / `hosted_api` are threaded,
+# and a thread that already exists when the window opens keeps its unblocked
+# mask, so it would still receive the signal and run the handler mid-window
+# (reproduced by the #3055 solution-verify round). CPython runs Python signal
+# handlers on the MAIN thread only, from a flag the C handler sets, so
+# recording the request in the handler is thread-agnostic by construction:
+# whichever thread the kernel picks, the request is parked and the window's
+# exit honours it. No mask means nothing to restore either — there is no
+# disposition left changed if the window is exited by an exception.
+#
+# Bounds and residuals, stated rather than implied:
+#   * The window is the construction only — never a long-running or blocking
+#     operation — so a stop is deferred by a server start (seconds), not
+#     indefinitely.
+#   * `_DEFER_DEADLINE_S` bounds a construction that is SLOW rather than
+#     hung: past the deadline the handler stops deferring and performs the
+#     teardown immediately, so a stuck start cannot swallow the stop. (A
+#     construction blocked inside C never runs the Python handler at all —
+#     that is pre-existing behaviour, not something the deferral changes.)
+#   * A construction that ABORTS (raises) still leaves the window through the
+#     context manager's `finally`, and a deferred request is still honoured
+#     there: the termination request wins over the exception, which is what a
+#     SIGTERM means.
+#   * Constructions that bypass `tortoise.FalkorDB` (raw `redislite` clients)
+#     are NOT deferred, but they do get an owner record from the #4487 patch,
+#     so an orphan they leave is one the reaper can confirm and reap — the
+#     fail-closed path, not the permanent leak.
+_DEFER_DEADLINE_S = 30.0
 
-    Restore the default disposition FIRST (a second signal during teardown
-    means "hurry up and die" — instant default death), then close every
-    live embedded client (see close_embedded_clients — inline, never
-    raises), then re-raise the original signal so the process dies with the
-    conventional signal semantics (WIFSIGNALED; shell status 128+signum)
-    no matter what the preempted code was doing. The re-raised signal is
-    blocked while the handler runs (Python installs handlers without
-    SA_NODEFER), so the default-action death lands the moment this handler
-    returns.
+_defer_lock = threading.Lock()
+_defer_depth = 0
+_defer_started_at: float | None = None
+_deferred_signum: int | None = None
+#: True from the moment the teardown starts. A signal that re-enters the
+#: handler while this is set is the "hurry up and die" case AND the guard
+#: against a recursion: on a non-main thread `signal.signal` raises, so the
+#: re-raised signal would land in this handler again instead of the default
+#: disposition.
+_teardown_in_progress = False
+
+
+def _defer_terminating_signal(signum) -> bool:
+    """Park a terminating signal while a construction window is open (#3055).
+
+    Returns True when the signal was parked (the handler must return without
+    tearing anything down) and False when it must be honoured immediately —
+    no window open, or the window has outrun `_DEFER_DEADLINE_S`.
     """
+    global _deferred_signum
+    with _defer_lock:
+        if _defer_depth <= 0:
+            return False
+        started = _defer_started_at
+        if started is not None and (time.monotonic() - started) > _DEFER_DEADLINE_S:
+            logger.warning(
+                "#3055: embedded construction outran the %.0fs deferral bound "
+                "— honouring the terminating signal now instead of waiting "
+                "for the window to close", _DEFER_DEADLINE_S)
+            return False
+        if _deferred_signum is None:
+            # First request wins: a second terminating signal inside the same
+            # window is the same request ("stop"), and re-raising the FIRST
+            # one keeps the exit convention the caller observed.
+            _deferred_signum = int(signum)
+        return True
+
+
+@contextlib.contextmanager
+def defer_terminating_signals():
+    """Hold a terminating signal until an embedded construction completes.
+
+    Wrap a construction window (see `tortoise.FalkorDB.__init__`): a
+    SIGTERM/SIGHUP/ignored-SIGINT delivered inside it is PARKED by
+    `_embedded_term_handler` instead of tearing down a half-built client, and
+    is re-delivered through the ordinary #2203 teardown on exit — when the
+    process is quiescent, so redislite's last-client close actually stops the
+    server (#3055).
+
+    Exit by exception is not a special case: the `finally` closes the window
+    like any other exit, and a parked request is honoured there — the
+    termination request outranks the exception.
+
+    When the signal was parked, this context manager DOES NOT RETURN from the
+    `finally`: the process dies by the signal, exactly as it would have
+    without the deferral, only after the server has been closed. Callers must
+    therefore not depend on running code after the `with` block on that path.
+    """
+    global _defer_depth, _defer_started_at, _deferred_signum
+    with _defer_lock:
+        _defer_depth += 1
+        if _defer_started_at is None:
+            _defer_started_at = time.monotonic()
+    try:
+        yield
+    finally:
+        parked: int | None = None
+        with _defer_lock:
+            # max(0, …): an out-of-order exit (a caller that swallows the
+            # generator, or a re-entrant window) must not drive the counter
+            # negative and silently disable deferral for the next window.
+            _defer_depth = max(0, _defer_depth - 1)
+            if _defer_depth == 0:
+                _defer_started_at = None
+                parked = _deferred_signum
+                _deferred_signum = None
+        if parked is not None:
+            _teardown_and_die(parked)
+
+
+def _teardown_and_die(signum) -> None:
+    """Close every live embedded client, then die by ``signum`` (#2203/#3055).
+
+    The one death path for both the immediate and the deferred case, so the
+    two cannot drift apart. `_teardown_in_progress` makes a re-entrant signal
+    an instant death — a second stop request while this one is running is
+    "hurry up and die", and on a non-main thread the disposition restore below
+    is refused by `signal.signal`, so without the flag the re-raised signal
+    would re-enter this function instead of killing the process.
+    """
+    global _teardown_in_progress
+    if _teardown_in_progress:
+        os._exit(128 + int(signum))
+    _teardown_in_progress = True
     try:  # noqa: SIM105
         _signal.signal(signum, _signal.SIG_DFL)
     except (ValueError, OSError, RuntimeError):
@@ -1663,7 +1806,27 @@ def _embedded_term_handler(signum, _frame) -> None:
         except (OSError, ValueError):
             # Signal delivery failed (e.g. signum became invalid) — never
             # leave the process alive after a termination request.
-            os._exit(128 + signum)
+            os._exit(128 + int(signum))
+
+
+def _embedded_term_handler(signum, _frame) -> None:
+    """Terminating-signal handler (issue #2203, #3055).
+
+    While a construction window is open (#3055) the request is PARKED —
+    tearing down mid-construction is what orphaned the server — and the
+    window's exit re-delivers it. Otherwise: restore the default disposition
+    FIRST (a second signal during teardown means "hurry up and die" — instant
+    default death), then close every live embedded client (see
+    close_embedded_clients — inline, never raises), then re-raise the original
+    signal so the process dies with the conventional signal semantics
+    (WIFSIGNALED; shell status 128+signum) no matter what the preempted code
+    was doing. The re-raised signal is blocked while the handler runs (Python
+    installs handlers without SA_NODEFER), so the default-action death lands
+    the moment this handler returns.
+    """
+    if _defer_terminating_signal(signum):
+        return
+    _teardown_and_die(signum)
 
 
 def install_embedded_signal_cleanup() -> bool:
