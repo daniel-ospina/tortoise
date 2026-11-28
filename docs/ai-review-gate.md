@@ -102,7 +102,23 @@ entry condition closes that path.
   — and drops blob `index` ids, hunk line numbers and counts, and hunk CONTEXT
   lines. Those are exactly the fields a **base advance** rewrites while the
   reviewed change is untouched, which is why a refreshed branch used to demand a
-  fresh 20–40 minute review for a diff nobody changed.
+  fresh 20–40 minute review for a diff nobody changed. Every field the arm
+  promises to KEEP is pinned as its own vector — `PP_NONL` (the
+  `\ No newline at end of file` marker), `PP_MODE` (a hunk-less mode/binary entry,
+  whose `index` line IS the content) and `PP_CRLF` (CRLF bytes) included — and
+  each is asserted to project to its OWN digest, so a refactor that drops a field
+  reddens instead of making two different changes project identically.
+
+  **It is entered when no ACCEPTABLE marker exists** — not when no marker-SHAPED
+  line exists. A PR-body line that merely matches the marker shape is a
+  *candidate* before its signature is checked, and the body is author-writable,
+  so it costs nothing to paste one whose 64-hex `sig=` does NOT verify (a pasted
+  marker, one signed with a rotated/personal key, one edited after signing).
+  Gating the arm on "no candidates" let one such head-bound line suppress the
+  whole arm and report an `HMAC mismatch` instead — sending you to fix a key that
+  is fine, for a review you were never owed. The guard is now "no candidate's
+  signature verifies": a local HMAC, no extra API call, and it can only ADD
+  evidence (harness case `(t27)`, both directions).
 
   **The patch arm requires a BASE ADVANCE — it does not carry across a rewrite and it
   does not carry across new authored commits.** Three checks, all fail-closed:
@@ -158,11 +174,15 @@ entry condition closes that path.
     this path (a first version of it did not, and stayed green with the patch arm
     disabled — measured).
   - **A base advance that rewrites the hunk's enclosing-scope heading** — git
-    derives the heading from the line preceding the hunk, so inserting a column-0
+    derives the heading from the last preceding line matching its default
+    funcname pattern (`^[A-Za-z_$]` per gitattributes(5): a line beginning with a
+    letter, `_` or `$`), so inserting such a
     line above the change (any markdown/text file, or a new `def` above the
     edited one) changes it — **refuses** the carry. That is an **over-block**: a
     false RED, never a pass, and it costs a fresh review on a diff nobody
-    changed. The same happens when a base advance re-groups the PR's hunks. The
+    changed. It is measured and pinned by `(t28)`, and its refusal is audible
+    (`the ANCHOR held`, pinned by `(t25)`) so the log does not read as a silently
+    changed diff. The same happens when a base advance re-groups the PR's hunks. The
     heading is kept anyway because a position-blind projection accepts a change
     that was **moved**, which is the direction a gate must not fail in. A relocation
     whose heading TEXT changes is refused (pinned by `(t20)`); the unchanged-text case
@@ -175,6 +195,24 @@ entry condition closes that path.
 
   The pass message names which arm fired: `passed via PATCH match` (this one),
   `passed via diff match` (the digest arm), or the head-bound message.
+
+  **The producer half is a cross-repo contract, and the harness measures it.**
+  The same projection is produced by agent-infra's
+  `scripts/lib/diff-normalize.py --patch-only` for `record-review.sh`'s
+  `patch_dimension_carry` — **once `agent-infra#4261` lands**: `main` today still
+  emits the frame-less shape, so until that PR merges the two sides disagree on
+  every hunk-bearing entry and this gate is the STRICTER half (see the workflow
+  header's declared divergence). Nothing in the fleet compares a producer digest
+  with a consumer digest at runtime, so drift between the two halves is invisible
+  until someone recomputes the pinned literals — which is how the position-bearing
+  frame could be quietly reverted. The harness therefore probes a local producer
+  (via `AGENT_INFRA_PATH` or `~/.pi/agent/scripts`) and reports four distinct
+  outcomes: agree is a PASS; a **producer that fails to run** is its own named
+  non-pass (its exit code is probed on every input the section reads — a crash
+  also emits no `@@` line, so absorbing it as "the old shape" would hide the
+  drift most worth seeing); the pre-#4261 frame-less shape is a named SKIP; and a
+  position-bearing mismatch is a FAIL. A box with no producer says agreement was
+  **not measured** and never claims a pass.
 
   **Two channels (#1224).** The marker is read from the PR body AND from the
   PR's issue comments, because the body is a mutable field any later legitimate

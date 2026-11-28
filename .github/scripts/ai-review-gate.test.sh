@@ -1248,6 +1248,36 @@ index 819129e..2355478 100644
 -l11
  l12
 DIFFEOF
+# ── The three fields the projection KEEPS, as FIXTURES (review, P2) ──────────
+# The header and the doc both promise the projection keeps `\ No newline at end of
+# file`, a hunk-less entry (whose `index`/mode lines ARE the content) and BYTE-EXACT
+# whitespace. `grep -c 'No newline'` over this file used to be 0, and the mode-only
+# entry was asserted only against the BINDING normalizer, never via `check_patch` —
+# so a refactor that dropped the hunk-less branch would make two different binaries
+# (or two different modes) project identically and nothing here would redden.
+NO_NEWLINE_DIFF_FILE="$T/no-newline.diff"
+cat > "$NO_NEWLINE_DIFF_FILE" <<'DIFFEOF'
+diff --git a/n.md b/n.md
+index 1111111..2222222 100644
+--- a/n.md
++++ b/n.md
+@@ -1,3 +1,3 @@ l1
+ a
+-b
+\ No newline at end of file
++c
+\ No newline at end of file
+DIFFEOF
+# A HUNK-LESS entry: no `@@ ` line, so the projector must emit it WHOLE — the `index`
+# line is the only thing distinguishing two different binaries here.
+MODE_ONLY_DIFF_FILE="$T/mode-only.diff"
+printf 'diff --git a/f.bin b/f.bin\nold mode 100644\nnew mode 100755\nindex 1111111..2222222\nBinary files a/f.bin and b/f.bin differ\n' \
+    > "$MODE_ONLY_DIFF_FILE"
+# CRLF: the projection splits on "\n", so a `\r` stays on every line and must survive
+# the re-join byte-exactly (`printf`, not a heredoc, so the CRs are literal).
+CRLF_DIFF_FILE="$T/crlf.diff"
+printf 'diff --git a/c.txt b/c.txt\r\nindex 1111111..2222222 100644\r\n--- a/c.txt\r\n+++ b/c.txt\r\n@@ -1,2 +1,2 @@\r\n a\r\n-b\r\n+c\r\n' \
+    > "$CRLF_DIFF_FILE"
 PB_REVIEWED="dfebaa86f270853c99b5f809b31f6f5621009e8e5a0f03d3a42597470a62420c"
 PB_LIVE="4d4d1118333448a5c97de826680e7fdcc929e133b179001565c03b2c80583eca"
 PP_REVIEWED="b243470836a141b2808db9ce56a772217fc51aed6d919e01e74bb1f6f62bede8"
@@ -1255,6 +1285,12 @@ PP_EDITED="c71ae6af2931817321618d8ba92507d4096ba76e4d89c2352ea7b28604a438b7"
 PP_WS="d99fac9ba2b8a910c951b5328e277d331f00ba752df3a5138245233f8e3f99e8"
 PP_RENAME="98ae79a1c98bfe47651b1af658f653036c0e7f8b639545d43851a678e57a3014"
 PP_DELETED="8662d5bdf1efd2faefdfb73fc90a334a4add05d73cac8b4b717afefc131453e0"
+# The "the projector KEEPS this" pins (see the fixtures above): the hunk-less entry,
+# the `\ No newline` marker, and CRLF bytes. Same rule as the rest — a literal digest,
+# computed from the CONSUMER, never a hand-written claim.
+PP_NONL="c6c0dc57cefc8b32abfe2ba54dc402930d04c0a661d5bba63b44c12bde5ec514"
+PP_MODE="3cfab13a0536434519f83e1076377766ea01c78c1e7a1d2cfe8899d07db36fca"
+PP_CRLF="8e358cf2901ff08963530c812753e90946859020bed42a9b09a3bc6b49643f43"
 BASE_SHA="$(printf 'c%.0s' $(seq 1 40))"
 
 # ── Direct vector tests of the extracted PATCH projector ──────────────────
@@ -1279,11 +1315,16 @@ check_patch "one byte edited" "$EDITED_DIFF_FILE" "$PP_EDITED"
 check_patch "whitespace added" "$WS_DIFF_FILE" "$PP_WS"
 check_patch "a RENAMED file" "$RENAMED_DIFF_FILE" "$PP_RENAME"
 check_patch "a DELETED line" "$DELETED_DIFF_FILE" "$PP_DELETED"
+check_patch 'a `\ No newline at end of file` marker' "$NO_NEWLINE_DIFF_FILE" "$PP_NONL"
+check_patch 'a HUNK-LESS entry (mode/binary; the `index` line IS the content)' "$MODE_ONLY_DIFF_FILE" "$PP_MODE"
+check_patch "CRLF bytes" "$CRLF_DIFF_FILE" "$PP_CRLF"
 # …and each of the four "the authored change moved" vectors must ALSO differ
 # from the reviewed digest. A pin that agrees with PP_REVIEWED would make the
 # claim above vacuous, which is the failure mode the header sentence is about.
 for _case in "a byte edit:$PP_EDITED" "whitespace:$PP_WS" \
-             "a rename:$PP_RENAME" "a deleted line:$PP_DELETED"; do
+             "a rename:$PP_RENAME" "a deleted line:$PP_DELETED" \
+             "a no-newline marker:$PP_NONL" "a mode-only entry:$PP_MODE" \
+             "CRLF bytes:$PP_CRLF"; do
     if [ "${_case##*:}" = "$PP_REVIEWED" ]; then
         bad "(t) the ${_case%%:*} vector projects to the REVIEWED digest — the anti-vacuity claim is false"
     else
@@ -1423,7 +1464,7 @@ MUT_COST="$T/mutant-no-cost-gate.sh"
 # NOTE the indentation: the harness STRIPS the YAML's 10-space `run: |` prefix, so a
 # top-level statement in the extracted block starts at column 0 and a `patch_arm_ok`
 # body line at column 2 (which is why (t7)'s mutant pattern above uses 2).
-sed 's/^if \[ -z "$candidates" \] && \[ -n "$all_markers" \]; then$/if [ -n "$all_markers" ]; then/' \
+sed 's/^if \[ "$candidates_acceptable" -eq 0 \] && \[ -n "$all_markers" \]; then$/if [ -n "$all_markers" ]; then/' \
     "$RUN_BLOCK" > "$MUT_COST"
 if cmp -s "$RUN_BLOCK" "$MUT_COST"; then
     bad "(t8) the cost-gate mutation did not apply — the guard line changed shape, so this control proves NOTHING"
@@ -1442,7 +1483,7 @@ else
     # every row. Removing BOTH must still be caught — that is what this second mutant
     # buys, and it is stated here rather than left as an implied attribution.
     MUT_BOTH="$T/mutant-no-cost-gate-no-head-skip.sh"
-    sed -e 's/^if \[ -z "$candidates" \] && \[ -n "$all_markers" \]; then$/if [ -n "$all_markers" ]; then/' \
+    sed -e 's/^if \[ "$candidates_acceptable" -eq 0 \] && \[ -n "$all_markers" \]; then$/if [ -n "$all_markers" ]; then/' \
         -e 's#^  \[ "$p_sha" != "$expected" \] || return 1$#  :#' \
         "$RUN_BLOCK" > "$MUT_BOTH"
     if cmp -s "$RUN_BLOCK" "$MUT_BOTH"; then
@@ -1843,6 +1884,20 @@ if grep -qE -- "repos/${REPO_NAME}/compare/${STALE}\.\.\.${HEAD}" "$T/gh.log"; t
 else
     bad "(t22) the gate never asked whether the reviewed commit is reachable from the head (stub log: $(cat "$T/gh.log"))"
 fi
+# (a2) …and THAT diagnosis must survive an unrelated decoy (§(t27)'s fixture). The guard
+# that prints it used to be `[ -z "$candidates" ]`, which meant "the arm appended
+# nothing" only while the arm could not run with decoys present; once it can (§(t27)),
+# one pasted marker-shaped line silenced every rule-(c) warning and left the operator
+# with the HMAC-mismatch advice — i.e. told to fix a key that was fine.
+{ printf 'review recorded: reviews/%s.json verdict=clean @ %s (%s) sig=%s\n' \
+      "$PR_NUMBER" "$HEAD" "$REPO_NAME" "$(printf '0%.0s' $(seq 1 64))"; \
+  diff_marker "$STALE" "$SAME_SCOPE_ANCHOR"; } > "$T/body-t22-decoy"
+STUB_DIFF_FILE="$SAME_SCOPE_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" STUB_ANCESTOR_STATUS=diverged \
+    run_gate "$T/body-t22-decoy"
+assert_rc 1 "(t22) a decoy line beside a REWRITTEN branch still FAILS CLOSED"
+assert_contains "(t22) …and the operator is STILL told the branch was rewritten (a pasted line does not silence the diagnosis)" \
+    "is NOT an ancestor of this PR's head"
 # (b) The other direction on the SAME bytes: an ADVANCED branch (the head descends from
 # the reviewed commit) still carries, so the refusal above is the rewrite and not a
 # rule that refuses everything. Without this half, deleting rule (c) would look green.
@@ -2116,6 +2171,120 @@ if [ "$_n_cmp" -eq 0 ]; then
 else
     bad "(t21) made $_n_cmp compare call(s) for UNSIGNED lines — the patch arm is reachable from any marker-shaped line before its signature is checked"
 fi
+
+# ── (t27) A HEAD-BOUND LINE WHOSE `sig=` DOES NOT VERIFY MUST NOT SUPPRESS RULE (c) ─
+# The gate reserves "UNSIGNED" for the sig-LESS case, which is never a candidate at all
+# (`sha_ok_re` ends in ` sig=[0-9a-f]{64}$`) — so this decoy carries a 64-hex `sig=`
+# that does not verify, which is the shape a reader can actually paste (a marker signed
+# with a rotated key, one edited after signing, or one copied from another head).
+# `candidates` is filled by SHAPE before any signature is checked, and the arm used to
+# be gated on `-z "$candidates"`. One such line therefore disabled the whole arm and the
+# run reported `HMAC mismatch`, sending the operator to buy a 20-40 minute re-review of
+# a change nobody had touched. The guard now means "no ACCEPTABLE marker"; these rows
+# pin both sides, and the decoy alone must still FAIL CLOSED.
+{ printf 'review recorded: reviews/%s.json verdict=clean @ %s (%s) sig=%s\n' \
+      "$PR_NUMBER" "$HEAD" "$REPO_NAME" "$(printf '0%.0s' $(seq 1 64))"; \
+  diff_marker "$STALE" "$PB_REVIEWED"; } > "$T/body-t27"
+STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t27"
+assert_rc 0 "(t27) a signed stale marker still carries when the body ALSO holds a head-bound decoy whose sig= does not verify"
+assert_contains "(t27) …naming the PATCH path (the arm ran)" "passed via PATCH match"
+if grep -q 'HMAC mismatch' "$T/gate.out"; then
+    bad "(t27) the run reported an HMAC mismatch although a SIGNED marker carried — the diagnosis blames the key for a decoy line"
+else
+    ok "(t27) …and no HMAC-mismatch diagnosis (which would have sent the operator to re-mint the key)"
+fi
+# …and the decoy ALONE must still FAIL CLOSED: the fix widens no acceptance.
+printf 'review recorded: reviews/%s.json verdict=clean @ %s (%s) sig=%s\n' \
+    "$PR_NUMBER" "$HEAD" "$REPO_NAME" "$(printf '0%.0s' $(seq 1 64))" > "$T/body-t27b"
+STUB_DIFF_FILE="$LIVE_DIFF_FILE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t27b"
+assert_rc 1 "(t27) the unverifiable head-bound decoy ALONE still fails closed"
+assert_not_contains "(t27) …and claims no review" "passed via PATCH match"
+# ⛔ AND THE APPEND SEPARATOR, which the guard above makes reachable: `candidates` is
+# rebuilt by a command substitution (trailing newlines STRIPPED), so the pre-review
+# `${candidates}${line}` glued the decoy and the carried marker into ONE unsignable
+# line. That row is the one above (rc must be 0 with a decoy present); it reddens on the
+# glued form, so the separator is load-bearing rather than cosmetic.
+
+# ── (t28) THE DECLARED OVER-BLOCK AT A BASE ADVANCE THAT REWRITES THE HEADING ─
+# (t25) proves the patch-mismatch refusal is AUDIBLE; this row proves the heading
+# rewrite itself is the trigger, using the same live bytes as (t1) with ONLY the hunk
+# heading changed. git derives that heading from the last preceding line matching its
+# default funcname pattern (`^[A-Za-z_$]`, gitattributes(5)), so a `main` insertion of a
+# `def`/key above the reviewed hunk REWRITES it and the carry is refused. §(u)'s fixture
+# is indented on purpose to avoid exactly this, so the limit was measured and left
+# unpinned until now — pinned in the direction that must hold (REFUSE, never accept).
+HEAD_MOVED_LIVE="$T/live-heading-moved.diff"
+sed 's/^@@ -8,6 +8,7 @@ l7$/@@ -8,6 +8,7 @@ def helper():/' "$LIVE_DIFF_FILE" > "$HEAD_MOVED_LIVE"
+if cmp -s <(sed 's/^@@ -8,6 +8,7 @@ def helper():$/@@ -8,6 +8,7 @@ l7/' "$HEAD_MOVED_LIVE") "$LIVE_DIFF_FILE"; then
+    ok "(t28) the heading-moved fixture differs from (t1)'s live diff ONLY in the hunk heading"
+else
+    bad "(t28) the heading-moved fixture changed more than the heading — the row would not attribute the refusal"
+fi
+_pp_hm="$(patch_projection_review_diff < "$HEAD_MOVED_LIVE" | openssl dgst -sha256 | awk '{print $NF}')"
+if [ "$_pp_hm" != "$PP_REVIEWED" ]; then
+    ok "(t28) …and the patch projection MOVES with the heading (so the heading is load-bearing, not decorative)"
+else
+    bad "(t28) the heading does not move the projection — the (t20) refusal must then be something else"
+fi
+unset _pp_hm
+diff_marker "$STALE" "$PB_REVIEWED" > "$T/body-t28"
+STUB_DIFF_FILE="$HEAD_MOVED_LIVE" STUB_BASE_SHA="$BASE_SHA" \
+    STUB_COMPARE_FILE="$REVIEWED_DIFF_FILE" run_gate "$T/body-t28"
+assert_rc 1 "(t28) a base advance that inserts a funcname-matching heading above the hunk REFUSES (the declared over-block)"
+assert_not_contains "(t28) …and does not claim a patch match" "passed via PATCH match"
+assert_contains "(t28) …and the log names the over-block instead of a silently-changed diff" "the ANCHOR held"
+
+# ── The CROSS-REPO probe: does the LOCAL producer agree with this consumer? ──────
+# The workflow header calls the patch projection a cross-repo contract with agent-infra's
+# `scripts/lib/diff-normalize.py --patch-only`, and nothing in the fleet compares a
+# producer digest with a consumer digest at runtime (the gate computes both sides
+# itself; `record-review.sh`'s `patch_dimension_carry` computes BOTH sides with the
+# producer). So drift between the two halves is invisible until someone recomputes the
+# pinned literals — which is how the position-bearing frame could be quietly reverted by
+# a helpful reader. This probe MEASURES the local producer when there is one and
+# classifies a disagreement instead of believing it away:
+#   agree                          → PASS: the contract holds on this box.
+#   PRE-#4261 shape (no `@@`)      → SKIP, named: it cannot agree by construction, and
+#                                    agent-infra#4261 is the land order.
+#   producer FAILED (rc != 0)      → its OWN named non-pass: a crash also emits no `@@`,
+#                                    so without this arm a broken producer would be
+#                                    swallowed as the old shape — the drift most worth
+#                                    seeing.
+#   position-bearing but different → FAIL: the halves have genuinely drifted.
+# ⛔ The rc is probed on EVERY input this section reads: a producer that crashes only on
+# the reviewed fixture used to fall through to the DRIFT branch, whose message is the one
+# thing that invites aligning the consumer to the producer.
+# A SKIP is not a PASS and is never counted as one.
+_pp_producer=""
+for _cand in "${AGENT_INFRA_PATH:-}/scripts/lib/diff-normalize.py" \
+             "$HOME/.pi/agent/scripts/lib/diff-normalize.py"; do
+    if [ -n "$_cand" ] && [ -f "$_cand" ]; then _pp_producer="$_cand"; break; fi
+done
+if [ -z "$_pp_producer" ]; then
+    echo "  ⏭  (t) no agent-infra producer on this box — cross-repo agreement NOT measured here (this is not a pass)"
+else
+    _pp_prod_digest="$(python3 "$_pp_producer" --patch-only < "$REVIEWED_DIFF_FILE" 2>/dev/null \
+        | openssl dgst -sha256 | awk '{print $NF}' || true)"
+    printf 'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@ def f():\n a\n-b\n+c\n' > "$T/pp-shape.diff"
+    _pp_frames="$(python3 "$_pp_producer" --patch-only < "$T/pp-shape.diff" 2>/dev/null \
+        | grep -c '^@@' || true)"
+    _pp_rc=0
+    python3 "$_pp_producer" --patch-only < "$REVIEWED_DIFF_FILE" >/dev/null 2>&1 || _pp_rc=$?
+    _pp_rc2=0
+    python3 "$_pp_producer" --patch-only < "$T/pp-shape.diff" >/dev/null 2>&1 || _pp_rc2=$?
+    if [ "$_pp_rc" -ne 0 ] || [ "$_pp_rc2" -ne 0 ]; then
+        echo "  ⏭  (t) the LOCAL producer at $_pp_producer FAILED (rc=${_pp_rc}/${_pp_rc2}) — cross-repo agreement NOT measured (this is not a pass, NOT the pre-#4261 shape, and NOT drift)"
+    elif [ "$_pp_prod_digest" = "$PP_REVIEWED" ]; then
+        ok "(t) the LOCAL producer ($_pp_producer) agrees with the consumer on the reviewed fixture — the cross-repo contract holds on this box"
+    elif [ "${_pp_frames:-0}" -eq 0 ]; then
+        echo "  ⏭  (t) producer at $_pp_producer is the PRE-#4261 shape (it drops the hunk frame): it cannot agree by construction, and agent-infra#4261 is the land order — agreement NOT claimed (this is not a pass)"
+    else
+        bad "(t) the LOCAL producer is position-bearing but disagrees with the consumer ($_pp_prod_digest vs $PP_REVIEWED) — the two halves of the contract have drifted"
+    fi
+fi
+unset _cand _pp_producer _pp_prod_digest _pp_frames _pp_rc _pp_rc2
 
 echo "  PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { echo "  ❌ FAILURES — fix and re-run"; exit 1; }

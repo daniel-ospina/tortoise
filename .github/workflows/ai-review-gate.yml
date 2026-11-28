@@ -207,7 +207,11 @@ name: ai-review-gate
 # differ from the reviewed digest, so no pin can pass vacuously and this sentence
 # cannot drift away from the harness that backs it. (Before that was true, this
 # paragraph claimed "pinned by the harness" for a rename and a deleted line that
-# no fixture exercised — a coverage claim the harness did not support.)
+# no fixture exercised — a coverage claim the harness did not support.) The
+# fields it ALSO keeps are pinned the same way (`PP_NONL`/`PP_MODE`/`PP_CRLF`) —
+# the hunk-less entry, the `\ No newline at end of file` marker, and CRLF bytes —
+# because a dropped field there would make two different changes project
+# identically with nothing to redden.
 # The fields it drops are exactly the ones a rebase
 # rewrites — which is the same arm agent-infra's `merge-one.sh` has ALREADY been
 # merging on since #1377 (`patch_dimension_carry`), so (c) widens no acceptance
@@ -217,7 +221,14 @@ name: ai-review-gate
 # reviewed diff did not.
 #
 # WHAT (c) COSTS, AND WHY THAT IS BOUNDED. It is consulted ONLY when (a) and (b)
-# found nothing, and within that it probes only markers whose HMAC VERIFIES,
+# found no marker whose HMAC VERIFIES — "found nothing" means no ACCEPTABLE marker,
+# not no marker-SHAPED line: a body line matching the sha shape is kept as a
+# candidate BEFORE its signature is checked, so gating on `-z candidates` let ONE
+# head-bound line whose 64-hex `sig=` does NOT verify (a pasted marker, one signed
+# with a rotated/personal key, one edited after signing — the PR body is
+# author-writable, so it costs nothing to paste) suppress this whole arm and report
+# an HMAC mismatch instead. §(t27) pins both directions. Within the arm it probes
+# only markers whose HMAC VERIFIES,
 # de-duplicated on (sha,diff) and capped at PATCH_PROBE_CAP. Both bounds exist
 # because each probe makes up to FOUR repo-scoped API calls (the ancestry read, the
 # base sha, the reviewed diff, and the branch-side commit list) while the marker list
@@ -699,9 +710,12 @@ jobs:
           # "\n".join over a latin-1 decode, same hunk-presence predicate, same
           # entry scoping — or the consumer disagrees with every producer in the
           # fleet (the #3076 shape). Pinned by the harness's direct vector tests, FOR
-          # THE CONSUMER'S OWN VECTORS ONLY — the harness never executes the producer,
-          # and the divergence declared above means producer agreement is NOT what those
-          # vectors prove. Producer agreement is agent-infra#4261's to prove.
+          # THE CONSUMER'S OWN VECTORS ONLY — and the divergence declared above means
+          # producer agreement is NOT what those vectors prove. The harness §(t) does
+          # PROBE a local agent-infra producer when one is on the box: agreement is a
+          # PASS, the pre-#4261 frame-less shape is a NAMED SKIP, a producer that
+          # cannot run is its own named non-pass, and a position-bearing mismatch is a
+          # FAIL. That is a drift detector, not a substitute for agent-infra#4261.
           patch_projection_review_diff() {
             python3 -c '
           import re, sys
@@ -1056,6 +1070,22 @@ jobs:
             fi
             return 0
           }
+          # ⛔ "FOUND NOTHING" MEANS NO *ACCEPTABLE* MARKER (§(t27)). `candidates` above
+          # is filled by SHAPE alone — a line matching sha_ok_re is kept whether or not
+          # its signature verifies. Gating this arm on `-z "$candidates"` therefore let
+          # ONE head-bound line whose 64-hex `sig=` does not verify suppress rule (c)
+          # entirely, after which the run printed the HMAC-mismatch diagnosis and sent
+          # the operator to fix a key that was fine. The guard now means what the doc
+          # promises: run (c) unless some candidate's signature ACTUALLY verifies. It
+          # costs NO extra API call on the green path (a local HMAC) and can only ADD
+          # evidence, never accept it.
+          candidates_acceptable=0
+          if [ -n "$candidates" ]; then
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              if marker_sig_ok "$line"; then candidates_acceptable=1; break; fi
+            done <<< "$candidates"
+          fi
           patch_sig_rejected=0
           patch_shape_rejected=0
           patch_probe_capped=0
@@ -1063,7 +1093,7 @@ jobs:
           patch_newcommit=0
           patch_ancestry_unreadable=0
           patch_diff_rejected=0
-          if [ -z "$candidates" ] && [ -n "$all_markers" ]; then
+          if [ "$candidates_acceptable" -eq 0 ] && [ -n "$all_markers" ]; then
             patch_probes=0
             patch_probe_keys="|"
             # NEWEST FIRST. `all_markers` is body-then-comment order, so its LAST
@@ -1107,7 +1137,17 @@ jobs:
               patch_probe_keys="${patch_probe_keys}${p_key}|"
               patch_probes=$((patch_probes + 1))
               if patch_arm_ok "$line"; then
-                candidates="${candidates}${line}"$'\n'
+                # ⛔ A SEPARATOR IS REQUIRED, AND IT IS NOT DECORATION (§(t27)).
+                # `candidates` was rebuilt with a command substitution, which STRIPS
+                # trailing newlines, so appending "${candidates}${line}" glued the decoy
+                # and the carried marker into ONE unsignable line. Unreachable while the
+                # arm could only run with an EMPTY candidates (the pre-review `-z` guard);
+                # the acceptable-marker guard above makes it reachable. Keep the newline.
+                if [ -n "$candidates" ]; then
+                  candidates="${candidates}"$'\n'"${line}"
+                else
+                  candidates="$line"
+                fi
                 candidates_via_patch=1
               fi
             done <<< "$(printf '%s\n' "$all_markers" | awk 'NF{a[NR]=$0} END{for(i=NR;i>0;i--) print a[i]}')"
@@ -1115,10 +1155,14 @@ jobs:
             if [ "$patch_probe_capped" -eq 1 ]; then
               echo "::warning::AI review rule (c): stopped after ${PATCH_PROBE_CAP} distinct SIGNED patch probes (newest first); older recorded review records were not compared. This can only REFUSE evidence, never accept it — re-record on the current head if the carry matters."
             fi
-            # ⛔ THREE DIFFERENT DIAGNOSES, because they lead to three different
+            # ⛔ FOUR DIFFERENT DIAGNOSES, because they lead to four different
             # actions. Conflating them is how an operator buys a 20–40 minute review
-            # for an API blip, or hunts a base advance that already matches.
-            if [ -z "$candidates" ]; then
+            # for an API blip, or hunts a base advance that already matches. The gate is
+            # `candidates_via_patch -eq 0` ("the arm appended nothing"), NOT
+            # `-z candidates`: once the arm can run with decoys present (§(t27)), a
+            # pasted marker-shaped line would silence every one of these — measured,
+            # and pinned by §(t22)'s decoy row, which is how the guard was found.
+            if [ "$candidates_via_patch" -eq 0 ]; then
               if [ "$patch_rewritten" -eq 1 ]; then
                 echo "::warning::AI review rule (c): the recorded review's commit is NOT an ancestor of this PR's head — the branch was REWRITTEN (force-push / rebase / amend) rather than advanced onto a new base. A carried review would approve a history this branch no longer has, so rule (c) refuses: re-record a fresh review on the current head."
               fi
