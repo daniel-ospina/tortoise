@@ -9329,7 +9329,7 @@ class CollisionPreflightTest(unittest.TestCase):
             message=f"claim owner=box-a nonce=9806\nrenewal note, previous lease_until={past}")
         self.assertTrue(claimed, basis)
         self.assertTrue(unreadable, basis)
-        self.assertIn("cannot parse (lease_until=absent)", basis)
+        self.assertIn("OUTSIDE the minted line", basis)
         self.assertNotIn("EXPIRED", basis, f"a junk line must not free the claim:\n{basis}")
         # ARM 2 — a HEADER may not contribute either: the author NAME carries the token.
         claimed, basis, unreadable = self.claim_read(
@@ -9355,6 +9355,40 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn(str(future), basis,
                          f"the second token must not contribute:\n{basis}")
         self.assertNotIn("s left", basis, f"no countdown from a junk token:\n{basis}")
+
+    def test_a_cr_inside_the_minted_line_is_not_a_line_boundary(self):
+        """`\r` is deleted by `claims.sh:_lease_of`; Python's decoder turns it into a LINE BREAK.
+
+        So `claim lease_until=<past>\rlease_until=<future>` is ONE line for the authority (whose
+        `sed` finds no whole-token match → `0` → unparseable → LIVE) and TWO for any Python reader,
+        which took the first and freed the claim. `_run` decodes with universal newlines, so the CR
+        is already `\n` here and cannot be told apart from a real break — which is why the rule is
+        the fail-closed one: a lease token after the minted line abstains, exactly as `_lease_of`
+        answers for the CR-split.
+        """
+        past, future = int(time.time()) - 86400, int(time.time()) + 86400
+        claimed, basis, unreadable = self.claim_read(
+            message=f"claim lease_until={past}\rlease_until={future}")
+        self.assertTrue(claimed, basis)
+        self.assertTrue(unreadable, basis)
+        self.assertIn("OUTSIDE the minted line", basis)
+        self.assertNotIn("EXPIRED", basis, f"a CR must not free the claim:\n{basis}")
+        self.assertNotIn("s left", basis, f"no lease may be quoted here:\n{basis}")
+
+    def test_a_no_break_space_is_not_a_field_separator(self):
+        """U+00A0 is whitespace to Python's `split()` and NOT to `tr ' \t'`.
+
+        `nonce=1<NBSP>lease_until=<past>` is ONE field to the authority (no whole-token match →
+        unparseable → LIVE) and two to a no-argument `split()`, which read the second and freed the
+        claim. Same class as the CR arm: the peer picks the separator, so the reader must not.
+        """
+        past = int(time.time()) - 86400
+        claimed, basis, unreadable = self.claim_read(
+            message=f"claim owner=b nonce=1\u00a0lease_until={past}")
+        self.assertTrue(claimed, basis)
+        self.assertTrue(unreadable, basis)
+        self.assertIn("cannot parse", basis)
+        self.assertNotIn("EXPIRED", basis, f"an NBSP must not free the claim:\n{basis}")
 
     def test_a_leading_zero_lease_is_unparseable_not_a_1970_window(self):
         """`claims.sh:_lease_unparseable`'s `0?*` arm, which this reader was missing.

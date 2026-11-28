@@ -3925,21 +3925,57 @@ class StaleHolder:
         # polarity has ONE owner (`_claim_lease_state`), and a reader that invented "ambiguous"
         # would disagree with the authority about the same bytes, which is the class of disagreement
         # agent-infra#3203 exists to end.
+        # ⛔ AND THE TOKENIZER IS ASCII, BECAUSE THE OWNER READER'S IS (#13727 review round 2).
+        # `claims.sh:_lease_of` DELETES `\r` (`:1146`) and splits fields with `tr ' \t'` (`:1161`);
+        # Python's no-argument `splitlines`, `strip()` and `split()` are WIDER — U+00A0 /
+        # U+2000-U+200A / U+202F / U+205F / U+3000 are WHITESPACE to `split()` and not to `tr` — so a
+        # peer-chosen byte handed this reader a field boundary the authority cannot see. Since the
+        # reader takes the FIRST match, that byte CHOSE the value: `nonce=1<NBSP>lease_until=<past>`
+        # read EXPIRED here while `_lease_of` answers `unparseable` → LIVE, i.e. a claim freed while
+        # its own reader still holds it. So: lines split on `\n` only, blank test on `[ \t]`, fields
+        # split on `[ \t]` — byte-for-byte the same separator set.
         body = out.split("\n\n", 1)[1] if "\n\n" in out else ""
-        minted = next((line for line in body.splitlines() if line.strip()), "")
-        lease = next((token.split("=", 1)[1] for token in minted.split()
-                      if token.startswith("lease_until=")), "")
+        lines = body.split("\n")
+        minted_at = next((i for i, line in enumerate(lines) if line.strip(" \t")), None)
+        minted = lines[minted_at] if minted_at is not None else ""
+        # ⛔ AND THE FIRST *FAITHFUL* TOKEN WINS, not merely the first `lease_until=` — `_lease_of`'s
+        # `sed` matches a WHOLE all-digit value and `head -n 1` takes the first such match, so
+        # `lease_until=junk lease_until=<digits>` reads as `<digits>` there. Reading the junk token
+        # instead would abstain where the authority frees (fail-closed, so never a wrong dispatch —
+        # but still a disagreement about the same bytes, and this reader's whole point is to agree).
+        # A junk value that stands ALONE still reaches the unparseable/LIVE arm below, because no
+        # faithful token exists and the junk one is then what "the lease" is.
+        tokens = [token.split("=", 1)[1] for token in minted.replace("\t", " ").split(" ")
+                  if token.startswith("lease_until=")]
+        faithful = [value for value in tokens
+                    if value and all(char in "0123456789" for char in value)]
+        lease = faithful[0] if faithful else (tokens[0] if tokens else "")
+        # ⛔ A `lease_until=` TOKEN AFTER THE MINTED LINE IS AN ABSTENTION, NOT JUNK WE MAY SKIP.
+        # `claims.sh:_lease_of` deletes `\r` BEFORE splitting lines, so a CR inside the minted line
+        # makes ONE (unparseable) line for the authority while it is TWO lines for any Python reader
+        # — and `_run` decodes with UNIVERSAL NEWLINES, so the CR has already become `\n` before this
+        # code sees it and CANNOT be told apart from a real line break. A minted line whose lease is
+        # readable plus a later lease token is therefore exactly the shape where the two readers
+        # disagree, and the only fail-closed answer is the one `claims.sh` gives for a CR-split:
+        # unjudgeable → LIVE. (0 of 543 local claim commits carry a token off the minted line, so this
+        # costs nothing in practice and it can only ever REFUSE a demotion.)
+        if any(token.startswith("lease_until=")
+               for line in lines[(minted_at if minted_at is not None else 0) + 1:]
+               for token in line.replace("\t", " ").split(" ")):
+            return (True, (f"`{ref}` (sha {sha[:9]}) carries a `lease_until=` token OUTSIDE the "
+                           "minted line — indistinguishable from a CR-split, whose two readers "
+                           f"disagree about the same bytes{moved_note} — so no lease can be "
+                           "reported: treated as LIVE, NOT demoted"), True)
         # claims.sh:_lease_unparseable — an absent value, the `0` sentinel, **a LEADING ZERO**, any
         # non-digit (a negative collapses to `0`) and a 19+-digit value (the 18-digit bound exists
         # so a full-width lease cannot wrap) are all "a claim EXISTS whose lease this reader cannot
         # parse" — i.e. LIVE, never free.
         # ⛔ THE LEADING-ZERO ARM IS NOT COSMETIC (#13727 review, measured against `claims.sh:1302`):
         # `int("0000009999")` is 9999, a 1970 window, so its absence freed a claim whose term this
-        # reader cannot judge — the exact value `claims.sh` was hardened against, and a field the
-        # comment above this predicate used to claim it carried.
-        # `isascii() and isdigit()`, not `isdigit()`: `int()` requires *Decimal*
-        # digits and raises on a Unicode *Digit* such as `'²'`, which would escape
-        # as an uncaught ValueError — a crash standing in for a verdict.
+        # reader cannot judge — the exact value `claims.sh` was hardened against.
+        # `isascii() and isdigit()`, not `isdigit()`: `int()` requires *Decimal* digits and raises on
+        # a Unicode *Digit* such as `'²'`, which would escape as an uncaught ValueError — a crash
+        # standing in for a verdict.
         if (not lease or not (lease.isascii() and lease.isdigit())
                 or lease.startswith("0") or len(lease) > 18):
             return (True, (f"`{ref}` (sha {sha[:9]}) is held with a lease this reader "
