@@ -436,7 +436,7 @@ cat > "$T/bin/gh" <<'STUB'
 #     "sha:parent-count" list).⛔ THE STUB CANNOT TELL A CHANGED `--jq` EXPRESSION
 #     FROM A CHANGED FIXTURE — it renders the row itself, so swapping the gate's
 #     expression for one that yields a SHORT row left this suite green (measured
-#     2026-11-28: PASS=259 FAIL=0, on a mutant that carries in production). What
+#     2026-11-28, on a mutant that carries in production). What
 #     catches that class is the GATE's own presence/arity guard in `patch_arm_ok`
 #     — both counts must be present and numeric — and `(t32)` pins all three
 #     directions of it plus a mutation control, and the two expression emulations
@@ -2436,9 +2436,12 @@ fi
 #   · the branch-side ARITY line   -> 3 red rows, `(t32e)` x3
 # so "removing EITHER alone reddened NO row" is wrong: `(t32e)` — added by this same PR —
 # pins the arity half by itself, and only the `[ -z "$p_bside" ]` half is attribution-less.
-# Removing BOTH still lets a single-parent AUTHORED commit carry via PATCH match, which is
-# why the mutant below sweeps the pair. `STUB_BRANCH_FAIL` (added above) fails only this
-# arm, as gh really can.
+# Removing ONLY that pair does NOT let it carry (measured: it reddens `(t32e)` and nothing
+# else), so the mutant below is NOT "the pair" — it sweeps FIVE guards together: the
+# branch-side numeric presence, the count equality, the arity check, `[ -z "$p_bside" ]`
+# and `[ "${p_btotal:-0}" -ge 1 ]`. A carry needs all of them gone, which is stated here
+# because this row's own mutant is the only thing that exercises any of them jointly.
+# `STUB_BRANCH_FAIL` (added above) fails only this arm, as gh really can.
 BSIDE_BODY="$T/body-t30"
 printf '%s\n' "$(diff_marker "$STALE" "$SAME_SCOPE_ANCHOR")" > "$BSIDE_BODY"
 # (a) The read fails: REFUSED, with the read-failure diagnosis, not a rewrite.
@@ -2491,7 +2494,7 @@ fi
 # inside one scope carries: the measured false pass (t23) this whole guard exists to stop.
 # It was invisible because the stub RENDERS the row itself, so a changed `--jq` expression
 # cannot be told from a changed fixture — measured: swapping it for `.status | @tsv` left
-# the suite green (PASS=259 FAIL=0). `STUB_ANCESTOR_ROW` (added above) serves a literal
+# the suite green. `STUB_ANCESTOR_ROW` (added above) serves a literal
 # row, which is how a differently-shaped answer is reproduced here.
 T32_BODY="$T/body-t32"
 printf '%s\n' "$(diff_marker "$STALE" "$SAME_SCOPE_ANCHOR")" > "$T32_BODY"

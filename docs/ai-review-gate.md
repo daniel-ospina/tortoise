@@ -154,10 +154,13 @@ entry condition closes that path.
      which guards are NOT individually pinned at all: the numeric-presence check is MASKED
      (removing it reddens nothing, and removing it together with the arity check reddens
      `(t32d)` only, because a further guard still refuses), and the empty-parse arm, the
-     branch-side numeric-presence check and `[ -z "$p_bside" ]` are SUBSUMED. `(t32f)` is
-     the only control that strips the whole masked set at once, which is why a single
-     deletion there LOOKS green. ⛔ Neither artifact quotes a tally or a PASS total: both
-     drift as rows are added, so the list is by NAME and the mutation is re-runnable.
+     branch-side numeric-presence check and `[ -z "$p_bside" ]` are SUBSUMED — the last one
+     has no row of its own and is observable only inside `(t30)`'s joint mutation.
+     `(t32f)` strips five guards together for its own fixed fixture (two of which ARE
+     individually pinned), which is why a single deletion there LOOKS green. ⛔ The
+     ATTRIBUTION LIST quotes no tally and no PASS total — those drift as rows are added, so
+     it names guards and the mutation is re-runnable. (Prose elsewhere may still mention the
+     outcome of a specific one-off measurement; no such number is load-bearing here.)
 
   ⛔ Checks 1 and 2 are not decoration, and check 1 alone was not enough. Measured on
   this rule, end to end, each `passed via PATCH match` with the anchor reproducing

@@ -1019,7 +1019,7 @@ jobs:
             # were SKIPPED SILENTLY — leaving rule (c) gated on `status=ahead` alone. A
             # changed expression produces exactly that row in production, and the stub
             # cannot tell it from a changed fixture (measured: swapping this expression
-            # for `.status | @tsv` left the suite green, PASS=259 FAIL=0). So PRESENCE,
+            # for `.status | @tsv` left the suite green). So PRESENCE,
             # ARITY AND MEANING ARE NOW CHECKED, in that order: both counts must be
             # present and numeric, each count must equal the number of items in its own
             # list (so `0` ⟺ an empty list), and the status must be one of the four
@@ -1043,18 +1043,27 @@ jobs:
             #     · branch `p_btotal >= 1` ....... `(t33)` — pins THIS side only; the
             #       reviewed side's zero guard is `(t32g)`/`(t32h)` and nothing else.
             #       `(t33)` also pins the `.sha[0:12]` WIDTH in the pinned `--jq` substrings.
-            #   MASKED (0 red rows alone):
-            #     · numeric presence on BOTH counts. With it gone `p_total`/`p_seen` are `""`,
+            #   MASKED (0 red rows alone) — reviewed side only; the BRANCH-side numeric
+            #   presence check is SUBSUMED, below, so the two lists cannot overlap:
+            #     · numeric presence on the REVIEWED counts. With it gone `p_total`/`p_seen` are `""`,
             #       the arity guard refuses, and `[ "" -ge 1 ]` is an ARITHMETIC error (rc 2)
             #       that takes the refuse arm — so removing presence AND reviewed arity
-            #       reddens `(t32d)` ONLY, never `(t32a)`/`(t32b)`. `(t32f)` strips the masked
-            #       set (allowlist, presence, equality, reviewed arity, self-consistency) and
-            #       is the only control under which the short row CARRIES: a single deletion
-            #       here LOOKS green, so delete none of them on the strength of a green suite.
+            #       reddens `(t32d)` ONLY, never `(t32a)`/`(t32b)`. `(t32f)` strips FIVE
+            #       guards together for ITS OWN fixture — the allowlist, the reviewed numeric
+            #       presence, the count equality, the reviewed arity and the self-consistency
+            #       check — and is the only control under which that short row CARRIES: a
+            #       single deletion there LOOKS green. ⛔ Those five are NOT one category: two
+            #       of them are individually pinned (see PINNED ALONE). They are simply all
+            #       masked for `(t32f)`'s fixed fixture, which is why the control strips the
+            #       whole five.
             #   SUBSUMED (0 red rows alone; kept as defence in depth, not as a pinned bound):
             #     · `[ -z "$p_row" ]` (the empty-parse arm), the BRANCH-side numeric presence
-            #       check, and `[ -z "$p_bside" ]` — for the last one only its JOINT removal
-            #       with the branch-side arity check is attributable, as `(t30)` states.
+            #       check, and `[ -z "$p_bside" ]`. ⛔ `[ -z "$p_bside" ]` has NO row of its
+            #       own and is not attributable together with the arity check either (measured:
+            #       removing just those two reddens `(t32e)` and nothing else). It is observable
+            #       only inside `(t30)`'s joint mutation, which sweeps the branch-side numeric
+            #       presence, the count equality, the arity check, `[ -z "$p_bside" ]` and
+            #       `p_btotal >= 1` TOGETHER — a carry needs all of them gone.
             # Both reads therefore refuse on anything unreadable or truncated, so a
             # transient (or a mis-shaped) answer can only NARROW rule (c), never widen it.
             p_base="$(gh api "repos/${REPO_NAME}/pulls/${PR_NUMBER}" --jq .base.sha 2>/dev/null || true)"
