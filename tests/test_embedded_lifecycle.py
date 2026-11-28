@@ -1188,7 +1188,18 @@ _SIGNAL_DURING_CONSTRUCTION_CHILD = (
     "import sys, time, os, signal\n"
     "sys.path.insert(0, %(root)r)\n"
     "import tortoise.embedded_lifecycle as lc\n"
+    "# #6177 precondition: SIG_IGN survives fork+exec, so a suite launched under\n"
+    "# `nohup` hands this child SIGHUP=SIG_IGN and the guard (which replaces a\n"
+    "# signal only while it is SIG_DFL) would decline to install — the test would\n"
+    "# then be measuring the LAUNCH ENVIRONMENT, not the code under test.\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
+    "try:\n"
+    "    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})\n"
+    "except (AttributeError, OSError, ValueError):\n"
+    "    pass\n"
     "lc.install_embedded_signal_cleanup()\n"
+    "print('HANDLER_INSTALLED=%%s' %% (signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL,),"
+    " flush=True)\n"
     "_orig = lc.record_owner\n"
     "def _parked_record_owner(sock):\n"
     "    print('IN_CONSTRUCTION', flush=True)\n"
@@ -1213,7 +1224,16 @@ _DEFER_WINDOW_CHILD = (
     "sys.path.insert(0, %(root)r)\n"
     "from tortoise.embedded_lifecycle import (\n"
     "    defer_terminating_signals, install_embedded_signal_cleanup)\n"
+    "# #6177 precondition (see _SIGNAL_DURING_CONSTRUCTION_CHILD): normalize the\n"
+    "# inherited disposition so the verdict is a function of the code under test.\n"
+    "signal.signal(%(signum)d, signal.SIG_DFL)\n"
+    "try:\n"
+    "    signal.pthread_sigmask(signal.SIG_UNBLOCK, {%(signum)d})\n"
+    "except (AttributeError, OSError, ValueError):\n"
+    "    pass\n"
     "install_embedded_signal_cleanup()\n"
+    "print('HANDLER_INSTALLED=%%s' %% (signal.getsignal(%(signum)d) is not signal.SIG_DFL,),"
+    " flush=True)\n"
     "with defer_terminating_signals():\n"
     "    os.kill(os.getpid(), %(signum)d)\n"
     "    time.sleep(0.25)\n"
@@ -1265,11 +1285,15 @@ def test_terminating_signal_during_construction_still_closes_the_server(tmp_path
     # parked, so the signal must be sent as soon as the child is in the
     # window — reading `DEFERRED=` first would deadlock (the marker is
     # printed only once the wait is over).
-    proc, _lines = _run_child_and_read(
+    proc, lines = _run_child_and_read(
         [sys.executable, "-c", child, str(dbdir / "sig.db")],
-        ("IN_CONSTRUCTION",))
+        ("HANDLER_INSTALLED=", "IN_CONSTRUCTION"))
     redis_pid = None
     try:
+        assert lines["HANDLER_INSTALLED="] == "HANDLER_INSTALLED=True", (
+            "#6177: the child did not install the terminating-signal guard, so "
+            "this run measures the launch environment rather than the code "
+            f"under test ({lines['HANDLER_INSTALLED=']!r})")
         os.kill(proc.pid, signum)
         try:
             deferred_line = _read_child_line(proc, "DEFERRED=")
@@ -1319,9 +1343,14 @@ def test_defer_window_holds_the_signal_until_it_closes(tmp_path, signum):
     """
     child = _DEFER_WINDOW_CHILD % {
         "root": _REPO_ROOT, "signum": int(signum), "raise_inside": False}
-    proc, _lines = _run_child_and_read(
-        [sys.executable, "-c", child, str(tmp_path)], ("ALIVE_INSIDE_WINDOW",))
+    proc, lines = _run_child_and_read(
+        [sys.executable, "-c", child, str(tmp_path)],
+        ("HANDLER_INSTALLED=", "ALIVE_INSIDE_WINDOW"))
     try:
+        assert lines["HANDLER_INSTALLED="] == "HANDLER_INSTALLED=True", (
+            "#6177: the child did not install the terminating-signal guard, so "
+            "this run measures the launch environment rather than the code "
+            f"under test ({lines['HANDLER_INSTALLED=']!r})")
         proc.wait(timeout=60)
     except _subprocess.TimeoutExpired:
         proc.kill()
@@ -1350,9 +1379,14 @@ def test_defer_window_honours_the_signal_when_the_construction_raises(tmp_path):
     signum = _signal.SIGTERM
     child = _DEFER_WINDOW_CHILD % {
         "root": _REPO_ROOT, "signum": int(signum), "raise_inside": True}
-    proc, _lines = _run_child_and_read(
-        [sys.executable, "-c", child, str(tmp_path)], ("ALIVE_INSIDE_WINDOW",))
+    proc, lines = _run_child_and_read(
+        [sys.executable, "-c", child, str(tmp_path)],
+        ("HANDLER_INSTALLED=", "ALIVE_INSIDE_WINDOW"))
     try:
+        assert lines["HANDLER_INSTALLED="] == "HANDLER_INSTALLED=True", (
+            "#6177: the child did not install the terminating-signal guard, so "
+            "this run measures the launch environment rather than the code "
+            f"under test ({lines['HANDLER_INSTALLED=']!r})")
         proc.wait(timeout=60)
     except _subprocess.TimeoutExpired:
         proc.kill()
