@@ -1471,7 +1471,9 @@ def _range_matches(text: str, rows: list[str]) -> list[re.Match]:
     return list(pattern.finditer(text))
 
 
-def _range_is_the_whole_claim(text: str, match: re.Match, rows: list[str]) -> bool:
+def _range_is_the_whole_claim(text: str, match: re.Match, rows: list[str],
+                              issue: int | None = None,
+                              repo: str | None = None) -> bool:
     """Is this range the ENTIRE claim of the clause it sits in (see `_BARE_PREFIX`)?
 
     ⛔ AND NOT WHEN A SIBLING CLAUSE ON THE SAME LINE NAMES ROWS: `Closes #N (rows V1–V6; V2 is what
@@ -1495,8 +1497,16 @@ def _range_is_the_whole_claim(text: str, match: re.Match, rows: list[str]) -> bo
             break
     else:
         return False
-    for c_start, c_end in spans:
-        if (c_start, c_end) == own:
+    # ⛔ A SIBLING THAT CLOSES A DIFFERENT ISSUE IS NOT THIS ISSUE'S ROWS (review round 32, P2).
+    # `Closes #13036 (V1-V6), closes #13037 (V2)` reaches this scan on the RANGE spelling, and without
+    # the exclusion the unrelated `closes #13037 (V2)` made the bare range a MENTION — so a COMPLETE
+    # close of a six-row issue fell through to `_narrowing_ids`, claimed V2 and raised a finding whose
+    # remediation tells the author to leave the capstone open. Its peer `_names_a_proper_subset` and
+    # `_narrowing_sibling_ids` already make this exclusion; `_narrowing_ids` did not, which is why the
+    # id-list spelling was pinned clean and the range spelling was not. Same predicate, both reads.
+    foreign = _foreign_closing_clauses(line, rows, issue, repo)
+    for i, (c_start, c_end) in enumerate(spans):
+        if (c_start, c_end) == own or i in foreign:
             continue
         other = line[c_start:c_end]
         if any(re.search(rf"(?<![A-Za-z0-9]){re.escape(row)}(?![A-Za-z0-9])", other) for row in rows):
@@ -1767,7 +1777,8 @@ def _clauses(line: str, rows: list[str]) -> list[str]:
     return [line[a:b] for a, b in _clause_spans(line, rows)]
 
 
-def _narrowing_ids(line: str, match: re.Match, rows: list[str]) -> set[str]:
+def _narrowing_ids(line: str, match: re.Match, rows: list[str],
+                   issue: int | None = None, repo: str | None = None) -> set[str]:
     """The ids a NARROWING sibling clause names — `(rows V1–V6; V2 only)` claims **V2**.
 
     ⛔ WHY THIS EXISTS, AND WHY IT IS NOT A CUE LIST (review round 11). Round 10 masked the claim read
@@ -1782,11 +1793,17 @@ def _narrowing_ids(line: str, match: re.Match, rows: list[str]) -> set[str]:
     the span, so a sibling that names the whole span (`V1 … V6 are separate PRs`) is not a narrowing
     and earns nothing (the line lands `ambiguous`, never `clean`).
     """
+    # ⛔ AND A SIBLING THAT CLOSES A DIFFERENT ISSUE IS NOT THIS ISSUE'S NARROWING (review round 32,
+    # P2). This function is the ONLY one of the three narrowing reads that did not make the exclusion
+    # its two peers already make (`_names_a_proper_subset`, `_narrowing_sibling_ids`), so
+    # `Closes #N (V1-V6), closes #M (V2)` read the foreign qualifier as a narrowing of #N and accused
+    # a COMPLETE close of claiming V2 — a wrong-claim-set finding, ranked beside a false PASS here.
     spans = _clause_spans(line, rows)
     own = next(((a, b) for a, b in spans if a <= match.start() and match.end() <= b), None)
+    foreign = _foreign_closing_clauses(line, rows, issue, repo)
     ids: set[str] = set()
-    for a, b in spans:
-        if (a, b) == own:
+    for i, (a, b) in enumerate(spans):
+        if (a, b) == own or i in foreign:
             continue
         clause = line[a:b]
         if _DISCLAIMER_RE.search(clause):
@@ -1868,7 +1885,109 @@ def _narrowing_sibling_ids(line: str, rows: list[str], claimable: set[int],
     return ids
 
 
-def _closing_line_range_claim(line: str, claim_text: str, rows: list[str]) -> set[str]:
+# Row-population COUNT words, used only by `_a_rowless_rider_understates_the_rows`. This is NOT the
+# negation-cue blocklist the file retired in round 8: a cardinal is a SYNTACTIC class, and its meaning
+# is fixed by the issue's own declared row population (`len(rows)`), which is the authority every other
+# read in this module is already grounded in. It says "this rider states a number of rows smaller than
+# the number the issue declares", never "this rider uses the word `remain`".
+_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+
+
+def _a_rowless_rider_understates_the_rows(line: str, rows: list[str], claimable: set[int],
+                                        issue: int | None = None,
+                                        repo: str | None = None) -> bool:
+    """Does a clause AFTER the claim state a COUNT smaller than the issue's declared rows?
+
+    ⛔ WHY THIS EXISTS (review round 32, P1). The two refusals that guard a COMPLETE claim are keyed on
+    (a) a cue word (`_DISCLAIMER_RE` / `_ELSEWHERE_RE` / `only`) or (b) a clause naming a NAMED subset of
+    the rows. A rider that names NO row and carries NO cue word satisfies neither, so it was simply
+    blanked as a non-claimable sibling and the complete claim stood. Measured on `#13036`'s six rows,
+    every one of these read `clean` while saying on its own closing line that rows are outstanding:
+
+        Closes #13036 (V1, V2, V3, V4, V5, V6); three remain
+        Closes #13036 (V1, V2, V3, V4, V5, V6); two are missing
+        Closes #13036 (V1, V2, V3, V4, V5, V6); 3 of 6 done
+        Closes #13036 (rows V1–V6); two are missing
+
+    — the exact defect this arm was filed for — while the SAME sentence joined by `but` was already
+    AMBIGUOUS (pinned, `NORTH_OF_ROUND_29`). `but` is a clause boundary (`_CLAUSE_SPLIT_RE`) and
+    `_range_is_the_whole_claim` refuses a bare range with a rider after it, so the rule existed but was
+    spelled against ONE separator and ONE of the two claim spellings; a `;` leaked, and an ID LIST
+    never reached it at all. `;` and `but` must not disagree about the same sentence.
+
+    ⛔ AND A BLANKET "ANY ROWLESS SIBLING DEMOTES" RULE IS REFUSED BY A RECORDED DECISION. The
+    first draft of this predicate did exactly that, and it broke two pinned controls —
+    `test_a_range_narrowed_by_a_cue_free_sibling_claims_exactly_that_sibling`'s CONTROL B
+    (`Closes #N (rows V1–V6; evidence in the evidence doc)` is a COMPLETE close) and the
+    `MINIMAL_PAIR_ROUND_29` row `…; the evidence doc is attached` — both of which record that a
+    rowless, cue-free sibling which merely POINTS somewhere is neutral and leaves the claim intact.
+    That pin is the round-8 decision that retired the cue blocklist precisely because it flagged
+    correct completes. So the discriminator cannot be "is the sibling rowless" — it must be what the
+    rider asserts. A remainder/partial claim states a NUMBER OF ROWS; a pointer names an artifact.
+
+    The number is read against the ISSUE's own declared population, so the test is grounded rather
+    than lexical: a stated count is a contradiction only when it is SMALLER than `len(rows)` —
+    `3 of 6 done` and `three remain` (3 < 6) contradict a six-row complete claim, while
+    `6/6 measured` (6 is not < 6) and `evidence in the evidence doc` (no count) do not. That keeps
+    both pinned controls green and catches every measured shape above.
+
+    The other two exclusion classes are shape checks, not vocabulary: a clause NAMING rows
+    (`; V1–V3 in this PR`, `; V6 needed a migration`) is the narrowing read's job
+    (`_narrowing_sibling_ids`) and earns a finding, not this abstention; and a clause closing a
+    DIFFERENT issue (`… , closes #13037 (V2)`) is `_foreign_closing_clauses`' job, reused here so the
+    three reads agree about what a clause is ABOUT. A clause with no letters is punctuation — the `)`
+    of `Closes #N (rows V1–V6)` is its own span and must never count, or every correct complete close
+    would abstain.
+
+    ⛔ THE COST, RECORDED: a correct complete close that trails a rowless count remark
+    (`Closes #N (rows V1–V6); 3 doc rows are links`) now reads AMBIGUOUS instead of `clean`. That is
+    the cheap error in this file's ranking (a counted abstention, never a pass, and never a false
+    accusation), which is the same price round 27 accepted for `_names_a_proper_subset`.
+    ⚠️ RESIDUAL, stated rather than hidden: the rider must come AFTER the claim, matching the `but`
+    rule's own scope, so `Three remain; Closes #N (V1 … V6)` is not caught. Widening it to the whole
+    line would abstain on ordinary prose that precedes a close
+    (`This closes the capstone; Closes #N (rows V1–V6)`), and an abstention on every correct close is a
+    tax this arm cannot pay — the trailing spelling is the one a lane writes.
+    """
+    spans = _clause_spans(line, rows)
+    if not claimable:
+        return False
+    after = max(b for a, b in (spans[i] for i in claimable))
+    foreign = _foreign_closing_clauses(line, rows, issue, repo)
+    for i, (a, b) in enumerate(spans):
+        if i in claimable or i in foreign or a < after:
+            continue
+        clause = line[a:b]
+        if not re.search(r"[A-Za-z]", clause):
+            continue
+        if _ids_in(clause, rows):
+            continue
+        if _clause_states_a_partial_count(clause, len(rows)):
+            return True
+    return False
+
+
+def _clause_states_a_partial_count(clause: str, row_count: int) -> bool:
+    """Does this clause state a number of rows SMALLER than the issue declares? `3 of 6`, `two`.
+
+    Grounded in `row_count` (the issue's own rows), never in a word list of negations: `two are
+    missing` and `two more are needed` both state a partial row count, and both are contradictions of
+    a complete claim regardless of the verb. `6 of 6 done` and `all six` are not, because the stated
+    count is not smaller than the population — which is what keeps the pinned complete-close controls
+    (`…; the evidence doc is attached`) and honest self-reports (`6/6`) reading `clean`.
+    """
+    for token in re.finditer(r"(?<![\w#])(\d{1,3})(?!\d)", clause):
+        if int(token.group(1)) < row_count:
+            return True
+    for token in re.finditer(r"\b(" + "|".join(_COUNT_WORDS) + r")\b", clause, re.IGNORECASE):
+        if _COUNT_WORDS[token.group(1).lower()] < row_count:
+            return True
+    return False
+
+
+def _closing_line_range_claim(line: str, claim_text: str, rows: list[str],
+                              issue: int | None = None, repo: str | None = None) -> set[str]:
     """The rows a RANGE earns on a closing line — read against THREE views of the same line.
 
     `claim_text` is the line with every non-CLAIMABLE clause blanked, so a range only counts where the
@@ -1888,10 +2007,10 @@ def _closing_line_range_claim(line: str, claim_text: str, rows: list[str]) -> se
     for match in _range_matches(claim_text, rows):
         lo, hi = sorted((order[match.group("a")], order[match.group("b")]))
         span = set(rows[lo:hi + 1])
-        if _range_is_the_whole_claim(line, match, rows):
+        if _range_is_the_whole_claim(line, match, rows, issue, repo):
             out |= span
             continue
-        narrowing = _narrowing_ids(line, match, rows)
+        narrowing = _narrowing_ids(line, match, rows, issue, repo)
         if narrowing and narrowing < span:
             out |= narrowing
     return out
@@ -2019,6 +2138,7 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
     text, _hidden = strip_code(pr_body, strict=True)
     named: set[str] = set()
     disclaimed = False
+    rider_seen = False
     ref = re.compile(rf"#{issue}(?!\d)")
     for line in text.splitlines():
         # ⛔ THE KEYWORD MUST BIND THIS ISSUE, NOT MERELY SHARE ITS LINE (review round 14). `ref.search`
@@ -2158,7 +2278,15 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
             # `(rows V1–V6; V2 only)` a complete claim, i.e. `clean` on a one-row close.
             claim_text = "".join(chars)
             line_named = (_explicit_ids(claim_text, rows)
-                          | _closing_line_range_claim(line, claim_text, rows))
+                          | _closing_line_range_claim(line, claim_text, rows, issue, repo))
+            # ⛔ A RIDER THAT STATES A PARTIAL COUNT DISQUALIFIES THE COMPLETE CLAIM ON ITS OWN LINE
+            # (review round 32, P1). This is the claim-set-level half of the `but` rule: the range path
+            # already refuses a bare range followed by a rowless rider, but an ID LIST never reached it,
+            # so `Closes #N (V1 … V6); three remain` was the arm's headline false PASS one separator
+            # away from the pinned control. Recorded here, applied with the SAME refusal the subset and
+            # disclaimer halves use, so all three land on the one verdict (AMBIGUOUS, counted).
+            if _a_rowless_rider_understates_the_rows(line, rows, claimable, issue, repo):
+                rider_seen = True
             # ⛔ A NARROWING ON THE LINE DECIDES THE CLAIM WHETHER OR NOT A RANGE MATCHED (review
             # round 29, P2 — the recorded false PASS on PR #14771). The sibling read above lived
             # only inside `_closing_line_range_claim`, i.e. only where a RANGE was present, so the
@@ -2231,6 +2359,13 @@ def _closing_line_claim(pr_body: str, issue: int, rows: list[str],
     # the finding on V2 — that claim is not complete, so this refusal never fires on it.
     refused = False
     if disclaimed and set(rows) <= named:
+        named = set()
+        refused = True
+    # ⛔ AND A ROWLESS RIDER REFUSES IT TOO — the same rule, from the same line (review round 32,
+    # P1). Gated on a COMPLETE claim for the reason the disclaimer veto is: it only contradicts a
+    # claim that says it closed everything, and a PARTIAL claim beside a rider is the careful
+    # author's correct form and must still yield its finding.
+    if rider_seen and set(rows) <= named:
         named = set()
         refused = True
     # ⛔ AND A PROPER SUBSET ANYWHERE IN THE BODY REFUSES A COMPLETE CLAIM (review round 27, R1+R2).

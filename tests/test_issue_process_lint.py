@@ -4759,6 +4759,89 @@ def test_the_id_list_spelling_of_a_narrowed_close_is_held_to_the_range_spelling(
     assert L.claimed_row_ids(body, 13036, rows) == (set(claimed) if claimed else set(rows)), body
 
 
+# ⛔ REVIEW ROUND 32 — the two near-misses found by reviewing the round-31 repair against the class it
+# exists for. Each row below was MEASURED `clean` at the round-31 head (see the round-32 findings on PR
+# #14771); each control row is what a blanket fix would have broken instead.
+#
+# P1 is the arm's headline false PASS, one SEPARATOR away from an already-pinned control. The `but`
+# spelling of the SAME sentence was pinned `ambiguous` in `NORTH_OF_ROUND_29`, because `but` is a clause
+# boundary and `_range_is_the_whole_claim` refuses a trailing rider — but the rule was spelled against
+# one separator and one claim spelling, so a `;` leaked and an ID LIST never reached it at all.
+#
+# The controls record the RECORDED DECISION this fix had to respect: a rowless, cue-free sibling that
+# merely POINTS somewhere is neutral (round 8 retired the cue blocklist precisely because it flagged
+# correct completes). So the discriminator is not "is the sibling rowless" but "does the rider state a
+# COUNT smaller than the issue's declared rows" — grounded in the issue's own population, never a word
+# list. A first draft of this fix used the blanket rule and broke BOTH pinned controls below.
+NORTH_OF_ROUND_32 = [
+    # P1 — the measured leaks. A partial-count rider beside a COMPLETE claim must not pass.
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6); three remain\n", "ambiguous"),
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6); two are missing\n", "ambiguous"),
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6); 3 of 6 done\n", "ambiguous"),
+    ("Closes #13036 (rows V1–V6); two are missing\n", "ambiguous"),
+    # …and the `but` spelling that was ALREADY right, re-pinned so the two separators cannot drift
+    # apart again: whichever one a lane writes, the sentence gets one verdict class.
+    ("Closes #13036 (rows V1–V6 but two are missing)\n", "ambiguous"),
+    # CONTROL — a POINTER sibling states no count, so the complete claim stands (the round-8 decision).
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6; the evidence doc is attached)\n", "clean"),
+    ("Closes #13036 (rows V1–V6; evidence in the evidence doc)\n", "clean"),
+    # CONTROL — a count that is NOT smaller than the population is not an understatement: `6 of 6`
+    # agrees with a complete claim, so an honest self-report must not be punished into abstention.
+    ("Closes #13036 (V1, V2, V3, V4, V5, V6; 6 of 6 measured)\n", "clean"),
+]
+
+
+@pytest.mark.parametrize("body,expected", NORTH_OF_ROUND_32)
+def test_a_partial_count_rider_is_held_to_the_same_rule_as_a_but_joined_one(body, expected):
+    """Review round 32 (PR #14771 P1) — the rider rule must not depend on the separator.
+
+    `Closes #N (V1 … V6); three remain` says on its own closing line that rows are outstanding, in the
+    claim-set shape #13886 used, and it read `clean` while the identical sentence joined by `but` was
+    pinned `ambiguous`. A rider that names no row and carries no cue word satisfied neither of the two
+    guards on a complete claim, so it was blanked as a non-claimable sibling and the claim stood.
+
+    The fix is grounded, not lexical: a rider whose stated count is SMALLER than the issue's declared
+    row population contradicts a complete claim; a rider that points at an artifact, or reports a count
+    equal to the population, does not. The two controls therefore pin the recorded round-8 decision —
+    a rowless cue-free pointer is neutral — which a blanket "any rowless sibling demotes" rule breaks.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    findings, stats = L.classify_partial_close(body, 500, {13036: _scope(rows)},
+                                              "daniel-ospina/tortoise")
+    assert stats[expected] == 1, (body, stats)
+    assert stats["clean"] == (1 if expected == "clean" else 0), (body, stats)
+    assert findings == [], body
+
+
+def test_a_range_close_beside_a_second_closing_ref_is_never_accused_of_the_other_issue():
+    """Review round 32 (PR #14771 P2) — one of the three narrowing reads omitted the foreign exclusion.
+
+    `_names_a_proper_subset` and `_narrowing_sibling_ids` both exclude a clause that closes a DIFFERENT
+    issue; `_narrowing_ids` — reached only on the RANGE path — did not. So `Closes #N (V1-V6), closes
+    #M (V2)` read the unrelated `closes #M (V2)` as a narrowing of #N, claimed V2 of a COMPLETE close
+    and raised a finding whose own remediation told its author to leave the capstone OPEN — a
+    wrong-claim-set finding, which this file ranks beside a false PASS.
+
+    The id-list spelling of the same sentence was pinned `clean` in `NORTH_OF_ROUND_29`; the range
+    spelling was not, which is exactly how a second implementation of one rule drifts. Pinning both
+    spellings here is the point: the read must not depend on how the rows were written.
+    """
+    rows = L.row_ids([CAPSTONE_BODY])
+    # `#13037` declares its own, unrelated rows, so nothing below can be a finding about it either.
+    other = ["A1", "A2"]
+    scopes = {13036: _scope(rows), 13037: _scope(other)}
+    for spelling in ("V1-V6", "V1–V6", "rows V1–V6", "V1, V2, V3, V4, V5, V6"):
+        body = f"Closes #13036 ({spelling}), closes #13037 (A1)\n"
+        findings, stats = L.classify_partial_close(body, 500, scopes, "daniel-ospina/tortoise")
+        # ⛔ THE CLAIM, NOT A VERDICT CLASS: #13036 is a COMPLETE close, so it must never be the
+        # subject of a FINDING naming V2. (The verdict may be `ambiguous` where the whole-body
+        # subset read cannot expand a bare range — a counted abstention, which is the cheap error —
+        # but it must never be an accusation against a correct close.)
+        assert [f for f in findings if f.evidence.get("issue") == 13036] == [], (body, findings)
+        assert L.claimed_row_ids(body, 13036, rows) == set(rows), (body, stats)
+
+
+
 # ⛔ THE TWO RE-DERIVATION PATHS THE REVIEWER NAMED (repros B, C, D), PLUS THE CUE-FREE SPELLINGS
 # THAT ARE THE ACTUAL FALSE PASSES ON THEM. None of these may be `clean`; the verdict may be
 # `finding` or `ambiguous` (the honest non-answer), but never a pass, and never a finding that names
