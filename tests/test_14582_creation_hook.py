@@ -1776,6 +1776,16 @@ def test_backfill_never_arms_a_halted_counter(monkeypatch) -> None:
     assert entry["armed"] is False, entry
     assert "reopen" in entry["arm_refused"], (
         f"the entry must name the halt's own remedy: {entry}")
+    # ⛔ AND THE EXIT CODE MUST SEE IT (#14587 review P2). `armed == 0` above is a
+    # REFUSAL, but `_exit_code_for` read only `refused` — which counts the
+    # `SeedRefused` leg — so a `--arm` run over halted graphs exited 0 over graphs
+    # that allocate nothing, the exact `exit 0`-over-uncut shape that function's
+    # own docstring says the verb exists to remove. Measured before the fix:
+    # `_exit_code_for(payload, dry_run=False)` returned `EXIT_OK` for this payload.
+    assert payload["arm_refused"] == 1, payload
+    assert cli._exit_code_for(payload, dry_run=False) == cli.EXIT_REFUSED, (
+        "an `--arm` refusal that is reported in the payload must reach the exit "
+        f"code: {payload}")
 
 
 # ── the backfill ───────────────────────────────────────────────────────────
@@ -2499,3 +2509,167 @@ def test_the_halted_population_publishes_its_cost_and_its_remedy(monkeypatch):
         assert _health(monkeypatch, dsn=None)["armed_but_halted_clears"] == note
     finally:
         rw.reset_uncut_graphs()
+
+
+# ── The two hardening arms this branch carries and `main` did not ──────────
+#
+# Both are conflict-resolution ports: `#14624` landed this hook on `main` from an
+# earlier cut, and these two properties were reviewed onto THIS branch afterwards
+# (`#14587` review P3-2 and P3). They are kept rather than dropped because each
+# one removes a failure mode `main` still has, and each test below reds on the
+# pre-fix (`main`) code.
+
+
+class _StatementRecordingConn:
+    """The hook's connection reduced to what it uses: a statement log + commit.
+
+    ⛔ IT LOGS `(sql, params)`, because BOTH halves of the bound matter: deleting
+    the call leaves no `statement_timeout` statement at all, and switching the
+    scope flag makes the same statement a SESSION setting on a pool handle.
+    """
+
+    def __init__(self) -> None:
+        self.statements: list[tuple[str, object]] = []
+        self.commits = 0
+        self.rollbacks = 0
+        self.closed = False
+
+    def cursor(self):
+        return _StatementRecordingCursor(self.statements)
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _StatementRecordingCursor:
+    def __init__(self, log: list[tuple[str, object]]) -> None:
+        self._log = log
+
+    def execute(self, sql, params=None) -> None:
+        self._log.append((str(sql), params))
+
+    def close(self) -> None:
+        pass
+
+
+def test_the_provision_statements_are_bounded_transaction_locally(monkeypatch):
+    """⛔ THE CONNECT BOUND WAS NOT THE STATEMENT BOUND (#14587 review P3-2).
+
+    `PROVISION_CONNECT_TIMEOUT_SECONDS` bounds the CONNECT only, and the hook's
+    advertised claim is "a record outage at creation costs the user a bounded
+    pause". A record that ACCEPTS the TCP connection and then hangs on a
+    statement refutes it: `_default_connect` sets `connect_timeout` and
+    `idle_in_transaction_session_timeout` and NO `statement_timeout`, and this
+    sync hook runs inside an `async` endpoint, so the hang blocked the worker's
+    event loop (including a co-located `/health`) with no bound at all.
+
+    Two assertions, two mutants: delete the `_bound_provision_statements(...)`
+    call → no `statement_timeout` statement is executed at all; flip the scope
+    flag `true` → `false` (a SESSION setting on a POOLED handle, #9558) → the
+    scope assertion reds.
+    """
+    from tortoise import record_allocator as ra
+
+    conn = _StatementRecordingConn()
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+    monkeypatch.setattr(rw, "_default_connect", lambda _dsn, **_kw: conn)
+
+    order: list[str] = []
+
+    def provision(*_a, **_kw):
+        order.append(f"allocator_after_{len(conn.statements)}_statements")
+        return SimpleNamespace(seq=0, mode="active", already_cut_over=False,
+                               seeded=True)
+
+    monkeypatch.setattr(ra, "provision_graph_record", provision)
+
+    assert rw.provision_graph_record(
+        org_id="org-14587", graph_id="graph-14587")["provisioned"] is True
+
+    bounds = [(sql, params) for sql, params in conn.statements
+              if "statement_timeout" in sql]
+    assert len(bounds) == 1, (
+        "the hook issued no statement bound — `connect_timeout` does not bound a "
+        f"statement, so a hung SELECT blocks the create unbounded: "
+        f"{conn.statements}")
+    sql, params = bounds[0]
+    assert params == (str(rw.PROVISION_STATEMENT_TIMEOUT_MS),), (
+        f"the bound applied is not PROVISION_STATEMENT_TIMEOUT_MS: {params!r}")
+    assert rw.PROVISION_STATEMENT_TIMEOUT_MS > 0, (
+        "Postgres reads `statement_timeout = 0` as NO TIMEOUT AT ALL, so a zero "
+        "here is the unbounded hang spelled as a bound")
+    assert sql.rstrip().endswith("true)"), (
+        "the bound must be TRANSACTION-LOCAL (`set_config(..., true)`): the "
+        "handle is POOLED (#9558), so a session-level SET follows it into the "
+        f"next borrower's transaction — got {sql!r}")
+    assert order and order[0].startswith("allocator_after_1"), (
+        "the bound must be scoped BEFORE the allocator's statements run, or those "
+        f"statements are the ones left unbounded: {order}")
+
+
+def test_a_backfill_that_refused_a_graph_does_not_exit_ok(monkeypatch, capsys):
+    """⛔ EXIT 0 OVER UNWRITTEN GRAPHS IS THE DEFECT, NOT AN ERGONOMICS NOTE.
+
+    `backfill` prints `K refused` with a working remedy per graph and returned
+    ``EXIT_OK`` anyway, while the single-graph ``seed`` returns ``EXIT_REFUSED``
+    on the same `SeedRefused` (#14587 review P3). A human reading the payload is
+    told everything; the scripted caller — the operator a cutover checklist is
+    run by — reads the exit code, and it was told "fine" over graphs that still
+    allocate nothing.
+
+    Mutants, each measured: return `EXIT_OK` from `main` (the wiring arm reds);
+    drop the `refused > 0` arm (the counted arm reds); drop the `dry_run` guard
+    (the projection arm reds).
+    """
+    from tools import record_allocator_cli as cli
+
+    refusing = {"command": "backfill", "considered": 3, "seeded": 1,
+                "rearmed": 1, "refused": 1, "unchanged": 0}
+    assert cli._exit_code_for(refusing, dry_run=False) == cli.EXIT_REFUSED, (
+        "refused: 1 was reported and the run still exits 0")
+    # A clean run is still clean — the arm cannot be "always refuse".
+    clean = {"command": "backfill", "considered": 2, "seeded": 2,
+             "rearmed": 0, "refused": 0, "unchanged": 0}
+    assert cli._exit_code_for(clean, dry_run=False) == cli.EXIT_OK, clean
+    # `--dry-run` wrote nothing; its refusals are a PROJECTION, and refusing a
+    # pre-flight for correctly predicting a refusal would defeat its purpose.
+    assert cli._exit_code_for(refusing, dry_run=True) == cli.EXIT_OK, (
+        "a `--dry-run` that predicted a refusal returned EXIT_REFUSED — the "
+        "pre-flight the operator runs BEFORE deciding now reports failure for "
+        "doing its job")
+    # ``refused`` is a STRING token on the payloads the acknowledgement / `seed`
+    # refusals emit; those paths return EXIT_REFUSED where they are built, and a
+    # truthy string must not be read as a count here (a bool is not a count
+    # either, `isinstance(True, int)`).
+    for token in ("unacknowledged-cutover", "divergence", True, None, 0):
+        assert cli._exit_code_for({"refused": token}, dry_run=False) == cli.EXIT_OK, (
+            f"a non-count `refused` token was read as a refusal count: {token!r}")
+
+    # ⛔ AND THE WIRING, end to end: a decision function nothing calls is a
+    # comment. Drive `main()` over a fake connection and a `_cmd_backfill` that
+    # reports one refusal, and read the process exit code the caller sees.
+    class _Conn:
+        closed = False
+
+        def rollback(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(cli, "_connect", lambda _dsn: _Conn())
+    monkeypatch.setattr(cli, "_cmd_backfill", lambda *_a, **_kw: dict(refusing))
+    monkeypatch.setenv(cli._record_env_contract()[0],
+                       "postgresql://u:p@127.0.0.1:1/record")
+
+    rc = cli.main(["backfill", "--org-id", "org-14587"])
+    capsys.readouterr()
+    assert rc == cli.EXIT_REFUSED, (
+        "`main()` reported one refused graph and still exited "
+        f"{rc} — a checklist step reads that as passed")
