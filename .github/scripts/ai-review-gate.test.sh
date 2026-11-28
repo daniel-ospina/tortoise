@@ -2430,8 +2430,8 @@ fi
 # measured this sentence FALSE as written). `[ -z "$p_bside" ]` and the branch-side
 # ARITY check are what make an UNREADABLE branch-side graph refuse instead of treating a
 # missing sha as "the base brought it in". Measured at `eebfd924`, each removed ALONE:
-#   · `[ -z "$p_bside" ]`          -> PASS=274 FAIL=0  (reddens NOTHING on its own)
-#   · the branch-side ARITY line   -> PASS=271 FAIL=3  (`(t32e)` x3)
+#   · `[ -z "$p_bside" ]`          -> 0 red rows          (attribution-less on its own)
+#   · the branch-side ARITY line   -> 3 red rows, `(t32e)` x3
 # so "removing EITHER alone reddened NO row" is wrong: `(t32e)` — added by this same PR —
 # pins the arity half by itself, and only the `[ -z "$p_bside" ]` half is attribution-less.
 # Removing BOTH still lets a single-parent AUTHORED commit carry via PATCH match, which is
@@ -2570,8 +2570,11 @@ else
         bad "(t32h) the mutant still refused (rc=$GATE_RC) — (t32g) attributes nothing"
     fi
 fi
-# ── (t32f) MUTATION: strip the presence AND list-arity guards → the short row
-# CARRIES, which is the false pass they prevent.
+# ── (t32f) MUTATION: strip the presence, equality, allowlist, list-arity AND
+# self-consistency guards -> the short row CARRIES. ⛔ IT MUST STRIP ALL FIVE: each one
+# alone is masked by a sibling, so a shorter strip set leaves this row refusing and the
+# control would attribute nothing (measured: presence+arity only reddens `(t32d)`, because
+# `[ "$p_seen" -ge 1 ]` still refuses on an empty count).
 MUT_T32="$T/mutant-no-arity-guards.sh"
 sed -E -e 's/^ *(\[\[ "\$p_rel" =~ \^\(ahead\|behind\|diverged\|identical\)\$ \]\] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
        -e 's/^ *(\[\[ "\$p_total" =~ \^\[0-9\]\+\$ && "\$p_seen" =~ \^\[0-9\]\+\$ \]\] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
@@ -2581,7 +2584,7 @@ sed -E -e 's/^ *(\[\[ "\$p_rel" =~ \^\(ahead\|behind\|diverged\|identical\)\$ \]
        -e 's/^ *(\[ "\$p_seen" -ge 1 \] \|\| \{ patch_ancestry_unreadable=1; return 1; \})$/:/' \
     "$RUN_BLOCK" > "$MUT_T32"
 if cmp -s "$RUN_BLOCK" "$MUT_T32"; then
-    bad "(t32f) the arity-guard mutation did not apply — this control proves NOTHING"
+    bad "(t32f) the guard-set mutation did not apply — this control proves NOTHING"
 elif ! bash -n "$MUT_T32"; then
     bad "(t32f) the arity mutant does not PARSE — an unparseable mutant cannot attribute anything"
 else
@@ -2590,7 +2593,7 @@ else
         STUB_COMPARE_FILE="$SAME_SCOPE_REVIEWED" STUB_ANCESTOR_ROW="ahead" run_gate "$T32_BODY"
     RUN_BLOCK="$_saved_block"
     if [ "$GATE_RC" = "0" ]; then
-        ok "(t32f) with the presence+arity guards removed the SHORT row CARRIES — so those guards are load-bearing"
+        ok "(t32f) with the FIVE guards removed the SHORT row CARRIES — so the set is jointly load-bearing (each one alone is masked by a sibling)"
     else
         bad "(t32f) the mutant still refused (rc=$GATE_RC) — something else refuses this, so the rows above attribute nothing"
     fi

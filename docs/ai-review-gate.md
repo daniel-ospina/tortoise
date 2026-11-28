@@ -150,8 +150,12 @@ entry condition closes that path.
      expression rendering literal zeros cannot skip the authored-commit loop; and an
      unrecognised status is reported as an UNREADABLE graph, not as a rewrite, which
      would send you to buy a 20–40 minute re-review for an API blip (harness cases
-     `(t32a)`–`(t32h)`, whose comments state which guard each row pins — including the
-     two that are pinned only as a MUTUAL-MASKING PAIR and the two subsumed ones).
+     `(t32a)`–`(t32h)`, whose comments state which guard each row pins, by RED ROW COUNT
+     rather than by a PASS total: four are pinned alone, one is masked by two siblings
+     (removing it reddens nothing, and removing it together with the arity check reddens
+     `(t32d)` only — the other rows are refused by a further guard), and two are subsumed.
+     `(t32f)` is the only control that strips the whole masked set at once, which is why a
+     single deletion there LOOKS green).
 
   ⛔ Checks 1 and 2 are not decoration, and check 1 alone was not enough. Measured on
   this rule, end to end, each `passed via PATCH match` with the anchor reproducing

@@ -1026,25 +1026,32 @@ jobs:
             # GitHub statuses. A short, absent or differently-shaped row is UNREADABLE —
             # never a consistent page, and never a rewrite.
             # ⛔ WHICH ROW PINS WHICH GUARD — the attribution is NOT one row per guard, and
-            # pretending otherwise is the defect this parameter has produced in every cycle
-            # (measured 2026-11-28, each guard removed ALONE at `eebfd924`):
-            #   · status allowlist            -> `(t32c)` x2   (pinned ALONE)
-            #   · reviewed-side list arity    -> `(t32d)` x3   (pinned ALONE)
-            #   · branch-side list arity      -> `(t32e)` x3   (pinned ALONE)
-            #   · the `p_seen -ge 1` self-consistency guard -> `(t32g)`/`(t32h)`
-            #   · numeric presence on BOTH counts -> NOTHING ALONE (0 red rows). It is a
-            #     MUTUAL-MASKING PAIR with the reviewed-side arity: with presence removed,
-            #     `p_total`/`p_seen` are `""` and the arity comparison refuses anyway, so
-            #     `(t32a)`/`(t32b)` pass on the pair. Removing BOTH lets `(t32a)`, `(t32b)`
-            #     AND `(t32d)` all carry (`rc=0`, `passed via PATCH match`). `(t32f)` is the
-            #     only control that strips both, so a single deletion here LOOKS green.
-            #     Do not delete one of the two on the strength of a green suite.
+            # pretending otherwise is the defect this paragraph has produced in EVERY cycle.
+            # Re-measured 2026-11-28 by removing each guard ALONE, and reporting RED ROW
+            # COUNT only: absolute PASS totals drift every time a row is added, so a quoted
+            # total is a claim that expires. (No sha is pinned either — a comment cannot stay
+            # bound to a moving head; the measurement is the mutation, re-runnable any time.)
+            #   · status allowlist          -> 2 red rows, `(t32c)`      (pinned ALONE)
+            #   · reviewed-side list arity  -> 3 red rows, `(t32d)`      (pinned ALONE)
+            #   · branch-side list arity    -> 3 red rows, `(t32e)`      (pinned ALONE)
+            #   · `[ "$p_seen" -ge 1 ]`     -> 3 red rows, `(t32g)`      (pinned ALONE).
+            #     Its control `(t32h)` is NOT a behavioural pin: with the guard already gone
+            #     its own mutation finds nothing to strip and self-reports, which is why the
+            #     `(t32g)` count is the one that matters.
+            #   · numeric presence on BOTH counts -> 0 red rows. It is MASKED: with it gone,
+            #     `p_total`/`p_seen` are `""`, the arity guard refuses, and the
+            #     self-consistency guard refuses again (`[ "" -ge 1 ]` is an ARITHMETIC error,
+            #     rc 2, so it takes the refuse arm). Removing presence AND reviewed arity
+            #     reddens `(t32d)` ONLY — NOT `(t32a)`/`(t32b)`, which the self-consistency
+            #     guard still refuses (measured; an earlier version of this paragraph claimed
+            #     all three carried, which was false the moment `(t32g)` was added).
+            #     `(t32f)` strips FIVE guards at once (allowlist, presence, equality,
+            #     reviewed arity, self-consistency) and is the only control under which the
+            #     short row carries — so a single deletion here LOOKS green. Do not delete
+            #     any one of them on the strength of a green suite.
             #   · `[ -z "$p_row" ]` (the empty-parse arm) and the BRANCH-side numeric
-            #     presence check are SUBSUMED by their siblings — each reddens nothing
-            #     alone (measured: 0) and is kept as defence in depth, not as a pinned
-            #     bound. That is stated, not implied.
-            # `(t32f)` strips the presence+arity set and asserts the short row CARRIES, which
-            # is what makes the class attributable at all.
+            #     presence check are SUBSUMED by their siblings — 0 red rows alone, kept as
+            #     defence in depth, not as a pinned bound. Stated, not implied.
             # Both reads therefore refuse on anything unreadable or truncated, so a
             # transient (or a mis-shaped) answer can only NARROW rule (c), never widen it.
             p_base="$(gh api "repos/${REPO_NAME}/pulls/${PR_NUMBER}" --jq .base.sha 2>/dev/null || true)"
@@ -1069,7 +1076,6 @@ jobs:
             if [ "$p_rel" != "ahead" ]; then patch_rewritten=1; return 1; fi
             # A truncated page could hide the commit this guard exists to find.
             [ "$p_total" = "$p_seen" ] || { patch_ancestry_unreadable=1; return 1; }
-            [ "$p_seen" -ge 1 ] || { patch_ancestry_unreadable=1; return 1; }
             # ⛔ THE LIST'S ARITY IS PART OF THE PAGE, NOT A SEPARATE DETAIL (review
             # cycle 2 of #4255). The equality above proves the two counts AGREE; it does
             # not prove the sha LIST was rendered. A row of `ahead<TAB>1<TAB>1<TAB>` —
