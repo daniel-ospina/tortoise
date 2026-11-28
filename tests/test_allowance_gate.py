@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from tortoise import cost_dimensions
+from tortoise import cost_dimensions, pricing
 from tortoise.allowance_gate import (
     ALLOWANCE_GATED_RESOURCES,
     ALLOWANCE_KEYS,
@@ -198,8 +198,32 @@ def test_ruled_dimension_two_graph_storage_mb_is_ARMED_at_the_tier_number():
         enforce_allowances(_limits(max_graph_storage_mb=77, tier="solo"),
                            meters={"graph_storage": _meter(116.0)})
     message = str(caught.value)
-    assert "77 MB" in message and "solo" in message
+    assert "77 MB" in message
+    # #4336: the plan is named as the customer BOUGHT it, never by its tier key.
+    assert f"on the {pricing.tier_display_name('solo')} plan" in message
     assert "LOWER BOUND" in message
+
+
+@pytest.mark.parametrize("tier", pricing.all_tiers())
+def test_the_plan_is_named_as_the_customer_was_sold_it(tier):
+    """#4336 at the ONE sentence a paying tenant reads its own plan's name.
+
+    RED before this fix, on every tier whose identifier is not its display name
+    (``pro`` → *Builder* is the measured one, #13526): the refusal rendered the
+    raw tier key, so a customer sold **Builder** was told about "the pro plan".
+    Driven from the artifact and from ``pricing.tier_display_name`` rather than
+    from literals, so a re-named or added tier is covered without editing this
+    test — and so the two spellings cannot drift apart here, which is what
+    ``tests/test_tier_naming.py`` pins for every OTHER surface.
+    """
+    name = pricing.tier_display_name(tier)
+    with pytest.raises(QuotaExceededError) as caught:
+        enforce_allowances(_limits(max_graph_storage_mb=100, tier=tier),
+                           meters={"graph_storage": _meter(200.0)})
+    message = str(caught.value)
+    assert f"on the {name} plan" in message, message
+    if name != tier:
+        assert f"on the {tier} plan" not in message, message
 
 
 def test_ruled_dimension_three_extraction_tokens():

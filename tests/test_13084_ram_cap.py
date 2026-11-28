@@ -165,7 +165,10 @@ def test_the_hard_stop_is_1_5x_the_cap_and_refuses_with_a_usable_message():
                            meters={"graph_storage": _meter(hard_stop)})
     message = str(caught.value)
     # the cap, the tier, the hard stop, why they differ, and what to do
-    assert "77 MB" in message and "solo plan" in message
+    # #4336: the tier is named as the CUSTOMER bought it ("Solo"), never by its
+    # identifier — the message used to read "on the solo plan" (#3841).
+    assert "77 MB" in message
+    assert f"on the {pricing.tier_display_name('solo')} plan" in message
     assert "115.5 MB" in message and "1.5x the cap" in message
     # ⛔ AND THE CLAIM IS QUALIFIED (#13102 P1-3). The old text asserted the figure
     # was a LOWER BOUND full stop; the systematic exclusions do remove bytes, but a
