@@ -1459,7 +1459,7 @@ place a machine reads it.
   be either observed or witnessed **idle** with a basis. The conditional set is read from this record
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
-  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:13167-13189`) collects only
+  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:12730-12752`) collects only
   kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:15149`, `:15302`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
@@ -1512,7 +1512,7 @@ place a machine reads it.
 ### 10.7 — the §11 cite block re-pointed after a 167-line insert above it (2026-11-04, `#10360`)
 
 - **Original value (as this record was last cut):** `_collect_classify_items` at
-  `tortoise/extractor_v2.py:9997`, its extent `:9987-10009`, the two `if items:` gates at `:10530`
+  `tortoise/extractor_v2.py:9987`, its extent `:9987-10009`, the two `if items:` gates at `:10530`
   and `:11724`, and the two fail-open `except` arms at `:10543`/`:10673`.
 - **New value:** the same symbols at `:10020`, `:10169-10191`, `:10736`/`:10868` and
   `:10749`/`:11973`.
@@ -1536,7 +1536,7 @@ place a machine reads it.
 ### 10.8 — the §11 cite block re-pointed again after `#10997`'s hold/reclaim insert (2026-11-06, `#10997`)
 
 - **Original value (as §10.7 left it):** `_collect_classify_items` at
-  `tortoise/extractor_v2.py:10203`, its extent `:10193-10215`, the two `if items:` gates at
+  `tortoise/extractor_v2.py:10193`, its extent `:10193-10215`, the two `if items:` gates at
   `:10736`/`:10868`, and the two fail-open `except` arms at `:10749`/`:11973`.
 - **New value:** the same symbols at `:10397`, `:10397-10419`, `:11849`/`:11998` and
   `:11862`/`:12009`.
@@ -1553,7 +1553,7 @@ place a machine reads it.
 ### 10.9 — the §11 cite block re-pointed after `main`'s S5 inserts moved `extractor_v2.py` (2026-11-07, `#11205`/`#11242`/`#11288` then `#11264`/`#11361`)
 
 - **Original value (as §10.8 left it):** `_collect_classify_items` at
-  `tortoise/extractor_v2.py:10407`, its extent `:10397-10419`, the two `if items:` gates at
+  `tortoise/extractor_v2.py:10397`, its extent `:10397-10419`, the two `if items:` gates at
   `:11849`/`:11998`, and the two fail-open `except` arms at `:11862`/`:12009`.
 - **New value:** the same symbols at `:11098`, `:11098-11120`, `:12908`/`:13057` and
   `:12921`/`:13068`.
@@ -1995,7 +1995,7 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 
 - **Baseline — measured at `origin/main`'s head when it merged `#11523` (`8212c41eff`):** the
   switch's read-back that the door's acceptance arm quotes, `_state_value_verbatim_enforced`
-  assigned to `_value_fidelity_judged`, at `extractor_v2.py:9954`.
+  assigned to `_value_fidelity_judged`, at `extractor_v2.py:9944`.
 - **New value — measured at this head (the `#11523` merge):** the same assignment at `:10157`.
 - **Why the delta is NOT main's.** `#11523` moved no line of `extractor_v2.py`; the +213 is this
   branch's own inserts above that line (the `#11002` G5 record at the module head and the
@@ -2271,8 +2271,8 @@ to answer.
 > are this tree's"): true when this entry was written, not true of this tree.
 >
 > **One number below is still live, and it is not §10.24's.** This entry's `#10360` read-back bullet
-> re-derives that switch's read-back to `extractor_v2.py:10518`; `#11239`'s `+17` inserts sit at
-> `extractor_v2.py:12122-12167`, **below** that assignment, so it did not move. That is why §10.20's
+> re-derives that switch's read-back to `extractor_v2.py:10508`; `#11239`'s `+17` inserts sit at
+> `extractor_v2.py:12112-12157`, **below** that assignment, so it did not move. That is why §10.20's
 > pointer still names THIS entry for the `:10508` value, and why `preregistration.json`'s `read_back`
 > prose carries it: §10.24 re-derived the block's lower cites and never restates `:10508`.
 >
@@ -2895,7 +2895,7 @@ to answer.
   opens that line and requires it to be the `_value_fidelity_judged = _state_value_verbatim_enforced()`
   assignment. At the `#12067` head it was `:10536`; at this head that line is
   `# #9906: an INTRA-BATCH duplicate (the same normalized content` — a comment, not a read.
-- **New value — measured at this head, by opening the line:** `tortoise/extractor_v2.py:10629` is
+- **New value — measured at this head, by opening the line:** `tortoise/extractor_v2.py:10619` is
   `_value_fidelity_judged = _state_value_verbatim_enforced()`. Re-derived by SYMBOL, not by adding
   the file's `+83`: the other two occurrences of that symbol are unmoved, because they sit above
   the first hunk (`@@ -5772 +5772,41 @@`, so a line above it takes no shift; a line BELOW it would
@@ -3357,7 +3357,7 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
   so every `extractor_v2.py` carrier at or below `:12358` moved, and the cites this bundle and its
   probes print for them had to be re-derived rather than carried. Reached through §10.41: `#14357`'s
   tree is the base this entry measures FROM, and §10.41 is marked superseded above for that reason.
-- **The measured shift.** `+10` for every cite below `:9154` and above `:12347`; **`+437`** for every
+- **The measured shift.** `+10` for every cite at or below `:9154` and above `:12347`; **`+437`** for every
   cite below `:12358` (the three `+427`-line clusters resolve to the same offset for the tail). The
   cite pairs below are MEASURED per cite against this tree, never computed from a constant stated
   here — the rule §10.40 had to learn twice. Measured on this tree:
@@ -3384,9 +3384,9 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
   of guessing which tree the base was; `+440`/`-3` is the numstat, the three deletions being the
   `supersede_allowed` lines the first hunk REPLACES.
 - **⛔ A MIXED-NUMBERING TRAP, recorded because it bit this repair.** This document's cites were not
-  all on one convention when the repair started: the `extractor_v2.py:NNNN` forms in §9/§11 and the
-  bundle's tables were still on the PRE-#14357 numbering while the `README.md` S-table's bare
-  `:NNNN` cites had already been shifted by §10.41 (+48, then +1). Applying one uniform delta to the
+  all on one convention when the repair started. The live `extractor_v2.py:NNNN` forms still carried
+  ORIGIN/MAIN's numbering — correct for `main`, stale here — while `README.md`'s S-table bare `:NNNN`
+  cites had already been shifted onto this branch's earlier heads by §10.41 (+48, then +1). Applying one uniform delta to the
   mixture re-shifted cites that were already correct — measured: `extract_session_v2`'s
   `def` at `:15115` was mapped to `:15552`, a comment, and `test_the_bundles_cites_resolve_where_the_bundle_says_they_do`
   caught it because the rule resolves the SYMBOL rather than the number. Every cite in this entry was

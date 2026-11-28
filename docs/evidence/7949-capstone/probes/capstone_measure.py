@@ -1881,7 +1881,7 @@ def _pass_ran(block: dict) -> bool | None:
     ⛔ AND THE FLAG ALONE IS NOT ACTIVITY, which is the sharper half and the one
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
     pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:15235`` and
-    ``edus = _edus_from_conversation(...)`` follows at ``:14801``, whose
+    ``edus = _edus_from_conversation(...)`` follows at ``:15238``, whose
     ``if not edus:`` early return (``:15239``) emits literally ``"vet": {"enabled":
     vet_enabled, "s2": {}, "union": {}}`` (``:15270``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
@@ -3275,7 +3275,7 @@ def _a4_writer_attribution(projection) -> dict:
     not a stored fact and the census must not pretend otherwise. What IS mechanical at this head:
 
     * `extractor_v2` CANNOT be the source of a typed claim. Its write gate repairs every point kind
-      outside the master vocabulary to `statement` (`extractor_v2.py:11430-11433`; `:11414` is the
+      outside the master vocabulary to `statement` (`extractor_v2.py:11430-11433`; `:11424` is the
       EMPTY-kind default only), so a claim carrying `decision`/`plan`/… did not come from that lane.
     * `extractor.py::_classify_point_kind` is a PURE keyword classifier over the claim's own
       content, so its answer is REPRODUCIBLE for any node: apply it and compare.
